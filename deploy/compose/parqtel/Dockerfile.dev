@@ -1,61 +1,36 @@
-# Multi-platform development Dockerfile for parqtel
-# Optimized for developer machines (Apple Silicon and Intel Mac)
+# Development Dockerfile for parqtel
+FROM rust:1.85-slim AS builder
 
-FROM rust:alpine AS builder
-
-# Install build dependencies
-RUN apk add --no-cache musl-dev protoc protobuf-dev gcc g++ make
+RUN apt-get update && apt-get install -y protobuf-compiler pkg-config libssl-dev g++ make && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Copy manifests to cache dependency compilation
+# Copy full workspace (relies on .dockerignore for exclusions)
 COPY Cargo.toml Cargo.lock ./
-COPY parqtel-core/Cargo.toml parqtel-core/
-COPY parqtel-ingest/Cargo.toml parqtel-ingest/
-COPY parqtel-query/Cargo.toml parqtel-query/
-COPY parqtel-server/Cargo.toml parqtel-server/
+COPY parqtel-core/ parqtel-core/
+COPY parqtel-ingest/ parqtel-ingest/
+COPY parqtel-query/ parqtel-query/
+COPY parqtel-alert/ parqtel-alert/
+COPY parqtel-pipeline/ parqtel-pipeline/
+COPY parqtel-server/ parqtel-server/
+COPY parqtel-mcp-core/ parqtel-mcp-core/
+COPY parqtel-mcp-slack/ parqtel-mcp-slack/
+COPY parqtel-mcp-pagerduty/ parqtel-mcp-pagerduty/
+COPY parqtel-mcp-jira/ parqtel-mcp-jira/
+COPY parqtel-mcp-notion/ parqtel-mcp-notion/
+COPY parqtel-mcp-discord/ parqtel-mcp-discord/
+COPY parqtel-mcp-gdocs/ parqtel-mcp-gdocs/
+COPY parqtel-mcp-parqtel/ parqtel-mcp-parqtel/
 
-# Create stub source files
-RUN mkdir -p parqtel-core/src parqtel-ingest/src parqtel-query/src parqtel-server/src && \
-    touch parqtel-core/src/lib.rs parqtel-ingest/src/lib.rs parqtel-query/src/lib.rs && \
-    echo 'fn main() {}' > parqtel-server/src/main.rs
-
-# Build dependencies (native target)
-RUN cargo build --release
-
-# Copy actual source
-COPY parqtel-core/src/ parqtel-core/src/
-COPY parqtel-ingest/src/ parqtel-ingest/src/
-COPY parqtel-ingest/proto/ parqtel-ingest/proto/
-COPY parqtel-ingest/build.rs parqtel-ingest/
-COPY parqtel-query/src/ parqtel-query/src/
-COPY parqtel-server/src/ parqtel-server/src/
-COPY config/ config/
-
-# Force rebuild
-RUN touch parqtel-core/src/lib.rs parqtel-ingest/src/lib.rs parqtel-query/src/lib.rs parqtel-server/src/main.rs
-
-# Build parqtel binary
 RUN cargo build --release --package parqtel-server
 
-# Stage 2: Final development image
-FROM alpine:latest
-
-# Install basic tools for dev convenience
-RUN apk add --no-cache curl jq
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y curl jq && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /var/lib/parqtel
-
-# Copy binary and dev config
 COPY --from=builder /app/target/release/parqtel /parqtel
-COPY deploy/compose/parqtel/config/dev.toml /etc/parqtel/dev.toml
 
-# Environment variables
-ENV PARQTEL_CONFIG=/etc/parqtel/dev.toml
-ENV PARQTEL_DATA_DIR=/var/lib/parqtel
-ENV RUST_LOG=debug
-
-# Expose dev port
+ENV RUST_LOG=info
 EXPOSE 9090
 
 ENTRYPOINT ["/parqtel"]

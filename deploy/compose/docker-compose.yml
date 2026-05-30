@@ -10,12 +10,16 @@ services:
       - "9090:9090"
     volumes:
       - parqtel_data:/var/lib/parqtel
+      - ./parqtel/config/dev.toml:/etc/parqtel/dev.toml:ro
+    environment:
+      - PARQTEL_CONFIG=/etc/parqtel/dev.toml
+      - RUST_LOG=info
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9090/api/v1/label/__name__/values"]
+      test: ["CMD", "curl", "-f", "http://localhost:9090/health"]
       interval: 5s
       timeout: 2s
       retries: 20
-      start_period: 5s
+      start_period: 10s
     restart: unless-stopped
 
   load-generator:

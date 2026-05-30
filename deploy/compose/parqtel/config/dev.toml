@@ -17,6 +17,15 @@ retention_days = 1
 compaction_interval_secs = 60
 row_group_size = 1000
 
+[logs]
+data_dir = "/var/lib/parqtel/logs"
+block_duration_secs = 10
+max_rows_per_block = 5000
+compression = "zstd"
+retention_days = 1
+compaction_interval_secs = 60
+row_group_size = 500
+
 [ingest]
 # 5MB max batch in dev
 max_body_size = 5242880
