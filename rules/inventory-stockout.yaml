@@ -1,0 +1,18 @@
+id: inventory-stockout
+name: Inventory Stockout Detected
+signal: metrics
+query: 'inventory.stock.level{product_category="electronics"}'
+condition:
+  type: threshold
+  operator: "<="
+  value: 0
+  for_duration_secs: 60
+severity: warning
+labels:
+  team: supply-chain
+  service: inventory-service
+annotations:
+  summary: "Electronics inventory depleted - stockout affecting orders"
+  runbook: "https://runbooks.internal/stockout"
+enabled: true
+noise_suppression_threshold: 0.5

@@ -1,0 +1,30 @@
+# Rust / Cargo
+/target/
+**/*.rs.bk
+
+# IDE and editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.fleet/
+
+# Environment and secrets
+.env
+.env.local
+.env.*.local
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Project specific
+parqtel_prompts/
+dist/
+graphify-out/
+deploy/compose/.env
+deploy/compose/docker-compose.override.yml
+
+# Local data and logs
+*.log

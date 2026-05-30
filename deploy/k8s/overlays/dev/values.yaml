@@ -1,0 +1,41 @@
+image:
+  repository: parqtel
+  tag: dev
+  pullPolicy: IfNotPresent
+
+provider:
+  enabled: true
+  externalMetrics:
+    enabled: false
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 32Mi
+  limits:
+    cpu: 250m
+    memory: 128Mi
+
+podDisruptionBudget:
+  enabled: false
+
+ingress:
+  enabled: true
+  className: traefik
+  hosts:
+    - host: parqtel.localhost
+      paths:
+        - path: /
+          pathType: ImplementationSpecific
+
+storage:
+  size: 1Gi
+
+parqtel:
+  storage:
+    blockDurationSecs: 30
+    retentionDays: 1
+  telemetry:
+    logLevel: "debug"
+
+replicaCount: 1

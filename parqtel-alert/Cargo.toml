@@ -1,0 +1,25 @@
+[package]
+name = "parqtel-alert"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+parqtel-core = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+chrono = { workspace = true }
+ulid = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+ahash = { workspace = true }
+notify = { workspace = true }
+bincode = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }
+
+[lints]
+workspace = true

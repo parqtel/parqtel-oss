@@ -1,0 +1,26 @@
+image:
+  repository: parqtel
+  tag: orbstack
+  pullPolicy: IfNotPresent
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 64Mi
+  limits:
+    cpu: 500m
+    memory: 128Mi
+
+storage:
+  enabled: true
+  size: 1Gi
+  storageClassName: local-path
+
+service:
+  type: LoadBalancer
+  port: 8080
+
+parqtel:
+  telemetry:
+    logLevel: "debug"
+    logFormat: "json"

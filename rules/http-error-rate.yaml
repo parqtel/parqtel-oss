@@ -1,0 +1,18 @@
+id: http-error-rate-high
+name: HTTP Error Rate High
+signal: metrics
+query: 'http_requests_total{status=~"5.."}'
+condition:
+  type: threshold
+  operator: ">"
+  value: 0.05
+  for_duration_secs: 300
+severity: warning
+labels:
+  team: platform
+  service: api-gateway
+annotations:
+  summary: "Error rate is high on api-gateway"
+  runbook: "https://runbooks.internal/http-errors"
+enabled: true
+noise_suppression_threshold: 0.7

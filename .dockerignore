@@ -1,0 +1,12 @@
+target/
+.git/
+.github/
+docs/
+e2e/
+scripts/
+deploy/
+rules/
+*.md
+LICENSE
+.gitignore
+Makefile

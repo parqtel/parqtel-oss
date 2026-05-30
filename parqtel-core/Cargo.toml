@@ -1,0 +1,24 @@
+[package]
+name = "parqtel-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ahash = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+arrow2 = { workspace = true }
+parquet2 = { workspace = true }
+chrono = "0.4"
+tracing = { workspace = true }
+tokio = { workspace = true }
+uuid = { workspace = true }
+tempfile = { workspace = true }
+futures = { workspace = true }
+bytes = { workspace = true }
+
+[lints]
+workspace = true

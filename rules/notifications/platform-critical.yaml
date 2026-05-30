@@ -1,0 +1,41 @@
+id: platform-critical-pagerduty
+name: Platform Team Critical Alerts
+match:
+  severity: [critical]
+  labels:
+    team: platform
+  time_window: all
+
+channels:
+  - type: pagerduty
+    server: parqtel-mcp-pagerduty
+    tool: create_incident
+    params:
+      service_id: "{{ env.PAGERDUTY_PLATFORM_SERVICE_ID }}"
+      routing_key: "{{ env.PAGERDUTY_ROUTING_KEY }}"
+    dedup_window_minutes: 30
+
+  - type: slack
+    server: parqtel-mcp-slack
+    tool: send_alert_message
+    params:
+      channel: "#incidents-platform"
+    dedup_window_minutes: 5
+
+escalation:
+  - after_minutes: 15
+    action: pagerduty_escalate
+    params:
+      escalation_policy_id: "{{ env.PD_ESCALATION_POLICY }}"
+  - after_minutes: 30
+    action: slack_notify
+    params:
+      channel: "#incidents-oncall-manager"
+      message: "Unacknowledged critical alert: {{ alert.title }}"
+
+quiet_hours:
+  suppress_severity: [warning, info]
+  windows:
+    - "22:00-08:00"
+  timezone: "UTC"
+  override_label: "bypass_quiet_hours=true"

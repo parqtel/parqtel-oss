@@ -1,0 +1,42 @@
+# k3d configuration for secure-cluster
+apiVersion: k3d.io/v1alpha5
+kind: Simple
+metadata:
+  name: secure-cluster
+servers: 1
+agents: 2
+image: rancher/k3s:v1.28.2-k3s1 # Pinned K8s 1.28
+ports:
+  - port: 80:80
+    nodeFilters:
+      - loadbalancer
+  - port: 443:443
+    nodeFilters:
+      - loadbalancer
+  - port: 9090:9090
+    nodeFilters:
+      - loadbalancer
+registries:
+  create:
+    name: registry.localhost
+    host: "0.0.0.0"
+    hostPort: "5050"
+options:
+  k3s:
+    extraArgs:
+      - arg: --disable=traefik
+        nodeFilters:
+          - server:*
+      # Note: We are keeping the default Traefik by NOT disabling it, 
+      # but providing the option here if we wanted to switch.
+      # K3s includes Traefik by default which is perfect for zero-config ingress.
+  kubeconfig:
+    updateDefaultKubeconfig: true
+    switchContext: true
+nodeLabels:
+  - label: role=storage
+    nodeFilters:
+      - agent:0
+  - label: role=compute
+    nodeFilters:
+      - agent:1

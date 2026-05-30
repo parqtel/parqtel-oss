@@ -1,0 +1,9 @@
+dependencies:
+- name: kube-prometheus-stack
+  repository: https://prometheus-community.github.io/helm-charts
+  version: 85.3.0
+- name: cert-manager
+  repository: https://charts.jetstack.io
+  version: v1.20.2
+digest: sha256:7cfff895456eb471a52ff4229accc32312fcc401caf953e41b0c0780a4d84321
+generated: "2026-05-23T18:07:39.717768+04:00"

@@ -1,0 +1,17 @@
+{{- if and .Values.storage.enabled (not .Values.storage.existingClaim) -}}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "parqtel.fullname" . }}
+  labels:
+    {{- include "parqtel.labels" . | nindent 4 }}
+spec:
+  accessModes:
+    - {{ .Values.storage.accessMode | quote }}
+  resources:
+    requests:
+      storage: {{ .Values.storage.size | quote }}
+  {{- if .Values.storage.storageClassName }}
+  storageClassName: {{ .Values.storage.storageClassName | quote }}
+  {{- end }}
+{{- end }}

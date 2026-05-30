@@ -1,0 +1,45 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "parqtel.fullname" . }}
+  labels:
+    {{- include "parqtel.labels" . | nindent 4 }}
+data:
+  parqtel.toml: |
+    [server]
+    bind_address = "0.0.0.0:{{ .Values.service.port }}"
+    max_connections = {{ .Values.parqtel.server.maxConnections | int }}
+    shutdown_timeout_secs = {{ .Values.parqtel.server.shutdownTimeoutSecs | int }}
+
+    [storage]
+    data_dir = "/data"
+    block_duration_secs = {{ .Values.parqtel.storage.blockDurationSecs | int }}
+    max_rows_per_block = {{ .Values.parqtel.storage.maxRowsPerBlock | int }}
+    compression = {{ .Values.parqtel.storage.compression | quote }}
+    retention_days = {{ .Values.parqtel.storage.retentionDays | int }}
+    compaction_interval_secs = {{ .Values.parqtel.storage.compactionIntervalSecs | int }}
+    row_group_size = {{ .Values.parqtel.storage.rowGroupSize | int }}
+
+    [ingest]
+    max_body_size = {{ .Values.parqtel.ingest.maxBodySize | int }}
+    wal_enabled = {{ .Values.parqtel.ingest.walEnabled }}
+
+    [query]
+    max_series = {{ .Values.parqtel.query.maxSeries | int }}
+    max_samples_per_series = {{ .Values.parqtel.query.maxSamplesPerSeries | int }}
+    timeout_secs = {{ .Values.parqtel.query.timeoutSecs | int }}
+
+    [ui]
+    enabled = {{ .Values.parqtel.ui.enabled }}
+
+    [telemetry]
+    log_level = {{ .Values.parqtel.telemetry.logLevel | quote }}
+    log_format = {{ .Values.parqtel.telemetry.logFormat | quote }}
+
+    [k8s_provider]
+    enabled = {{ .Values.provider.enabled }}
+    bind_address = "0.0.0.0:{{ .Values.provider.port }}"
+    cache_expiry_secs = {{ .Values.provider.cacheExpirySecs | int }}
+    query_timeout_secs = {{ .Values.provider.queryTimeoutSecs | int }}
+    max_concurrent = {{ .Values.provider.maxConcurrent | int }}
+    tls_secret_name = {{ .Values.provider.tlsSecretName | quote }}

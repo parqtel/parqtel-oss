@@ -1,0 +1,18 @@
+id: order-latency-high
+name: Order Processing Latency High
+signal: metrics
+query: 'order.processing.duration_ms'
+condition:
+  type: threshold
+  operator: ">"
+  value: 5000
+  for_duration_secs: 180
+severity: warning
+labels:
+  team: platform
+  service: order-service
+annotations:
+  summary: "Order processing p99 latency exceeds 5s during peak load"
+  runbook: "https://runbooks.internal/order-latency"
+enabled: true
+noise_suppression_threshold: 0.6

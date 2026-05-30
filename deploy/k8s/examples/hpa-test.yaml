@@ -1,0 +1,49 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: test-app
+  namespace: parqtel
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: test-app
+  template:
+    metadata:
+      labels:
+        app: test-app
+    spec:
+      containers:
+      - name: nginx
+        image: nginx:alpine
+---
+apiVersion: parqtel.io/v1alpha1
+kind: ParqtelMetricMapping
+metadata:
+  name: http-requests-mapping
+  namespace: parqtel
+spec:
+  metricName: http_requests
+  sourceQuery: "http_requests_total"
+  objectType: pods
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: test-app-hpa
+  namespace: parqtel
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: test-app
+  minReplicas: 1
+  maxReplicas: 3
+  metrics:
+  - type: Pods
+    pods:
+      metric:
+        name: http_requests
+      target:
+        type: AverageValue
+        averageValue: "100"

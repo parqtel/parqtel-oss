@@ -1,0 +1,18 @@
+id: payment-error-rate-critical
+name: Payment Failure Rate Critical
+signal: metrics
+query: 'payment.failure.rate'
+condition:
+  type: threshold
+  operator: ">"
+  value: 0.10
+  for_duration_secs: 120
+severity: critical
+labels:
+  team: payments
+  service: payment-gateway-svc
+annotations:
+  summary: "Payment failure rate exceeds 10% - potential Stripe API outage"
+  runbook: "https://runbooks.internal/payment-failures"
+enabled: true
+noise_suppression_threshold: 0.8

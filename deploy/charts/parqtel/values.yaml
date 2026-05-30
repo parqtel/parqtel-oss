@@ -1,0 +1,280 @@
+# Default values for parqtel.
+# This is a YAML-formatted file.
+# Declare variables to be passed into your templates.
+
+# -- Number of replicas for parqtel. 
+# @default -- 1
+# NOTE: more than 1 replica requires shared storage (like NFS/EFS) or an external backend.
+replicaCount: 1
+
+image:
+  # -- Repository for the parqtel container image.
+  repository: ghcr.io/parqtel/parqtel
+  # -- Overrides the image tag whose default is the chart appVersion.
+  tag: ""
+  # -- Pull policy for the image.
+  pullPolicy: IfNotPresent
+  # -- List of image pull secrets.
+  pullSecrets: []
+
+# -- Overrides the chart name.
+nameOverride: ""
+# -- Overrides the full name of the release.
+fullnameOverride: ""
+
+serviceAccount:
+  # -- Specifies whether a service account should be created.
+  create: true
+  # -- Annotations to add to the service account.
+  annotations: {}
+  # -- The name of the service account to use.
+  # If not set and create is true, a name is generated using the fullname template.
+  name: ""
+
+# -- Annotations to add to the pod.
+podAnnotations: {}
+
+# -- Labels to add to the pod.
+podLabels: {}
+
+# -- Security context for the pod.
+podSecurityContext:
+  fsGroup: 65534
+  runAsGroup: 65534
+  runAsUser: 65534
+  seccompProfile:
+    type: RuntimeDefault
+
+# -- Security context for the container.
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  runAsUser: 65534
+
+# -- Resource requests and limits.
+# Memory limit should never be set below 64Mi.
+resources:
+  limits:
+    cpu: 200m
+    memory: 128Mi
+  requests:
+    cpu: 25m
+    memory: 64Mi
+
+service:
+  # -- Service type.
+  type: ClusterIP
+  # -- Service port.
+  port: 8080
+  # -- Annotations for the service.
+  annotations: {}
+  # -- NodePort (only used when type is NodePort).
+  nodePort: ""
+
+# -- Deployment strategy.
+# Recreate is recommended for single-replica RWO storage.
+strategy:
+  type: Recreate
+
+ingress:
+  # -- Enables Ingress for the server.
+  enabled: false
+  # -- Ingress class name.
+  className: ""
+  # -- Annotations for the Ingress.
+  annotations: {}
+    # kubernetes.io/ingress.class: nginx
+    # cert-manager.io/cluster-issuer: letsencrypt-prod
+  # -- List of hosts for the Ingress.
+  hosts:
+    - host: parqtel.local
+      paths:
+        - path: /
+          pathType: ImplementationSpecific
+  # -- TLS configuration for the Ingress.
+  tls: []
+  #  - secretName: parqtel-tls
+  #    hosts:
+  #      - parqtel.local
+
+storage:
+  # -- Enable persistent storage.
+  enabled: true
+  # -- Size of the persistent volume.
+  size: 2Gi
+  # -- Storage class name (empty means cluster default).
+  storageClassName: ""
+  # -- Access mode for the volume.
+  accessMode: ReadWriteOnce
+  # -- Use an existing PVC instead of creating a new one.
+  existingClaim: ""
+
+# -- Configuration for the parqtel engine.
+# These map to parqtel's internal configuration file.
+parqtel:
+  server:
+    maxConnections: 1024
+    shutdownTimeoutSecs: 30
+  storage:
+    blockDurationSecs: 7200
+    maxRowsPerBlock: 1000000
+    compression: "zstd"
+    retentionDays: 7
+    compactionIntervalSecs: 3600
+    rowGroupSize: 100000
+  ingest:
+    maxBodySize: 10485760
+    walEnabled: false
+  query:
+    maxSeries: 1000
+    maxSamplesPerSeries: 10000
+    timeoutSecs: 30
+  ui:
+    enabled: true
+  telemetry:
+    logLevel: "info"
+    logFormat: "text"
+
+# -- Horizontal Pod Autoscaling settings.
+# NOTE: autoscaling with > 1 replica requires shared storage.
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 5
+  targetCPUUtilizationPercentage: 80
+  # targetMemoryUtilizationPercentage: 80
+
+# -- Pod Disruption Budget settings.
+podDisruptionBudget:
+  enabled: false
+  minAvailable: 1
+  # maxUnavailable: 1
+
+# -- Network Policy settings.
+networkPolicy:
+  enabled: false
+  # -- Namespace containing Prometheus for scraping.
+  monitoringNamespace: "monitoring"
+  # -- Label of pods allowed to access parqtel.
+  ingressSelectorLabels: {}
+
+# -- Metric and monitoring settings.
+metrics:
+  # -- Enable the /metrics endpoint.
+  enabled: true
+  serviceMonitor:
+    # -- Enable Prometheus Operator ServiceMonitor.
+    enabled: false
+    interval: 30s
+    scrapeTimeout: 10s
+    honorLabels: true
+    relabelings: []
+  prometheusRule:
+    # -- Enable Prometheus Operator PrometheusRule for alerts.
+    enabled: false
+    rules:
+      highMemory: true
+      ingestErrors: true
+      queryErrors: true
+      storageAnomaly: true
+      instanceDown: true
+
+# -- Node selector for pod placement.
+nodeSelector: {}
+
+# -- Tolerations for pod placement.
+tolerations: []
+
+# -- Affinity for pod placement.
+affinity: {}
+
+# -- Topology spread constraints for pod placement.
+topologySpreadConstraints: []
+
+# -- Additional environment variables.
+extraEnv: []
+
+# -- Additional volumes.
+extraVolumes: []
+
+# -- Additional volume mounts.
+extraVolumeMounts: []
+
+# -- Init containers.
+initContainers: []
+
+# -- Sidecar containers.
+sidecars: []
+
+# -- Pod lifecycle hooks.
+lifecycle:
+  preStop:
+    exec:
+      command: ["/bin/sleep", "5"]
+
+# -- Optional dependencies.
+kube-prometheus-stack:
+  enabled: false
+cert-manager:
+  enabled: false
+
+# -- Kubernetes Custom Metrics Provider settings.
+provider:
+
+# -- Cloud monitoring integrations.
+# Configure native pull/push integrations with AWS, GCP, and Azure.
+integrations:
+  # -- AWS CloudWatch integration via Metric Streams (Firehose push).
+  aws:
+    enabled: false
+    # -- Name of existing K8s Secret containing FIREHOSE_API_KEY.
+    existingSecret: ""
+    # -- CloudWatch namespaces to accept (empty = all).
+    acceptedNamespaces: []
+    # -- Enrich metrics with EC2 instance metadata.
+    enrichEc2Metadata: true
+  # -- GCP Cloud Operations integration (polling).
+  gcp:
+    enabled: false
+    # -- Name of existing K8s Secret containing GOOGLE_APPLICATION_CREDENTIALS JSON.
+    existingSecret: ""
+    # -- GCP project ID (required when enabled).
+    projectId: ""
+    # -- Polling interval in seconds.
+    scrapeIntervalSecs: 60
+  # -- Azure Monitor integration (polling).
+  azure:
+    enabled: false
+    # -- Name of existing K8s Secret containing AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET.
+    existingSecret: ""
+    # -- Azure subscription IDs to monitor.
+    subscriptions: []
+    # -- Polling interval in seconds.
+    scrapeIntervalSecs: 60
+  # -- Enables the Kubernetes custom metrics provider API.
+  enabled: false
+  externalMetrics:
+    enabled: true
+  # -- Port for the provider HTTPS listener.
+  port: 6443
+  # -- Lookback window for metric queries (seconds).
+  cacheExpirySecs: 30
+  # -- Timeout for individual queries to parqtel storage (seconds).
+  queryTimeoutSecs: 10
+  # -- Maximum number of concurrent queries to parqtel storage.
+  maxConcurrent: 10
+  # -- Name of the Secret to store/load provider TLS certificates.
+  tlsSecretName: parqtel-provider-tls
+  # -- Resource requests and limits for the provider logic.
+  # Note: logic runs inside the main parqtel container.
+  resources:
+    requests:
+      cpu: 50m
+      memory: 32Mi
+    limits:
+      cpu: 500m
+      memory: 128Mi

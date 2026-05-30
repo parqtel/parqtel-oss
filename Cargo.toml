@@ -1,0 +1,86 @@
+[workspace]
+members = [
+    "parqtel-core",
+    "parqtel-ingest",
+    "parqtel-query",
+    "parqtel-alert",
+    "parqtel-pipeline",
+    "parqtel-server",
+    "parqtel-mcp-core",
+    "parqtel-mcp-slack",
+    "parqtel-mcp-pagerduty",
+    "parqtel-mcp-jira",
+    "parqtel-mcp-notion",
+    "parqtel-mcp-discord",
+    "parqtel-mcp-gdocs",
+    "parqtel-mcp-parqtel",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["parqtel team"]
+license = "Apache-2.0"
+description = "An ultra-lightweight SRE observability tool for streaming OTel metrics and logs into compressed Parquet chunks"
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["full"] }
+arrow2 = { version = "0.17", features = ["io_parquet"] }
+parquet2 = { version = "0.17", features = ["zstd"] }
+zstd = "0.13"
+axum = "0.7"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+prost = "0.12"
+prost-types = "0.12"
+clap = { version = "4", features = ["derive", "env"] }
+figment = { version = "0.10", features = ["toml", "env"] }
+thiserror = "1"
+anyhow = "1"
+flate2 = "1"
+sha2 = "0.10"
+hex = "0.4"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "chrono"] }
+tower = "0.4"
+tower-http = { version = "0.5", features = ["cors", "trace", "limit", "timeout"] }
+ahash = "0.8"
+tempfile = "3"
+uuid = { version = "1", features = ["v4", "fast-rng"] }
+bytes = "1"
+chrono = { version = "0.4", features = ["serde"] }
+ulid = { version = "1", features = ["serde"] }
+notify = { version = "6", features = ["macos_fsevent"] }
+bincode = "1"
+async-trait = "0.1"
+futures = "0.3"
+regex = "1"
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+schemars = "0.8"
+
+# Internal crates
+parqtel-core = { path = "parqtel-core" }
+parqtel-ingest = { path = "parqtel-ingest" }
+parqtel-query = { path = "parqtel-query" }
+parqtel-alert = { path = "parqtel-alert" }
+parqtel-pipeline = { path = "parqtel-pipeline" }
+parqtel-server = { path = "parqtel-server" }
+parqtel-mcp-core = { path = "parqtel-mcp-core" }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "warn"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"
+opt-level = 3

@@ -1,0 +1,62 @@
+{{- if .Values.metrics.prometheusRule.enabled -}}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "parqtel.fullname" . }}
+  labels:
+    {{- include "parqtel.labels" . | nindent 4 }}
+spec:
+  groups:
+    - name: parqtel.rules
+      rules:
+        {{- if .Values.metrics.prometheusRule.rules.highMemory }}
+        - alert: ParqtelHighMemoryRSS
+          expr: parqtel_process_rss_bytes > 47185920
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Parqtel instance {{ "{{ $labels.instance }}" }} high memory usage"
+            description: "Memory usage is above 45MB (limit is 50MB) for more than 5 minutes."
+        {{- end }}
+        {{- if .Values.metrics.prometheusRule.rules.ingestErrors }}
+        - alert: ParqtelIngestErrors
+          expr: rate(parqtel_ingest_errors_total[2m]) > 0
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Parqtel instance {{ "{{ $labels.instance }}" }} ingestion errors"
+            description: "Ingestion errors detected in the last 2 minutes."
+        {{- end }}
+        {{- if .Values.metrics.prometheusRule.rules.queryErrors }}
+        - alert: ParqtelQueryErrors
+          expr: rate(parqtel_query_errors_total[2m]) > 0
+          for: 2m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Parqtel instance {{ "{{ $labels.instance }}" }} query errors"
+            description: "Query errors detected in the last 2 minutes."
+        {{- end }}
+        {{- if .Values.metrics.prometheusRule.rules.storageAnomaly }}
+        - alert: ParqtelStorageGrowthAnomaly
+          expr: (parqtel_storage_bytes - parqtel_storage_bytes offset 1h) / parqtel_storage_bytes offset 1h > 0.2
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Parqtel instance {{ "{{ $labels.instance }}" }} storage growth anomaly"
+            description: "Storage bytes grown by more than 20% in the last hour."
+        {{- end }}
+        {{- if .Values.metrics.prometheusRule.rules.instanceDown }}
+        - alert: ParqtelDown
+          expr: up == 0
+          for: 1m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Parqtel instance {{ "{{ $labels.instance }}" }} is down"
+            description: "Instance has been unreachable for more than 1 minute."
+        {{- end }}
+{{- end }}

@@ -1,0 +1,16 @@
+# Local developer overrides (example)
+# Rename this file to docker-compose.override.yml to use it.
+# It is gitignored to prevent local secrets or custom paths from being committed.
+
+version: '3.8'
+
+services:
+  # Example: mount your local parqtel source for live development (if using a different Dockerfile)
+  # parqtel:
+  #   volumes:
+  #     - ./parqtel-core:/app/parqtel-core:ro
+  
+  # Example: change Grafana port
+  # grafana:
+  #   ports:
+  #     - "3001:3000"

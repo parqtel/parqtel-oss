@@ -1,0 +1,11 @@
+{{- if .Values.provider.enabled -}}
+apiVersion: parqtel.io/v1alpha1
+kind: ParqtelProviderConfig
+metadata:
+  name: default
+spec:
+  queryTimeoutSeconds: {{ .Values.provider.queryTimeoutSecs | default 10 }}
+  cacheExpirySeconds: {{ .Values.provider.cacheExpirySecs | default 30 }}
+  maxConcurrentQueries: {{ .Values.provider.maxConcurrent | default 10 }}
+  allowedNamespaces: []
+{{- end }}

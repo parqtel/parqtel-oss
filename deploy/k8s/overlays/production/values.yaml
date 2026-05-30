@@ -1,0 +1,34 @@
+# Production-like values for SRE validation on k3d
+image:
+  repository: registry.localhost:5050/parqtel
+  tag: dev
+  pullPolicy: IfNotPresent
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 64Mi
+  limits:
+    cpu: 500m
+    memory: 128Mi
+
+storage:
+  enabled: true
+  size: 5Gi
+  storageClassName: local-path
+
+# Ensure parqtel schedules on the storage-labeled node
+nodeSelector:
+  role: storage
+
+parqtel:
+  storage:
+    blockDurationSecs: 60
+    retentionDays: 1
+  telemetry:
+    logLevel: "info"
+    logFormat: "json"
+
+service:
+  type: LoadBalancer
+  port: 9090

@@ -1,0 +1,30 @@
+# Build stage
+FROM rust:1.79-slim AS builder
+
+WORKDIR /build
+
+# Install dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    clang \
+    pkg-config \
+    libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy workspace files
+COPY Cargo.toml Cargo.lock ./
+COPY crates/parqtel-mcp-core crates/parqtel-mcp-core
+COPY crates/parqtel-mcp-gdocs crates/parqtel-mcp-gdocs
+
+# Build release
+RUN cargo build --release --bin parqtel-mcp-gdocs
+
+# Final stage
+FROM gcr.io/distroless/cc-debian12
+
+WORKDIR /app
+
+COPY --from=builder /build/target/release/parqtel-mcp-gdocs /app/parqtel-mcp-gdocs
+
+EXPOSE 3000
+
+CMD ["/app/parqtel-mcp-gdocs"]

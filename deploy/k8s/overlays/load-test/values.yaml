@@ -1,0 +1,30 @@
+image:
+  repository: registry.localhost:5050/parqtel
+  tag: dev
+  pullPolicy: Always
+
+resources:
+  requests:
+    cpu: 500m
+    memory: 128Mi
+  limits:
+    cpu: 2000m
+    memory: 256Mi
+
+parqtel:
+  storage:
+    maxRowsPerBlock: 1000000
+    blockDurationSecs: 3600
+  query:
+    timeoutSecs: 60
+  ui:
+    enabled: false
+
+ingress:
+  enabled: true
+  className: traefik
+  hosts:
+    - host: parqtel.localhost
+      paths:
+        - path: /
+          pathType: ImplementationSpecific

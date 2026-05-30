@@ -1,0 +1,42 @@
+{{- if .Values.networkPolicy.enabled -}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "parqtel.fullname" . }}
+  labels:
+    {{- include "parqtel.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "parqtel.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Allow traffic from specific labels
+    {{- if .Values.networkPolicy.ingressSelectorLabels }}
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.ingressSelectorLabels | nindent 14 }}
+    {{- end }}
+    # Allow traffic from monitoring namespace for scraping
+    {{- if .Values.networkPolicy.monitoringNamespace }}
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.monitoringNamespace }}
+    {{- end }}
+    # Always allow traffic within the same namespace for metrics/health
+    - from:
+        - podSelector: {}
+  egress:
+    # Allow DNS
+    - to:
+        - ports:
+            - protocol: UDP
+              port: 53
+            - protocol: TCP
+              port: 53
+    # Deny everything else by default (add extra egress rules if parqtel needs to talk to external systems)
+{{- end }}

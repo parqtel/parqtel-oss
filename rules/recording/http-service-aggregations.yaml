@@ -1,0 +1,39 @@
+# Recording rules: pre-aggregate HTTP request rate and p99 latency by service
+groups:
+  - name: http_service_aggregations
+    interval: 1m
+    rules:
+      - record: service:http_requests:rate5m
+        expr: |
+          sum by (service_name, k8s_namespace) (
+            rate(http_requests_total[5m])
+          )
+        labels:
+          aggregation: "rate5m"
+          generated_by: "parqtel_ruler"
+        description: "Pre-aggregated HTTP request rate per service"
+
+      - record: service:http_error_rate:rate5m
+        expr: |
+          sum by (service_name, k8s_namespace) (
+            rate(http_requests_total{status=~"5.."}[5m])
+          ) / sum by (service_name, k8s_namespace) (
+            rate(http_requests_total[5m])
+          )
+        labels:
+          aggregation: "rate5m"
+          generated_by: "parqtel_ruler"
+        description: "HTTP 5xx error rate per service"
+
+      - record: service:http_request_duration_p99:5m
+        expr: |
+          histogram_quantile(0.99,
+            sum by (service_name, le) (
+              rate(http_request_duration_seconds_bucket[5m])
+            )
+          )
+        labels:
+          quantile: "0.99"
+          generated_by: "parqtel_ruler"
+        description: "p99 request latency per service (5m window)"
+        retention_override_days: 90

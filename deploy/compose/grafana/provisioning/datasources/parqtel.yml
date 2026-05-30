@@ -1,0 +1,12 @@
+apiVersion: 1
+
+datasources:
+  - name: parqtel
+    type: prometheus
+    url: http://parqtel:9090
+    access: proxy
+    isDefault: true
+    jsonData:
+      httpMethod: GET
+      scrape_interval: 15s
+    editable: true

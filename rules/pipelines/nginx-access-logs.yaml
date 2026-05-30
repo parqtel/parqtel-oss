@@ -1,0 +1,74 @@
+# Pipeline: parse Nginx access logs, extract metrics, mask IPs
+pipelines:
+  - name: nginx-access-logs
+    description: "Parse Nginx access logs, extract request counter and latency histogram, mask client IPs"
+    match:
+      signal: logs
+      conditions:
+        - field: service_name
+          op: "="
+          value: "nginx"
+
+    stages:
+      # Stage 1: Extract fields from Nginx combined log format
+      - type: processor
+        name: parse_nginx_log
+        processor: regex_extract
+        source_field: body
+        pattern: |
+          (?P<client_ip>\d+\.\d+\.\d+\.\d+) - (?P<user>[^ ]*) \[(?P<timestamp>[^\]]+)\] "(?P<method>[A-Z]+) (?P<path>[^ ]*) HTTP/[\d.]+" (?P<status>\d+) (?P<bytes>\d+) "[^"]*" "[^"]*" (?P<duration_ms>[\d.]+)
+        target_fields:
+          http.client_ip: client_ip
+          http.method: method
+          http.target: path
+          http.status_code: status
+          http.response_bytes: bytes
+          http.duration_ms: duration_ms
+        on_parse_failure: keep_original
+
+      # Stage 2: Extract request counter metric
+      - type: metric_extract
+        name: extract_request_count
+        metric_name: nginx_requests_total
+        metric_type: counter
+        value_field: "constant:1"
+        dimensions:
+          - http.method
+          - http.status_code
+          - service_name
+          - k8s_namespace
+
+      # Stage 3: Extract latency histogram metric
+      - type: metric_extract
+        name: extract_request_latency
+        metric_name: nginx_request_duration_ms
+        metric_type: gauge
+        value_field: http.duration_ms
+        dimensions:
+          - http.method
+          - http.target
+          - service_name
+        condition:
+          field: http.duration_ms
+          op: ">"
+          value: 0
+
+      # Stage 4: Mask client IP addresses before storage
+      - type: masker
+        name: mask_client_ips
+        rules:
+          - field: body
+            pattern: '\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}'
+            replacement: "[IP_MASKED]"
+          - field: http.client_ip
+            pattern: '.*'
+            replacement: "[MASKED]"
+
+      # Stage 5: Drop health check noise
+      - type: router
+        name: drop_health_checks
+        conditions:
+          - field: http.target
+            op: "=~"
+            value: "^/(health|ready|live)"
+        action: drop

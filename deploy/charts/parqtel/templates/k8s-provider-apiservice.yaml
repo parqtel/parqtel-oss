@@ -1,0 +1,35 @@
+{{- if .Values.provider.enabled -}}
+apiVersion: apiregistration.k8s.io/v1
+kind: APIService
+metadata:
+  name: v1beta2.custom.metrics.k8s.io
+spec:
+  service:
+    name: {{ include "parqtel.fullname" . }}-provider
+    namespace: {{ .Release.Namespace }}
+    port: 443
+  group: custom.metrics.k8s.io
+  version: v1beta2
+  insecureSkipTLSVerify: false
+  groupPriorityMinimum: 100
+  versionPriority: 100
+  caBundle: "" # Will be patched by the parqtel-server on startup
+{{- if .Values.provider.externalMetrics.enabled }}
+---
+apiVersion: apiregistration.k8s.io/v1
+kind: APIService
+metadata:
+  name: v1beta1.external.metrics.k8s.io
+spec:
+  service:
+    name: {{ include "parqtel.fullname" . }}-provider
+    namespace: {{ .Release.Namespace }}
+    port: 443
+  group: external.metrics.k8s.io
+  version: v1beta1
+  insecureSkipTLSVerify: false
+  groupPriorityMinimum: 100
+  versionPriority: 100
+  caBundle: "" # Will be patched by the parqtel-server on startup
+{{- end }}
+{{- end }}

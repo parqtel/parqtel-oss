@@ -1,0 +1,42 @@
+[package]
+name = "parqtel-server"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "parqtel"
+path = "src/main.rs"
+
+[dependencies]
+parqtel-core = { workspace = true }
+parqtel-ingest = { workspace = true }
+parqtel-query = { workspace = true }
+parqtel-alert = { workspace = true }
+axum = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tower = { version = "0.4", features = ["util"] }
+tower-http = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+prost = { workspace = true }
+bytes = { workspace = true }
+anyhow = { workspace = true }
+flate2 = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+chrono = { workspace = true }
+ulid = { workspace = true }
+clap = { workspace = true }
+figment = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
+urlencoding = "2"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["full"] }
+http = "1"
+
+[lints]
+workspace = true

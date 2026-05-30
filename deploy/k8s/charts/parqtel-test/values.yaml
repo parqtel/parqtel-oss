@@ -1,0 +1,21 @@
+# Default values for parqtel-test support services.
+
+loadGenerator:
+  image:
+    repository: registry.localhost:5050/load-generator
+    tag: dev
+    pullPolicy: Always
+  replicas: 1
+
+grafana:
+  image:
+    repository: grafana/grafana
+    tag: 10.0.0
+    pullPolicy: IfNotPresent
+  replicas: 1
+  service:
+    port: 3000
+  ingress:
+    enabled: true
+    className: traefik
+    host: grafana.localhost

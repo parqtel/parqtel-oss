@@ -1,0 +1,43 @@
+[Unit]
+Description=parqtel - SRE Observability Metrics Engine
+Documentation=https://github.com/parqtel/parqtel
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+User=parqtel
+Group=parqtel
+WorkingDirectory=/var/lib/parqtel
+
+# Executable path (assuming standard install location)
+ExecStart=/usr/local/bin/parqtel serve --config /etc/parqtel/default.toml
+
+# Environment Overrides
+EnvironmentFile=-/etc/parqtel/env
+Environment=RUST_LOG=info
+
+# Restart Policy
+Restart=on-failure
+RestartSec=10s
+TimeoutStopSec=30s
+
+# Resource Limits
+# Hard memory limit (50MB target + 10MB headroom)
+MemoryMax=60M
+# Disable swap so memory pressure causes OOM kill rather than thrashing
+MemorySwapMax=0
+# Allow up to 65536 open files for concurrent connections
+LimitNOFILE=65536
+
+# Security Hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+PrivateTmp=yes
+ProtectKernelTunables=yes
+RestrictRealtime=yes
+# Only allow writing to the specific data directory
+ReadWritePaths=/var/lib/parqtel
+
+[Install]
+WantedBy=multi-user.target

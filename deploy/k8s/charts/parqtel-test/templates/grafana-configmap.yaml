@@ -1,0 +1,42 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-provisioning
+data:
+  parqtel-datasource.yaml: |
+    apiVersion: 1
+    datasources:
+      - name: parqtel
+        type: prometheus
+        url: http://parqtel:9090
+        access: proxy
+        isDefault: true
+        jsonData:
+          httpMethod: GET
+          scrape_interval: 15s
+        editable: true
+  dashboards.yaml: |
+    apiVersion: 1
+    providers:
+      - name: 'parqtel'
+        orgId: 1
+        folder: ''
+        type: file
+        disableDeletion: false
+        editable: true
+        options:
+          path: /etc/grafana/dashboards
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboards
+data:
+  # Simple dashboard placeholder
+  parqtel-overview.json: |
+    {
+      "title": "parqtel K8s Overview",
+      "panels": [
+        { "title": "Ingestion Rate", "type": "timeseries", "targets": [{ "expr": "rate(parqtel_ingested_points_total[1m])" }] }
+      ]
+    }

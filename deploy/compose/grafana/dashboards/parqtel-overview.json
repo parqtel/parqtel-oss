@@ -1,0 +1,64 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "title": "Counter Rate (per second)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "targets": [
+        { "expr": "rate(http_requests_total_0[1m])", "refId": "A" }
+      ]
+    },
+    {
+      "title": "Gauge Values",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "targets": [
+        { "expr": "system_metric_0", "refId": "A" }
+      ]
+    },
+    {
+      "title": "Latency Heatmap",
+      "type": "heatmap",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "targets": [
+        { "expr": "latency_ms_0_bucket", "refId": "A" }
+      ]
+    },
+    {
+      "title": "Self Metrics: Ingestion Rate",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "targets": [
+        { "expr": "rate(parqtel_ingested_points_total[1m])", "refId": "A" }
+      ]
+    },
+    {
+      "title": "Top Series by Sample Count",
+      "type": "table",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 16 },
+      "targets": [
+        { "expr": "topk(10, count_over_time({__name__=~\".+\"}[1h]))", "refId": "A" }
+      ]
+    }
+  ],
+  "schemaVersion": 38,
+  "templating": {
+    "list": [
+      {
+        "name": "metric",
+        "type": "query",
+        "query": "label_values(__name__)",
+        "refresh": 1
+      }
+    ]
+  },
+  "time": { "from": "now-1h", "to": "now" },
+  "title": "parqtel Overview",
+  "uid": "parqtel-overview"
+}

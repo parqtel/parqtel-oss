@@ -1,0 +1,238 @@
+version: '3.8'
+
+services:
+  parqtel:
+    build:
+      context: ../..
+      dockerfile: deploy/compose/parqtel/Dockerfile.dev
+    container_name: parqtel
+    ports:
+      - "9090:9090"
+    volumes:
+      - parqtel_data:/var/lib/parqtel
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9090/api/v1/label/__name__/values"]
+      interval: 5s
+      timeout: 2s
+      retries: 20
+      start_period: 5s
+    restart: unless-stopped
+
+  load-generator:
+    build:
+      context: ./load-generator
+    container_name: load-generator
+    environment:
+      - PARQTEL_URL=http://parqtel:9090
+      - LOAD_TEST_MODE=${LOAD_TEST_MODE:-false}
+      - GENERATOR_NORMAL_SERIES=${GENERATOR_NORMAL_SERIES:-1000}
+      - GENERATOR_NORMAL_RPS=${GENERATOR_NORMAL_RPS:-167}
+      - GENERATOR_LOAD_SERIES=${GENERATOR_LOAD_SERIES:-10000}
+      - GENERATOR_LOAD_RPS=${GENERATOR_LOAD_RPS:-17000}
+    volumes:
+      - loadtest_results:/results
+    depends_on:
+      parqtel:
+        condition: service_healthy
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:10.0.0
+    container_name: grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-parqtel-dev}
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning
+      - ./grafana/dashboards:/etc/grafana/dashboards
+    depends_on:
+      parqtel:
+        condition: service_healthy
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v2.45.0
+    container_name: prometheus
+    ports:
+      - "9091:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    depends_on:
+      parqtel:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # MCP Servers
+  mcp-slack:
+    build:
+      context: ../..
+      dockerfile: deploy/compose/mcp/Dockerfile.slack
+    container_name: mcp-slack
+    ports:
+      - "3001:3000"
+    environment:
+      - MCP_HOST=0.0.0.0
+      - MCP_PORT=3000
+      - MCP_RATE_LIMIT=60
+      - SLACK_BOT_TOKEN=${SLACK_BOT_TOKEN:-}
+    depends_on:
+      parqtel:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+  mcp-pagerduty:
+    build:
+      context: ../..
+      dockerfile: deploy/compose/mcp/Dockerfile.pagerduty
+    container_name: mcp-pagerduty
+    ports:
+      - "3002:3000"
+    environment:
+      - MCP_HOST=0.0.0.0
+      - MCP_PORT=3000
+      - MCP_RATE_LIMIT=60
+      - PAGERDUTY_API_KEY=${PAGERDUTY_API_KEY:-}
+    depends_on:
+      parqtel:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+  mcp-jira:
+    build:
+      context: ../..
+      dockerfile: deploy/compose/mcp/Dockerfile.jira
+    container_name: mcp-jira
+    ports:
+      - "3003:3000"
+    environment:
+      - MCP_HOST=0.0.0.0
+      - MCP_PORT=3000
+      - MCP_RATE_LIMIT=60
+      - JIRA_BASE_URL=${JIRA_BASE_URL:-}
+      - JIRA_USER_EMAIL=${JIRA_USER_EMAIL:-}
+      - JIRA_API_TOKEN=${JIRA_API_TOKEN:-}
+    depends_on:
+      parqtel:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+  mcp-notion:
+    build:
+      context: ../..
+      dockerfile: deploy/compose/mcp/Dockerfile.notion
+    container_name: mcp-notion
+    ports:
+      - "3004:3000"
+    environment:
+      - MCP_HOST=0.0.0.0
+      - MCP_PORT=3000
+      - MCP_RATE_LIMIT=60
+      - NOTION_API_KEY=${NOTION_API_KEY:-}
+    depends_on:
+      parqtel:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+  mcp-discord:
+    build:
+      context: ../..
+      dockerfile: deploy/compose/mcp/Dockerfile.discord
+    container_name: mcp-discord
+    ports:
+      - "3005:3000"
+    environment:
+      - MCP_HOST=0.0.0.0
+      - MCP_PORT=3000
+      - MCP_RATE_LIMIT=60
+      - DISCORD_BOT_TOKEN=${DISCORD_BOT_TOKEN:-}
+    depends_on:
+      parqtel:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+  mcp-gdocs:
+    build:
+      context: ../..
+      dockerfile: deploy/compose/mcp/Dockerfile.gdocs
+    container_name: mcp-gdocs
+    ports:
+      - "3006:3000"
+    environment:
+      - MCP_HOST=0.0.0.0
+      - MCP_PORT=3000
+      - MCP_RATE_LIMIT=60
+      - GOOGLE_SERVICE_ACCOUNT_JSON=${GOOGLE_SERVICE_ACCOUNT_JSON:-}
+    depends_on:
+      parqtel:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+  mcp-parqtel:
+    build:
+      context: ../..
+      dockerfile: deploy/compose/mcp/Dockerfile.parqtel
+    container_name: mcp-parqtel
+    ports:
+      - "3007:3000"
+    environment:
+      - MCP_HOST=0.0.0.0
+      - MCP_PORT=3000
+      - MCP_RATE_LIMIT=60
+      - PARQTEL_API_URL=http://parqtel:9090
+    depends_on:
+      parqtel:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+volumes:
+  parqtel_data:
+  grafana_data:
+  prometheus_data:
+  loadtest_results:

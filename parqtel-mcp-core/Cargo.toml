@@ -1,0 +1,21 @@
+[package]
+name = "parqtel-mcp-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Core library for parqtel MCP servers"
+
+[dependencies]
+tokio = { workspace = true }
+axum = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+schemars = { workspace = true }
+futures = { workspace = true }
+tower-http = { workspace = true }
+uuid = { workspace = true }
+regex = { workspace = true }
+async-trait = { workspace = true }

@@ -1,0 +1,27 @@
+# Minimal resource configuration for parqtel
+image:
+  repository: parqtel
+  tag: local
+  pullPolicy: IfNotPresent
+
+resources:
+  requests:
+    cpu: 10m
+    memory: 48Mi
+  limits:
+    cpu: 100m
+    memory: 80Mi
+
+storage:
+  size: 1Gi
+  storageClassName: "local-path"
+
+provider:
+  enabled: true
+  externalMetrics:
+    enabled: false
+  port: 6443
+
+parqtel:
+  telemetry:
+    logLevel: "debug"

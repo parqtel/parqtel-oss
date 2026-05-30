@@ -1,0 +1,30 @@
+id: dev-team-slack
+name: Development Team Slack Notifications
+match:
+  severity: [warning, critical]
+  labels:
+    team: development
+  time_window: business_hours
+
+channels:
+  - type: slack
+    server: parqtel-mcp-slack
+    tool: send_alert_message
+    params:
+      channel: "#dev-alerts"
+    dedup_window_minutes: 10
+
+  - type: slack
+    server: parqtel-mcp-slack
+    tool: send_alert_message
+    params:
+      channel: "#dev-oncall"
+    dedup_window_minutes: 10
+
+quiet_hours:
+  suppress_severity: [warning]
+  windows:
+    - "22:00-08:00"
+    - "12:00-13:00"
+  timezone: "America/New_York"
+  override_label: "bypass_quiet_hours=true"
