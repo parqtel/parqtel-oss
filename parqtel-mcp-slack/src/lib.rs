@@ -3,14 +3,13 @@
 //! This library provides the Slack integration tools for the MCP server.
 
 use serde_json::json;
-use schemars::JsonSchema;
 
 use parqtel_mcp_core::tool::McpTool;
 
 /// Severity colors for Slack Block Kit messages
 pub fn severity_color(severity: &str) -> &'static str {
     match severity.to_lowercase().as_str() {
-        "critical" | "critical" => "#ff0000",
+        "critical" => "#ff0000",
         "warning" | "warn" => "#ffa500",
         "info" | "information" => "#008080",
         _ => "#808080",

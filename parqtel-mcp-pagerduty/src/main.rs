@@ -8,7 +8,7 @@ use parqtel_mcp_pagerduty::{
     make_add_note_tool, make_create_incident_tool, make_get_oncall_tool,
     make_get_recent_incidents_tool, make_resolve_incident_tool,
 };
-use tracing_subscriber::{fmt::format::Json, EnvFilter};
+use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

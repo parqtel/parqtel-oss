@@ -516,7 +516,7 @@ mod tests {
         let plan = QueryPlan::new("cpu".into(), vec![], 0, 5000, None, 10, 100, None, None).unwrap();
         let res = exec.execute(plan).await.unwrap();
         assert_eq!(res.points_scanned, 3);
-        assert!(res.series.len() >= 1);
+        assert!(!res.series.is_empty());
         assert_eq!(res.total_series_count, 2); // h1 and h2
     }
 
@@ -684,7 +684,7 @@ mod tests {
 
     #[test]
     fn test_v_to_f64() {
-        assert_eq!(v_to_f64(&parqtel_core::MetricValue::Double(3.14)), 3.14);
+        assert_eq!(v_to_f64(&parqtel_core::MetricValue::Double(3.15)), 3.15);
         assert_eq!(v_to_f64(&parqtel_core::MetricValue::Int(42)), 42.0);
         assert_eq!(v_to_f64(&parqtel_core::MetricValue::Histogram {
             count: 1, sum: 99.0, min: None, max: None, boundaries: vec![], counts: vec![],

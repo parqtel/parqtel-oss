@@ -130,7 +130,7 @@ mod tests {
     fn test_span_duration_ms() {
         let span = Span::new(
             [0; 16], [0; 8], "tracestate".into(), "test-span".into(),
-            1, 1000_000_000, 2500_000_000, LabelSet::default(), vec![], vec![],
+            1, 1_000_000_000, 2_500_000_000, LabelSet::default(), vec![], vec![],
             SpanStatus { code: 0, message: "".into() },
             [0; 8], 0,
         );

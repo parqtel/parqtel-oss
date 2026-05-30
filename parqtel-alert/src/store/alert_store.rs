@@ -1,3 +1,4 @@
+use std::cmp::Reverse;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -73,7 +74,7 @@ impl AlertStore {
             .filter(|i| i.updated_at >= since)
             .cloned()
             .collect();
-        results.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        results.sort_by_key(|a| Reverse(a.updated_at));
         results.truncate(limit);
         results
     }

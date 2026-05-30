@@ -54,11 +54,12 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
     use super::*;
 
     #[test]
     fn test_error_variants() {
-        let io_err = Error::Io(std::io::Error::new(std::io::ErrorKind::Other, "io"));
+        let io_err = Error::Io(std::io::Error::other("io"));
         assert!(io_err.to_string().contains("I/O error: io"));
 
         let parquet_err = Error::Parquet("parquet".into());

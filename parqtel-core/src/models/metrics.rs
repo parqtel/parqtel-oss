@@ -121,7 +121,7 @@ mod tests {
     #[test]
     fn test_metric_value_serialization() {
         let values = vec![
-            MetricValue::Double(3.14),
+            MetricValue::Double(3.15),
             MetricValue::Int(42),
             MetricValue::Histogram { count: 10, sum: 100.0, min: Some(1.0), max: Some(20.0), boundaries: vec![5.0, 10.0], counts: vec![3, 5, 2] },
             MetricValue::Summary { count: 5, sum: 50.0, quantiles: vec![(0.5, 10.0), (0.99, 20.0)] },

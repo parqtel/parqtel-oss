@@ -5,7 +5,7 @@ use std::env;
 use axum::{routing::get, Router};
 use parqtel_mcp_core::{server::ServerConfig, McpServer};
 use parqtel_mcp_discord::{make_resolve_alert_tool, make_send_alert_embed_tool, make_send_rca_update_tool};
-use tracing_subscriber::{fmt::format::Json, EnvFilter};
+use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

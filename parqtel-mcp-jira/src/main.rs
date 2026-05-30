@@ -8,7 +8,7 @@ use parqtel_mcp_jira::{
     make_add_rca_comment_tool, make_create_action_item_tool, make_create_incident_issue_tool,
     make_transition_issue_tool,
 };
-use tracing_subscriber::{fmt::format::Json, EnvFilter};
+use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

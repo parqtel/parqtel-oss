@@ -8,7 +8,7 @@ use parqtel_mcp_notion::{
     make_append_rca_section_tool, make_create_incident_page_tool, make_create_postmortem_page_tool,
     make_update_incident_status_tool,
 };
-use tracing_subscriber::{fmt::format::Json, EnvFilter};
+use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

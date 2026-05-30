@@ -1767,7 +1767,6 @@ dependencies = [
  "parqtel-mcp-core",
  "reqwest",
  "rustls",
- "schemars",
  "serde",
  "serde_json",
  "thiserror",

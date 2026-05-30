@@ -115,6 +115,7 @@ pub trait StorageEngine: Send + Sync {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use super::parquet::ParquetStorageEngine;
     use super::registry::StorageEngineRegistry;

@@ -208,7 +208,7 @@ mod tests {
             .await
             .unwrap();
         // Both writes succeed (storage doesn't deduplicate, but both have same ts)
-        assert!(results.len() >= 1);
+        assert!(!results.is_empty());
     }
 
     #[tokio::test]

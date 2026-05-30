@@ -1,4 +1,4 @@
-//go:build e2e,slow
+//go:build e2e && slow
 package tests
 
 import (

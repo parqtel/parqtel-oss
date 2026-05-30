@@ -8,7 +8,7 @@ use parqtel_mcp_parqtel::{
     make_get_alert_history_tool, make_get_noise_statistics_tool, make_get_topology_tool,
     make_query_logs_tool, make_query_metrics_tool,
 };
-use tracing_subscriber::{fmt::format::Json, EnvFilter};
+use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

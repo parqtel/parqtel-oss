@@ -1,4 +1,4 @@
-//go:build e2e,resilience
+//go:build e2e && resilience
 package tests
 
 import (

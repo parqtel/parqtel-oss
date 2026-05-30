@@ -1,5 +1,6 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 use parqtel_ingest::decode::OtlpDecoder;
-use parqtel_core::{MetricKind, MetricValue, Span, SpanEvent, SpanLink, SpanStatus};
+use parqtel_core::{MetricKind, MetricValue};
 use serde_json::json;
 
 #[test]

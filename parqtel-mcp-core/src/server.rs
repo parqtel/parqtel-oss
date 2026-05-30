@@ -59,7 +59,7 @@ impl RateLimiter {
         let now = Utc::now().timestamp() as u64;
         let tokens_per_second = self.requests_per_minute as f64 / 60.0;
 
-        let entry = self.tokens.entry(client_id.to_string()).or_insert(tokens_per_second as f64);
+        let entry = self.tokens.entry(client_id.to_string()).or_insert(tokens_per_second);
         let last = self.last_update.entry(client_id.to_string()).or_insert(now);
 
         let elapsed = (now - *last) as f64;
@@ -170,10 +170,10 @@ async fn tools_call_handler(
     Json(request): Json<Value>,
 ) -> (StatusCode, Json<Value>) {
     let id = request.get("id").and_then(|v| v.as_str()).unwrap_or("unknown");
-    let _method = request.get("method").and_then(|v| v.as_str());
+    let method = request.get("method").and_then(|v| v.as_str());
 
-    let method = match _method {
-        Some("tools/call") => "tools/call",
+    match method {
+        Some("tools/call") => {}
         Some(m) => {
             return (
                 StatusCode::BAD_REQUEST,
@@ -200,7 +200,7 @@ async fn tools_call_handler(
                 }))
             );
         }
-    };
+    }
 
     let params = request.get("params").cloned().unwrap_or(Value::Null);
     let tool_name = params.get("name").and_then(|v| v.as_str());

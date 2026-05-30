@@ -8,7 +8,7 @@ use parqtel_mcp_slack::{
     make_create_incident_channel_tool, make_resolve_notification_tool, make_send_alert_message_tool,
     make_send_rca_update_tool,
 };
-use tracing_subscriber::{fmt::format::Json, EnvFilter};
+use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

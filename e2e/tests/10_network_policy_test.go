@@ -1,4 +1,4 @@
-//go:build e2e,security
+//go:build e2e && security
 package tests
 
 import (

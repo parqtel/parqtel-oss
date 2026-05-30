@@ -60,6 +60,7 @@ impl AppState {
     }
 
     #[cfg(test)]
+    #[allow(clippy::unwrap_used)]
     pub async fn default_for_tests() -> Self {
         use tokio::sync::mpsc;
         let dir = tempfile::tempdir().unwrap();

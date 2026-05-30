@@ -25,6 +25,7 @@ fn main() -> Result<()> {
        collector_metrics_proto.exists() && logs_proto.exists() && collector_logs_proto.exists() &&
        traces_proto.exists() && collector_traces_proto.exists() {
         let mut config = prost_build::Config::new();
+        config.disable_comments(["."]); // Prevent proto comments from becoming invalid doc-tests
         
         config.compile_protos(
             &[

@@ -75,13 +75,13 @@ fn convert_span(proto: ProtoSpan, _resource_attributes: LabelSet) -> Result<Span
         SpanLink { trace_id: tid, span_id: sid, attributes: attrs }
     }).collect();
 
-    let status = proto.status.map(|s| SpanStatus { code: s.code as i32, message: s.message })
+    let status = proto.status.map(|s| SpanStatus { code: s.code, message: s.message })
         .unwrap_or(SpanStatus { code: 0, message: String::new() });
 
     Ok(Span::new(
-        trace_id, span_id, proto.trace_state, proto.name, proto.kind as i32,
+        trace_id, span_id, proto.trace_state, proto.name, proto.kind,
         proto.start_time_unix_nano as i64, proto.end_time_unix_nano as i64,
-        attributes, events, links, status, parent_span_id, proto.flags as u32,
+        attributes, events, links, status, parent_span_id, proto.flags,
     ))
 }
 
