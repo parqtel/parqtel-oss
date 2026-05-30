@@ -4,13 +4,15 @@
 </p>
 
 <p align="center">
+  <a href="docs/GETTING_STARTED.md"><b>Getting Started</b></a> •
+  <a href="docs/TUTORIALS.md">Tutorials</a> •
+  <a href="CONTRIBUTING.md">Contributing</a> •
   <a href="#features">Features</a> •
   <a href="#architecture">Architecture</a> •
-  <a href="#quick-start">Quick Start</a> •
   <a href="#api-reference">API</a> •
-  <a href="#mcp-integrations">MCP</a> •
-  <a href="#deployment">Deployment</a> •
-  <a href="#contributing">Contributing</a>
+  <a href="docs/MCP.md">MCP</a> •
+  <a href="docs/DEPLOYMENT.md">Deployment</a> •
+  <a href="docs/TROUBLESHOOTING.md">Troubleshooting</a>
 </p>
 
 ---
@@ -24,6 +26,26 @@ Parqtel is a single-binary observability backend written in Rust that ingests Op
 - **Columnar storage** — Parquet + Zstd compression for 10-20x storage reduction
 - **Drop-in compatibility** — works with existing Prometheus/Grafana dashboards
 - **AI-native** — Model Context Protocol (MCP) servers for LLM-driven incident response
+
+## Common Use Cases
+
+| Use Case | Solution |
+|----------|----------|
+| **Low-cost Archiving** | Stream OTel data to Parquet for long-term storage with 90% compression vs Prometheus TSDB. |
+| **Edge Observability** | Deploy on resource-constrained edge devices (IoT, ARM) to local-first telemetry. |
+| **Log-to-Metric Pipelines** | Extract business metrics from high-volume Nginx or app logs using YAML pipelines. |
+| **AI Incident Response** | Use MCP servers to give LLMs direct access to your telemetry for automated RCAs. |
+| **Serverless Monitoring** | Ingest ephemeral logs/metrics from Lambda/Cloud Run without managing a heavy cluster. |
+
+## 🗺 Documentation Map
+
+| Area | Guides |
+|------|--------|
+| **Onboarding** | [Getting Started](docs/GETTING_STARTED.md) • [Glossary](docs/GLOSSARY.md) • [FAQ](docs/FAQ.md) |
+| **Learning** | [Tutorials](docs/TUTORIALS.md) • [Use Cases](#common-use-cases) |
+| **Deep Dive** | [Architecture](docs/ARCHITECTURE.md) • [Configuration](docs/CONFIGURATION.md) • [Developer Guide](docs/DEVELOPER_GUIDE.md) • [MCP Integrations](docs/MCP.md) |
+| **Operations** | [Deployment](docs/DEPLOYMENT.md) • [Troubleshooting](docs/TROUBLESHOOTING.md) • [Best Practices](docs/BEST_PRACTICES.md) • [Testing & Validation](docs/TESTING.md) |
+| **Community** | [Contributing](CONTRIBUTING.md) • [Code of Conduct](CODE_OF_CONDUCT.md) • [Security](SECURITY.md) |
 
 ## Features
 
