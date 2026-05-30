@@ -32,7 +32,7 @@ Parqtel is a single-binary observability backend written in Rust that ingests Op
 | **Ingestion** | OTLP/Proto & JSON for metrics, logs, and traces |
 | **Storage** | Block-based Parquet with Zstd/Snappy/LZ4, automatic compaction, configurable retention |
 | **Query** | PromQL-compatible instant & range queries, label matching, aggregations (sum, avg, rate, histogram_quantile, etc.) |
-| **Alerting** | YAML-defined rules, threshold & anomaly detection, state machine (Inactive→Pending→Firing→Resolved), noise scoring |
+| **Alerting** | YAML-defined rules, threshold & anomaly detection, state machine (Inactive→Pending→Firing→Resolved), background evaluation loop (15s), noise scoring |
 | **Pipeline** | Recording rules, stream processing pipelines, metric extraction from logs |
 | **Visualization** | Built-in web UI, Grafana SimpleJSON datasource, Prometheus-compatible `/api/v1/*` |
 | **MCP** | 7 AI tool servers (Slack, PagerDuty, Jira, Notion, Discord, Google Docs, Parqtel) |
@@ -190,6 +190,15 @@ curl "http://localhost:8080/api/v1/query?query=http_requests_total"
 | `/api/v1/rules` | GET/POST | List or create alert rules |
 | `/api/v1/rules/:id` | PUT/DELETE | Update or delete a rule |
 
+### Pipelines & Recording Rules
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/v1/recording_rules` | GET/POST | List or create recording rule groups |
+| `/api/v1/recording_rules/:name` | DELETE | Delete a recording rule group |
+| `/api/v1/pipelines` | GET/POST | List or create pipeline definitions |
+| `/api/v1/pipelines/:name` | DELETE | Delete a pipeline |
+
 ### Grafana SimpleJSON
 
 | Endpoint | Method | Description |
@@ -206,6 +215,7 @@ curl "http://localhost:8080/api/v1/query?query=http_requests_total"
 |----------|--------|-------------|
 | `/health` | GET | Health check |
 | `/metrics` | GET | Prometheus metrics (self-monitoring) |
+| `/openapi.yaml` | GET | OpenAPI 3.0 specification |
 | `/ui` | GET | Built-in web UI |
 
 ## CLI Commands
