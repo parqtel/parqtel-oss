@@ -73,6 +73,20 @@ impl RuleRegistry {
         }
     }
 
+    /// Add a recording rule group.
+    pub fn add_group(&self, group: RecordingRuleGroup) {
+        if let Ok(mut groups) = self.groups.write() {
+            groups.insert(group.name.clone(), group);
+        }
+    }
+
+    /// Add a pipeline definition.
+    pub fn add_pipeline(&self, pipeline: PipelineDefinition) {
+        if let Ok(mut pipelines) = self.pipelines.write() {
+            pipelines.insert(pipeline.name.clone(), pipeline);
+        }
+    }
+
     /// Remove a pipeline by name.
     pub fn remove_pipeline(&self, name: &str) {
         if let Ok(mut pipelines) = self.pipelines.write() {

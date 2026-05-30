@@ -216,6 +216,45 @@ async fn run_server(
         }
     });
 
+    // Alert evaluation loop
+    let state_clone = state.clone();
+    let alert_eval_task = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(15));
+        loop {
+            interval.tick().await;
+            let rules = state_clone.inner.alert_registry.list_enabled().await;
+            for rule in rules {
+                let parsed = parqtel_query::parse_query(&rule.query);
+                let (metric_name, matchers, aggregation, quantile) = match parsed {
+                    Ok(p) => p,
+                    Err(_) => continue,
+                };
+                let now_ns = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
+                let start_ns = now_ns - 300_000_000_000; // 5 min lookback
+                let plan = parqtel_query::QueryPlan::new(
+                    metric_name, matchers, start_ns, now_ns, None,
+                    100, 1000, aggregation, quantile,
+                );
+                let plan = match plan {
+                    Ok(p) => p,
+                    Err(_) => continue,
+                };
+                if let Ok(qr) = state_clone.inner.query_executor.execute(plan).await {
+                    for series in &qr.series {
+                        if let Some(sample) = series.samples.last() {
+                            let labels = series.labels.iter()
+                                .map(|(k, v)| (k.to_string(), v.to_string()))
+                                .collect();
+                            state_clone.inner.alert_engine.evaluate_rule_with_value(
+                                &rule, sample.value, labels,
+                            ).await;
+                        }
+                    }
+                }
+            }
+        }
+    });
+
     let router = build_router(state.clone());
     let addr = config.server.bind_address.clone();
     let listener = tokio::net::TcpListener::bind(&addr).await?;
@@ -229,6 +268,7 @@ async fn run_server(
 
     tracing::info!("Shutting down gracefully...");
     flush_task.abort();
+    alert_eval_task.abort();
     
     state.inner.ingestion_service.lock().await.shutdown().await?;
     state.inner.log_ingestion_service.lock().await.shutdown().await?;

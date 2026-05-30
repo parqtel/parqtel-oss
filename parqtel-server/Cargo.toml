@@ -12,6 +12,7 @@ parqtel-core = { workspace = true }
 parqtel-ingest = { workspace = true }
 parqtel-query = { workspace = true }
 parqtel-alert = { workspace = true }
+parqtel-pipeline = { workspace = true }
 axum = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }

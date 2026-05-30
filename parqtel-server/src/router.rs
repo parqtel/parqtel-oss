@@ -77,7 +77,15 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/v1/rules", get(handlers::alerts::list_rules))
         .route("/api/v1/rules", post(handlers::alerts::create_rule))
         .route("/api/v1/rules/:id", put(handlers::alerts::update_rule))
-        .route("/api/v1/rules/:id", delete(handlers::alerts::delete_rule));
+        .route("/api/v1/rules/:id", delete(handlers::alerts::delete_rule))
+
+        // Pipeline & Recording Rules API
+        .route("/api/v1/recording_rules", get(handlers::pipeline::list_recording_rules))
+        .route("/api/v1/recording_rules", post(handlers::pipeline::create_recording_rule))
+        .route("/api/v1/recording_rules/:name", delete(handlers::pipeline::delete_recording_rule))
+        .route("/api/v1/pipelines", get(handlers::pipeline::list_pipelines))
+        .route("/api/v1/pipelines", post(handlers::pipeline::create_pipeline))
+        .route("/api/v1/pipelines/:name", delete(handlers::pipeline::delete_pipeline));
 
     routes
         .layer(cors)

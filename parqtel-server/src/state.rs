@@ -5,6 +5,8 @@ use parqtel_ingest::{IngestionService, LogIngestionService, TraceIngestionServic
 use parqtel_query::QueryExecutor;
 use parqtel_alert::AlertRuleRegistry;
 use parqtel_alert::AlertStore;
+use parqtel_alert::evaluator::engine::{EvaluationEngine, EvalConfig};
+use parqtel_pipeline::rule::registry::RuleRegistry as PipelineRegistry;
 
 /// Shared application state for the HTTP server.
 #[derive(Clone)]
@@ -25,6 +27,8 @@ pub struct AppStateInner {
     pub metrics: crate::metrics::ServerMetrics,
     pub alert_registry: AlertRuleRegistry,
     pub alert_store: AlertStore,
+    pub alert_engine: Arc<EvaluationEngine>,
+    pub pipeline_registry: PipelineRegistry,
 }
 
 impl AppState {
@@ -40,6 +44,15 @@ impl AppState {
         ui_etag: String,
     ) -> Self {
         let data_dir = config.storage.data_dir.clone();
+        let alert_registry = AlertRuleRegistry::new();
+        let alert_store = AlertStore::new(Some(data_dir)).await;
+        let (alert_tx, _) = tokio::sync::mpsc::unbounded_channel();
+        let alert_engine = Arc::new(EvaluationEngine::new(
+            EvalConfig { evaluation_interval_secs: 15, evaluation_timeout_secs: 10 },
+            alert_registry.clone(),
+            alert_store.clone(),
+            alert_tx,
+        ));
 
         Self {
             inner: Arc::new(AppStateInner {
@@ -53,8 +66,10 @@ impl AppState {
                 ui_content,
                 ui_etag,
                 metrics: crate::metrics::ServerMetrics::default(),
-                alert_registry: AlertRuleRegistry::new(),
-                alert_store: AlertStore::new(Some(data_dir)).await,
+                alert_registry,
+                alert_store,
+                alert_engine,
+                pipeline_registry: PipelineRegistry::new(),
             }),
         }
     }
