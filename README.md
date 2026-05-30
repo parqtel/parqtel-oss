@@ -215,7 +215,7 @@ curl "http://localhost:8080/api/v1/query?query=http_requests_total"
 |----------|--------|-------------|
 | `/health` | GET | Health check |
 | `/metrics` | GET | Prometheus metrics (self-monitoring) |
-| `/openapi.yaml` | GET | OpenAPI 3.0 specification |
+| `/oas` | GET | OpenAPI 3.0 specification |
 | `/ui` | GET | Built-in web UI |
 
 ## CLI Commands

@@ -36,7 +36,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/metrics", get(handlers::misc::metrics))
         .route("/", get(|| async { Redirect::to("/ui") }))
         .route("/ui", get(handlers::misc::ui))
-        .route("/openapi.yaml", get(handlers::misc::openapi_spec))
+        .route("/oas", get(handlers::misc::openapi_spec))
 
         // OTLP Ingestion
         .route("/v1/metrics", post(handlers::ingest::ingest_proto))
