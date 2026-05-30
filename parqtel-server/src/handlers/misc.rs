@@ -46,3 +46,14 @@ pub async fn ui(
         state.inner.ui_content.clone(),
     ).into_response()
 }
+
+const OPENAPI_SPEC: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../openapi.yaml"));
+
+/// Handler for GET /openapi.yaml
+pub async fn openapi_spec() -> Response {
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "text/yaml; charset=utf-8")],
+        OPENAPI_SPEC,
+    ).into_response()
+}

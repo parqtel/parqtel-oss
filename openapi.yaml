@@ -1,0 +1,1421 @@
+openapi: "3.0.3"
+info:
+  title: Parqtel API
+  description: |
+    Ultra-lightweight SRE observability engine — streaming OpenTelemetry metrics, logs, and traces into compressed Parquet.
+    Exposes Prometheus-compatible query API, Grafana SimpleJSON datasource, alerting engine, and pipeline management.
+  version: "0.1.0"
+  license:
+    name: Apache-2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0
+  contact:
+    name: Parqtel
+    url: https://github.com/parqtel/parqtel-oss
+
+servers:
+  - url: http://localhost:9090
+    description: Local development
+  - url: http://localhost:8080
+    description: Default production
+
+tags:
+  - name: Health
+    description: Health and operational endpoints
+  - name: Ingestion
+    description: OTLP data ingestion (metrics, logs, traces)
+  - name: Query
+    description: Prometheus-compatible query API
+  - name: Logs
+    description: Log query and field exploration
+  - name: Alerts
+    description: Alert rules and instances
+  - name: Pipelines
+    description: Recording rules and stream pipelines
+  - name: Grafana
+    description: Grafana SimpleJSON datasource
+  - name: Correlation
+    description: Cross-signal correlation and trace search
+
+components:
+  schemas:
+    HealthResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: ok
+
+    ApiResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [success, error]
+        data:
+          type: object
+        error:
+          type: string
+
+    IngestResponse:
+      type: object
+      properties:
+        ingested:
+          type: integer
+          example: 5
+
+    ErrorResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: error
+        error:
+          type: string
+          example: "Validation error: Missing resource_metrics"
+
+    OtlpMetricsPayload:
+      type: object
+      required: [resource_metrics]
+      properties:
+        resource_metrics:
+          type: array
+          items:
+            type: object
+            properties:
+              resource:
+                type: object
+                properties:
+                  attributes:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/KeyValue"
+              scope_metrics:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    scope:
+                      type: object
+                      properties:
+                        name:
+                          type: string
+                    metrics:
+                      type: array
+                      items:
+                        $ref: "#/components/schemas/Metric"
+
+    OtlpLogsPayload:
+      type: object
+      required: [resource_logs]
+      properties:
+        resource_logs:
+          type: array
+          items:
+            type: object
+            properties:
+              resource:
+                type: object
+                properties:
+                  attributes:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/KeyValue"
+              scope_logs:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    log_records:
+                      type: array
+                      items:
+                        $ref: "#/components/schemas/LogRecord"
+
+    OtlpTracesPayload:
+      type: object
+      required: [resource_spans]
+      properties:
+        resource_spans:
+          type: array
+          items:
+            type: object
+
+    KeyValue:
+      type: object
+      properties:
+        key:
+          type: string
+        value:
+          type: object
+          properties:
+            string_value:
+              type: string
+            int_value:
+              type: integer
+            double_value:
+              type: number
+
+    Metric:
+      type: object
+      properties:
+        name:
+          type: string
+        gauge:
+          type: object
+          properties:
+            data_points:
+              type: array
+              items:
+                $ref: "#/components/schemas/DataPoint"
+        sum:
+          type: object
+          properties:
+            data_points:
+              type: array
+              items:
+                $ref: "#/components/schemas/DataPoint"
+            aggregation_temporality:
+              type: integer
+            is_monotonic:
+              type: boolean
+        histogram:
+          type: object
+          properties:
+            data_points:
+              type: array
+              items:
+                type: object
+            aggregation_temporality:
+              type: integer
+
+    DataPoint:
+      type: object
+      properties:
+        time_unix_nano:
+          type: integer
+          format: int64
+        value:
+          type: object
+          properties:
+            as_double:
+              type: number
+            as_int:
+              type: integer
+        attributes:
+          type: array
+          items:
+            $ref: "#/components/schemas/KeyValue"
+
+    LogRecord:
+      type: object
+      properties:
+        time_unix_nano:
+          type: integer
+          format: int64
+        severity_number:
+          type: integer
+        severity_text:
+          type: string
+        body:
+          type: object
+          properties:
+            string_value:
+              type: string
+        attributes:
+          type: array
+          items:
+            $ref: "#/components/schemas/KeyValue"
+
+    PrometheusQueryResult:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [success, error]
+        data:
+          type: object
+          properties:
+            resultType:
+              type: string
+              enum: [vector, matrix]
+            result:
+              type: array
+              items:
+                $ref: "#/components/schemas/TimeSeries"
+            totalSeriesCount:
+              type: integer
+
+    TimeSeries:
+      type: object
+      properties:
+        metric:
+          type: object
+          additionalProperties:
+            type: string
+        values:
+          type: array
+          items:
+            type: array
+            items:
+              oneOf:
+                - type: number
+                - type: string
+
+    AlertRule:
+      type: object
+      required: [id, name, query, condition, severity]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        signal:
+          type: string
+          default: metrics
+        query:
+          type: string
+        condition:
+          $ref: "#/components/schemas/AlertCondition"
+        severity:
+          type: string
+          enum: [info, warning, critical]
+        labels:
+          type: object
+          additionalProperties:
+            type: string
+        annotations:
+          type: object
+          additionalProperties:
+            type: string
+        enabled:
+          type: boolean
+          default: true
+        noise_suppression_threshold:
+          type: number
+          default: 0.7
+
+    AlertCondition:
+      type: object
+      required: [type, operator, value]
+      properties:
+        type:
+          type: string
+          example: threshold
+        operator:
+          type: string
+          enum: [">", ">=", "<", "<=", "==", "!="]
+        value:
+          type: number
+        for_duration_secs:
+          type: integer
+          default: 0
+
+    AlertInstance:
+      type: object
+      properties:
+        id:
+          type: string
+        rule_id:
+          type: string
+        rule_name:
+          type: string
+        state:
+          type: string
+          enum: [pending, firing, acknowledged, resolved, suppressed, noise_flagged]
+        severity:
+          type: string
+        value:
+          type: number
+        labels:
+          type: object
+          additionalProperties:
+            type: string
+        started_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    RecordingRuleGroup:
+      type: object
+      required: [name, rules]
+      properties:
+        name:
+          type: string
+        interval:
+          type: string
+          default: "1m"
+        rules:
+          type: array
+          items:
+            type: object
+            required: [record, expr]
+            properties:
+              record:
+                type: string
+              expr:
+                type: string
+              labels:
+                type: object
+                additionalProperties:
+                  type: string
+
+    PipelineDefinition:
+      type: object
+      required: [name, stages]
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+        match:
+          type: object
+          properties:
+            signal:
+              type: string
+        stages:
+          type: array
+          items:
+            type: object
+            required: [type, name]
+            properties:
+              type:
+                type: string
+              name:
+                type: string
+              config:
+                type: object
+
+paths:
+  /health:
+    get:
+      tags: [Health]
+      summary: Health check
+      operationId: healthCheck
+      responses:
+        "200":
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+
+  /metrics:
+    get:
+      tags: [Health]
+      summary: Prometheus self-monitoring metrics
+      operationId: getMetrics
+      responses:
+        "200":
+          description: Prometheus exposition format
+          content:
+            text/plain:
+              schema:
+                type: string
+
+  /v1/metrics:
+    post:
+      tags: [Ingestion]
+      summary: Ingest metrics (Protobuf)
+      operationId: ingestMetricsProto
+      requestBody:
+        required: true
+        content:
+          application/x-protobuf:
+            schema:
+              type: string
+              format: binary
+      responses:
+        "200":
+          description: Metrics ingested
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IngestResponse"
+        "400":
+          description: Invalid payload
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /v1/metrics/json:
+    post:
+      tags: [Ingestion]
+      summary: Ingest metrics (JSON)
+      operationId: ingestMetricsJson
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OtlpMetricsPayload"
+      responses:
+        "200":
+          description: Metrics ingested
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IngestResponse"
+        "400":
+          description: Invalid payload
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /v1/logs:
+    post:
+      tags: [Ingestion]
+      summary: Ingest logs (Protobuf)
+      operationId: ingestLogsProto
+      requestBody:
+        required: true
+        content:
+          application/x-protobuf:
+            schema:
+              type: string
+              format: binary
+      responses:
+        "200":
+          description: Logs ingested
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IngestResponse"
+        "400":
+          description: Invalid payload
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /v1/logs/json:
+    post:
+      tags: [Ingestion]
+      summary: Ingest logs (JSON)
+      operationId: ingestLogsJson
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OtlpLogsPayload"
+      responses:
+        "200":
+          description: Logs ingested
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IngestResponse"
+        "400":
+          description: Invalid payload
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /v1/traces:
+    post:
+      tags: [Ingestion]
+      summary: Ingest traces (Protobuf)
+      operationId: ingestTracesProto
+      requestBody:
+        required: true
+        content:
+          application/x-protobuf:
+            schema:
+              type: string
+              format: binary
+      responses:
+        "200":
+          description: Traces ingested
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IngestResponse"
+        "400":
+          description: Invalid payload
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /v1/traces/json:
+    post:
+      tags: [Ingestion]
+      summary: Ingest traces (JSON)
+      operationId: ingestTracesJson
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OtlpTracesPayload"
+      responses:
+        "200":
+          description: Traces ingested
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IngestResponse"
+        "400":
+          description: Invalid payload
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/v1/query:
+    get:
+      tags: [Query]
+      summary: Instant query
+      operationId: queryInstant
+      parameters:
+        - name: query
+          in: query
+          required: true
+          schema:
+            type: string
+          description: PromQL expression
+        - name: time
+          in: query
+          schema:
+            type: number
+          description: Evaluation timestamp (Unix seconds). Defaults to now.
+      responses:
+        "200":
+          description: Query result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PrometheusQueryResult"
+        "400":
+          description: Invalid query
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/v1/query_range:
+    get:
+      tags: [Query]
+      summary: Range query
+      operationId: queryRange
+      parameters:
+        - name: query
+          in: query
+          required: true
+          schema:
+            type: string
+          description: PromQL expression
+        - name: start
+          in: query
+          required: true
+          schema:
+            type: number
+          description: Start timestamp (Unix seconds)
+        - name: end
+          in: query
+          required: true
+          schema:
+            type: number
+          description: End timestamp (Unix seconds)
+        - name: step
+          in: query
+          required: true
+          schema:
+            type: string
+          description: "Query resolution step (e.g. 60s, 5m)"
+      responses:
+        "200":
+          description: Range query result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PrometheusQueryResult"
+        "400":
+          description: Invalid parameters
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/v1/labels:
+    get:
+      tags: [Query]
+      summary: List all label names
+      operationId: listLabels
+      responses:
+        "200":
+          description: Label names
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                  data:
+                    type: array
+                    items:
+                      type: string
+
+  /api/v1/label/__name__/values:
+    get:
+      tags: [Query]
+      summary: List all metric names
+      operationId: listMetricNames
+      responses:
+        "200":
+          description: Metric names
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                  data:
+                    type: array
+                    items:
+                      type: string
+
+  /api/v1/label/{name}/values:
+    get:
+      tags: [Query]
+      summary: List values for a label
+      operationId: listLabelValues
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Label name
+      responses:
+        "200":
+          description: Label values
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                  data:
+                    type: array
+                    items:
+                      type: string
+
+  /api/v1/logs:
+    get:
+      tags: [Logs]
+      summary: Query logs
+      operationId: queryLogs
+      parameters:
+        - name: query
+          in: query
+          required: true
+          schema:
+            type: string
+          description: "Log filter expression (use * for all)"
+        - name: start
+          in: query
+          required: true
+          schema:
+            type: number
+          description: Start timestamp (Unix seconds)
+        - name: end
+          in: query
+          required: true
+          schema:
+            type: number
+          description: End timestamp (Unix seconds)
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 100
+        - name: order
+          in: query
+          schema:
+            type: string
+            enum: [asc, desc]
+            default: desc
+        - name: severity_min
+          in: query
+          schema:
+            type: integer
+          description: "Minimum severity number (9=INFO, 13=WARN, 17=ERROR, 21=FATAL)"
+        - name: search
+          in: query
+          schema:
+            type: string
+          description: Full-text search in log body
+      responses:
+        "200":
+          description: Log query result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                  data:
+                    type: object
+                    properties:
+                      logs:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            timestamp_ns:
+                              type: integer
+                            severity_text:
+                              type: string
+                            body:
+                              type: string
+                            service_name:
+                              type: string
+                            attributes:
+                              type: object
+                      total_matched:
+                        type: integer
+                      truncated:
+                        type: boolean
+
+  /v1/logs/count:
+    get:
+      tags: [Logs]
+      summary: Count matching logs
+      operationId: queryLogsCount
+      parameters:
+        - name: query
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: start
+          in: query
+          required: true
+          schema:
+            type: number
+        - name: end
+          in: query
+          required: true
+          schema:
+            type: number
+      responses:
+        "200":
+          description: Log count buckets
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        start_ns:
+                          type: integer
+                        end_ns:
+                          type: integer
+                        count:
+                          type: integer
+
+  /v1/logs/fields:
+    get:
+      tags: [Logs]
+      summary: List available log fields
+      operationId: listLogFields
+      responses:
+        "200":
+          description: Log fields
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                  data:
+                    type: object
+                    properties:
+                      dedicated_columns:
+                        type: array
+                        items:
+                          type: string
+                      common_attributes:
+                        type: array
+                        items:
+                          type: string
+
+  /v1/logs/field_values:
+    get:
+      tags: [Logs]
+      summary: List values for a log field
+      operationId: listLogFieldValues
+      parameters:
+        - name: field
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Field values
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                  data:
+                    type: array
+                    items:
+                      type: string
+
+  /api/v1/alerts:
+    get:
+      tags: [Alerts]
+      summary: List all alert instances
+      operationId: listAlerts
+      responses:
+        "200":
+          description: Alert instances
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/AlertInstance"
+
+  /api/v1/alerts/{id}:
+    get:
+      tags: [Alerts]
+      summary: Get alert instance by ID
+      operationId: getAlert
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Alert instance
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                  data:
+                    $ref: "#/components/schemas/AlertInstance"
+        "404":
+          description: Alert not found
+
+  /api/v1/alerts/{id}/acknowledge:
+    post:
+      tags: [Alerts]
+      summary: Acknowledge an alert
+      operationId: acknowledgeAlert
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Alert acknowledged
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiResponse"
+
+  /api/v1/alerts/{id}/resolve:
+    post:
+      tags: [Alerts]
+      summary: Resolve an alert
+      operationId: resolveAlert
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Alert resolved
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiResponse"
+
+  /api/v1/rules:
+    get:
+      tags: [Alerts]
+      summary: List alert rules
+      operationId: listRules
+      responses:
+        "200":
+          description: Alert rules
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/AlertRule"
+    post:
+      tags: [Alerts]
+      summary: Create alert rule
+      operationId: createRule
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AlertRule"
+      responses:
+        "201":
+          description: Rule created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                  data:
+                    $ref: "#/components/schemas/AlertRule"
+
+  /api/v1/rules/{id}:
+    put:
+      tags: [Alerts]
+      summary: Update alert rule
+      operationId: updateRule
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AlertRule"
+      responses:
+        "200":
+          description: Rule updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                  data:
+                    $ref: "#/components/schemas/AlertRule"
+    delete:
+      tags: [Alerts]
+      summary: Delete (disable) alert rule
+      operationId: deleteRule
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Rule disabled
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiResponse"
+
+  /api/v1/recording_rules:
+    get:
+      tags: [Pipelines]
+      summary: List recording rule groups
+      operationId: listRecordingRules
+      responses:
+        "200":
+          description: Recording rule groups
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/RecordingRuleGroup"
+    post:
+      tags: [Pipelines]
+      summary: Create recording rule group
+      operationId: createRecordingRule
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RecordingRuleGroup"
+      responses:
+        "201":
+          description: Recording rule group created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                  data:
+                    $ref: "#/components/schemas/RecordingRuleGroup"
+
+  /api/v1/recording_rules/{name}:
+    delete:
+      tags: [Pipelines]
+      summary: Delete recording rule group
+      operationId: deleteRecordingRule
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Recording rule group deleted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiResponse"
+
+  /api/v1/pipelines:
+    get:
+      tags: [Pipelines]
+      summary: List pipeline definitions
+      operationId: listPipelines
+      responses:
+        "200":
+          description: Pipeline definitions
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/PipelineDefinition"
+    post:
+      tags: [Pipelines]
+      summary: Create pipeline definition
+      operationId: createPipeline
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PipelineDefinition"
+      responses:
+        "201":
+          description: Pipeline created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                  data:
+                    $ref: "#/components/schemas/PipelineDefinition"
+
+  /api/v1/pipelines/{name}:
+    delete:
+      tags: [Pipelines]
+      summary: Delete pipeline definition
+      operationId: deletePipeline
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Pipeline deleted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiResponse"
+
+  /search:
+    post:
+      tags: [Grafana]
+      summary: Grafana SimpleJSON - search metrics
+      operationId: grafanaSearch
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                target:
+                  type: string
+      responses:
+        "200":
+          description: Available metrics
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: string
+
+  /query:
+    post:
+      tags: [Grafana]
+      summary: Grafana SimpleJSON - query time-series
+      operationId: grafanaQuery
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                targets:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      target:
+                        type: string
+                      type:
+                        type: string
+                        enum: [timeserie, table]
+                range:
+                  type: object
+                  properties:
+                    from:
+                      type: string
+                      format: date-time
+                    to:
+                      type: string
+                      format: date-time
+                intervalMs:
+                  type: integer
+                maxDataPoints:
+                  type: integer
+      responses:
+        "200":
+          description: Time-series data
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    target:
+                      type: string
+                    datapoints:
+                      type: array
+                      items:
+                        type: array
+                        items:
+                          type: number
+
+  /annotations:
+    post:
+      tags: [Grafana]
+      summary: Grafana SimpleJSON - query annotations
+      operationId: grafanaAnnotations
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        "200":
+          description: Annotations
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+
+  /tag-keys:
+    post:
+      tags: [Grafana]
+      summary: Grafana SimpleJSON - list tag keys
+      operationId: grafanaTagKeys
+      responses:
+        "200":
+          description: Tag keys
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    type:
+                      type: string
+                    text:
+                      type: string
+
+  /tag-values:
+    post:
+      tags: [Grafana]
+      summary: Grafana SimpleJSON - list tag values
+      operationId: grafanaTagValues
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                key:
+                  type: string
+      responses:
+        "200":
+          description: Tag values
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    text:
+                      type: string
+
+  /v1/correlate:
+    get:
+      tags: [Correlation]
+      summary: Cross-signal correlation
+      operationId: correlate
+      parameters:
+        - name: anchor_signal
+          in: query
+          required: true
+          schema:
+            type: string
+            enum: [metrics, logs, traces]
+        - name: anchor_timestamp_ns
+          in: query
+          required: true
+          schema:
+            type: integer
+            format: int64
+        - name: anchor_labels
+          in: query
+          required: true
+          schema:
+            type: string
+          description: JSON-encoded label set
+        - name: target_signal
+          in: query
+          required: true
+          schema:
+            type: string
+            enum: [metrics, logs, traces]
+        - name: window_ns
+          in: query
+          schema:
+            type: integer
+            format: int64
+            default: 300000000000
+          description: Correlation window in nanoseconds (default 5min)
+      responses:
+        "200":
+          description: Correlated events
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                  data:
+                    type: object
+
+  /v1/traces/search:
+    get:
+      tags: [Correlation]
+      summary: Search traces
+      operationId: searchTraces
+      parameters:
+        - name: service
+          in: query
+          schema:
+            type: string
+        - name: operation
+          in: query
+          schema:
+            type: string
+        - name: min_duration_ms
+          in: query
+          schema:
+            type: integer
+        - name: max_duration_ms
+          in: query
+          schema:
+            type: integer
+        - name: start
+          in: query
+          schema:
+            type: number
+        - name: end
+          in: query
+          schema:
+            type: number
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 20
+      responses:
+        "200":
+          description: Matching traces
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                  data:
+                    type: array
+                    items:
+                      type: object
