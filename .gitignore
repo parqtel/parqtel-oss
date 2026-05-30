@@ -26,5 +26,9 @@ graphify-out/
 deploy/compose/.env
 deploy/compose/docker-compose.override.yml
 
+# Python
+__pycache__/
+*.pyc
+
 # Local data and logs
 *.log
