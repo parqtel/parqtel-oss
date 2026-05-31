@@ -14,6 +14,7 @@ env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-D warnings"
   RUST_BACKTRACE: 1
+  MSRV: "1.85"
 
 jobs:
   # ── Lint ──────────────────────────────────────────────────────────────────
@@ -41,22 +42,62 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Run tests
         run: cargo test --workspace
+      - name: Run doc tests
+        run: cargo test --workspace --doc
 
-  # ── Build ─────────────────────────────────────────────────────────────────
-  build:
-    name: Build
+  # ── MSRV Check ───────────────────────────────────────────────────────────
+  msrv:
+    name: MSRV (${{ matrix.msrv }})
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        msrv: ["1.85"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.msrv }}
+      - uses: Swatinem/rust-cache@v2
+      - name: Check MSRV
+        run: cargo check --workspace
+
+  # ── Build Matrix ─────────────────────────────────────────────────────────
+  build:
+    name: Build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: x86_64-apple-darwin
+            os: macos-latest
+          - target: aarch64-apple-darwin
+            os: macos-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - name: Install cross-compilation tools
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
       - name: Build release binary
-        run: cargo build --release -p parqtel-server
+        run: cargo build --release -p parqtel-server --target ${{ matrix.target }}
       - name: Upload binary
         uses: actions/upload-artifact@v4
         with:
-          name: parqtel-linux-amd64
-          path: target/release/parqtel
+          name: parqtel-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/parqtel
           retention-days: 7
 
   # ── Helm Lint ─────────────────────────────────────────────────────────────
@@ -68,17 +109,17 @@ jobs:
       - uses: azure/setup-helm@v4
         with:
           version: v3.16.0
-      - name: Lint chart (default values)
+      - name: Lint chart (default)
         run: helm lint deploy/charts/parqtel
-      - name: Lint chart (minimal values)
+      - name: Lint chart (minimal)
         run: helm lint deploy/charts/parqtel -f deploy/charts/parqtel/ci/minimal-values.yaml
-      - name: Lint chart (full values)
+      - name: Lint chart (full)
         run: helm lint deploy/charts/parqtel -f deploy/charts/parqtel/ci/full-values.yaml
       - name: Template validation
         run: helm template test deploy/charts/parqtel --debug > /dev/null
 
-  # ── Docker Build (no push) ───────────────────────────────────────────────
-  docker-build:
+  # ── Docker Build ─────────────────────────────────────────────────────────
+  docker:
     name: Docker Build
     runs-on: ubuntu-latest
     steps:
@@ -89,18 +130,25 @@ jobs:
         with:
           context: .
           push: false
-          tags: parqtel:ci
+          tags: ghcr.io/parqtel/parqtel-oss:ci
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-  # ── Security Scan ────────────────────────────────────────────────────────
+  # ── Security ─────────────────────────────────────────────────────────────
   security:
     name: Security Audit
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked
-      - name: Run audit
+      - name: Audit dependencies
         run: cargo audit
+      - name: Check for unsafe code
+        run: |
+          if grep -r "unsafe" --include="*.rs" parqtel-*/src/ | grep -v "forbid(unsafe_code)" | grep -v "//"; then
+            echo "::error::Unsafe code detected"
+            exit 1
+          fi

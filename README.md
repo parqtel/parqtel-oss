@@ -4,6 +4,16 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/parqtel/parqtel-oss/actions/workflows/ci.yml"><img src="https://github.com/parqtel/parqtel-oss/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/parqtel/parqtel-oss/actions/workflows/release.yml"><img src="https://github.com/parqtel/parqtel-oss/actions/workflows/release.yml/badge.svg" alt="Release"></a>
+  <a href="https://github.com/parqtel/parqtel-oss/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" alt="License"></a>
+  <a href="https://ghcr.io/parqtel/parqtel-oss"><img src="https://img.shields.io/badge/docker-ghcr.io-blue?logo=docker" alt="Docker"></a>
+  <a href="https://github.com/parqtel/parqtel-oss/pkgs/container/charts%2Fparqtel"><img src="https://img.shields.io/badge/helm-OCI-blue?logo=helm" alt="Helm"></a>
+  <img src="https://img.shields.io/badge/MSRV-1.85-orange?logo=rust" alt="MSRV">
+  <img src="https://img.shields.io/badge/unsafe-forbidden-success.svg" alt="Unsafe Forbidden">
+</p>
+
+<p align="center">
   <a href="docs/GETTING_STARTED.md"><b>Getting Started</b></a> •
   <a href="docs/TUTORIALS.md">Tutorials</a> •
   <a href="CONTRIBUTING.md">Contributing</a> •
