@@ -5,6 +5,7 @@ use tokio::sync::{mpsc, Mutex};
 use bytes::Bytes;
 use prost::Message;
 use parqtel_core::{BlockConfig, LogBlockConfig, Metric, Result, Error, LogRecord, Span};
+use parqtel_core::MemoryBuffer;
 use crate::decode::OtlpDecoder;
 use crate::writer::{BlockMetadata, BlockWriter, LogWriter, TraceWriter};
 use crate::otel::collector::metrics::v1::ExportMetricsServiceRequest;
@@ -35,11 +36,12 @@ impl BlockRotator {
         Ok(())
     }
 
-    pub fn check_and_flush(&mut self) -> Result<()> {
+    pub fn check_and_flush(&mut self) -> Result<bool> {
         if Instant::now().duration_since(self.last_flush) >= self.max_duration {
             self.flush()?;
+            return Ok(true);
         }
-        Ok(())
+        Ok(false)
     }
 
     pub fn flush(&mut self) -> Result<()> {
@@ -74,11 +76,12 @@ impl LogRotator {
         Ok(())
     }
 
-    pub fn check_and_flush(&mut self) -> Result<()> {
+    pub fn check_and_flush(&mut self) -> Result<bool> {
         if Instant::now().duration_since(self.last_flush) >= self.max_duration {
             self.flush()?;
+            return Ok(true);
         }
-        Ok(())
+        Ok(false)
     }
 
     pub fn flush(&mut self) -> Result<()> {
@@ -101,6 +104,7 @@ pub struct IngestionStats {
 pub struct IngestionService {
     rotator: Arc<Mutex<BlockRotator>>,
     stats: Arc<IngestionStats>,
+    memory_buffer: Option<MemoryBuffer>,
 }
 
 impl IngestionService {
@@ -108,7 +112,14 @@ impl IngestionService {
         Self {
             rotator: Arc::new(Mutex::new(BlockRotator::new(config, metadata_tx))),
             stats: Arc::new(IngestionStats::default()),
+            memory_buffer: None,
         }
+    }
+
+    /// Set the shared memory buffer for stream-queryable data.
+    pub fn with_memory_buffer(mut self, buffer: MemoryBuffer) -> Self {
+        self.memory_buffer = Some(buffer);
+        self
     }
 
     pub async fn ingest_proto(&self, body: Bytes) -> Result<u64> {
@@ -127,20 +138,38 @@ impl IngestionService {
 
     async fn process_metrics(&self, metrics: Vec<Metric>) -> Result<u64> {
         let mut count = 0;
+        let mut flushed = false;
+        // Write to in-memory buffer first (before rotator takes ownership)
+        if let Some(ref buf) = self.memory_buffer {
+            for m in &metrics {
+                buf.push_metrics(&m.name, &m.data_points).await;
+            }
+        }
         let mut rotator = self.rotator.lock().await;
         for m in metrics {
             count += m.data_points.len() as u64;
             if let Err(e) = rotator.push(m) {
-                if e.to_string().contains("buffer is full") { rotator.flush()?; }
-                else { self.stats.failed_batches.fetch_add(1, Ordering::Relaxed); return Err(e); }
+                if e.to_string().contains("buffer is full") {
+                    rotator.flush()?;
+                    flushed = true;
+                } else {
+                    self.stats.failed_batches.fetch_add(1, Ordering::Relaxed);
+                    return Err(e);
+                }
             }
         }
-        rotator.check_and_flush()?;
+        if rotator.check_and_flush()? { flushed = true; }
+        drop(rotator);
+        if flushed {
+            if let Some(ref buf) = self.memory_buffer {
+                buf.drain_metrics().await;
+            }
+        }
         self.stats.ingested_points.fetch_add(count, Ordering::Relaxed);
         Ok(count)
     }
 
-    pub async fn check_and_flush(&self) -> Result<()> { self.rotator.lock().await.check_and_flush() }
+    pub async fn check_and_flush(&self) -> Result<()> { let _ = self.rotator.lock().await.check_and_flush()?; Ok(()) }
 
     pub async fn shutdown(&self) -> Result<()> {
         let mut rotator = self.rotator.lock().await;
@@ -157,6 +186,7 @@ impl IngestionService {
 pub struct LogIngestionService {
     rotator: Arc<Mutex<LogRotator>>,
     stats: Arc<IngestionStats>,
+    memory_buffer: Option<MemoryBuffer>,
 }
 
 impl LogIngestionService {
@@ -164,7 +194,14 @@ impl LogIngestionService {
         Self {
             rotator: Arc::new(Mutex::new(LogRotator::new(config, metadata_tx))),
             stats: Arc::new(IngestionStats::default()),
+            memory_buffer: None,
         }
+    }
+
+    /// Set the shared memory buffer for stream-queryable data.
+    pub fn with_memory_buffer(mut self, buffer: MemoryBuffer) -> Self {
+        self.memory_buffer = Some(buffer);
+        self
     }
 
     pub async fn ingest_proto(&self, body: Bytes) -> Result<u64> {
@@ -183,19 +220,35 @@ impl LogIngestionService {
 
     async fn process_logs(&self, logs: Vec<LogRecord>) -> Result<u64> {
         let count = logs.len() as u64;
+        let mut flushed = false;
+        // Write to in-memory buffer first
+        if let Some(ref buf) = self.memory_buffer {
+            buf.push_logs(&logs).await;
+        }
         let mut rotator = self.rotator.lock().await;
         for l in logs {
             if let Err(e) = rotator.push(l) {
-                if e.to_string().contains("buffer is full") { rotator.flush()?; }
-                else { self.stats.failed_batches.fetch_add(1, Ordering::Relaxed); return Err(e); }
+                if e.to_string().contains("buffer is full") {
+                    rotator.flush()?;
+                    flushed = true;
+                } else {
+                    self.stats.failed_batches.fetch_add(1, Ordering::Relaxed);
+                    return Err(e);
+                }
             }
         }
-        rotator.check_and_flush()?;
+        if rotator.check_and_flush()? { flushed = true; }
+        drop(rotator);
+        if flushed {
+            if let Some(ref buf) = self.memory_buffer {
+                buf.drain_logs().await;
+            }
+        }
         self.stats.ingested_points.fetch_add(count, Ordering::Relaxed);
         Ok(count)
     }
 
-    pub async fn check_and_flush(&self) -> Result<()> { self.rotator.lock().await.check_and_flush() }
+    pub async fn check_and_flush(&self) -> Result<()> { let _ = self.rotator.lock().await.check_and_flush()?; Ok(()) }
 
     pub async fn shutdown(&self) -> Result<()> {
         let mut rotator = self.rotator.lock().await;
@@ -289,7 +342,7 @@ impl TraceIngestionService {
         Ok(count)
     }
 
-    pub async fn check_and_flush(&self) -> Result<()> { self.rotator.lock().await.check_and_flush() }
+    pub async fn check_and_flush(&self) -> Result<()> { let _ = self.rotator.lock().await.check_and_flush()?; Ok(()) }
 
     pub async fn shutdown(&self) -> Result<()> {
         let mut rotator = self.rotator.lock().await;

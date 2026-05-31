@@ -7,8 +7,6 @@ Expand the name of the chart.
 
 {{/*
 Create a default fully qualified app name.
-We truncate at 63 chars because some Kubernetes name fields are limited to this (by the DNS naming spec).
-If release name contains chart name it will be used as a full name.
 */}}
 {{- define "parqtel.fullname" -}}
 {{- if .Values.fullnameOverride }}
@@ -40,6 +38,7 @@ helm.sh/chart: {{ include "parqtel.chart" . }}
 app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
 {{- end }}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
+app.kubernetes.io/part-of: parqtel
 {{- end }}
 
 {{/*
@@ -62,8 +61,15 @@ Create the name of the service account to use
 {{- end }}
 
 {{/*
-Generate config checksum
+Generate config checksum for rolling restarts on config change
 */}}
 {{- define "parqtel.configChecksum" -}}
 {{- include (print $.Template.BasePath "/configmap.yaml") . | sha256sum -}}
+{{- end }}
+
+{{/*
+Return the image reference
+*/}}
+{{- define "parqtel.image" -}}
+{{- printf "%s:%s" .Values.image.repository (.Values.image.tag | default .Chart.AppVersion) }}
 {{- end }}

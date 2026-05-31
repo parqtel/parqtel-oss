@@ -36,10 +36,12 @@ data:
     log_level = {{ .Values.parqtel.telemetry.logLevel | quote }}
     log_format = {{ .Values.parqtel.telemetry.logFormat | quote }}
 
+    {{- if .Values.provider.enabled }}
     [k8s_provider]
-    enabled = {{ .Values.provider.enabled }}
+    enabled = true
     bind_address = "0.0.0.0:{{ .Values.provider.port }}"
     cache_expiry_secs = {{ .Values.provider.cacheExpirySecs | int }}
     query_timeout_secs = {{ .Values.provider.queryTimeoutSecs | int }}
     max_concurrent = {{ .Values.provider.maxConcurrent | int }}
     tls_secret_name = {{ .Values.provider.tlsSecretName | quote }}
+    {{- end }}

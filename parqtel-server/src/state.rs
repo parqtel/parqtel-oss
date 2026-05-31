@@ -1,6 +1,6 @@
 use std::sync::Arc;
-use tokio::sync::{RwLock, Mutex};
-use parqtel_core::{BlockIndex, Config, StorageEngine};
+use tokio::sync::RwLock;
+use parqtel_core::{BlockIndex, Config, StorageEngine, MemoryBuffer};
 use parqtel_ingest::{IngestionService, LogIngestionService, TraceIngestionService};
 use parqtel_query::QueryExecutor;
 use parqtel_alert::AlertRuleRegistry;
@@ -16,11 +16,12 @@ pub struct AppState {
 
 pub struct AppStateInner {
     pub storage_engine: Arc<dyn StorageEngine>,
-    pub ingestion_service: Mutex<IngestionService>,
-    pub log_ingestion_service: Mutex<LogIngestionService>,
-    pub trace_ingestion_service: Mutex<TraceIngestionService>,
+    pub ingestion_service: IngestionService,
+    pub log_ingestion_service: LogIngestionService,
+    pub trace_ingestion_service: TraceIngestionService,
     pub query_executor: QueryExecutor,
     pub index: Arc<RwLock<BlockIndex>>,
+    pub memory_buffer: MemoryBuffer,
     pub config: Config,
     pub ui_content: Vec<u8>,
     pub ui_etag: String,
@@ -39,6 +40,7 @@ impl AppState {
         trace_ingestion_service: TraceIngestionService,
         query_executor: QueryExecutor,
         index: Arc<RwLock<BlockIndex>>,
+        memory_buffer: MemoryBuffer,
         config: Config,
         ui_content: Vec<u8>,
         ui_etag: String,
@@ -57,11 +59,12 @@ impl AppState {
         Self {
             inner: Arc::new(AppStateInner {
                 storage_engine,
-                ingestion_service: Mutex::new(ingestion_service),
-                log_ingestion_service: Mutex::new(log_ingestion_service),
-                trace_ingestion_service: Mutex::new(trace_ingestion_service),
+                ingestion_service,
+                log_ingestion_service,
+                trace_ingestion_service,
                 query_executor,
                 index,
+                memory_buffer,
                 config,
                 ui_content,
                 ui_etag,
@@ -97,6 +100,7 @@ impl AppState {
             TraceIngestionService::new(config.storage.clone(), ttx),
             QueryExecutor::new(index.clone(), log_index),
             index,
+            MemoryBuffer::new(),
             config,
             vec![],
             "".into(),

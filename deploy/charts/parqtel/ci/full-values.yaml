@@ -1,31 +1,10 @@
-# Values file with all features enabled for CI rendering test
-
+# Full CI values — tests all features enabled
 replicaCount: 2
 
 image:
   repository: ghcr.io/parqtel/parqtel
-  tag: "v0.1.0"
+  tag: "latest"
   pullPolicy: Always
-
-serviceAccount:
-  create: true
-  annotations:
-    iam.amazonaws.com/role: parqtel-role
-
-podAnnotations:
-  prometheus.io/scrape: "true"
-  prometheus.io/port: "9090"
-
-podLabels:
-  env: production
-
-resources:
-  limits:
-    cpu: "1"
-    memory: 256Mi
-  requests:
-    cpu: 200m
-    memory: 128Mi
 
 ingress:
   enabled: true
@@ -37,18 +16,22 @@ ingress:
       paths:
         - path: /
           pathType: Prefix
+  tls:
+    - secretName: parqtel-tls
+      hosts:
+        - parqtel.example.com
 
 storage:
   enabled: true
   size: 50Gi
-  storageClassName: premium-rwo
-  accessMode: ReadWriteOnce
+  storageClassName: gp3
 
 autoscaling:
   enabled: true
   minReplicas: 2
   maxReplicas: 10
-  targetCPUUtilizationPercentage: 50
+  targetCPUUtilizationPercentage: 70
+  targetMemoryUtilizationPercentage: 80
 
 podDisruptionBudget:
   enabled: true
@@ -56,57 +39,52 @@ podDisruptionBudget:
 
 networkPolicy:
   enabled: true
-  monitoringNamespace: "monitoring-stack"
-  ingressSelectorLabels:
-    app: frontend
+  monitoringNamespace: monitoring
 
 metrics:
   enabled: true
   serviceMonitor:
     enabled: true
+    interval: "15s"
+    scrapeTimeout: "10s"
+    honorLabels: true
+    relabelings: []
   prometheusRule:
     enabled: true
+    rules:
+      highMemory: true
+      ingestErrors: true
+      queryErrors: true
+      storageAnomaly: true
+      instanceDown: true
+
+provider:
+  enabled: true
+  port: 6443
+  cacheExpirySecs: 30
+  queryTimeoutSecs: 10
+  maxConcurrent: 10
+  tlsSecretName: parqtel-provider-tls
+
+integrations:
+  aws:
+    enabled: true
+    existingSecret: aws-firehose-secret
+    acceptedNamespaces: ["AWS/EC2", "AWS/ELB"]
+    enrichEc2Metadata: true
+
+resources:
+  requests:
+    cpu: 250m
+    memory: 256Mi
+  limits:
+    cpu: "2"
+    memory: 1Gi
 
 parqtel:
-  server:
-    maxConnections: 2048
   storage:
-    compression: "zstd"
+    compression: zstd
     retentionDays: 30
   telemetry:
-    logLevel: "debug"
-    logFormat: "json"
-
-extraEnv:
-  - name: DEBUG_MODE
-    value: "true"
-
-extraVolumes:
-  - name: secret-config
-    secret:
-      secretName: parqtel-secrets
-
-extraVolumeMounts:
-  - name: secret-config
-    mountPath: /etc/secrets
-    readOnly: true
-
-nodeSelector:
-  kubernetes.io/os: linux
-
-tolerations:
-  - key: "dedicated"
-    operator: "Equal"
-    value: "observability"
-    effect: "NoSchedule"
-
-affinity:
-  podAntiAffinity:
-    requiredDuringSchedulingIgnoredDuringExecution:
-      - labelSelector:
-          matchExpressions:
-            - key: app.kubernetes.io/name
-              operator: In
-              values:
-                - parqtel
-        topologyKey: "kubernetes.io/hostname"
+    logLevel: debug
+    logFormat: json

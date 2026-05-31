@@ -43,6 +43,7 @@ async fn setup_test_app() -> axum::Router {
     hasher.update(ui_html.as_bytes());
     let ui_etag = format!("\"{}\"", hex::encode(hasher.finalize()));
 
+    let memory_buffer = parqtel_core::MemoryBuffer::new();
     let state = AppState::new(
         storage_engine,
         IngestionService::new(config.storage.clone(), tx),
@@ -50,6 +51,7 @@ async fn setup_test_app() -> axum::Router {
         TraceIngestionService::new(config.storage.clone(), ttx),
         QueryExecutor::new(index.clone(), log_index),
         index,
+        memory_buffer,
         config,
         ui_content,
         ui_etag,

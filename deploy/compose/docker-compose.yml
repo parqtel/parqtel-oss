@@ -1,78 +1,120 @@
-version: '3.8'
+# ─────────────────────────────────────────────────────────────────────────────
+# Parqtel — Full-stack local development environment
+# Usage: docker compose up -d
+# ─────────────────────────────────────────────────────────────────────────────
+
+x-common: &common
+  restart: unless-stopped
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
 
 services:
+  # ── Core ───────────────────────────────────────────────────────────────────
   parqtel:
+    <<: *common
     build:
       context: ../..
       dockerfile: deploy/compose/parqtel/Dockerfile.dev
     container_name: parqtel
     ports:
-      - "9090:9090"
+      - "${PARQTEL_PORT:-9090}:9090"
     volumes:
       - parqtel_data:/var/lib/parqtel
-      - ./parqtel/config/dev.toml:/etc/parqtel/dev.toml:ro
+      - ./parqtel/config/dev.toml:/etc/parqtel/config.toml:ro
     environment:
-      - PARQTEL_CONFIG=/etc/parqtel/dev.toml
-      - RUST_LOG=info
+      PARQTEL_CONFIG: /etc/parqtel/config.toml
+      RUST_LOG: "${RUST_LOG:-info}"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9090/health"]
-      interval: 5s
-      timeout: 2s
-      retries: 20
-      start_period: 10s
-    restart: unless-stopped
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 15s
+    networks:
+      - frontend
+      - backend
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: "2.0"
+        reservations:
+          memory: 128M
+          cpus: "0.5"
 
+  # ── Observability ──────────────────────────────────────────────────────────
+  grafana:
+    <<: *common
+    image: grafana/grafana:11.4.0
+    container_name: grafana
+    ports:
+      - "${GRAFANA_PORT:-3000}:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: "${GRAFANA_ADMIN_PASSWORD:-parqtel-dev}"
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/etc/grafana/dashboards:ro
+    depends_on:
+      parqtel:
+        condition: service_healthy
+    networks:
+      - frontend
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/api/health || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+  prometheus:
+    <<: *common
+    image: prom/prometheus:v2.54.0
+    container_name: prometheus
+    ports:
+      - "${PROMETHEUS_PORT:-9091}:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.retention.time=7d"
+      - "--web.enable-lifecycle"
+    depends_on:
+      parqtel:
+        condition: service_healthy
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:9090/-/healthy || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+  # ── Load Generator ─────────────────────────────────────────────────────────
   load-generator:
+    <<: *common
     build:
       context: ./load-generator
     container_name: load-generator
     environment:
-      - PARQTEL_URL=http://parqtel:9090
-      - LOAD_TEST_MODE=${LOAD_TEST_MODE:-false}
-      - GENERATOR_NORMAL_SERIES=${GENERATOR_NORMAL_SERIES:-1000}
-      - GENERATOR_NORMAL_RPS=${GENERATOR_NORMAL_RPS:-167}
-      - GENERATOR_LOAD_SERIES=${GENERATOR_LOAD_SERIES:-10000}
-      - GENERATOR_LOAD_RPS=${GENERATOR_LOAD_RPS:-17000}
-    volumes:
-      - loadtest_results:/results
+      PARQTEL_URL: http://parqtel:8080
+      LOAD_TEST_MODE: "${LOAD_TEST_MODE:-false}"
+      GENERATOR_NORMAL_SERIES: "${GENERATOR_NORMAL_SERIES:-1000}"
+      GENERATOR_NORMAL_RPS: "${GENERATOR_NORMAL_RPS:-167}"
     depends_on:
       parqtel:
         condition: service_healthy
-    restart: unless-stopped
+    networks:
+      - backend
 
-  grafana:
-    image: grafana/grafana:10.0.0
-    container_name: grafana
-    ports:
-      - "3000:3000"
-    environment:
-      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-parqtel-dev}
-      - GF_AUTH_ANONYMOUS_ENABLED=true
-      - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
-    volumes:
-      - grafana_data:/var/lib/grafana
-      - ./grafana/provisioning:/etc/grafana/provisioning
-      - ./grafana/dashboards:/etc/grafana/dashboards
-    depends_on:
-      parqtel:
-        condition: service_healthy
-    restart: unless-stopped
-
-  prometheus:
-    image: prom/prometheus:v2.45.0
-    container_name: prometheus
-    ports:
-      - "9091:9090"
-    volumes:
-      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
-      - prometheus_data:/prometheus
-    depends_on:
-      parqtel:
-        condition: service_healthy
-    restart: unless-stopped
-
-  # MCP Servers
+  # ── MCP Servers ────────────────────────────────────────────────────────────
   mcp-slack:
+    <<: *common
     build:
       context: ../..
       dockerfile: deploy/compose/mcp/Dockerfile.slack
@@ -80,22 +122,24 @@ services:
     ports:
       - "3001:3000"
     environment:
-      - MCP_HOST=0.0.0.0
-      - MCP_PORT=3000
-      - MCP_RATE_LIMIT=60
-      - SLACK_BOT_TOKEN=${SLACK_BOT_TOKEN:-}
+      MCP_HOST: "0.0.0.0"
+      MCP_PORT: "3000"
+      MCP_RATE_LIMIT: "60"
+      SLACK_BOT_TOKEN: "${SLACK_BOT_TOKEN:-}"
     depends_on:
       parqtel:
         condition: service_healthy
-    restart: unless-stopped
+    networks:
+      - backend
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
-      interval: 10s
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/health || exit 1"]
+      interval: 30s
       timeout: 5s
       retries: 3
       start_period: 5s
 
   mcp-pagerduty:
+    <<: *common
     build:
       context: ../..
       dockerfile: deploy/compose/mcp/Dockerfile.pagerduty
@@ -103,22 +147,24 @@ services:
     ports:
       - "3002:3000"
     environment:
-      - MCP_HOST=0.0.0.0
-      - MCP_PORT=3000
-      - MCP_RATE_LIMIT=60
-      - PAGERDUTY_API_KEY=${PAGERDUTY_API_KEY:-}
+      MCP_HOST: "0.0.0.0"
+      MCP_PORT: "3000"
+      MCP_RATE_LIMIT: "60"
+      PAGERDUTY_API_KEY: "${PAGERDUTY_API_KEY:-}"
     depends_on:
       parqtel:
         condition: service_healthy
-    restart: unless-stopped
+    networks:
+      - backend
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
-      interval: 10s
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/health || exit 1"]
+      interval: 30s
       timeout: 5s
       retries: 3
       start_period: 5s
 
   mcp-jira:
+    <<: *common
     build:
       context: ../..
       dockerfile: deploy/compose/mcp/Dockerfile.jira
@@ -126,24 +172,26 @@ services:
     ports:
       - "3003:3000"
     environment:
-      - MCP_HOST=0.0.0.0
-      - MCP_PORT=3000
-      - MCP_RATE_LIMIT=60
-      - JIRA_BASE_URL=${JIRA_BASE_URL:-}
-      - JIRA_USER_EMAIL=${JIRA_USER_EMAIL:-}
-      - JIRA_API_TOKEN=${JIRA_API_TOKEN:-}
+      MCP_HOST: "0.0.0.0"
+      MCP_PORT: "3000"
+      MCP_RATE_LIMIT: "60"
+      JIRA_BASE_URL: "${JIRA_BASE_URL:-}"
+      JIRA_USER_EMAIL: "${JIRA_USER_EMAIL:-}"
+      JIRA_API_TOKEN: "${JIRA_API_TOKEN:-}"
     depends_on:
       parqtel:
         condition: service_healthy
-    restart: unless-stopped
+    networks:
+      - backend
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
-      interval: 10s
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/health || exit 1"]
+      interval: 30s
       timeout: 5s
       retries: 3
       start_period: 5s
 
   mcp-notion:
+    <<: *common
     build:
       context: ../..
       dockerfile: deploy/compose/mcp/Dockerfile.notion
@@ -151,22 +199,24 @@ services:
     ports:
       - "3004:3000"
     environment:
-      - MCP_HOST=0.0.0.0
-      - MCP_PORT=3000
-      - MCP_RATE_LIMIT=60
-      - NOTION_API_KEY=${NOTION_API_KEY:-}
+      MCP_HOST: "0.0.0.0"
+      MCP_PORT: "3000"
+      MCP_RATE_LIMIT: "60"
+      NOTION_API_KEY: "${NOTION_API_KEY:-}"
     depends_on:
       parqtel:
         condition: service_healthy
-    restart: unless-stopped
+    networks:
+      - backend
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
-      interval: 10s
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/health || exit 1"]
+      interval: 30s
       timeout: 5s
       retries: 3
       start_period: 5s
 
   mcp-discord:
+    <<: *common
     build:
       context: ../..
       dockerfile: deploy/compose/mcp/Dockerfile.discord
@@ -174,22 +224,24 @@ services:
     ports:
       - "3005:3000"
     environment:
-      - MCP_HOST=0.0.0.0
-      - MCP_PORT=3000
-      - MCP_RATE_LIMIT=60
-      - DISCORD_BOT_TOKEN=${DISCORD_BOT_TOKEN:-}
+      MCP_HOST: "0.0.0.0"
+      MCP_PORT: "3000"
+      MCP_RATE_LIMIT: "60"
+      DISCORD_BOT_TOKEN: "${DISCORD_BOT_TOKEN:-}"
     depends_on:
       parqtel:
         condition: service_healthy
-    restart: unless-stopped
+    networks:
+      - backend
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
-      interval: 10s
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/health || exit 1"]
+      interval: 30s
       timeout: 5s
       retries: 3
       start_period: 5s
 
   mcp-gdocs:
+    <<: *common
     build:
       context: ../..
       dockerfile: deploy/compose/mcp/Dockerfile.gdocs
@@ -197,22 +249,24 @@ services:
     ports:
       - "3006:3000"
     environment:
-      - MCP_HOST=0.0.0.0
-      - MCP_PORT=3000
-      - MCP_RATE_LIMIT=60
-      - GOOGLE_SERVICE_ACCOUNT_JSON=${GOOGLE_SERVICE_ACCOUNT_JSON:-}
+      MCP_HOST: "0.0.0.0"
+      MCP_PORT: "3000"
+      MCP_RATE_LIMIT: "60"
+      GOOGLE_SERVICE_ACCOUNT_JSON: "${GOOGLE_SERVICE_ACCOUNT_JSON:-}"
     depends_on:
       parqtel:
         condition: service_healthy
-    restart: unless-stopped
+    networks:
+      - backend
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
-      interval: 10s
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/health || exit 1"]
+      interval: 30s
       timeout: 5s
       retries: 3
       start_period: 5s
 
   mcp-parqtel:
+    <<: *common
     build:
       context: ../..
       dockerfile: deploy/compose/mcp/Dockerfile.parqtel
@@ -220,23 +274,35 @@ services:
     ports:
       - "3007:3000"
     environment:
-      - MCP_HOST=0.0.0.0
-      - MCP_PORT=3000
-      - MCP_RATE_LIMIT=60
-      - PARQTEL_API_URL=http://parqtel:9090
+      MCP_HOST: "0.0.0.0"
+      MCP_PORT: "3000"
+      MCP_RATE_LIMIT: "60"
+      PARQTEL_API_URL: http://parqtel:8080
     depends_on:
       parqtel:
         condition: service_healthy
-    restart: unless-stopped
+    networks:
+      - backend
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
-      interval: 10s
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/health || exit 1"]
+      interval: 30s
       timeout: 5s
       retries: 3
       start_period: 5s
 
+# ── Networks ───────────────────────────────────────────────────────────────────
+networks:
+  frontend:
+    driver: bridge
+  backend:
+    driver: bridge
+    internal: true
+
+# ── Volumes ────────────────────────────────────────────────────────────────────
 volumes:
   parqtel_data:
+    driver: local
   grafana_data:
+    driver: local
   prometheus_data:
-  loadtest_results:
+    driver: local

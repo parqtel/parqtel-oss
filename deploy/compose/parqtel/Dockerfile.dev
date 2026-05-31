@@ -7,6 +7,7 @@ WORKDIR /app
 
 # Copy full workspace (relies on .dockerignore for exclusions)
 COPY Cargo.toml Cargo.lock ./
+COPY openapi.yaml ./
 COPY parqtel-core/ parqtel-core/
 COPY parqtel-ingest/ parqtel-ingest/
 COPY parqtel-query/ parqtel-query/

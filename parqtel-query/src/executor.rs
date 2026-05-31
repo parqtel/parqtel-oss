@@ -3,7 +3,7 @@ use std::time::Instant;
 use tokio::sync::RwLock;
 use std::collections::{BTreeMap, HashSet};
 use serde_json::json;
-use parqtel_core::{BlockIndex, Scanner, Result, LabelSet, MetricValue, StorageEngine};
+use parqtel_core::{BlockIndex, Scanner, Result, LabelSet, MetricValue, StorageEngine, MemoryBuffer};
 use crate::models::{QueryResult, TimeSeries, Sample, LogQueryResult, CorrelatedEvent, CorrelationResult};
 use crate::plan::QueryPlan;
 use crate::matcher::{evaluate_matchers, LabelMatcher};
@@ -14,17 +14,30 @@ pub struct QueryExecutor {
     storage: Arc<dyn StorageEngine>,
     index: Arc<RwLock<BlockIndex>>,
     log_index: Arc<RwLock<BlockIndex>>,
+    buffer: MemoryBuffer,
 }
 
 impl QueryExecutor {
     /// Creates a new [QueryExecutor] with shared block indexes.
     pub fn new(index: Arc<RwLock<BlockIndex>>, log_index: Arc<RwLock<BlockIndex>>) -> Self {
-        // Create a minimal parquet engine for backward compat
         let config = parqtel_core::BlockConfig::default();
         let storage: Arc<dyn StorageEngine> = Arc::new(
             parqtel_core::engine::parquet::ParquetStorageEngine::new(config)
         );
-        Self { storage, index, log_index }
+        Self { storage, index, log_index, buffer: MemoryBuffer::new() }
+    }
+
+    /// Creates a new [QueryExecutor] with a memory buffer for stream-queryable data.
+    pub fn with_buffer(
+        index: Arc<RwLock<BlockIndex>>,
+        log_index: Arc<RwLock<BlockIndex>>,
+        buffer: MemoryBuffer,
+    ) -> Self {
+        let config = parqtel_core::BlockConfig::default();
+        let storage: Arc<dyn StorageEngine> = Arc::new(
+            parqtel_core::engine::parquet::ParquetStorageEngine::new(config)
+        );
+        Self { storage, index, log_index, buffer }
     }
 
     /// Creates a new [QueryExecutor] with a storage engine and block indexes.
@@ -33,7 +46,12 @@ impl QueryExecutor {
         index: Arc<RwLock<BlockIndex>>,
         log_index: Arc<RwLock<BlockIndex>>,
     ) -> Self {
-        Self { storage, index, log_index }
+        Self { storage, index, log_index, buffer: MemoryBuffer::new() }
+    }
+
+    /// Returns a clone of the memory buffer for use by ingestion services.
+    pub fn memory_buffer(&self) -> MemoryBuffer {
+        self.buffer.clone()
     }
 
     /// Executes a [QueryPlan] for metrics and returns a [QueryResult].
@@ -47,22 +65,69 @@ impl QueryExecutor {
         };
 
         if blocks.is_empty() {
-            return Ok(QueryResult {
-                series: Vec::new(),
-                execution_time: start_time.elapsed(),
-                points_scanned: 0,
-                total_series_count: 0,
-                volume_summary: vec![0; 60],
-            });
+            // Even with no disk blocks, check the in-memory buffer
+            let buffered = self.buffer.scan_metrics(&plan.metric_name, plan.start_ns, plan.end_ns).await;
+            if buffered.is_empty() {
+                return Ok(QueryResult {
+                    series: Vec::new(),
+                    execution_time: start_time.elapsed(),
+                    points_scanned: 0,
+                    total_series_count: 0,
+                    volume_summary: vec![0; 60],
+                });
+            }
+            // Process buffered data through the same pipeline below
+            let raw_points = buffered;
+            let points_scanned = raw_points.len() as u64;
+            let mut series_map: BTreeMap<u64, (LabelSet, Vec<(i64, MetricValue)>)> = BTreeMap::new();
+            let mut matched_series_fps = HashSet::new();
+            let mut volume_summary = vec![0u64; 60];
+            let window_ns = (plan.end_ns - plan.start_ns) / 60;
+            for dp in raw_points {
+                if evaluate_matchers(&plan.matchers, &dp.labels, &plan.metric_name) {
+                    if window_ns > 0 {
+                        let bucket = ((dp.timestamp_ns - plan.start_ns) / window_ns).clamp(0, 59) as usize;
+                        volume_summary[bucket] += 1;
+                    }
+                    let fp = dp.labels.fingerprint();
+                    matched_series_fps.insert(fp);
+                    if series_map.contains_key(&fp) || series_map.len() < plan.max_series {
+                        let entry = series_map.entry(fp).or_insert_with(|| (dp.labels.clone(), Vec::new()));
+                        if entry.1.len() < plan.max_samples_per_series {
+                            entry.1.push((dp.timestamp_ns, dp.value));
+                        }
+                    }
+                }
+            }
+            let total_series_count = matched_series_fps.len();
+            let mut results = Vec::new();
+            for (_, (mut labels, points)) in series_map {
+                labels = labels.merge(&LabelSet::try_from_iter(vec![("__name__", plan.metric_name.clone())])?);
+                let samples = if let Some(step) = plan.step_ns {
+                    if let Some(op) = plan.aggregation {
+                        crate::aggregation::downsample(points, plan.start_ns, plan.end_ns, step, op, plan.quantile)
+                    } else {
+                        points.into_iter().map(|(t, v)| Sample { timestamp_ns: t, value: v_to_f64(&v) }).collect()
+                    }
+                } else {
+                    points.into_iter().map(|(t, v)| Sample { timestamp_ns: t, value: v_to_f64(&v) }).collect()
+                };
+                results.push(TimeSeries { labels, samples });
+            }
+            return Ok(QueryResult { series: results, execution_time: start_time.elapsed(), points_scanned, total_series_count, volume_summary });
         }
 
         // 2. Scan blocks concurrently
-        let raw_points = Scanner::scan(
+        let mut raw_points = Scanner::scan(
             blocks,
             plan.metric_name.clone(),
             plan.start_ns,
             plan.end_ns,
         ).await?;
+
+        // 2b. Merge in-memory buffer data (not yet flushed to disk)
+        let buffered = self.buffer.scan_metrics(&plan.metric_name, plan.start_ns, plan.end_ns).await;
+        raw_points.extend(buffered);
 
         let points_scanned = raw_points.len() as u64;
 
@@ -151,7 +216,10 @@ impl QueryExecutor {
             idx.query(start_ns, end_ns, None)
         };
 
-        if blocks.is_empty() { 
+        // Scan in-memory buffer for unflushed logs
+        let buffered_logs = self.buffer.scan_logs(start_ns, end_ns).await;
+
+        if blocks.is_empty() && buffered_logs.is_empty() {
             return Ok(LogQueryResult {
                 logs: Vec::new(),
                 execution_time: start_time.elapsed(),
@@ -160,7 +228,13 @@ impl QueryExecutor {
             }); 
         }
 
-        let mut raw_logs = Scanner::scan_logs(blocks, start_ns, end_ns).await?;
+        let mut raw_logs = if blocks.is_empty() {
+            buffered_logs
+        } else {
+            let mut disk_logs = Scanner::scan_logs(blocks, start_ns, end_ns).await?;
+            disk_logs.extend(buffered_logs);
+            disk_logs
+        };
         
         // Apply ordering
         if order_desc {
@@ -267,13 +341,22 @@ impl QueryExecutor {
 
     /// Returns a list of all known metric names.
     pub async fn list_metrics(&self) -> HashSet<String> {
-        self.index.read().await.all_metrics()
+        let mut names = self.index.read().await.all_metrics();
+        // Include metrics from in-memory buffer
+        for n in self.buffer.metric_names().await {
+            names.insert(n);
+        }
+        names
     }
 
     /// Returns all label names across both metrics and logs.
     pub async fn list_labels(&self, _metric: Option<&str>) -> HashSet<String> {
         let mut names = self.index.read().await.all_labels();
         names.extend(self.log_index.read().await.all_labels());
+        // Include labels from in-memory buffer
+        for n in self.buffer.label_names().await {
+            names.insert(n);
+        }
         names
     }
 

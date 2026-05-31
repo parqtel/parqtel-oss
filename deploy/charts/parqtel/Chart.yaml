@@ -1,33 +1,41 @@
 apiVersion: v2
 name: parqtel
-description: An ultra-lightweight SRE observability tool supporting streaming OTel metrics ingestion into compressed 100MB Parquet chunks.
+description: Ultra-lightweight SRE observability engine — streaming OTel into compressed Parquet
 type: application
-version: 0.1.0
+version: 0.2.0
 appVersion: "0.1.0"
+kubeVersion: ">=1.25.0-0"
+
 keywords:
   - observability
   - metrics
   - opentelemetry
   - parquet
   - timeseries
-home: https://github.com/parqtel/parqtel
+  - sre
+  - monitoring
+
+home: https://github.com/parqtel/parqtel-oss
 sources:
-  - https://github.com/parqtel/parqtel
+  - https://github.com/parqtel/parqtel-oss
+
 maintainers:
   - name: parqtel-team
     email: maintainers@parqtel.io
+
 annotations:
-  artifacthub.io/license: MIT
-  artifacthub.io/links: |
-    - name: Source
-      url: https://github.com/parqtel/parqtel
+  artifacthub.io/license: Apache-2.0
+  artifacthub.io/category: monitoring-logging
+  artifacthub.io/signKey: ""
+  artifacthub.io/prerelease: "false"
+  artifacthub.io/containsSecurityUpdates: "false"
 
 dependencies:
   - name: kube-prometheus-stack
-    version: ">= 45.0.0"
+    version: ">=45.0.0"
     repository: https://prometheus-community.github.io/helm-charts
     condition: kube-prometheus-stack.enabled
   - name: cert-manager
-    version: ">= 1.0.0"
+    version: ">=1.0.0"
     repository: https://charts.jetstack.io
     condition: cert-manager.enabled

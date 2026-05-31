@@ -60,6 +60,35 @@ Parqtel is a single-binary observability backend written in Rust that ingests Op
 | **MCP** | 7 AI tool servers (Slack, PagerDuty, Jira, Notion, Discord, Google Docs, Parqtel) |
 | **Operations** | Health checks, `/metrics` endpoint, graceful shutdown, CLI subcommands |
 
+## Built-in Web UI
+
+Parqtel ships with a zero-dependency embedded web console at `/ui` — no separate frontend deployment needed.
+
+| Metrics | Logs |
+|---------|------|
+| ![Metrics View](docs/screenshots/ui-metrics.png) | ![Logs View](docs/screenshots/ui-logs.png) |
+
+| Traces | Alerts |
+|--------|--------|
+| ![Traces View](docs/screenshots/ui-traces.png) | ![Alerts View](docs/screenshots/ui-alerts.png) |
+
+**Features:** PromQL autocomplete, time range selection, drag-to-zoom histogram, severity filtering, trace waterfall, alert state machine with acknowledge/resolve actions.
+
+## Performance
+
+Benchmarked with sustained 1000 samples/sec (metrics + logs + traces) for 15 minutes:
+
+| Metric | Result |
+|--------|--------|
+| **Sustained throughput** | 972 samples/sec (zero errors) |
+| **Total ingested** | 875,100 samples in 15 min |
+| **Ingest p50** | 4.4ms per batch |
+| **Ingest p99** | 63ms per batch |
+| **Query p50 (instant)** | 12.7ms |
+| **Query p99 (range)** | 160ms |
+| **Immediate queryability** | 1.7ms (in-memory buffer) |
+| **Data durability** | ✅ Survives container restart |
+
 ## Architecture
 
 ```

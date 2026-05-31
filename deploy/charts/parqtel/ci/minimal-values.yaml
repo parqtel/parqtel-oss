@@ -1,4 +1,3 @@
-image:
-  tag: "latest"
+# Minimal CI values — tests chart renders with least config
 storage:
-  storageClassName: "standard"
+  enabled: false

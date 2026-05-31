@@ -13,8 +13,8 @@ spec:
   insecureSkipTLSVerify: false
   groupPriorityMinimum: 100
   versionPriority: 100
-  caBundle: "" # Will be patched by the parqtel-server on startup
-{{- if .Values.provider.externalMetrics.enabled }}
+  caBundle: ""
+{{- if .Values.provider.externalMetrics }}
 ---
 apiVersion: apiregistration.k8s.io/v1
 kind: APIService
@@ -30,6 +30,6 @@ spec:
   insecureSkipTLSVerify: false
   groupPriorityMinimum: 100
   versionPriority: 100
-  caBundle: "" # Will be patched by the parqtel-server on startup
+  caBundle: ""
 {{- end }}
 {{- end }}

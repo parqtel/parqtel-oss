@@ -11,10 +11,10 @@ spec:
   selector:
     matchLabels:
       {{- include "parqtel.selectorLabels" . | nindent 6 }}
+  {{- with .Values.strategy }}
   strategy:
-    {{- with .Values.strategy }}
     {{- toYaml . | nindent 4 }}
-    {{- end }}
+  {{- end }}
   template:
     metadata:
       annotations:
@@ -33,76 +33,80 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       serviceAccountName: {{ include "parqtel.serviceAccountName" . }}
+      automountServiceAccountToken: {{ .Values.serviceAccount.create }}
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      {{- with .Values.initContainers }}
+      initContainers:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       containers:
         - name: {{ .Chart.Name }}
           securityContext:
             {{- toYaml .Values.containerSecurityContext | nindent 12 }}
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          image: {{ include "parqtel.image" . | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           ports:
             - name: http
               containerPort: {{ .Values.service.port }}
               protocol: TCP
             {{- if .Values.provider.enabled }}
-            - name: https
+            - name: https-provider
               containerPort: {{ .Values.provider.port }}
               protocol: TCP
             {{- end }}
           env:
-            - name: NAMESPACE
-              valueFrom:
-                fieldRef:
-                  fieldPath: metadata.namespace
             - name: PARQTEL_DATA_DIR
               value: "/data"
             - name: PARQTEL_CONFIG
               value: "/etc/parqtel/parqtel.toml"
+            - name: RUST_LOG
+              value: {{ .Values.parqtel.telemetry.logLevel | quote }}
             {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
           livenessProbe:
             httpGet:
-              path: /api/v1/label/__name__/values
+              path: /health
               port: http
             initialDelaySeconds: 10
             periodSeconds: 30
+            timeoutSeconds: 5
             failureThreshold: 3
           readinessProbe:
             httpGet:
-              path: /api/v1/label/__name__/values
+              path: /health
               port: http
             initialDelaySeconds: 5
             periodSeconds: 10
-            failureThreshold: 1
+            timeoutSeconds: 3
+            failureThreshold: 3
           startupProbe:
             httpGet:
-              path: /api/v1/label/__name__/values
+              path: /health
               port: http
-            periodSeconds: 10
+            periodSeconds: 5
             failureThreshold: 30
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
+          {{- with .Values.lifecycle }}
           lifecycle:
-            {{- toYaml .Values.lifecycle | nindent 12 }}
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           volumeMounts:
             - name: data
               mountPath: /data
             - name: config
               mountPath: /etc/parqtel
+              readOnly: true
             - name: tmp
               mountPath: /tmp
             {{- with .Values.extraVolumeMounts }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
-      {{- with .Values.sidecars }}
-      {{- toYaml . | nindent 8 }}
-      {{- end }}
-      {{- with .Values.initContainers }}
-      initContainers:
+        {{- with .Values.sidecars }}
         {{- toYaml . | nindent 8 }}
-      {{- end }}
+        {{- end }}
       volumes:
         - name: data
           {{- if .Values.storage.enabled }}
@@ -115,7 +119,8 @@ spec:
           configMap:
             name: {{ include "parqtel.fullname" . }}
         - name: tmp
-          emptyDir: {}
+          emptyDir:
+            sizeLimit: 100Mi
         {{- with .Values.extraVolumes }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
@@ -135,4 +140,3 @@ spec:
       topologySpreadConstraints:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      automountServiceAccountToken: {{ .Values.serviceAccount.create }}

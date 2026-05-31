@@ -174,11 +174,17 @@ async fn run_server(
         }
     });
 
-    let ingestion_service = IngestionService::new(config.storage.clone(), tx);
-    let log_ingestion_service = LogIngestionService::new(config.logs.clone(), log_tx);
+    // Create shared in-memory buffer for stream-queryable data
+    let memory_buffer = parqtel_core::MemoryBuffer::new();
+
+    let ingestion_service = IngestionService::new(config.storage.clone(), tx)
+        .with_memory_buffer(memory_buffer.clone());
+    let log_ingestion_service = LogIngestionService::new(config.logs.clone(), log_tx)
+        .with_memory_buffer(memory_buffer.clone());
     let (trace_tx, _) = mpsc::unbounded_channel();
     let trace_ingestion_service = TraceIngestionService::new(config.storage.clone(), trace_tx);
-    let query_executor = QueryExecutor::new(index.clone(), log_index.clone());
+
+    let query_executor = QueryExecutor::with_buffer(index.clone(), log_index.clone(), memory_buffer.clone());
 
     start_maintenance(index.clone(), config.storage.clone());
     start_maintenance(log_index.clone(), config.logs.clone().into());
@@ -190,6 +196,7 @@ async fn run_server(
         trace_ingestion_service,
         query_executor, 
         index.clone(),
+        memory_buffer.clone(),
         config.clone(),
         ui_content,
         ui_etag,
@@ -201,18 +208,9 @@ async fn run_server(
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
         loop {
             interval.tick().await;
-            {
-                let service = state_clone.inner.ingestion_service.lock().await;
-                let _ = service.check_and_flush().await;
-            }
-            {
-                let service = state_clone.inner.log_ingestion_service.lock().await;
-                let _ = service.check_and_flush().await;
-            }
-            {
-                let service = state_clone.inner.trace_ingestion_service.lock().await;
-                let _ = service.check_and_flush().await;
-            }
+            let _ = state_clone.inner.ingestion_service.check_and_flush().await;
+            let _ = state_clone.inner.log_ingestion_service.check_and_flush().await;
+            let _ = state_clone.inner.trace_ingestion_service.check_and_flush().await;
         }
     });
 
@@ -270,9 +268,9 @@ async fn run_server(
     flush_task.abort();
     alert_eval_task.abort();
     
-    state.inner.ingestion_service.lock().await.shutdown().await?;
-    state.inner.log_ingestion_service.lock().await.shutdown().await?;
-    state.inner.trace_ingestion_service.lock().await.shutdown().await?;
+    state.inner.ingestion_service.shutdown().await?;
+    state.inner.log_ingestion_service.shutdown().await?;
+    state.inner.trace_ingestion_service.shutdown().await?;
     
     drop(state);
     let _ = index_task.await;
