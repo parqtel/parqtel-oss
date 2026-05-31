@@ -152,3 +152,10 @@ jobs:
             echo "::error::Unsafe code detected"
             exit 1
           fi
+      - name: Trivy filesystem scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: fs
+          scan-ref: .
+          severity: CRITICAL,HIGH
+          exit-code: 1

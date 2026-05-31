@@ -11,6 +11,9 @@
   <a href="https://github.com/parqtel/parqtel-oss/pkgs/container/charts%2Fparqtel"><img src="https://img.shields.io/badge/helm-OCI-blue?logo=helm" alt="Helm"></a>
   <img src="https://img.shields.io/badge/MSRV-1.85-orange?logo=rust" alt="MSRV">
   <img src="https://img.shields.io/badge/unsafe-forbidden-success.svg" alt="Unsafe Forbidden">
+  <a href="https://securityscorecards.dev/viewer/?uri=github.com/parqtel/parqtel-oss"><img src="https://api.securityscorecards.dev/projects/github.com/parqtel/parqtel-oss/badge" alt="OpenSSF Scorecard"></a>
+  <a href="https://github.com/parqtel/parqtel-oss/security"><img src="https://img.shields.io/badge/trivy-scanned-blueviolet?logo=aqua" alt="Trivy Scanned"></a>
+  <a href="https://github.com/parqtel/parqtel-oss/actions/workflows/release.yml"><img src="https://img.shields.io/badge/cosign-signed-green?logo=sigstore" alt="Cosign Signed"></a>
 </p>
 
 <p align="center">
