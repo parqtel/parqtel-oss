@@ -1,9 +1,10 @@
-use arrow2::array::{Array, DictionaryArray, Int64Array, Float64Array, Int32Array, Utf8Array, PrimitiveArray, FixedSizeBinaryArray};
+use arrow2::array::{Array, BinaryArray, DictionaryArray, Int64Array, Float64Array, Int32Array, Utf8Array, PrimitiveArray, FixedSizeBinaryArray};
 use arrow2::chunk::Chunk;
 use crate::error::{Error, Result};
 use crate::models::labels::LabelSet;
 use crate::models::metrics::{DataPoint, MetricKind, MetricValue};
 use crate::models::logs::LogRecord;
+use crate::models::traces::{Span, SpanEvent, SpanLink, SpanStatus};
 use super::correlation::{row_to_correlation, inject_correlation};
 
 /// Reads a single row from an Arrow [Chunk] back into a [DataPoint] and its metric metadata.
@@ -122,4 +123,107 @@ pub fn row_to_log<A: AsRef<dyn Array>>(chunk: &Chunk<A>, row: usize) -> Result<L
         timestamp_ns, observed_timestamp_ns, severity_number, severity_text, body,
         attributes, resource_attributes, trace_id, span_id, flags, scope_name, scope_version
     ))
+}
+
+/// Reads a single row from an Arrow [Chunk] back into a [Span].
+pub fn row_to_span<A: AsRef<dyn Array>>(chunk: &Chunk<A>, row: usize) -> Result<Span> {
+    // Column 1: span_id (FixedSizeBinary(8) or Binary)
+    let mut span_id = [0u8; 8];
+    read_binary_field(chunk.arrays()[1].as_ref(), row, &mut span_id)?;
+
+    // Column 2: span_name (Dictionary)
+    let span_name_arr = chunk.arrays()[2].as_ref().as_any().downcast_ref::<DictionaryArray<i32>>()
+        .ok_or_else(|| Error::Arrow("Invalid span_name column".into()))?;
+    let name = span_name_arr.values().as_any().downcast_ref::<Utf8Array<i32>>()
+        .ok_or_else(|| Error::Arrow("Invalid span_name values".into()))?
+        .value(span_name_arr.keys().value(row) as usize).to_string();
+
+    // Column 3: span_kind (Utf8)
+    let kind_str = chunk.arrays()[3].as_ref().as_any().downcast_ref::<Utf8Array<i32>>()
+        .ok_or_else(|| Error::Arrow("Invalid span_kind column".into()))?.value(row);
+    let kind = match kind_str {
+        "SPAN_KIND_INTERNAL" => 1, "SPAN_KIND_SERVER" => 2, "SPAN_KIND_CLIENT" => 3,
+        "SPAN_KIND_PRODUCER" => 4, "SPAN_KIND_CONSUMER" => 5, _ => 0,
+    };
+
+    // Columns 4,5: start_time_ns, end_time_ns
+    let start_time_ns = chunk.arrays()[4].as_ref().as_any().downcast_ref::<Int64Array>()
+        .ok_or_else(|| Error::Arrow("Invalid start_time_ns column".into()))?.value(row);
+    let end_time_ns = chunk.arrays()[5].as_ref().as_any().downcast_ref::<Int64Array>()
+        .ok_or_else(|| Error::Arrow("Invalid end_time_ns column".into()))?.value(row);
+
+    // Column 7: status_code (Utf8)
+    let status_code_str = chunk.arrays()[7].as_ref().as_any().downcast_ref::<Utf8Array<i32>>()
+        .ok_or_else(|| Error::Arrow("Invalid status_code column".into()))?.value(row);
+    let status_code = match status_code_str {
+        "STATUS_CODE_OK" => 1, "STATUS_CODE_ERROR" => 2, _ => 0,
+    };
+
+    // Column 8: status_message (Utf8, nullable)
+    let status_message = chunk.arrays()[8].as_ref().as_any().downcast_ref::<Utf8Array<i32>>()
+        .ok_or_else(|| Error::Arrow("Invalid status_message column".into()))?;
+    let status_msg = if status_message.is_null(row) { String::new() } else { status_message.value(row).to_string() };
+
+    // Column 16: trace_id (FixedSizeBinary(16) or Binary)
+    let mut trace_id = [0u8; 16];
+    read_binary_field(chunk.arrays()[16].as_ref(), row, &mut trace_id)?;
+
+    // Column 17: parent_span_id (FixedSizeBinary(8) or Binary, nullable)
+    let mut parent_span_id = [0u8; 8];
+    if !chunk.arrays()[17].as_ref().is_null(row) {
+        read_binary_field(chunk.arrays()[17].as_ref(), row, &mut parent_span_id)?;
+    }
+
+    // Column 18: flags (UInt32, nullable)
+    let flags_arr = chunk.arrays()[18].as_ref().as_any().downcast_ref::<PrimitiveArray<u32>>()
+        .ok_or_else(|| Error::Arrow("Invalid flags column".into()))?;
+    let flags = if flags_arr.is_null(row) { 0 } else { flags_arr.value(row) };
+
+    // Column 19: trace_state (Utf8, nullable)
+    let trace_state_arr = chunk.arrays()[19].as_ref().as_any().downcast_ref::<Utf8Array<i32>>()
+        .ok_or_else(|| Error::Arrow("Invalid trace_state column".into()))?;
+    let trace_state = if trace_state_arr.is_null(row) { String::new() } else { trace_state_arr.value(row).to_string() };
+
+    // Column 20: attributes (Utf8 JSON)
+    let attributes = LabelSet::from_json(
+        chunk.arrays()[20].as_ref().as_any().downcast_ref::<Utf8Array<i32>>()
+            .ok_or_else(|| Error::Arrow("Invalid attributes column".into()))?.value(row)
+    )?;
+
+    // Column 22: events (Utf8 JSON)
+    let events_json = chunk.arrays()[22].as_ref().as_any().downcast_ref::<Utf8Array<i32>>()
+        .ok_or_else(|| Error::Arrow("Invalid events column".into()))?.value(row);
+    let events: Vec<SpanEvent> = serde_json::from_str(events_json).unwrap_or_default();
+
+    // Column 23: links (Utf8 JSON)
+    let links_json = chunk.arrays()[23].as_ref().as_any().downcast_ref::<Utf8Array<i32>>()
+        .ok_or_else(|| Error::Arrow("Invalid links column".into()))?.value(row);
+    let links: Vec<SpanLink> = serde_json::from_str(links_json).unwrap_or_default();
+
+    // Correlation columns 9-15 → inject back into attributes
+    let correlation = row_to_correlation(chunk, row, 9);
+    let attributes = inject_correlation(attributes, correlation);
+
+    Ok(Span::new(
+        trace_id, span_id, trace_state, name, kind,
+        start_time_ns, end_time_ns, attributes, events, links,
+        SpanStatus { code: status_code, message: status_msg },
+        parent_span_id, flags,
+    ))
+}
+
+/// Reads a binary field that may be either FixedSizeBinaryArray or BinaryArray<i32>.
+fn read_binary_field(arr: &dyn Array, row: usize, out: &mut [u8]) -> Result<()> {
+    if let Some(fixed) = arr.as_any().downcast_ref::<FixedSizeBinaryArray>() {
+        let val = fixed.value(row);
+        let len = val.len().min(out.len());
+        out[..len].copy_from_slice(&val[..len]);
+    } else if let Some(var) = arr.as_any().downcast_ref::<BinaryArray<i32>>() {
+        let val = var.value(row);
+        let len = val.len().min(out.len());
+        out[..len].copy_from_slice(&val[..len]);
+    } else {
+        return Err(Error::Arrow("Invalid binary column type".into()));
+    }
+    Ok(())
 }

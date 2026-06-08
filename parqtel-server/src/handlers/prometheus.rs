@@ -104,12 +104,12 @@ pub async fn query_instant(
 
     let now = params.time.unwrap_or_else(|| chrono::Utc::now().timestamp() as f64);
     
-    let (metric_name, matchers, aggregation, quantile) = match parse_query(&params.query) {
+    let (metric_name, matchers, aggregation, quantile, topk_n, group_by, group_without, label_replace, scalar_param, clamp) = match parse_query(&params.query) {
         Ok(res) => res,
         Err(e) => return map_error(e),
     };
 
-    let plan = match QueryPlan::new(
+    let plan = match QueryPlan::new_full(
         metric_name,
         matchers,
         (now * 1_000_000_000.0) as i64 - 60_000_000_000, // 1 min window
@@ -119,6 +119,12 @@ pub async fn query_instant(
         state.inner.config.query.max_samples_per_series,
         aggregation.or(Some(AggregationOp::Avg)),
         quantile,
+        topk_n,
+        group_by,
+        group_without,
+        label_replace,
+        scalar_param,
+        clamp,
     ) {
         Ok(p) => p,
         Err(e) => return map_error(e),
@@ -162,7 +168,7 @@ pub async fn query_range(
         Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({"status": "error", "error": e.to_string()}))).into_response(),
     };
 
-    let (metric_name, matchers, aggregation, quantile) = match parse_query(&params.query) {
+    let (metric_name, matchers, aggregation, quantile, topk_n, group_by, group_without, label_replace, scalar_param, clamp) = match parse_query(&params.query) {
         Ok(res) => res,
         Err(e) => return map_error(e),
     };
@@ -175,7 +181,7 @@ pub async fn query_range(
         Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"status": "error", "error": "Invalid step duration"}))).into_response(),
     };
 
-    let plan = match QueryPlan::new(
+    let plan = match QueryPlan::new_full(
         metric_name,
         matchers,
         start_ns,
@@ -183,8 +189,14 @@ pub async fn query_range(
         Some(step_ns),
         state.inner.config.query.max_series,
         state.inner.config.query.max_samples_per_series,
-        aggregation.or(Some(AggregationOp::Avg)), // Default to Avg if not specified
+        aggregation.or(Some(AggregationOp::Avg)),
         quantile,
+        topk_n,
+        group_by,
+        group_without,
+        label_replace,
+        scalar_param,
+        clamp,
     ) {
         Ok(p) => p,
         Err(e) => return map_error(e),
@@ -381,40 +393,47 @@ pub async fn correlate(
     }
 }
 
-/// Handler for GET /v1/traces/search (Stub).
+/// Handler for GET /v1/traces/search.
 pub async fn search_traces(
+    State(state): State<AppState>,
     params: Query<serde_json::Value>,
 ) -> Response {
-    let trace_id = params.get("trace_id").and_then(|v| v.as_str()).unwrap_or("unknown");
-    
-    // Stub response
-    let now = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
-    (StatusCode::OK, Json(json!({
-        "status": "success",
-        "stub": true,
-        "data": {
-            "trace_id": trace_id,
-            "spans": [
-                {
-                    "span_id": "root-span",
-                    "operation_name": "HTTP GET /api/data",
-                    "service_name": "api-gateway",
-                    "start_timestamp_ns": now - 100_000_000,
-                    "end_timestamp_ns": now,
-                    "attributes": {"http.method": "GET", "http.status_code": 200}
-                },
-                {
-                    "parent_span_id": "root-span",
-                    "span_id": "child-1",
-                    "operation_name": "SELECT * FROM users",
-                    "service_name": "auth-service",
-                    "start_timestamp_ns": now - 80_000_000,
-                    "end_timestamp_ns": now - 40_000_000,
-                    "attributes": {"db.system": "postgres"}
+    let trace_id = params.get("trace_id").and_then(|v| v.as_str()).unwrap_or("");
+    let start = params.get("start").and_then(|v| v.as_str()).and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+    let end = params.get("end").and_then(|v| v.as_str()).and_then(|s| s.parse::<f64>().ok())
+        .unwrap_or_else(|| chrono::Utc::now().timestamp() as f64);
+
+    let start_ns = (start * 1_000_000_000.0) as i64;
+    let end_ns = (end * 1_000_000_000.0) as i64;
+    let filter = if trace_id.is_empty() { None } else { Some(trace_id) };
+
+    match state.inner.query_executor.query_traces(start_ns, end_ns, filter, 200).await {
+        Ok(spans) => {
+            let tid = if let Some(first) = spans.first() { hex::encode(first.trace_id) } else { trace_id.to_string() };
+            let span_json: Vec<serde_json::Value> = spans.iter().map(|s| {
+                let svc = s.attributes.get("service.name").unwrap_or("unknown").to_string();
+                let parent = hex::encode(s.parent_span_id);
+                let mut obj = json!({
+                    "span_id": hex::encode(s.span_id),
+                    "operation_name": s.name,
+                    "service_name": svc,
+                    "start_timestamp_ns": s.start_time_ns,
+                    "end_timestamp_ns": s.end_time_ns,
+                    "attributes": s.attributes,
+                });
+                if s.parent_span_id != [0u8; 8] {
+                    obj.as_object_mut().unwrap().insert("parent_span_id".into(), json!(parent));
                 }
-            ]
+                obj
+            }).collect();
+
+            (StatusCode::OK, Json(json!({
+                "status": "success",
+                "data": { "trace_id": tid, "spans": span_json }
+            }))).into_response()
         }
-    }))).into_response()
+        Err(e) => map_error(e),
+    }
 }
 
 fn map_error(e: parqtel_core::Error) -> Response {

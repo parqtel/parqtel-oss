@@ -181,10 +181,25 @@ async fn run_server(
         .with_memory_buffer(memory_buffer.clone());
     let log_ingestion_service = LogIngestionService::new(config.logs.clone(), log_tx)
         .with_memory_buffer(memory_buffer.clone());
-    let (trace_tx, _) = mpsc::unbounded_channel();
+    let (trace_tx, mut trace_rx) = mpsc::unbounded_channel();
     let trace_ingestion_service = TraceIngestionService::new(config.storage.clone(), trace_tx);
 
-    let query_executor = QueryExecutor::with_buffer(index.clone(), log_index.clone(), memory_buffer.clone());
+    // Trace index - uses same data_dir as metrics but separate index file
+    let trace_data_dir = config.storage.data_dir.join("traces");
+    std::fs::create_dir_all(&trace_data_dir).unwrap_or_default();
+    let mut trace_index = BlockIndex::new(&trace_data_dir);
+    trace_index.load().unwrap_or_default();
+    let trace_index = Arc::new(tokio::sync::RwLock::new(trace_index));
+
+    let trace_idx_clone = trace_index.clone();
+    let trace_index_task = tokio::spawn(async move {
+        while let Some(meta) = trace_rx.recv().await {
+            let mut idx = trace_idx_clone.write().await;
+            if let Err(e) = idx.add(meta) { tracing::error!("Failed to add trace block to index: {}", e); }
+        }
+    });
+
+    let query_executor = QueryExecutor::with_trace_index(index.clone(), log_index.clone(), trace_index.clone(), memory_buffer.clone());
 
     start_maintenance(index.clone(), config.storage.clone());
     start_maintenance(log_index.clone(), config.logs.clone().into());
@@ -223,15 +238,16 @@ async fn run_server(
             let rules = state_clone.inner.alert_registry.list_enabled().await;
             for rule in rules {
                 let parsed = parqtel_query::parse_query(&rule.query);
-                let (metric_name, matchers, aggregation, quantile) = match parsed {
+                let (metric_name, matchers, aggregation, quantile, topk_n, group_by, group_without, label_replace, scalar_param, clamp) = match parsed {
                     Ok(p) => p,
                     Err(_) => continue,
                 };
                 let now_ns = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
                 let start_ns = now_ns - 300_000_000_000; // 5 min lookback
-                let plan = parqtel_query::QueryPlan::new(
+                let plan = parqtel_query::QueryPlan::new_full(
                     metric_name, matchers, start_ns, now_ns, None,
                     100, 1000, aggregation, quantile,
+                    topk_n, group_by, group_without, label_replace, scalar_param, clamp,
                 );
                 let plan = match plan {
                     Ok(p) => p,
@@ -275,9 +291,11 @@ async fn run_server(
     drop(state);
     let _ = index_task.await;
     let _ = log_index_task.await;
+    let _ = trace_index_task.await;
     
     index.read().await.save()?;
     log_index.read().await.save()?;
+    trace_index.read().await.save()?;
     tracing::info!("Shutdown complete");
 
     Ok(())

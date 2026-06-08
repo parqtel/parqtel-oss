@@ -4,11 +4,12 @@
 # Final image: distroless/static (~15MB), nonroot, no shell
 # ─────────────────────────────────────────────────────────────────────────────
 
-ARG RUST_VERSION=1.85
+ARG RUST_VERSION=1.86
 ARG CHEF_VERSION=0.1.71
 
 # ── Stage 1: Chef planner ────────────────────────────────────────────────────
 FROM rust:${RUST_VERSION}-slim AS chef
+ARG CHEF_VERSION
 RUN cargo install cargo-chef --version ${CHEF_VERSION} --locked
 WORKDIR /app
 
@@ -21,7 +22,7 @@ RUN cargo chef prepare --recipe-path recipe.json
 FROM chef AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    pkg-config libssl-dev cmake g++ \
+    pkg-config libssl-dev cmake g++ protobuf-compiler \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=planner /app/recipe.json recipe.json

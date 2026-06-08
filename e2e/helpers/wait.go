@@ -2,6 +2,8 @@ package helpers
 
 import (
 	"context"
+	"fmt"
+	"net/http"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -22,4 +24,21 @@ func WaitForDeployment(ctx context.Context, clientset *kubernetes.Clientset, nam
 
 		return false, nil
 	})
+}
+
+// WaitForHTTP polls url until it returns HTTP 200 or timeout is exceeded.
+func WaitForHTTP(url string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		resp, err := http.Get(url) //nolint:gosec,noctx
+		if err == nil && resp.StatusCode == 200 {
+			resp.Body.Close()
+			return nil
+		}
+		if resp != nil {
+			resp.Body.Close()
+		}
+		time.Sleep(2 * time.Second)
+	}
+	return fmt.Errorf("timeout waiting for %s to become healthy", url)
 }

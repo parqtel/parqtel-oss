@@ -1,5 +1,5 @@
 {{- if .Values.provider.enabled -}}
-apiVersion: parqtel.io/v1alpha1
+apiVersion: parqtel.com/v1alpha1
 kind: ParqtelProviderConfig
 metadata:
   name: default

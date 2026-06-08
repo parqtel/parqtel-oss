@@ -9,7 +9,7 @@
   <a href="https://github.com/parqtel/parqtel-oss/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" alt="License"></a>
   <a href="https://ghcr.io/parqtel/parqtel-oss"><img src="https://img.shields.io/badge/docker-ghcr.io-blue?logo=docker" alt="Docker"></a>
   <a href="https://github.com/parqtel/parqtel-oss/pkgs/container/charts%2Fparqtel"><img src="https://img.shields.io/badge/helm-OCI-blue?logo=helm" alt="Helm"></a>
-  <img src="https://img.shields.io/badge/MSRV-1.85-orange?logo=rust" alt="MSRV">
+  <img src="https://img.shields.io/badge/MSRV-1.86-orange?logo=rust" alt="MSRV">
   <img src="https://img.shields.io/badge/unsafe-forbidden-success.svg" alt="Unsafe Forbidden">
   <a href="https://securityscorecards.dev/viewer/?uri=github.com/parqtel/parqtel-oss"><img src="https://api.securityscorecards.dev/projects/github.com/parqtel/parqtel-oss/badge" alt="OpenSSF Scorecard"></a>
   <a href="https://github.com/parqtel/parqtel-oss/security"><img src="https://img.shields.io/badge/trivy-scanned-blueviolet?logo=aqua" alt="Trivy Scanned"></a>
@@ -56,7 +56,7 @@ Parqtel is a single-binary observability backend written in Rust that ingests Op
 |------|--------|
 | **Onboarding** | [Getting Started](docs/GETTING_STARTED.md) • [Glossary](docs/GLOSSARY.md) • [FAQ](docs/FAQ.md) |
 | **Learning** | [Tutorials](docs/TUTORIALS.md) • [Use Cases](#common-use-cases) |
-| **Deep Dive** | [Architecture](docs/ARCHITECTURE.md) • [Configuration](docs/CONFIGURATION.md) • [Developer Guide](docs/DEVELOPER_GUIDE.md) • [MCP Integrations](docs/MCP.md) |
+| **Deep Dive** | [Architecture](docs/ARCHITECTURE.md) • [Configuration](docs/CONFIGURATION.md) • [Developer Guide](docs/DEVELOPER_GUIDE.md) • [MCP Integrations](docs/MCP.md) • [Query Functions](docs/QUERY_FUNCTIONS.md) |
 | **Operations** | [Deployment](docs/DEPLOYMENT.md) • [Troubleshooting](docs/TROUBLESHOOTING.md) • [Best Practices](docs/BEST_PRACTICES.md) • [Testing & Validation](docs/TESTING.md) |
 | **Community** | [Contributing](CONTRIBUTING.md) • [Code of Conduct](CODE_OF_CONDUCT.md) • [Security](SECURITY.md) |
 
@@ -161,7 +161,7 @@ Benchmarked with sustained 1000 samples/sec (metrics + logs + traces) for 15 min
 
 ### Prerequisites
 
-- Rust 1.85+ (for building from source)
+- Rust 1.86+ (for building from source)
 - Docker (for containerized deployment)
 
 ### Run from Source
@@ -189,26 +189,29 @@ docker run -p 8080:8080 -v parqtel_data:/var/lib/parqtel parqtel:local
 ### Run with Docker Compose (full stack)
 
 ```bash
-cd deploy/compose
+# First-time setup: copies .env.example → .env and starts everything
+make dev-setup
+
+# Or manually
 cp .env.example .env
-docker-compose up -d
+docker compose up -d
 ```
 
-This starts Parqtel, Grafana (port 3000), Prometheus (port 9091), a load generator, and all MCP servers.
+This starts Parqtel (port 9090), Grafana (port 3000), Prometheus (port 9091), and a load generator. MCP servers are defined in `docker-compose.yml` but commented out — uncomment the ones you need after adding the corresponding tokens to `.env`.
 
 ### Verify
 
 ```bash
-# Health check
-curl http://localhost:8080/health
+# Health check (compose stack runs on port 9090; raw docker run uses 8080)
+curl http://localhost:9090/health
 
 # Send a metric via OTLP JSON
-curl -X POST http://localhost:8080/v1/metrics/json \
+curl -X POST http://localhost:9090/v1/metrics/json \
   -H "Content-Type: application/json" \
   -d '{"resourceMetrics":[{"resource":{"attributes":[{"key":"service.name","value":{"stringValue":"demo"}}]},"scopeMetrics":[{"metrics":[{"name":"http_requests_total","gauge":{"dataPoints":[{"asDouble":42,"timeUnixNano":"1700000000000000000","attributes":[{"key":"method","value":{"stringValue":"GET"}}]}]}}]}]}]}'
 
 # Query it back (Prometheus API)
-curl "http://localhost:8080/api/v1/query?query=http_requests_total"
+curl "http://localhost:9090/api/v1/query?query=http_requests_total"
 ```
 
 ## API Reference
@@ -327,9 +330,9 @@ See [docs/MCP.md](docs/MCP.md) for detailed configuration and tool schemas.
 | Method | Guide |
 |--------|-------|
 | Docker | Single container with volume mount |
-| Docker Compose | Full stack (Parqtel + Grafana + Prometheus + MCP) |
-| Kubernetes (Helm) | Production-grade with HPA, PDB, NetworkPolicy |
-| systemd | Bare-metal Linux service |
+| Docker Compose | Full stack (Parqtel + Grafana + Prometheus + MCP) — `docker compose up -d` from root |
+| Kubernetes (Helm) | Production-grade with HPA, PDB, NetworkPolicy — chart at `charts/parqtel/` |
+| systemd | Bare-metal Linux service — unit at `deploy/systemd/parqtel.service` |
 
 See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for detailed instructions.
 
@@ -359,12 +362,15 @@ See [docs/CONFIGURATION.md](docs/CONFIGURATION.md) for the full reference.
 ## Development
 
 ```bash
+make dev-setup      # First-time local setup (copies .env, starts compose stack)
 make build          # Debug build
 make release        # Optimized release build
 make test           # Run all tests
 make lint           # rustfmt + clippy
 make docker         # Build Docker image
-make run            # Start server locally
+make run            # Start server locally (from source)
+make local-up       # Start compose stack
+make local-rebuild  # Rebuild images and restart (after source changes)
 make load           # Send synthetic data
 make perf-audit     # Full performance audit
 ```

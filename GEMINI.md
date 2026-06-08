@@ -30,7 +30,7 @@ Parqtel is an ultra-lightweight SRE observability engine designed to ingest Open
 - `make test`: Run unit and integration tests.
 - `make lint`: Run `cargo fmt` and `clippy`.
 - `make run`: Start the server locally.
-- `cd deploy/compose && docker-compose up -d`: Start the full stack (Parqtel, Grafana, Prometheus, MCP servers).
+- `make dev-setup`: First-time setup (copies `.env.example` → `.env`, starts the full stack — Parqtel, Grafana, Prometheus, load-generator). MCP servers are opt-in.
 
 ## Development Conventions
 - **Safety:** No `unsafe` code allowed (`#[forbid(unsafe_code)]`).

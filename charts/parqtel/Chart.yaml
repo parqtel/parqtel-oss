@@ -21,7 +21,7 @@ sources:
 
 maintainers:
   - name: parqtel-team
-    email: maintainers@parqtel.io
+    email: maintainers@parqtel.com
 
 annotations:
   artifacthub.io/license: Apache-2.0

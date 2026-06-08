@@ -23,8 +23,7 @@ Thumbs.db
 parqtel_prompts/
 dist/
 graphify-out/
-deploy/compose/.env
-deploy/compose/docker-compose.override.yml
+docker-compose.override.yml
 
 # Python
 __pycache__/
