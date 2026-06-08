@@ -3,6 +3,7 @@ use crate::error::{Error, Result};
 use crate::models::storage::{BlockMetadata, StorageModel};
 use crate::models::metrics::DataPoint;
 use crate::models::logs::LogRecord;
+use crate::models::traces::Span;
 use arrow2::io::parquet::read;
 
 /// Reads and filters data points from Parquet files.
@@ -106,5 +107,53 @@ impl Scanner {
             }
         }
         Ok(logs)
+    }
+
+    /// Scans a set of blocks for spans matching a time range.
+    pub async fn scan_traces(
+        blocks: Vec<BlockMetadata>,
+        start_ns: i64,
+        end_ns: i64,
+    ) -> Result<Vec<Span>> {
+        let mut tasks = Vec::new();
+        for block in blocks {
+            tasks.push(tokio::spawn(async move {
+                Self::scan_trace_block(block, start_ns, end_ns)
+            }));
+        }
+
+        let mut all_spans = Vec::new();
+        for task in tasks {
+            let spans = task.await.map_err(|e| Error::Internal(e.to_string()))??;
+            all_spans.extend(spans);
+        }
+        all_spans.sort_by_key(|s| s.start_time_ns);
+        Ok(all_spans)
+    }
+
+    fn scan_trace_block(meta: BlockMetadata, start_ns: i64, end_ns: i64) -> Result<Vec<Span>> {
+        let mut file = match File::open(&meta.path) {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                tracing::warn!("Trace block file not found, skipping: {:?}", meta.path);
+                return Ok(Vec::new());
+            }
+            Err(e) => return Err(Error::Io(e)),
+        };
+        let metadata = read::read_metadata(&mut file).map_err(|e| Error::Parquet(e.to_string()))?;
+        let schema = StorageModel::traces_schema();
+        let reader = read::FileReader::new(file, metadata.row_groups, schema, None, None, None);
+
+        let mut spans = Vec::new();
+        for chunk in reader {
+            let chunk = chunk.map_err(|e| Error::Parquet(e.to_string()))?;
+            for row in 0..chunk.len() {
+                let span = StorageModel::row_to_span(&chunk, row)?;
+                if span.start_time_ns >= start_ns && span.start_time_ns <= end_ns {
+                    spans.push(span);
+                }
+            }
+        }
+        Ok(spans)
     }
 }
