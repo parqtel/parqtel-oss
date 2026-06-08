@@ -13,7 +13,7 @@ parqtel is an ultra-lightweight SRE observability tool for streaming OTel metric
 ## Installation
 
 ```bash
-helm repo add parqtel https://charts.parqtel.io
+helm repo add parqtel https://charts.parqtel.com
 helm install my-parqtel parqtel/parqtel
 ```
 

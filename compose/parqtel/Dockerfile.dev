@@ -1,5 +1,5 @@
 # Development Dockerfile for parqtel
-FROM rust:1.85-slim AS builder
+FROM rust:1.86-slim AS builder
 
 RUN apt-get update && apt-get install -y protobuf-compiler pkg-config libssl-dev g++ make && rm -rf /var/lib/apt/lists/*
 
