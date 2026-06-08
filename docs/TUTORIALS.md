@@ -48,7 +48,7 @@ In this scenario, we will set up an alert for high HTTP latency and receive noti
 Ensure your `mcp-slack` server is running and has a valid bot token.
 
 ```bash
-# In deploy/compose/.env
+# In .env (project root)
 SLACK_BOT_TOKEN=xoxb-your-token
 ```
 

@@ -11,7 +11,7 @@ docker build -t parqtel:local .
 ```
 
 The Dockerfile uses a multi-stage build:
-- **Builder**: `rust:1.85-slim` with build dependencies
+- **Builder**: `rust:1.86-slim` with build dependencies
 - **Runtime**: `gcr.io/distroless/cc-debian12:nonroot` (~15 MB final image)
 
 ### Run
@@ -35,15 +35,21 @@ docker exec parqtel curl -f http://localhost:8080/health
 
 ## Docker Compose (Full Stack)
 
-The Compose setup includes Parqtel, Grafana, Prometheus, a load generator, and all 7 MCP servers.
+The Compose setup includes Parqtel, Grafana, Prometheus, and a load generator. MCP servers are defined but commented out by default — uncomment the ones you need after setting the corresponding env vars in `.env`.
 
 ### Setup
 
 ```bash
-cd deploy/compose
+# From project root
 cp .env.example .env
-# Edit .env with your API keys for MCP integrations (optional)
-docker-compose up -d
+# Optionally add MCP API keys in .env
+docker compose up -d
+```
+
+Or via Make (first-time onboarding):
+
+```bash
+make dev-setup
 ```
 
 ### Services
@@ -54,13 +60,7 @@ docker-compose up -d
 | `grafana` | 3000 | Dashboards (auto-provisioned) |
 | `prometheus` | 9091 | Self-monitoring scraper |
 | `load-generator` | — | Synthetic data generator |
-| `mcp-slack` | 3001 | Slack MCP server |
-| `mcp-pagerduty` | 3002 | PagerDuty MCP server |
-| `mcp-jira` | 3003 | Jira MCP server |
-| `mcp-notion` | 3004 | Notion MCP server |
-| `mcp-discord` | 3005 | Discord MCP server |
-| `mcp-gdocs` | 3006 | Google Docs MCP server |
-| `mcp-parqtel` | 3007 | Parqtel query MCP server |
+| `mcp-*` | 3001–3007 | MCP servers (opt-in — uncomment in `docker-compose.yml`) |
 
 ### Environment Variables (`.env`)
 
@@ -84,18 +84,24 @@ GENERATOR_NORMAL_RPS=167
 GRAFANA_ADMIN_PASSWORD=parqtel-dev
 ```
 
-### Override File
+### Local Overrides
 
-For local development customizations, copy the override example:
+To customise ports, mounts, or enable MCP servers locally without touching the committed file, create a `docker-compose.override.yml` (gitignored):
 
 ```bash
-cp docker-compose.override.yml.example docker-compose.override.yml
+# docker-compose.override.yml is gitignored — safe for local secrets/port changes
+# Example: enable the Slack MCP server
+# services:
+#   mcp-slack:
+#     profiles: []
 ```
 
 ### Teardown
 
 ```bash
-docker-compose down -v  # -v removes volumes
+docker compose down -v  # -v removes volumes
+# or
+make local-down
 ```
 
 ## Kubernetes (Helm)
@@ -109,7 +115,7 @@ docker-compose down -v  # -v removes volumes
 ### Quick Install
 
 ```bash
-helm install parqtel deploy/charts/parqtel \
+helm install parqtel charts/parqtel \
   --namespace parqtel \
   --create-namespace \
   -f deploy/k8s/overlays/production/values.yaml
@@ -129,7 +135,7 @@ Pre-configured value files for different environments:
 
 ### Helm Chart Features
 
-The chart (`deploy/charts/parqtel`) includes:
+The chart (`charts/parqtel`) includes:
 
 - **Deployment** with configurable replicas, resources, and probes
 - **HorizontalPodAutoscaler** — scales on CPU/memory/custom metrics
@@ -180,16 +186,20 @@ mcp:
 
 ```bash
 # Create cluster and deploy
-bash deploy/k8s/setup.sh
+bash scripts/k8s-setup.sh
+# or
+make local-k3d-up
 
 # Check status
-make -C deploy/k8s cluster-status
+make local-k3d-status
 
 # Run load test
-bash deploy/k8s/load-test.sh
+bash scripts/k8s-load-test.sh
 
 # Teardown
-bash deploy/k8s/teardown.sh
+bash scripts/k8s-teardown.sh
+# or
+make local-k3d-down
 ```
 
 ### Uninstall

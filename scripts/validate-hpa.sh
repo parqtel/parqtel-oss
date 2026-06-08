@@ -24,7 +24,7 @@ echo "SUCCESS: APIService is Available."
 # 2. Create Metric Mapping
 echo ">>> Creating ParqtelMetricMapping for $METRIC_NAME..."
 cat <<EOF | kubectl apply -f -
-apiVersion: parqtel.io/v1alpha1
+apiVersion: parqtel.com/v1alpha1
 kind: ParqtelMetricMapping
 metadata:
   name: $METRIC_NAME

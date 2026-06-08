@@ -12,9 +12,10 @@ We recommend using the `docker-compose` setup for local testing to ensure all co
 
 ### Launching the Test Environment
 ```bash
-cd deploy/compose
-cp .env.example .env
-docker-compose up -d --build
+# From project root
+make dev-setup          # first time (copies .env.example → .env and starts stack)
+# or
+docker compose up -d --build
 ```
 
 ---
