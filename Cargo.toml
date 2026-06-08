@@ -82,5 +82,5 @@ todo = "warn"
 lto = "fat"
 codegen-units = 1
 strip = "symbols"
-panic = "abort"
+panic = "unwind"
 opt-level = 3
