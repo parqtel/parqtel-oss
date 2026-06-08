@@ -307,6 +307,7 @@ impl QueryExecutor {
     }
 
     /// Executes a trace query and returns matching spans.
+    /// At petabyte scale, caps the number of blocks scanned and pushes limit down.
     pub async fn query_traces(
         &self,
         start_ns: i64,
@@ -314,16 +315,22 @@ impl QueryExecutor {
         trace_id_filter: Option<&str>,
         limit: usize,
     ) -> Result<Vec<parqtel_core::Span>> {
+        // Cap blocks scanned to bound I/O — most recent blocks first for relevance
+        const MAX_BLOCKS: usize = 64;
         let blocks = {
             let idx = self.trace_index.read().await;
-            idx.query(start_ns, end_ns, None)
+            let mut b = idx.query(start_ns, end_ns, None);
+            // Reverse so newest blocks are scanned first (more useful for debugging)
+            b.reverse();
+            b.truncate(MAX_BLOCKS);
+            b
         };
 
         if blocks.is_empty() {
             return Ok(Vec::new());
         }
 
-        let mut spans = Scanner::scan_traces(blocks, start_ns, end_ns).await?;
+        let mut spans = Scanner::scan_traces(blocks, start_ns, end_ns, limit).await?;
 
         // Filter by trace_id if provided
         if let Some(tid) = trace_id_filter {
