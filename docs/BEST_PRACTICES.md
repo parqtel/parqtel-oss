@@ -12,13 +12,17 @@ Parqtel's memory usage is primarily driven by:
 **Recommendation:** For high-throughput environments, increase `max_rows_per_block` to 2M or 5M to reduce the number of small Parquet files, but ensure you have at least 2GB of RAM.
 
 ### CPU & I/O
-- **Compaction**: This is a CPU and Disk I/O intensive process. If your queries are slow, check if the compactor is lagging.
+- **Compaction**: This is a CPU and Disk I/O intensive process. Parqtel uses **Tiered Compaction** (Warm: 6h, Cold: 24h) to optimize long-term storage without impacting ingest performance.
+- **Bounded Concurrency**: Queries are limited to 16 concurrent I/O tasks. This prevents a single heavy query from starving the ingest pipeline of disk bandwidth.
 - **Zstd Level**: Parqtel uses Zstd for compression. If CPU usage is too high, you can lower the compression level (on the roadmap) or switch to `lz4`.
 
 ## 2. Storage Strategy
 
 ### SSDs are Mandatory
 Parquet is a columnar format that benefits from fast sequential and random reads. **Do not use HDD** for production data directories; the performance degradation will be significant.
+
+### Data Resilience
+Parqtel uses a "skip-on-error" strategy for corrupted data. If a specific Parquet block becomes unreadable or has schema corruption, the scanner will log a warning and skip that block rather than crashing the server. This ensures that historical data issues do not impact current observability.
 
 ### Retention vs. Compaction
 - Keep `retention_days` realistic for your disk size.
@@ -49,8 +53,9 @@ Don't let your monitoring tool go unmonitored!
     - `parqtel_compaction_duration_seconds` (sudden spikes)
     - Disk usage > 85%
 
-## 5. High Availability (HA)
+## 5. High Availability (HA) & Scaling
 
 Parqtel is currently designed as a single-node engine. For HA:
 1. **Replication**: Run two identical Parqtel instances and have your OTLP collector "load balance" or "mirror" data to both.
 2. **Persistence**: Use a Persistent Volume Claim (PVC) in Kubernetes with `ReadWriteOnce` and rely on K8s to restart the pod on a healthy node if one fails.
+3. **Query Caps**: Be aware that queries are capped at 128 blocks (64 for traces). For very long time-range queries (e.g., >30 days), consider using recording rules to aggregate data into coarser-grained metrics.

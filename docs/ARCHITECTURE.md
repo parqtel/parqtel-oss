@@ -154,22 +154,37 @@ The `BlockIndex` is an in-memory structure that tracks all blocks:
 
 ### Compaction
 
-The `Compactor` runs on a configurable interval (default: 1 hour):
+The `Compactor` runs on a configurable interval (default: 1 hour) and implements a **Tiered Compaction** strategy:
 
-1. Identifies small adjacent blocks with overlapping time ranges
-2. Reads all data points from candidate blocks
-3. Writes a single merged Parquet file
-4. Atomically updates the index and removes old files
+1. **Small Block Merging**: Identifies small adjacent blocks (<10K rows) and merges up to 12 into a single block to reduce metadata overhead.
+2. **Warm Tier (>6h)**: Blocks older than 6 hours are merged into larger blocks spanning approximately 6 hours of data.
+3. **Cold Tier (>24h)**: Blocks older than 24 hours are merged into daily blocks (24 hours).
+4. **Limits**: Merge groups are capped at 500,000 rows to ensure blocks remain manageable for rapid scanning.
+5. **Efficiency**: Only one merge pass is performed per signal type (Metrics, Logs, Traces) per cycle to avoid long lock holds on the index.
 
 ### Retention
 
 The `RetentionPolicy` runs alongside compaction:
 
-1. Scans the index for blocks whose `end_timestamp_ns` is older than the retention window
-2. Deletes expired Parquet files from disk
-3. Removes entries from the index
+1. Scans the index for blocks whose `end_timestamp_ns` is older than the retention window.
+2. Deletes expired Parquet files from disk.
+3. Removes entries from the index.
 
-## Storage Engine Registry
+## Concurrency & Scaling
+
+### Bounded Query Concurrency
+To prevent I/O saturation and system-wide slowdowns during heavy query loads, Parqtel implements bounded concurrency in the `Scanner`:
+- **Semaphore-based limiting**: Max 16 concurrent block read tasks per signal.
+- **Block Scanning Caps**: Queries are capped to scan a maximum of 128 blocks (64 for traces) to ensure predictable response times even for massive time ranges.
+- **Reverse Scan Order**: Most recent blocks are scanned first (LIFO) to prioritize SRE relevance.
+
+### Data Resilience
+Parqtel is designed to survive data corruption without crashing:
+- **Unwinding Panics**: The release profile uses `panic = "unwind"` to allow `catch_unwind` at the block-scanning boundary.
+- **Graceful Skipping**: If a Parquet block is corrupt or has schema mismatches (e.g., incorrect byte widths for IDs), the scanner logs the error and skips the block rather than aborting the process.
+- **Validation**: Schema validation (field count and physical type checks) is performed during block initialization.
+
+## Configuration System
 
 The `StorageEngineRegistry` provides a pluggable backend system:
 
@@ -234,7 +249,7 @@ Each MCP server:
 | `lto` | `"fat"` | Full link-time optimization |
 | `codegen-units` | `1` | Maximum optimization (single compilation unit) |
 | `strip` | `"symbols"` | Remove debug symbols from binary |
-| `panic` | `"abort"` | No unwinding overhead |
+| `panic` | `"unwind"` | Enables resilience via `catch_unwind` |
 | `opt-level` | `3` | Maximum runtime performance |
 
 The Docker image uses a multi-stage build: Rust builder → distroless runtime (~15 MB final image).

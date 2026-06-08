@@ -142,6 +142,19 @@ cache_expiry_secs = 30
 | `bind_address` | String | `"0.0.0.0:6443"` | Address for the K8s API service |
 | `cache_expiry_secs` | Integer | `30` | Cache TTL for metric values |
 
+## System Limits
+
+While many aspects of Parqtel are configurable, some internal limits are currently hardcoded to ensure system stability and predictable performance:
+
+| Limit | Value | Scope | Description |
+|-------|-------|-------|-------------|
+| **Concurrent Scans** | 16 | Queries | Maximum simultaneous block read tasks per query to prevent I/O saturation. |
+| **Metric Scan Cap** | 128 | Queries | Maximum number of blocks scanned for a single metric/log query. |
+| **Trace Scan Cap** | 64 | Queries | Maximum number of blocks scanned for trace searches. |
+| **Compaction Row Ceiling** | 500,000 | Storage | Maximum rows in a single merged block to keep scans rapid. |
+| **Small Merge Group** | 12 | Storage | Maximum number of small blocks merged in a single compaction pass. |
+| **Max Time Range** | 30 days | Queries | Maximum window allowed for range queries. |
+
 ## Environment Variables
 
 Environment variables use the `PARQTEL__` prefix with `__` as the section separator. Examples:

@@ -66,10 +66,10 @@ Parqtel is a single-binary observability backend written in Rust that ingests Op
 |----------|-------------|
 | **Ingestion** | OTLP/Proto & JSON for metrics, logs, and traces |
 | **Storage** | Block-based Parquet with Zstd/Snappy/LZ4, automatic compaction, configurable retention |
-| **Query** | PromQL-compatible instant & range queries, label matching, aggregations (sum, avg, rate, histogram_quantile, etc.) |
+| **Query** | PromQL-compatible instant & range queries, context-aware search UI, bounded concurrency (16x), capped scans (128 blocks) |
 | **Alerting** | YAML-defined rules, threshold & anomaly detection, state machine (Inactive→Pending→Firing→Resolved), background evaluation loop (15s), noise scoring |
 | **Pipeline** | Recording rules, stream processing pipelines, metric extraction from logs |
-| **Visualization** | Built-in web UI, Grafana SimpleJSON datasource, Prometheus-compatible `/api/v1/*` |
+| **Visualization** | Built-in web UI, context-aware search (MTR/LOG/TRC/ALT), trace waterfall with hierarchy, Grafana SimpleJSON datasource |
 | **MCP** | 7 AI tool servers (Slack, PagerDuty, Jira, Notion, Discord, Google Docs, Parqtel) |
 | **Operations** | Health checks, `/metrics` endpoint, graceful shutdown, CLI subcommands |
 
@@ -85,7 +85,7 @@ Parqtel ships with a zero-dependency embedded web console at `/ui` — no separa
 |--------|--------|
 | ![Traces View](docs/screenshots/ui-traces.png) | ![Alerts View](docs/screenshots/ui-alerts.png) |
 
-**Features:** PromQL autocomplete, time range selection, drag-to-zoom histogram, severity filtering, trace waterfall, alert state machine with acknowledge/resolve actions.
+**Features:** Context-aware search (signal badges: MTR/LOG/TRC/ALT), PromQL autocomplete, time range selection, drag-to-zoom histogram, trace waterfall with parent-child hierarchy, span detail panel, and alert state machine with acknowledge/resolve actions.
 
 ## Performance
 
