@@ -39,11 +39,11 @@ pub fn build_router(state: AppState) -> Router {
         .route("/oas", get(handlers::misc::openapi_spec))
 
         // OTLP Ingestion
-        .route("/v1/metrics", post(handlers::ingest::ingest_proto))
+        .route("/v1/metrics", post(handlers::ingest::ingest_json))
         .route("/v1/metrics/json", post(handlers::ingest::ingest_json))
-        .route("/v1/logs", post(handlers::ingest::ingest_logs_proto))
+        .route("/v1/logs", post(handlers::ingest::ingest_logs_json))
         .route("/v1/logs/json", post(handlers::ingest::ingest_logs_json))
-        .route("/v1/traces", post(handlers::ingest::ingest_traces_proto))
+        .route("/v1/traces", post(handlers::ingest::ingest_traces_json))
         .route("/v1/traces/json", post(handlers::ingest::ingest_traces_json))
 
         // Prometheus API v1
