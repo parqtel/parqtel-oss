@@ -1,0 +1,62 @@
+FROM rust:1.86-slim AS builder
+WORKDIR /build
+RUN apt-get update && apt-get install -y pkg-config libssl-dev g++ make && rm -rf /var/lib/apt/lists/*
+
+COPY parqtel-mcp-core/ parqtel-mcp-core/
+COPY parqtel-mcp-jira/ parqtel-mcp-jira/
+COPY Cargo.lock ./
+
+# Minimal workspace Cargo.toml — only the two needed members
+RUN cat > Cargo.toml << 'EOF'
+[workspace]
+members = ["parqtel-mcp-core", "parqtel-mcp-jira"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["parqtel team"]
+license = "Apache-2.0"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["full"] }
+axum = "0.7"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tower-http = { version = "0.5", features = ["cors", "trace", "limit", "timeout"] }
+uuid = { version = "1", features = ["v4", "fast-rng"] }
+bytes = "1"
+chrono = { version = "0.4", features = ["serde"] }
+regex = "1"
+async-trait = "0.1"
+futures = "0.3"
+schemars = "0.8"
+parqtel-mcp-core = { path = "parqtel-mcp-core" }
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"
+opt-level = 3
+EOF
+
+RUN cargo build --release --bin parqtel-mcp-jira
+
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y ca-certificates curl && rm -rf /var/lib/apt/lists/*
+COPY --from=builder /build/target/release/parqtel-mcp-jira /app/parqtel-mcp-jira
+EXPOSE 3000
+CMD ["/app/parqtel-mcp-jira"]

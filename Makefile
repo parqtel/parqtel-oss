@@ -1,103 +1,145 @@
-.PHONY: help build release test lint bench docker run inspect load clean
+.PHONY: help dev-setup build release test lint bench docker \
+        local-up local-down local-logs local-ps local-rebuild test-api \
+        run inspect load load-test perf-audit clean \
+        k8s-install k8s-validate k8s-sre-validate k8s-undeploy \
+        local-k3d-up local-k3d-down local-k3d-status
 
-# Default target
+# ─── Help ──────────────────────────────────────────────────────────────────────
 help: ## Show this help message
-	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-15s\033[0m %s\n", $$1, $$2}'
+	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
 
-build: ## Build the project in debug mode
+# ─── Onboarding ────────────────────────────────────────────────────────────────
+dev-setup: ## First-time setup: copy .env.example → .env, then start the full stack
+	@if [ ! -f .env ]; then \
+		cp .env.example .env; \
+		echo "✅ Created .env from .env.example — edit it to add MCP API keys (optional)"; \
+	else \
+		echo "ℹ️  .env already exists, skipping copy"; \
+	fi
+	@if [ ! -f docker-compose.override.yml ] && [ -f docker-compose.override.yml.example ]; then \
+		echo "ℹ️  To customise ports/mounts copy: cp docker-compose.override.yml.example docker-compose.override.yml"; \
+	fi
+	$(MAKE) local-up
+	@echo ""
+	@echo "🚀 Stack is up! Services:"
+	@echo "   Parqtel    → http://localhost:$$(grep PARQTEL_PORT .env | cut -d= -f2 || echo 9090)"
+	@echo "   Grafana    → http://localhost:$$(grep GRAFANA_PORT .env | cut -d= -f2 || echo 3000)  (admin / parqtel-dev)"
+	@echo "   Prometheus → http://localhost:$$(grep PROMETHEUS_PORT .env | cut -d= -f2 || echo 9091)"
+	@echo ""
+	@echo "Run 'make test-api' to verify, 'make local-logs' to tail logs."
+
+# ─── Rust build & test ─────────────────────────────────────────────────────────
+build: ## Debug build
 	cargo build
 
-release: ## Build the project in release mode (optimised)
+release: ## Optimised release build (LTO, stripped)
 	cargo build --release
 
-test: ## Run the full test suite
+test: ## Run all workspace tests
 	cargo test --workspace
 
-lint: ## Run rustfmt and clippy
+lint: ## rustfmt check + clippy
 	cargo fmt --check
 	cargo clippy --workspace -- -D warnings
 
-bench: ## Run benchmarks (requires nightly for some criterion features, or just standard cargo bench)
+bench: ## Run benchmarks
 	cargo bench
 
-docker: ## Build a local Docker image and report its size
+# ─── Docker ────────────────────────────────────────────────────────────────────
+docker: ## Build production Docker image (distroless) and report size
 	docker build -t parqtel:local .
 	@echo "Image size:"
 	@docker images parqtel:local --format "{{.Size}}"
 
-local-up: ## Spin up local environment with docker-compose
-	docker-compose -f deploy/compose/docker-compose.yml up -d
+# ─── Local dev (Docker Compose) ────────────────────────────────────────────────
+local-up: ## Start full local stack (Parqtel + Grafana + Prometheus + load-generator)
+	docker compose up -d
 
-local-down: ## Tear down local environment
-	docker-compose -f deploy/compose/docker-compose.yml down
+local-down: ## Stop and remove containers
+	docker compose down
 
-local-logs: ## Tail local environment logs
-	docker-compose -f deploy/compose/docker-compose.yml logs -f
+local-rebuild: ## Force rebuild images and restart (use after source changes)
+	docker compose up -d --build
 
-k8s-install: ## Install parqtel on the current K8s cluster using Helm
-	bash deploy/k8s/install.sh
+local-logs: ## Tail logs from all services
+	docker compose logs -f
+
+local-ps: ## Show status of all compose services
+	docker compose ps
+
+test-api: ## Smoke-test the local API (requires local-up)
+	@echo "Querying label values..."
+	@curl -s -f http://localhost:$$(grep PARQTEL_PORT .env 2>/dev/null | cut -d= -f2 || echo 9090)/api/v1/label/__name__/values \
+		| jq . || (echo "❌ API test failed — is 'make local-up' running?" && exit 1)
+	@echo "✅ API is healthy"
+
+# ─── Local run (from source) ───────────────────────────────────────────────────
+run: ## Start the server locally from source (default config)
+	cargo run --bin parqtel -- serve
+
+inspect: ## Inspect local storage index
+	cargo run --bin parqtel -- inspect
+
+# ─── Load testing ──────────────────────────────────────────────────────────────
+load: ## Send 10,000 synthetic data points to localhost:9090
+	python3 scripts/load-test.py http://localhost:9090 10000
+
+LOAD_RATE   ?= 1000
+LOAD_TIME   ?= 1
+TARGET_URL  ?= http://localhost:9090
+LOAD_TYPE   ?= all
+LOAD_SCRIPT ?= scripts/load_gen.py
+
+load-test: ## Full load test (LOAD_RATE, LOAD_TIME, TARGET_URL, LOAD_TYPE overrideable)
+	@echo "========================================================"
+	@echo "🚀 Parqtel Load Test — $(TARGET_URL)"
+	@echo "   Rate: $(LOAD_RATE) samples/min  Duration: $(LOAD_TIME) min  Type: $(LOAD_TYPE)"
+	@echo "========================================================"
+	@python3 -m venv .venv && \
+	. .venv/bin/activate && \
+	pip install --quiet --upgrade pip && \
+	pip install --quiet opentelemetry-sdk opentelemetry-exporter-otlp-proto-http && \
+	python3 $(LOAD_SCRIPT) --endpoint $(TARGET_URL) --rate $(LOAD_RATE) --duration $(LOAD_TIME) --type $(LOAD_TYPE)
+
+perf-audit: release ## Release build + full performance audit
+	@echo "========================================================"
+	@echo "📊 Parqtel Performance Audit"
+	@echo "========================================================"
+	bash scripts/run_perf_audit.sh
+
+# ─── Kubernetes ────────────────────────────────────────────────────────────────
+k8s-install: ## Install Parqtel on the current K8s cluster via Helm
+	bash scripts/k8s-install.sh
 
 k8s-validate: ## Run E2E tests against the current K8s cluster (requires Go)
 	bash scripts/validate.sh
 	bash scripts/validate-hpa.sh
 
-k8s-sre-validate: ## Run shell-based SRE validation against the current K8s cluster
+k8s-sre-validate: ## Shell-based SRE validation against the current K8s cluster
 	bash scripts/sre-validate.sh
 
-k8s-undeploy: ## Remove parqtel from the current K8s cluster
+k8s-undeploy: ## Uninstall Parqtel from the current K8s cluster
 	helm uninstall parqtel -n parqtel --ignore-not-found
 
-local-k3d-up: ## Setup local k3d cluster and deploy parqtel
-	bash deploy/k8s/setup.sh
+local-k3d-up: ## Provision a local k3d cluster and deploy Parqtel
+	bash scripts/k8s-setup.sh
 
-local-k3d-down: ## Tear down local k3d cluster
-	bash deploy/k8s/teardown.sh
+local-k3d-down: ## Destroy the local k3d cluster
+	bash scripts/k8s-teardown.sh
 
 local-k3d-status: ## Show k3d cluster status
-	$(MAKE) -C deploy/k8s cluster-status
+	kubectl get pods -n parqtel
 
-run: ## Start the server locally with default configuration
-	cargo run --bin parqtel -- serve
+# ─── E2E / Functional tests ────────────────────────────────────────────────────
+PARQTEL_E2E_URL ?= http://localhost:9090
 
-inspect: ## Inspect the local storage index
-	cargo run --bin parqtel -- inspect
+e2e-promql: ## Run PromQL functional validation tests against the compose stack (requires local-up)
+	@echo "Running PromQL functional tests against $(PARQTEL_E2E_URL) ..."
+	cd e2e && PARQTEL_URL=$(PARQTEL_E2E_URL) go test -v -count=1 -tags promql ./tests/ \
+		-run TestPromQLFunctions \
+		-timeout 120s
 
-test-api: ## Run a simple API test against the local environment (port 9090)
-	@echo "Querying label values..."
-	@curl -s -f http://localhost:9090/api/v1/label/__name__/values | jq . || (echo "API test failed (make sure local-up is running)" && exit 1)
-
-load: ## Send 10,000 synthetic data points to the local environment (port 9090)
-	python3 scripts/load-test.py http://localhost:9090 10000
-
-# Default Load Parameters
-LOAD_RATE ?= 1000
-LOAD_TIME ?= 1
-TARGET_URL ?= http://localhost:8080
-LOAD_TYPE ?= all
-LOAD_SCRIPT ?= scripts/load_gen.py
-
-.PHONY: load-test
-load-test:
-	@echo "========================================================================"
-	@echo "🚀 Initiating Parqtel Unified Load Test Engine"
-	@echo "🎯 Target Endpoint: $(TARGET_URL)"
-	@echo "📊 Target Load Rate: $(LOAD_RATE) samples/minute"
-	@echo "⏱️ Total Run Duration: $(LOAD_TIME) minute(s)"
-	@echo "📈 Telemetry Type: $(LOAD_TYPE)"
-	@echo "========================================================================"
-	@python3 -m venv .venv && \
-	. .venv/bin/activate && \
-	pip install --upgrade pip && \
-	pip install opentelemetry-sdk opentelemetry-exporter-otlp-proto-http && \
-	python3 $(LOAD_SCRIPT) --endpoint $(TARGET_URL) --rate $(LOAD_RATE) --duration $(LOAD_TIME) --type $(LOAD_TYPE)
-
-.PHONY: perf-audit
-perf-audit: release ## Run performance audit (builds release binary and runs load test)
-	@echo "========================================================================"
-	@echo "📊 Running Parqtel Performance Audit"
-	@echo "========================================================================"
-	@bash scripts/run_perf_audit.sh
-
-clean: ## Clean build artifacts and local data directory
+# ─── Cleanup ───────────────────────────────────────────────────────────────────
+clean: ## Remove build artefacts and local data directory
 	cargo clean
 	rm -rf data

@@ -14,6 +14,7 @@ pub struct QueryExecutor {
     storage: Arc<dyn StorageEngine>,
     index: Arc<RwLock<BlockIndex>>,
     log_index: Arc<RwLock<BlockIndex>>,
+    trace_index: Arc<RwLock<BlockIndex>>,
     buffer: MemoryBuffer,
 }
 
@@ -24,7 +25,8 @@ impl QueryExecutor {
         let storage: Arc<dyn StorageEngine> = Arc::new(
             parqtel_core::engine::parquet::ParquetStorageEngine::new(config)
         );
-        Self { storage, index, log_index, buffer: MemoryBuffer::new() }
+        let trace_index = Arc::new(RwLock::new(BlockIndex::new(std::path::Path::new("/tmp/parqtel-traces"))));
+        Self { storage, index, log_index, trace_index, buffer: MemoryBuffer::new() }
     }
 
     /// Creates a new [QueryExecutor] with a memory buffer for stream-queryable data.
@@ -37,7 +39,22 @@ impl QueryExecutor {
         let storage: Arc<dyn StorageEngine> = Arc::new(
             parqtel_core::engine::parquet::ParquetStorageEngine::new(config)
         );
-        Self { storage, index, log_index, buffer }
+        let trace_index = Arc::new(RwLock::new(BlockIndex::new(std::path::Path::new("/tmp/parqtel-traces"))));
+        Self { storage, index, log_index, trace_index, buffer }
+    }
+
+    /// Creates a new [QueryExecutor] with a trace index and memory buffer.
+    pub fn with_trace_index(
+        index: Arc<RwLock<BlockIndex>>,
+        log_index: Arc<RwLock<BlockIndex>>,
+        trace_index: Arc<RwLock<BlockIndex>>,
+        buffer: MemoryBuffer,
+    ) -> Self {
+        let config = parqtel_core::BlockConfig::default();
+        let storage: Arc<dyn StorageEngine> = Arc::new(
+            parqtel_core::engine::parquet::ParquetStorageEngine::new(config)
+        );
+        Self { storage, index, log_index, trace_index, buffer }
     }
 
     /// Creates a new [QueryExecutor] with a storage engine and block indexes.
@@ -46,7 +63,8 @@ impl QueryExecutor {
         index: Arc<RwLock<BlockIndex>>,
         log_index: Arc<RwLock<BlockIndex>>,
     ) -> Self {
-        Self { storage, index, log_index, buffer: MemoryBuffer::new() }
+        let trace_index = Arc::new(RwLock::new(BlockIndex::new(std::path::Path::new("/tmp/parqtel-traces"))));
+        Self { storage, index, log_index, trace_index, buffer: MemoryBuffer::new() }
     }
 
     /// Returns a clone of the memory buffer for use by ingestion services.
@@ -105,7 +123,7 @@ impl QueryExecutor {
                 labels = labels.merge(&LabelSet::try_from_iter(vec![("__name__", plan.metric_name.clone())])?);
                 let samples = if let Some(step) = plan.step_ns {
                     if let Some(op) = plan.aggregation {
-                        crate::aggregation::downsample(points, plan.start_ns, plan.end_ns, step, op, plan.quantile)
+                        crate::aggregation::downsample(points, plan.start_ns, plan.end_ns, step, op, plan.quantile, plan.scalar_param, plan.clamp)
                     } else {
                         points.into_iter().map(|(t, v)| Sample { timestamp_ns: t, value: v_to_f64(&v) }).collect()
                     }
@@ -114,6 +132,7 @@ impl QueryExecutor {
                 };
                 results.push(TimeSeries { labels, samples });
             }
+            results = apply_post_processing(results, &plan);
             return Ok(QueryResult { series: results, execution_time: start_time.elapsed(), points_scanned, total_series_count, volume_summary });
         }
 
@@ -175,6 +194,8 @@ impl QueryExecutor {
                         step,
                         op,
                         plan.quantile,
+                        plan.scalar_param,
+                        plan.clamp,
                     )
                 } else {
                     points.into_iter().map(|(t, v)| Sample { timestamp_ns: t, value: v_to_f64(&v) }).collect()
@@ -188,6 +209,7 @@ impl QueryExecutor {
                 samples,
             });
         }
+        results = apply_post_processing(results, &plan);
 
         Ok(QueryResult {
             series: results,
@@ -282,6 +304,35 @@ impl QueryExecutor {
             total_logs_count,
             volume_summary,
         })
+    }
+
+    /// Executes a trace query and returns matching spans.
+    pub async fn query_traces(
+        &self,
+        start_ns: i64,
+        end_ns: i64,
+        trace_id_filter: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<parqtel_core::Span>> {
+        let blocks = {
+            let idx = self.trace_index.read().await;
+            idx.query(start_ns, end_ns, None)
+        };
+
+        if blocks.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut spans = Scanner::scan_traces(blocks, start_ns, end_ns).await?;
+
+        // Filter by trace_id if provided
+        if let Some(tid) = trace_id_filter {
+            let tid_lower = tid.to_lowercase();
+            spans.retain(|s| hex::encode(s.trace_id) == tid_lower);
+        }
+
+        spans.truncate(limit);
+        Ok(spans)
     }
 
     /// Returns all known field names across the log schema.
@@ -509,6 +560,78 @@ fn v_to_f64(v: &MetricValue) -> f64 {
         MetricValue::Histogram { sum, .. } => *sum,
         MetricValue::Summary { sum, .. } => *sum,
     }
+}
+
+/// Applies grouping (by/without), topk/bottomk ranking, and label_replace
+/// to the per-series result set produced by the executor.
+fn apply_post_processing(
+    mut series: Vec<crate::models::TimeSeries>,
+    plan: &crate::plan::QueryPlan,
+) -> Vec<crate::models::TimeSeries> {
+    // ── by / without grouping ──────────────────────────────────────────────
+    if !plan.group_by.is_empty() || !plan.group_without.is_empty() {
+        use std::collections::HashMap;
+        let mut grouped: HashMap<Vec<(String, String)>, crate::models::TimeSeries> = HashMap::new();
+        for ts in series {
+            let key: Vec<(String, String)> = if !plan.group_by.is_empty() {
+                plan.group_by.iter()
+                    .filter_map(|l| ts.labels.get(l).map(|v| (l.clone(), v.to_string())))
+                    .collect()
+            } else {
+                ts.labels.iter()
+                    .filter(|(k, _)| !plan.group_without.contains(&k.to_string()))
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect()
+            };
+            let entry = grouped.entry(key.clone()).or_insert_with(|| {
+                let new_labels = LabelSet::try_from_iter(key).unwrap_or_default();
+                crate::models::TimeSeries { labels: new_labels, samples: Vec::new() }
+            });
+            for s in ts.samples {
+                if let Some(existing) = entry.samples.iter_mut().find(|e| e.timestamp_ns == s.timestamp_ns) {
+                    existing.value += s.value;
+                } else {
+                    entry.samples.push(s);
+                }
+            }
+        }
+        series = grouped.into_values().collect();
+        for ts in &mut series {
+            ts.samples.sort_by_key(|s| s.timestamp_ns);
+        }
+    }
+
+    // ── label_replace ──────────────────────────────────────────────────────
+    if let Some((dst, repl, src, regex)) = &plan.label_replace {
+        if let Ok(re) = regex::Regex::new(regex) {
+            for ts in &mut series {
+                let src_val = ts.labels.get(src).unwrap_or("").to_string();
+                let new_val = re.replace(&src_val, repl.as_str()).to_string();
+                let patch = LabelSet::try_from_iter(std::iter::once((dst.as_str(), new_val.as_str())));
+                if let Ok(patch) = patch {
+                    ts.labels = ts.labels.merge(&patch);
+                }
+            }
+        }
+    }
+
+    // ── topk / bottomk ────────────────────────────────────────────────────
+    if let Some(n) = plan.topk_n {
+        let last_val = |ts: &crate::models::TimeSeries| ts.samples.last().map(|s| s.value).unwrap_or(0.0);
+        match plan.aggregation {
+            Some(crate::plan::AggregationOp::TopK) => {
+                series.sort_by(|a, b| last_val(b).partial_cmp(&last_val(a)).unwrap_or(std::cmp::Ordering::Equal));
+                series.truncate(n);
+            }
+            Some(crate::plan::AggregationOp::BottomK) => {
+                series.sort_by(|a, b| last_val(a).partial_cmp(&last_val(b)).unwrap_or(std::cmp::Ordering::Equal));
+                series.truncate(n);
+            }
+            _ => {}
+        }
+    }
+
+    series
 }
 
 

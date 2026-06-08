@@ -428,11 +428,11 @@ SLACK_BOT_TOKEN=xoxb-... MCP_PORT=3001 ./target/release/parqtel-mcp-slack
 
 ### Docker Compose
 
-All MCP servers are included in the Docker Compose stack:
+All MCP servers are included in the Docker Compose stack (commented out by default). Uncomment the ones you need in `docker-compose.yml`, then start them:
 
 ```bash
-cd deploy/compose
-docker-compose up -d mcp-slack mcp-pagerduty mcp-jira
+# From project root
+docker compose up -d mcp-slack mcp-pagerduty mcp-jira
 ```
 
 ### Kubernetes (Helm)

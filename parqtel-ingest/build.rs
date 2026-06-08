@@ -3,10 +3,6 @@ use std::path::Path;
 
 fn main() -> Result<()> {
     let proto_dir = "proto";
-    
-    // Set PROTOC and PROTOC_INCLUDE from protobuf-src
-    std::env::set_var("PROTOC", protobuf_src::protoc());
-    std::env::set_var("PROTOC_INCLUDE", protobuf_src::include());
 
     let metrics_proto = Path::new(proto_dir).join("opentelemetry/proto/metrics/v1/metrics.proto");
     let common_proto = Path::new(proto_dir).join("opentelemetry/proto/common/v1/common.proto");

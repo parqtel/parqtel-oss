@@ -40,6 +40,9 @@ impl StorageModel {
     pub fn row_to_log<A: AsRef<dyn Array>>(chunk: &Chunk<A>, row: usize) -> Result<LogRecord> {
         reader::row_to_log(chunk, row)
     }
+    pub fn row_to_span<A: AsRef<dyn Array>>(chunk: &Chunk<A>, row: usize) -> Result<Span> {
+        reader::row_to_span(chunk, row)
+    }
 }
 
 #[cfg(test)]
@@ -90,6 +93,30 @@ mod tests {
         );
         let chunk = StorageModel::traces_to_chunk(&[span]).unwrap();
         assert_eq!(chunk.len(), 1);
+    }
+
+    #[test]
+    fn test_traces_roundtrip() {
+        let span = Span::new(
+            [1; 16], [2; 8], "state".into(), "my-span".into(), 2,
+            1000, 2000, LabelSet::try_from_iter(vec![("key", "val")]).unwrap_or_default(),
+            vec![], vec![],
+            SpanStatus { code: 1, message: "OK".into() }, [3; 8], 5,
+        );
+        let chunk = StorageModel::traces_to_chunk(&[span.clone()]).unwrap();
+        let decoded = StorageModel::row_to_span(&chunk, 0).unwrap();
+        assert_eq!(decoded.trace_id, [1; 16]);
+        assert_eq!(decoded.span_id, [2; 8]);
+        assert_eq!(decoded.parent_span_id, [3; 8]);
+        assert_eq!(decoded.name, "my-span");
+        assert_eq!(decoded.kind, 2);
+        assert_eq!(decoded.start_time_ns, 1000);
+        assert_eq!(decoded.end_time_ns, 2000);
+        assert_eq!(decoded.status.code, 1);
+        assert_eq!(decoded.status.message, "OK");
+        assert_eq!(decoded.flags, 5);
+        assert_eq!(decoded.trace_state, "state");
+        assert_eq!(decoded.attributes.get("key"), Some("val"));
     }
 
     #[test]

@@ -22,8 +22,12 @@ make perf-audit     # Release build + performance audit script
 ### Docker Compose (full stack)
 
 ```bash
-cd deploy/compose && cp .env.example .env
-docker compose up -d       # Parqtel + Grafana + Prometheus + MCP servers
+# First-time setup (copies .env.example → .env and starts the stack)
+make dev-setup
+
+# Or manually
+cp .env.example .env       # edit for MCP API keys (optional)
+docker compose up -d       # Parqtel + Grafana + Prometheus + load-generator
 docker compose down
 ```
 
@@ -36,9 +40,9 @@ cd e2e && go test -v ./...
 ### Helm Chart
 
 ```bash
-helm lint deploy/charts/parqtel
-helm template test deploy/charts/parqtel
-helm install parqtel deploy/charts/parqtel -n parqtel --create-namespace
+helm lint charts/parqtel
+helm template test charts/parqtel
+helm install parqtel charts/parqtel -n parqtel --create-namespace
 ```
 
 ## Architecture
@@ -73,14 +77,14 @@ Rust workspace with 14 crates:
 - **Image**: `gcr.io/distroless/cc-debian12:nonroot`, ~15MB, no shell
 - **Layer caching**: cargo-chef ensures dependency changes don't rebuild source
 
-### Docker Compose (`deploy/compose/`)
+### Docker Compose (`compose/`)
 
 - Network isolation: `frontend` (user-facing), `backend` (internal, no external access)
 - YAML anchors (`x-common`) for DRY service config
 - Resource limits, healthchecks (wget-based for distroless compatibility)
 - Configurable ports via `.env`
 
-### Helm Chart (`deploy/charts/parqtel/`)
+### Helm Chart (`charts/parqtel/`)
 
 - **values.schema.json** — Full JSON Schema validation, passes `helm lint`
 - **CI test values** — `ci/minimal-values.yaml`, `ci/default-values.yaml`, `ci/full-values.yaml`
