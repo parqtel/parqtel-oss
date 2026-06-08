@@ -192,6 +192,13 @@ header{height:48px;flex-shrink:0;background:var(--bg-void);border-bottom:1px sol
 #search-wrap{flex:1;max-width:500px;position:relative;}
 #search-box{height:32px;background:var(--bg-surface);border:1px solid var(--border-default);border-radius:6px;display:flex;align-items:center;}
 #search-box:focus-within{border-color:var(--border-focus);}
+#search-clear{background:none;border:none;color:var(--text-muted);cursor:pointer;font-size:14px;padding:0 8px;display:none;flex-shrink:0;line-height:1;}
+#search-clear:hover{color:var(--text-primary);}
+#search-box.has-value #search-clear{display:block;}
+#search-sig{font-size:9px;padding:2px 5px;border-radius:3px;margin-left:8px;flex-shrink:0;font-family:var(--mono);font-weight:700;text-transform:uppercase;letter-spacing:.05em;}
+#search-sig.metrics{color:var(--c0);background:rgba(0,245,212,.08);border:1px solid rgba(0,245,212,.2);}
+#search-sig.logs{color:var(--c2);background:rgba(255,204,0,.08);border:1px solid rgba(255,204,0,.2);}
+#search-sig.traces{color:var(--c1);background:rgba(68,136,255,.08);border:1px solid rgba(68,136,255,.2);}
 #search-input{color:var(--text-primary);caret-color:var(--accent);width:100%;background:transparent;border:none;outline:none;padding:0 10px;font-family:var(--mono);font-size:12px;}
 #ac-drop{display:none;position:absolute;top:calc(100% + 3px);left:0;right:0;background:var(--bg-surface);border:1px solid var(--border-default);border-radius:6px;z-index:200;max-height:260px;overflow-y:auto;box-shadow:0 8px 24px rgba(0,0,0,.6);}
 #ac-drop.open{display:block;}
@@ -342,7 +349,7 @@ header{height:48px;flex-shrink:0;background:var(--bg-void);border-bottom:1px sol
     <span style="font-weight:900;font-size:13px;letter-spacing:.08em;text-transform:uppercase;font-style:italic;">parqtel</span>
   </div>
   <div id="search-wrap">
-    <div id="search-box"><input type="text" id="search-input" autocomplete="off" spellcheck="false" placeholder="metric_name{} or service=&quot;name&quot;"></div>
+    <div id="search-box"><span id="search-sig" class="metrics">MTR</span><input type="text" id="search-input" autocomplete="off" spellcheck="false" placeholder="metric_name{} or service=&quot;name&quot;"><button id="search-clear" title="Clear search (Esc)" aria-label="Clear search">✕</button></div>
     <div id="ac-drop"></div>
   </div>
   <nav class="nav-tabs" id="signal-tabs" role="tablist" aria-label="Signal type">
@@ -517,7 +524,7 @@ function setRange(min,query=true){ST.range.presetMin=min;const now=new Date(),fr
 function clearPreset(){document.querySelectorAll('#quick-ranges .preset-btn').forEach(b=>b.classList.remove('active'));ST.range.presetMin=0;}
 
 /* STATUS */
-function setStatus(ok){ST.server.ok=ok;E.dot.className='sdot'+(ok?' ok':'');E.dot.title=ok?`${ST.server.names.length} metrics`:'Server unreachable';tx($('srv-status'),ok?'Connected':'Unreachable');}
+function setStatus(ok){ST.server.ok=ok;E.dot.className='sdot'+(ok?' ok':'');E.dot.title=ok?`Connected · ${ST.server.names.length} metrics indexed`:'Server unreachable';tx($('srv-status'),ok?'Connected':'Unreachable');}
 function showWarn(msg){tx(E.bannerTxt,msg);E.banner.classList.add('visible');E.banner.style.cssText='display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid rgba(251,191,36,.3);background:rgba(251,191,36,.07);padding:5px 16px;font-size:11px;font-family:var(--mono);color:var(--warn);';}
 function showError(msg){tx(E.bannerTxt,msg);E.banner.classList.add('visible');E.banner.style.cssText='display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid rgba(244,63,94,.3);background:rgba(244,63,94,.07);padding:5px 16px;font-size:11px;font-family:var(--mono);color:var(--err);';setStatus(false);}
 
@@ -685,10 +692,12 @@ function injectFilter(token){let cur=(E.qIn.value||'').trim();if(ST.sig==='metri
 /* AUTOCOMPLETE */
 let acIdx=-1,acList=[];
 async function prefetch(){try{const r=await fetch('/api/v1/label/__name__/values');if(r.ok){const j=await r.json();ST.server.names=(j.data||[]).sort();tx($('srv-count'),ST.server.names.length);}}catch{}try{const r=await fetch('/api/v1/labels');if(r.ok){const j=await r.json();ST.server.labels=(j.data||[]).filter(l=>l!=='__name__');}}catch{}}
-function showAC(){const raw=E.qIn.value,dd=E.acDrop;dd.innerHTML='';acList=[];acIdx=-1;const inBrace=raw.includes('{');const partial=(inBrace?raw.split(/[{,]/).pop().trim().split('=')[0]:raw).toLowerCase();const src=ST.sig==='logs'?['service_name','k8s_namespace','k8s_pod_name','severity_text','body','trace_id']:(!inBrace?ST.server.names:ST.server.labels);const matches=src.filter(n=>!partial||n.toLowerCase().includes(partial)).slice(0,12);if(!matches.length){dd.classList.remove('open');return;}const sec=document.createElement('div');const hdr=document.createElement('div');hdr.className='ac-hdr';hdr.textContent=!inBrace?'Metrics':'Labels';sec.appendChild(hdr);matches.forEach(m=>{acList.push(m);const it=document.createElement('div');it.className='ac-item';it.dataset.aci=acList.length-1;const txt=document.createElement('span');txt.textContent=m;const typ=document.createElement('span');typ.className='ac-type';typ.textContent=!inBrace?'metric':'key';it.append(txt,typ);sec.appendChild(it);});dd.appendChild(sec);dd.classList.add('open');}
+function showAC(){const raw=E.qIn.value,dd=E.acDrop;dd.innerHTML='';acList=[];acIdx=-1;if(ST.sig==='traces'){const traceHints=['(paste a trace_id to search)','(leave empty for recent traces)'];if(!raw){const sec=document.createElement('div');const hdr=document.createElement('div');hdr.className='ac-hdr';hdr.textContent='Traces';sec.appendChild(hdr);traceHints.forEach(h=>{const it=document.createElement('div');it.className='ac-item';it.style.color='var(--text-muted)';it.textContent=h;sec.appendChild(it);});dd.appendChild(sec);dd.classList.add('open');}else{dd.classList.remove('open');}return;}const inBrace=raw.includes('{');const partial=(inBrace?raw.split(/[{,]/).pop().trim().split('=')[0]:raw).toLowerCase();let src,hdrText,typText;if(ST.sig==='logs'){src=['service_name','k8s_namespace','k8s_pod_name','severity_text','body','trace_id'];hdrText='Log Fields';typText='field';}else{src=!inBrace?ST.server.names:ST.server.labels;hdrText=!inBrace?'Metrics':'Labels';typText=!inBrace?'metric':'key';}const matches=src.filter(n=>!partial||n.toLowerCase().includes(partial)).slice(0,12);if(!matches.length){dd.classList.remove('open');return;}const sec=document.createElement('div');const hdr=document.createElement('div');hdr.className='ac-hdr';hdr.textContent=hdrText;sec.appendChild(hdr);matches.forEach(m=>{acList.push(m);const it=document.createElement('div');it.className='ac-item';it.dataset.aci=acList.length-1;const txt=document.createElement('span');txt.textContent=m;const typ=document.createElement('span');typ.className='ac-type';typ.textContent=typText;it.append(txt,typ);sec.appendChild(it);});dd.appendChild(sec);dd.classList.add('open');}
 function closeAC(){E.acDrop.classList.remove('open');acIdx=-1;}
 function selAC(item){const raw=E.qIn.value,inBrace=raw.includes('{');if(inBrace){const p=Math.max(raw.lastIndexOf('{'),raw.lastIndexOf(','));E.qIn.value=raw.slice(0,p+1)+item+'=';}else{E.qIn.value=item;}closeAC();E.qIn.focus();}
-E.qIn.addEventListener('focus',showAC);E.qIn.addEventListener('input',()=>{showAC();clearPreset();});
+E.qIn.addEventListener('focus',showAC);E.qIn.addEventListener('input',()=>{showAC();updateSearchClear();clearPreset();});
+function updateSearchClear(){$('search-box').classList.toggle('has-value',!!E.qIn.value);}
+$('search-clear').addEventListener('click',()=>{E.qIn.value='';updateSearchClear();closeAC();runQuery();E.qIn.focus();});
 E.qIn.addEventListener('keydown',e=>{if(!E.acDrop.classList.contains('open')){if(e.key==='Enter'){e.preventDefault();runQuery();}return;}if(e.key==='ArrowDown'){e.preventDefault();acIdx=Math.min(acIdx+1,acList.length-1);}else if(e.key==='ArrowUp'){e.preventDefault();acIdx=Math.max(acIdx-1,-1);}else if(e.key==='Enter'||e.key==='Tab'){e.preventDefault();if(acIdx>=0)selAC(acList[acIdx]);else{closeAC();if(e.key==='Enter')runQuery();}return;}else if(e.key==='Escape'){closeAC();return;}E.acDrop.querySelectorAll('.ac-item').forEach((el,ii)=>el.classList.toggle('sel',ii===acIdx));});
 E.acDrop.addEventListener('click',e=>{const it=e.target.closest('.ac-item');if(it)selAC(acList[+it.dataset.aci]);});
 document.addEventListener('click',e=>{if(!E.qIn.contains(e.target)&&!E.acDrop.contains(e.target))closeAC();});
@@ -909,6 +918,12 @@ function switchSig(sig){
   E.kbHints.classList.toggle('visible',sig==='alerts');
   $('toolbar').style.display=sig==='alerts'?'none':'flex';
   $('volume-histogram').style.display=sig==='alerts'||sig==='traces'?'none':'block';
+  // Context-aware search: clear value, update placeholder + signal badge
+  E.qIn.value='';updateSearchClear();
+  const ph={metrics:'metric_name{} or service="name"',logs:'service="name" or severity="ERROR"',traces:'trace_id or leave empty for recent',alerts:''};
+  E.qIn.setAttribute('placeholder',ph[sig]||'');
+  const sigBadge=$('search-sig');sigBadge.className=sig;
+  const sigTxt={metrics:'MTR',logs:'LOG',traces:'TRC',alerts:'ALT'};sigBadge.textContent=sigTxt[sig]||'';
   if(sig==='alerts'){pollAlerts();if(!alertPollTmr)alertPollTmr=setInterval(pollAlerts,10000);}
   if(sig==='metrics'||sig==='logs'||sig==='traces')runQuery();
 }
