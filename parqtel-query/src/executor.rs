@@ -233,6 +233,13 @@ impl QueryExecutor {
         search: Option<String>,
     ) -> Result<LogQueryResult> {
         let start_time = Instant::now();
+
+        // Normalize matcher names: map user-friendly underscore names to OTel dotted names
+        let matchers: Vec<crate::matcher::LabelMatcher> = matchers.into_iter().map(|mut m| {
+            m.name = normalize_log_field_name(&m.name).to_string();
+            m
+        }).collect();
+
         let blocks = {
             let idx = self.log_index.read().await;
             idx.query(start_ns, end_ns, None)
@@ -282,9 +289,10 @@ impl QueryExecutor {
                 if !log.body.to_lowercase().contains(pattern) { continue; }
             }
 
-            // 3. Label matchers
-            let all_labels = log.attributes.merge(&log.resource_attributes);
-            if evaluate_matchers(&matchers, &all_labels, "") {
+            // 3. Label matchers — merge attributes with resource and include dedicated fields
+            let mut all_labels = log.attributes.merge(&log.resource_attributes);
+            all_labels = inject_dedicated_log_fields(all_labels, &log);
+            if evaluate_log_matchers(&matchers, &all_labels) {
                 total_logs_count += 1;
                 
                 if window_ns > 0 {
@@ -364,6 +372,7 @@ impl QueryExecutor {
 
     /// Returns distinct values for a given log field, sorted by frequency.
     pub async fn get_log_field_values(&self, field: &str, limit: usize) -> Vec<String> {
+        let normalized = normalize_log_field_name(field);
         let mut freq = BTreeMap::new();
         let blocks = {
             let idx = self.log_index.read().await;
@@ -375,11 +384,17 @@ impl QueryExecutor {
         for block in blocks {
             if let Ok(logs) = Scanner::scan_logs(vec![block], 0, i64::MAX).await {
                 for l in logs {
-                    let val = if let Some(v) = l.attributes.get(field) { Some(v) }
-                             else { l.resource_attributes.get(field) };
+                    let val = match normalized {
+                        "severity_text" => Some(l.severity_text.as_str().to_string()),
+                        "body" => Some(l.body.clone()),
+                        _ => l.attributes.get(normalized).map(|v| v.to_string())
+                                .or_else(|| l.resource_attributes.get(normalized).map(|v| v.to_string()))
+                                .or_else(|| l.attributes.get(field).map(|v| v.to_string()))
+                                .or_else(|| l.resource_attributes.get(field).map(|v| v.to_string())),
+                    };
                     
                     if let Some(v) = val {
-                        *freq.entry(v.to_string()).or_insert(0u64) += 1;
+                        *freq.entry(v).or_insert(0u64) += 1;
                     }
                 }
             }
@@ -632,6 +647,53 @@ fn apply_post_processing(
     }
 
     series
+}
+
+
+/// Maps user-friendly underscore field names to OTel dotted key names.
+/// Passes through names that don't need mapping (including already-dotted names).
+fn normalize_log_field_name(name: &str) -> &str {
+    match name {
+        "service_name" => "service.name",
+        "service_version" => "service.version",
+        "k8s_namespace" => "k8s.namespace.name",
+        "k8s_pod_name" => "k8s.pod.name",
+        "k8s_pod_uid" => "k8s.pod.uid",
+        "k8s_container_name" => "k8s.container.name",
+        "k8s_node_name" => "k8s.node.name",
+        other => other,
+    }
+}
+
+/// Evaluates log matchers trying both the normalized (dotted) name and the original name.
+fn evaluate_log_matchers(matchers: &[LabelMatcher], labels: &LabelSet) -> bool {
+    for m in matchers {
+        let val = labels.get(&m.name)
+            .or_else(|| labels.get(normalize_log_field_name(&m.name)));
+        if !m.matches(val) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Injects dedicated LogRecord struct fields into a LabelSet for matching.
+fn inject_dedicated_log_fields(labels: LabelSet, log: &parqtel_core::LogRecord) -> LabelSet {
+    let mut owned_pairs: Vec<(String, String)> = Vec::new();
+    if !log.severity_text.is_empty() {
+        owned_pairs.push(("severity_text".into(), log.severity_text.clone()));
+    }
+    if !log.body.is_empty() {
+        owned_pairs.push(("body".into(), log.body.clone()));
+    }
+    if log.trace_id != [0u8; 16] {
+        owned_pairs.push(("trace_id".into(), hex::encode(log.trace_id)));
+    }
+    if owned_pairs.is_empty() {
+        return labels;
+    }
+    let extra = LabelSet::try_from_iter(owned_pairs).unwrap_or_default();
+    labels.merge(&extra)
 }
 
 
