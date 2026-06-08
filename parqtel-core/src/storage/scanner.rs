@@ -1,4 +1,5 @@
 use std::fs::File;
+use std::sync::Arc;
 use crate::error::{Error, Result};
 use crate::models::storage::{BlockMetadata, StorageModel};
 use crate::models::metrics::DataPoint;
@@ -11,16 +12,21 @@ pub struct Scanner;
 
 impl Scanner {
     /// Scans a set of blocks for data points matching a metric and time range.
+    /// Uses bounded concurrency to prevent I/O saturation at scale.
     pub async fn scan(
         blocks: Vec<BlockMetadata>,
         metric_name: String,
         start_ns: i64,
         end_ns: i64,
     ) -> Result<Vec<DataPoint>> {
+        const MAX_CONCURRENT: usize = 16;
+        let sem = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT));
         let mut tasks = Vec::new();
-        for block in blocks {
+        for block in blocks.into_iter().take(128) {
             let m_name = metric_name.clone();
+            let permit = sem.clone();
             tasks.push(tokio::spawn(async move {
+                let _permit = permit.acquire().await;
                 Self::scan_block(block, m_name, start_ns, end_ns)
             }));
         }
@@ -62,14 +68,19 @@ impl Scanner {
     }
 
     /// Scans a set of blocks for log records matching a time range.
+    /// Uses bounded concurrency to prevent I/O saturation at scale.
     pub async fn scan_logs(
         blocks: Vec<BlockMetadata>,
         start_ns: i64,
         end_ns: i64,
     ) -> Result<Vec<LogRecord>> {
+        const MAX_CONCURRENT: usize = 16;
+        let sem = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT));
         let mut tasks = Vec::new();
-        for block in blocks {
+        for block in blocks.into_iter().take(128) {
+            let permit = sem.clone();
             tasks.push(tokio::spawn(async move {
+                let _permit = permit.acquire().await;
                 Self::scan_log_block(block, start_ns, end_ns)
             }));
         }
