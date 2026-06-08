@@ -14,16 +14,24 @@ use crate::models::labels::LabelSet;
 use crate::config::BlockConfig;
 use super::index::BlockIndex;
 
-/// Background task that merges small adjacent blocks.
+/// Background task that merges small adjacent blocks and implements tiered compaction.
+/// Tier strategy:
+///   - Small blocks (< 10K rows): merge up to 8 into one (existing behavior)
+///   - Warm tier (blocks > 6h old, same signal): merge adjacent into ~6h blocks
+///   - Cold tier (blocks > 24h old): merge adjacent into ~24h blocks
 pub struct Compactor;
 
 impl Compactor {
     pub async fn run_loop(index: Arc<RwLock<BlockIndex>>, config: BlockConfig) {
-        let interval = Duration::from_secs(300);
+        let interval = Duration::from_secs(config.compaction_interval_secs.max(60));
         loop {
             tokio::time::sleep(interval).await;
             if let Err(e) = Self::compact_once(&index, &config).await {
                 tracing::error!("Compaction failed: {}", e);
+            }
+            // Tiered compaction for warm/cold data
+            if let Err(e) = Self::compact_tiered(&index, &config).await {
+                tracing::error!("Tiered compaction failed: {}", e);
             }
         }
     }
@@ -66,6 +74,83 @@ impl Compactor {
 
         for path in original_paths {
             let _ = fs::remove_file(path);
+        }
+        Ok(())
+    }
+
+    /// Tiered compaction: merge adjacent blocks of the same signal type into larger time frames.
+    /// Warm tier (>6h old): target 6h blocks. Cold tier (>24h old): target 24h blocks.
+    async fn compact_tiered(index: &Arc<RwLock<BlockIndex>>, config: &BlockConfig) -> Result<()> {
+        let now_ns = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
+        let six_hours_ns = 6 * 3600 * 1_000_000_000i64;
+        let twenty_four_hours_ns = 24 * 3600 * 1_000_000_000i64;
+
+        // Process each signal type
+        for signal_type in &[SignalType::Metrics, SignalType::Logs, SignalType::Traces] {
+            let candidates = {
+                let idx = index.read().await;
+                let mut blocks: Vec<_> = idx.blocks.iter()
+                    .filter(|b| b.signal_type == *signal_type)
+                    .filter(|b| now_ns - b.end_timestamp_ns > six_hours_ns)
+                    .filter(|b| b.row_count < 500_000) // don't re-merge already large blocks
+                    .cloned()
+                    .collect();
+                blocks.sort_by_key(|b| b.start_timestamp_ns);
+                blocks
+            };
+
+            if candidates.len() < 2 { continue; }
+
+            // Find adjacent blocks within a 6h window that can be merged
+            let tier_window = if candidates.iter().any(|b| now_ns - b.end_timestamp_ns > twenty_four_hours_ns) {
+                twenty_four_hours_ns // cold tier: 24h target
+            } else {
+                six_hours_ns // warm tier: 6h target
+            };
+
+            let mut i = 0;
+            while i < candidates.len() {
+                let anchor_start = candidates[i].start_timestamp_ns;
+                let window_end = anchor_start + tier_window;
+                let mut group: Vec<BlockMetadata> = vec![candidates[i].clone()];
+                let mut j = i + 1;
+                while j < candidates.len() && candidates[j].start_timestamp_ns <= window_end {
+                    group.push(candidates[j].clone());
+                    j += 1;
+                }
+                i = j;
+
+                if group.len() < 2 { continue; }
+                // Limit merge group to 12 blocks per pass
+                group.truncate(12);
+
+                let paths: Vec<_> = group.iter().map(|b| b.path.clone()).collect();
+
+                if *signal_type == SignalType::Traces {
+                    // For traces, skip read_source_blocks (which only handles metrics/logs)
+                    // and just leave them for now — trace compaction reads spans directly
+                    continue;
+                }
+
+                let (all_points, all_logs) = Self::read_source_blocks(&group, *signal_type)?;
+                if all_points.is_empty() && all_logs.is_empty() { continue; }
+
+                let new_meta = Self::write_merged(config, *signal_type, all_points, all_logs)?;
+
+                let mut idx = index.write().await;
+                for path in &paths {
+                    idx.blocks.retain(|b| &b.path != path);
+                }
+                idx.blocks.push(new_meta);
+                idx.blocks.sort_by_key(|b| b.start_timestamp_ns);
+                idx.save()?;
+
+                for path in paths {
+                    let _ = fs::remove_file(path);
+                }
+                // Only one merge per signal per pass to avoid holding the lock too long
+                break;
+            }
         }
         Ok(())
     }
