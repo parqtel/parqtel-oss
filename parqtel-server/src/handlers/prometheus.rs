@@ -413,6 +413,12 @@ pub async fn search_traces(
             let span_json: Vec<serde_json::Value> = spans.iter().map(|s| {
                 let svc = s.attributes.get("service.name").unwrap_or("unknown").to_string();
                 let parent = hex::encode(s.parent_span_id);
+                let events: Vec<serde_json::Value> = s.events.iter().map(|e| {
+                    json!({ "time_ns": e.time_ns, "name": e.name, "attributes": e.attributes })
+                }).collect();
+                let links: Vec<serde_json::Value> = s.links.iter().map(|l| {
+                    json!({ "trace_id": hex::encode(l.trace_id), "span_id": hex::encode(l.span_id), "attributes": l.attributes })
+                }).collect();
                 let mut obj = json!({
                     "span_id": hex::encode(s.span_id),
                     "operation_name": s.name,
@@ -420,6 +426,10 @@ pub async fn search_traces(
                     "start_timestamp_ns": s.start_time_ns,
                     "end_timestamp_ns": s.end_time_ns,
                     "attributes": s.attributes,
+                    "status": { "code": s.status.code, "message": s.status.message },
+                    "kind": s.kind,
+                    "events": events,
+                    "links": links,
                 });
                 if s.parent_span_id != [0u8; 8] {
                     obj.as_object_mut().unwrap().insert("parent_span_id".into(), json!(parent));
