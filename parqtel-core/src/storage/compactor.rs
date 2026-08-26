@@ -14,6 +14,13 @@ use std::time::Duration;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
+/// Points grouped with their metric metadata, plus log records — the decoded
+/// contents of source blocks awaiting compaction.
+type DecodedBlocks = (
+    Vec<(String, MetricKind, LabelSet, DataPoint)>,
+    Vec<LogRecord>,
+);
+
 /// Background task that merges small adjacent blocks and implements tiered compaction.
 /// Tier strategy:
 ///   - Small blocks (< 10K rows): merge up to 8 into one (existing behavior)
@@ -176,10 +183,7 @@ impl Compactor {
     fn read_source_blocks(
         blocks: &[BlockMetadata],
         signal_type: SignalType,
-    ) -> Result<(
-        Vec<(String, MetricKind, LabelSet, DataPoint)>,
-        Vec<LogRecord>,
-    )> {
+    ) -> Result<DecodedBlocks> {
         let mut all_points = Vec::new();
         let mut all_logs = Vec::new();
 
