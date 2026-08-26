@@ -207,7 +207,7 @@ impl IngestionService {
     }
 
     pub async fn check_and_flush(&self) -> Result<()> {
-        let _ = self.rotator.lock().await.check_and_flush().await?;
+        self.rotator.lock().await.check_and_flush().await?;
         Ok(())
     }
 
@@ -297,7 +297,7 @@ impl LogIngestionService {
     }
 
     pub async fn check_and_flush(&self) -> Result<()> {
-        let _ = self.rotator.lock().await.check_and_flush().await?;
+        self.rotator.lock().await.check_and_flush().await?;
         Ok(())
     }
 
@@ -403,12 +403,10 @@ impl TraceIngestionService {
 
     async fn process_traces(&self, spans: Vec<Span>) -> Result<u64> {
         let count = spans.len() as u64;
-        let mut flushed = false;
+        // Traces have no memory buffer, so the flush signal is not needed.
         let mut rotator = self.rotator.lock().await;
         for s in spans {
-            if rotator.push(s).await? {
-                flushed = true;
-            }
+            let _flushed = rotator.push(s).await?;
         }
         rotator.check_and_flush().await?;
         self.stats
@@ -418,7 +416,7 @@ impl TraceIngestionService {
     }
 
     pub async fn check_and_flush(&self) -> Result<()> {
-        let _ = self.rotator.lock().await.check_and_flush().await?;
+        self.rotator.lock().await.check_and_flush().await?;
         Ok(())
     }
 

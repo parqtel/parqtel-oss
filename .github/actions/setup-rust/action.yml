@@ -1,0 +1,44 @@
+name: 'Setup Parqtel Rust Build'
+description: >
+  Rust toolchain + protoc (required by parqtel-ingest build.rs / prost-build)
+  + shared Swatinem cache. Use in every job that compiles the workspace.
+
+inputs:
+  toolchain:
+    description: 'Rust toolchain to install (stable, 1.86, nightly…)'
+    required: false
+    default: stable
+  components:
+    description: 'Extra rustup components (e.g. "rustfmt, clippy")'
+    required: false
+    default: ''
+  targets:
+    description: 'Additional rustup targets (cross-compile, e.g. aarch64-unknown-linux-gnu)'
+    required: false
+    default: ''
+  cache-key:
+    description: 'Extra key suffix for Swatinem/rust-cache'
+    required: false
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    - uses: dtolnay/rust-toolchain@master
+      with:
+        toolchain: ${{ inputs.toolchain }}
+        components: ${{ inputs.components }}
+        targets: ${{ inputs.targets }}
+
+    # prost-build shells out to protoc when compiling the OTLP protobufs;
+    # runner images no longer ship it preinstalled.
+    - name: Install protoc
+      shell: bash
+      run: |
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq protobuf-compiler
+        protoc --version
+
+    - uses: Swatinem/rust-cache@v2
+      with:
+        key: ${{ inputs.cache-key }}

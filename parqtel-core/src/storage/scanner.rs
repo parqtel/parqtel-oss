@@ -311,7 +311,7 @@ impl Scanner {
                     if num_vals > 0 && col.uncompressed_size() > 0 {
                         // Basic sanity: uncompressed data should be at least num_values * size
                         // (with some tolerance for page headers/encoding overhead)
-                        let min_expected_bytes = (num_vals as i64) * (declared_len as i64);
+                        let min_expected_bytes = num_vals * (declared_len as i64);
                         if col.uncompressed_size() < min_expected_bytes / 2 {
                             tracing::warn!(
                                 "Corrupt FixedLenByteArray column in {:?}: declared_len={}, num_values={}, uncompressed={} — skipping block",
