@@ -3,10 +3,10 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::config::BlockConfig;
-use crate::error::{Error, Result};
 use super::parquet::ParquetStorageEngine;
 use super::StorageEngine;
+use crate::config::BlockConfig;
+use crate::error::{Error, Result};
 
 type Factory = Box<dyn Fn(BlockConfig) -> Arc<dyn StorageEngine> + Send + Sync>;
 
@@ -17,7 +17,9 @@ pub struct StorageEngineRegistry {
 
 impl StorageEngineRegistry {
     pub fn new() -> Self {
-        Self { factories: HashMap::new() }
+        Self {
+            factories: HashMap::new(),
+        }
     }
 
     /// Register a custom backend factory.
@@ -30,7 +32,9 @@ impl StorageEngineRegistry {
 
     /// Register the built-in Parquet backend.
     pub fn register_parquet(&mut self) {
-        self.register("parquet", |config| Arc::new(ParquetStorageEngine::new(config)));
+        self.register("parquet", |config| {
+            Arc::new(ParquetStorageEngine::new(config))
+        });
     }
 
     /// Build a storage engine by backend name.
@@ -61,7 +65,6 @@ impl Default for StorageEngineRegistry {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -77,7 +80,9 @@ mod tests {
     #[test]
     fn test_register_custom_backend() {
         let mut reg = StorageEngineRegistry::new();
-        reg.register("custom", |config| Arc::new(ParquetStorageEngine::new(config)));
+        reg.register("custom", |config| {
+            Arc::new(ParquetStorageEngine::new(config))
+        });
         assert!(reg.backends().contains(&"custom"));
     }
 
@@ -85,8 +90,13 @@ mod tests {
     fn test_build_custom_backend() {
         let dir = tempdir().unwrap();
         let mut reg = StorageEngineRegistry::new();
-        reg.register("custom", |config| Arc::new(ParquetStorageEngine::new(config)));
-        let config = BlockConfig { data_dir: dir.path().to_path_buf(), ..Default::default() };
+        reg.register("custom", |config| {
+            Arc::new(ParquetStorageEngine::new(config))
+        });
+        let config = BlockConfig {
+            data_dir: dir.path().to_path_buf(),
+            ..Default::default()
+        };
         assert!(reg.build("custom", config).is_ok());
     }
 
@@ -96,14 +106,20 @@ mod tests {
         let config = BlockConfig::default();
         let result = reg.build("unknown", config);
         assert!(result.is_err());
-        assert!(result.err().unwrap().to_string().contains("unsupported storage backend"));
+        assert!(result
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("unsupported storage backend"));
     }
 
     #[test]
     fn test_backends_list() {
         let mut reg = StorageEngineRegistry::new();
         reg.register_parquet();
-        reg.register("lance", |config| Arc::new(ParquetStorageEngine::new(config)));
+        reg.register("lance", |config| {
+            Arc::new(ParquetStorageEngine::new(config))
+        });
         let backends = reg.backends();
         assert!(backends.contains(&"parquet"));
         assert!(backends.contains(&"lance"));

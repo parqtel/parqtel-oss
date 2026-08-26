@@ -1,7 +1,7 @@
+use crate::rule::types::AlertRule;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use crate::rule::types::AlertRule;
 
 /// In-memory store of alert rules with CRUD operations.
 #[derive(Debug, Clone)]
@@ -29,7 +29,13 @@ impl AlertRuleRegistry {
     }
 
     pub async fn list_enabled(&self) -> Vec<AlertRule> {
-        self.rules.read().await.values().filter(|r| r.enabled).cloned().collect()
+        self.rules
+            .read()
+            .await
+            .values()
+            .filter(|r| r.enabled)
+            .cloned()
+            .collect()
     }
 
     pub async fn list_all(&self) -> Vec<AlertRule> {

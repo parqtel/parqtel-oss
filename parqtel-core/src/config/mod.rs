@@ -12,8 +12,8 @@ pub use server::ServerConfig;
 pub use storage::{BlockConfig, LogBlockConfig, RetentionConfig};
 pub use telemetry::{K8sProviderConfig, TelemetryConfig};
 
-use serde::{Deserialize, Serialize};
 use crate::error::{Error, Result};
+use serde::{Deserialize, Serialize};
 
 /// Global configuration for parqtel.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -46,10 +46,16 @@ impl Config {
 
         let valid_codecs = ["zstd", "snappy", "lz4", "none"];
         if !valid_codecs.contains(&self.storage.compression.as_str()) {
-            errors.push(format!("storage.compression must be one of: {}", valid_codecs.join(", ")));
+            errors.push(format!(
+                "storage.compression must be one of: {}",
+                valid_codecs.join(", ")
+            ));
         }
         if !valid_codecs.contains(&self.logs.compression.as_str()) {
-            errors.push(format!("logs.compression must be one of: {}", valid_codecs.join(", ")));
+            errors.push(format!(
+                "logs.compression must be one of: {}",
+                valid_codecs.join(", ")
+            ));
         }
 
         let valid_formats = ["text", "json"];

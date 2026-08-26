@@ -1,17 +1,13 @@
-use axum::{extract::State, response::IntoResponse, Json, http::StatusCode};
-use serde_json::json;
 use crate::state::AppState;
+use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
+use serde_json::json;
 
-pub async fn list_recording_rules(
-    State(state): State<AppState>,
-) -> impl IntoResponse {
+pub async fn list_recording_rules(State(state): State<AppState>) -> impl IntoResponse {
     let groups = state.inner.pipeline_registry.get_groups();
     Json(json!({"status": "success", "data": groups}))
 }
 
-pub async fn list_pipelines(
-    State(state): State<AppState>,
-) -> impl IntoResponse {
+pub async fn list_pipelines(State(state): State<AppState>) -> impl IntoResponse {
     let pipelines = state.inner.pipeline_registry.get_pipelines();
     Json(json!({"status": "success", "data": pipelines}))
 }
@@ -21,7 +17,10 @@ pub async fn create_recording_rule(
     Json(group): Json<parqtel_pipeline::rule::schema::RecordingRuleGroup>,
 ) -> impl IntoResponse {
     state.inner.pipeline_registry.add_group(group.clone());
-    (StatusCode::CREATED, Json(json!({"status": "success", "data": group})))
+    (
+        StatusCode::CREATED,
+        Json(json!({"status": "success", "data": group})),
+    )
 }
 
 pub async fn create_pipeline(
@@ -29,7 +28,10 @@ pub async fn create_pipeline(
     Json(pipeline): Json<parqtel_pipeline::rule::schema::PipelineDefinition>,
 ) -> impl IntoResponse {
     state.inner.pipeline_registry.add_pipeline(pipeline.clone());
-    (StatusCode::CREATED, Json(json!({"status": "success", "data": pipeline})))
+    (
+        StatusCode::CREATED,
+        Json(json!({"status": "success", "data": pipeline})),
+    )
 }
 
 pub async fn delete_recording_rule(

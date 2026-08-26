@@ -102,6 +102,8 @@ Benchmarked with sustained 1000 samples/sec (metrics + logs + traces) for 15 min
 | **Immediate queryability** | 1.7ms (in-memory buffer) |
 | **Data durability** | ✅ Survives container restart |
 
+Hot-path optimizations (non-blocking flushes, row-group pruning, label caching) are detailed in [docs/benchmarks/PERFORMANCE.md](docs/benchmarks/PERFORMANCE.md) — scan throughput +39%, narrow-range queries decode only matching row groups, and Parquet writes no longer stall async workers.
+
 ## Architecture
 
 ```

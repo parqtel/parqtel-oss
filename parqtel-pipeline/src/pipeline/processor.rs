@@ -32,11 +32,17 @@ impl Stage for RegexProcessor {
     }
 
     fn process(&self, mut record: SignalRecord, _extracted: &mut Vec<Metric>) -> StageResult {
-        let source = record.fields.get(&self.source_field).cloned().unwrap_or_default();
+        let source = record
+            .fields
+            .get(&self.source_field)
+            .cloned()
+            .unwrap_or_default();
         if let Some(caps) = self.regex.captures(&source) {
             for (target_field, capture_name) in &self.target_fields {
                 if let Some(m) = caps.name(capture_name) {
-                    record.fields.insert(target_field.clone(), m.as_str().to_string());
+                    record
+                        .fields
+                        .insert(target_field.clone(), m.as_str().to_string());
                 }
             }
         } else if self.on_parse_failure == ParseFailureAction::Drop {

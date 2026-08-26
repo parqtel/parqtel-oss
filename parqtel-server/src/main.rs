@@ -1,24 +1,27 @@
+use crate::router::build_router;
+use crate::state::AppState;
+use clap::{Parser, Subcommand};
+use figment::{
+    providers::{Env, Format, Serialized, Toml},
+    Figment,
+};
+use flate2::write::GzEncoder;
+use flate2::Compression;
+use parqtel_core::engine::registry::StorageEngineRegistry;
+use parqtel_core::{start_maintenance, BlockIndex, Config, StorageEngine};
+use parqtel_ingest::{IngestionService, LogIngestionService, TraceIngestionService};
+use parqtel_query::QueryExecutor;
+use sha2::{Digest, Sha256};
+use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use parqtel_core::{BlockIndex, Config, StorageEngine, start_maintenance};
-use parqtel_core::engine::registry::StorageEngineRegistry;
-use parqtel_ingest::{IngestionService, LogIngestionService, TraceIngestionService};
-use parqtel_query::QueryExecutor;
-use crate::state::AppState;
-use crate::router::build_router;
-use std::io::Write;
-use flate2::Compression;
-use flate2::write::GzEncoder;
-use sha2::{Sha256, Digest};
-use clap::{Parser, Subcommand};
-use figment::{Figment, providers::{Format, Toml, Env, Serialized}};
 
-mod state;
 mod handlers;
-mod router;
-mod telemetry;
 mod metrics;
+mod router;
+mod state;
+mod telemetry;
 #[cfg(test)]
 mod tests;
 
@@ -83,7 +86,7 @@ async fn main() -> anyhow::Result<()> {
     } else if std::path::Path::new("config/default.toml").exists() {
         figment = figment.merge(Toml::file("config/default.toml"));
     }
-    
+
     figment = figment.merge(Env::prefixed("PARQTEL_").split("__"));
 
     // Apply CLI overrides
@@ -129,27 +132,33 @@ async fn main() -> anyhow::Result<()> {
         Commands::Serve => run_server(config, index, log_index).await?,
         Commands::Compact => run_compact(config, index, log_index).await?,
         Commands::Inspect => run_inspect(index, log_index).await?,
-        Commands::Export { metric, start, end, output } => run_export(config, index, metric, start, end, output).await?,
+        Commands::Export {
+            metric,
+            start,
+            end,
+            output,
+        } => run_export(config, index, metric, start, end, output).await?,
     }
 
     Ok(())
 }
 
 async fn run_server(
-    config: Config, 
+    config: Config,
     index: Arc<tokio::sync::RwLock<BlockIndex>>,
     log_index: Arc<tokio::sync::RwLock<BlockIndex>>,
 ) -> anyhow::Result<()> {
     // Build storage engine via registry
     let registry = StorageEngineRegistry::default();
-    let storage_engine: Arc<dyn StorageEngine> = registry.build(&config.storage.backend, config.storage.clone())
+    let storage_engine: Arc<dyn StorageEngine> = registry
+        .build(&config.storage.backend, config.storage.clone())
         .map_err(|e| anyhow::anyhow!("{}", e))?;
 
     // Prepare UI assets
     let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
     encoder.write_all(UI_HTML.as_bytes())?;
     let ui_content = encoder.finish()?;
-    
+
     let mut hasher = Sha256::new();
     hasher.update(UI_HTML.as_bytes());
     let ui_etag = format!("\"{}\"", hex::encode(hasher.finalize()));
@@ -160,7 +169,9 @@ async fn run_server(
     let index_task = tokio::spawn(async move {
         while let Some(meta) = rx.recv().await {
             let mut idx = idx_clone.write().await;
-            if let Err(e) = idx.add(meta) { tracing::error!("Failed to add block to index: {}", e); }
+            if let Err(e) = idx.add(meta) {
+                tracing::error!("Failed to add block to index: {}", e);
+            }
         }
     });
 
@@ -170,15 +181,17 @@ async fn run_server(
     let log_index_task = tokio::spawn(async move {
         while let Some(meta) = log_rx.recv().await {
             let mut idx = log_idx_clone.write().await;
-            if let Err(e) = idx.add(meta) { tracing::error!("Failed to add log block to index: {}", e); }
+            if let Err(e) = idx.add(meta) {
+                tracing::error!("Failed to add log block to index: {}", e);
+            }
         }
     });
 
     // Create shared in-memory buffer for stream-queryable data
     let memory_buffer = parqtel_core::MemoryBuffer::new();
 
-    let ingestion_service = IngestionService::new(config.storage.clone(), tx)
-        .with_memory_buffer(memory_buffer.clone());
+    let ingestion_service =
+        IngestionService::new(config.storage.clone(), tx).with_memory_buffer(memory_buffer.clone());
     let log_ingestion_service = LogIngestionService::new(config.logs.clone(), log_tx)
         .with_memory_buffer(memory_buffer.clone());
     let (trace_tx, mut trace_rx) = mpsc::unbounded_channel();
@@ -195,11 +208,18 @@ async fn run_server(
     let trace_index_task = tokio::spawn(async move {
         while let Some(meta) = trace_rx.recv().await {
             let mut idx = trace_idx_clone.write().await;
-            if let Err(e) = idx.add(meta) { tracing::error!("Failed to add trace block to index: {}", e); }
+            if let Err(e) = idx.add(meta) {
+                tracing::error!("Failed to add trace block to index: {}", e);
+            }
         }
     });
 
-    let query_executor = QueryExecutor::with_trace_index(index.clone(), log_index.clone(), trace_index.clone(), memory_buffer.clone());
+    let query_executor = QueryExecutor::with_trace_index(
+        index.clone(),
+        log_index.clone(),
+        trace_index.clone(),
+        memory_buffer.clone(),
+    );
 
     start_maintenance(index.clone(), config.storage.clone());
     start_maintenance(log_index.clone(), config.logs.clone().into());
@@ -209,13 +229,14 @@ async fn run_server(
         ingestion_service,
         log_ingestion_service,
         trace_ingestion_service,
-        query_executor, 
+        query_executor,
         index.clone(),
         memory_buffer.clone(),
         config.clone(),
         ui_content,
         ui_etag,
-    ).await;
+    )
+    .await;
 
     // Background flush task
     let state_clone = state.clone();
@@ -224,8 +245,16 @@ async fn run_server(
         loop {
             interval.tick().await;
             let _ = state_clone.inner.ingestion_service.check_and_flush().await;
-            let _ = state_clone.inner.log_ingestion_service.check_and_flush().await;
-            let _ = state_clone.inner.trace_ingestion_service.check_and_flush().await;
+            let _ = state_clone
+                .inner
+                .log_ingestion_service
+                .check_and_flush()
+                .await;
+            let _ = state_clone
+                .inner
+                .trace_ingestion_service
+                .check_and_flush()
+                .await;
         }
     });
 
@@ -238,16 +267,39 @@ async fn run_server(
             let rules = state_clone.inner.alert_registry.list_enabled().await;
             for rule in rules {
                 let parsed = parqtel_query::parse_query(&rule.query);
-                let (metric_name, matchers, aggregation, quantile, topk_n, group_by, group_without, label_replace, scalar_param, clamp) = match parsed {
+                let (
+                    metric_name,
+                    matchers,
+                    aggregation,
+                    quantile,
+                    topk_n,
+                    group_by,
+                    group_without,
+                    label_replace,
+                    scalar_param,
+                    clamp,
+                ) = match parsed {
                     Ok(p) => p,
                     Err(_) => continue,
                 };
                 let now_ns = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
                 let start_ns = now_ns - 300_000_000_000; // 5 min lookback
                 let plan = parqtel_query::QueryPlan::new_full(
-                    metric_name, matchers, start_ns, now_ns, None,
-                    100, 1000, aggregation, quantile,
-                    topk_n, group_by, group_without, label_replace, scalar_param, clamp,
+                    metric_name,
+                    matchers,
+                    start_ns,
+                    now_ns,
+                    None,
+                    100,
+                    1000,
+                    aggregation,
+                    quantile,
+                    topk_n,
+                    group_by,
+                    group_without,
+                    label_replace,
+                    scalar_param,
+                    clamp,
                 );
                 let plan = match plan {
                     Ok(p) => p,
@@ -256,12 +308,16 @@ async fn run_server(
                 if let Ok(qr) = state_clone.inner.query_executor.execute(plan).await {
                     for series in &qr.series {
                         if let Some(sample) = series.samples.last() {
-                            let labels = series.labels.iter()
+                            let labels = series
+                                .labels
+                                .iter()
                                 .map(|(k, v)| (k.to_string(), v.to_string()))
                                 .collect();
-                            state_clone.inner.alert_engine.evaluate_rule_with_value(
-                                &rule, sample.value, labels,
-                            ).await;
+                            state_clone
+                                .inner
+                                .alert_engine
+                                .evaluate_rule_with_value(&rule, sample.value, labels)
+                                .await;
                         }
                     }
                 }
@@ -273,26 +329,28 @@ async fn run_server(
     let addr = config.server.bind_address.clone();
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     tracing::info!("parqtel server listening on {}", addr);
-    
+
     let shutdown = async {
         tokio::signal::ctrl_c().await.unwrap_or_default();
     };
 
-    axum::serve(listener, router).with_graceful_shutdown(shutdown).await?;
+    axum::serve(listener, router)
+        .with_graceful_shutdown(shutdown)
+        .await?;
 
     tracing::info!("Shutting down gracefully...");
     flush_task.abort();
     alert_eval_task.abort();
-    
+
     state.inner.ingestion_service.shutdown().await?;
     state.inner.log_ingestion_service.shutdown().await?;
     state.inner.trace_ingestion_service.shutdown().await?;
-    
+
     drop(state);
     let _ = index_task.await;
     let _ = log_index_task.await;
     let _ = trace_index_task.await;
-    
+
     index.read().await.save()?;
     log_index.read().await.save()?;
     trace_index.read().await.save()?;
@@ -301,12 +359,19 @@ async fn run_server(
     Ok(())
 }
 
-async fn run_compact(_config: Config, _idx: Arc<tokio::sync::RwLock<BlockIndex>>, _lidx: Arc<tokio::sync::RwLock<BlockIndex>>) -> anyhow::Result<()> {
+async fn run_compact(
+    _config: Config,
+    _idx: Arc<tokio::sync::RwLock<BlockIndex>>,
+    _lidx: Arc<tokio::sync::RwLock<BlockIndex>>,
+) -> anyhow::Result<()> {
     tracing::info!("Running one-off compaction...");
     Ok(())
 }
 
-async fn run_inspect(index: Arc<tokio::sync::RwLock<BlockIndex>>, log_index: Arc<tokio::sync::RwLock<BlockIndex>>) -> anyhow::Result<()> {
+async fn run_inspect(
+    index: Arc<tokio::sync::RwLock<BlockIndex>>,
+    log_index: Arc<tokio::sync::RwLock<BlockIndex>>,
+) -> anyhow::Result<()> {
     let idx = index.read().await;
     let lidx = log_index.read().await;
     let summary = serde_json::json!({
@@ -327,12 +392,12 @@ async fn run_inspect(index: Arc<tokio::sync::RwLock<BlockIndex>>, log_index: Arc
 }
 
 async fn run_export(
-    _config: Config, 
-    index: Arc<tokio::sync::RwLock<BlockIndex>>, 
-    metric: String, 
-    start: String, 
-    end: String, 
-    output: PathBuf
+    _config: Config,
+    index: Arc<tokio::sync::RwLock<BlockIndex>>,
+    metric: String,
+    start: String,
+    end: String,
+    output: PathBuf,
 ) -> anyhow::Result<()> {
     let start_dt = chrono::DateTime::parse_from_rfc3339(&start)?;
     let end_dt = chrono::DateTime::parse_from_rfc3339(&end)?;
@@ -345,11 +410,17 @@ async fn run_export(
     };
 
     let points = parqtel_core::storage::Scanner::scan(blocks, metric, start_ns, end_ns).await?;
-    
+
     let mut file = std::fs::File::create(output)?;
     writeln!(file, "timestamp_ns,value,labels")?;
     for p in &points {
-        writeln!(file, "{},{},{:?}", p.timestamp_ns, v_to_f64(&p.value), p.labels)?;
+        writeln!(
+            file,
+            "{},{},{:?}",
+            p.timestamp_ns,
+            v_to_f64(&p.value),
+            p.labels
+        )?;
     }
 
     println!("Exported {} points", points.len());

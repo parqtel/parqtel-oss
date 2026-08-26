@@ -6,7 +6,9 @@ pub struct RuleValidator;
 impl RuleValidator {
     pub fn validate_group(&self, group: &RecordingRuleGroup) -> crate::Result<()> {
         if group.name.is_empty() {
-            return Err(crate::Error::Validation("Group name cannot be empty".into()));
+            return Err(crate::Error::Validation(
+                "Group name cannot be empty".into(),
+            ));
         }
         parse_duration(&group.interval)?;
         for rule in &group.rules {
@@ -67,7 +69,9 @@ pub fn parse_duration(s: &str) -> crate::Result<u64> {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
-    use crate::rule::schema::{RecordingRule, RecordingRuleGroup, PipelineDefinition, PipelineStage, StageType};
+    use crate::rule::schema::{
+        PipelineDefinition, PipelineStage, RecordingRule, RecordingRuleGroup, StageType,
+    };
     use std::collections::BTreeMap;
 
     #[test]

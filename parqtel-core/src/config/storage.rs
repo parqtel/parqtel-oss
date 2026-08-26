@@ -1,5 +1,5 @@
-use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 
 /// Configuration for storage blocks (Parquet files).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -23,7 +23,9 @@ pub struct BlockConfig {
     pub row_group_size: usize,
 }
 
-fn default_backend() -> String { "parquet".into() }
+fn default_backend() -> String {
+    "parquet".into()
+}
 
 impl Default for BlockConfig {
     fn default() -> Self {

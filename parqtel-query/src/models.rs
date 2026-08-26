@@ -1,5 +1,5 @@
-use serde::{Deserialize, Serialize};
 use parqtel_core::LabelSet;
+use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
 /// A single data point in a query result.
@@ -79,13 +79,19 @@ mod tests {
 
     #[test]
     fn test_sample_timestamp_seconds() {
-        let s = Sample { timestamp_ns: 1_500_000_000_000_000_000, value: 42.0 };
+        let s = Sample {
+            timestamp_ns: 1_500_000_000_000_000_000,
+            value: 42.0,
+        };
         assert_eq!(s.timestamp_seconds(), 1_500_000_000.0);
     }
 
     #[test]
     fn test_sample_timestamp_seconds_zero() {
-        let s = Sample { timestamp_ns: 0, value: 0.0 };
+        let s = Sample {
+            timestamp_ns: 0,
+            value: 0.0,
+        };
         assert_eq!(s.timestamp_seconds(), 0.0);
     }
 
@@ -93,7 +99,10 @@ mod tests {
     fn test_time_series_serialization() {
         let ts = TimeSeries {
             labels: LabelSet::try_from_iter(vec![("env", "prod")]).unwrap(),
-            samples: vec![Sample { timestamp_ns: 100, value: 1.0 }],
+            samples: vec![Sample {
+                timestamp_ns: 100,
+                value: 1.0,
+            }],
         };
         let json = serde_json::to_string(&ts).unwrap();
         let decoded: TimeSeries = serde_json::from_str(&json).unwrap();

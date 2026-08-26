@@ -1,5 +1,5 @@
-use serde::{Deserialize, Serialize};
 use crate::models::labels::LabelSet;
+use serde::{Deserialize, Serialize};
 
 /// Represents a single span in a distributed trace, compatible with the OTLP span data model.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -117,10 +117,22 @@ mod tests {
     #[test]
     fn test_span_creation() {
         let span = Span::new(
-            [0; 16], [0; 8], "tracestate".into(), "test-span".into(),
-            1, 1000, 2000, LabelSet::default(), vec![], vec![],
-            SpanStatus { code: 0, message: "".into() },
-            [0; 8], 0,
+            [0; 16],
+            [0; 8],
+            "tracestate".into(),
+            "test-span".into(),
+            1,
+            1000,
+            2000,
+            LabelSet::default(),
+            vec![],
+            vec![],
+            SpanStatus {
+                code: 0,
+                message: "".into(),
+            },
+            [0; 8],
+            0,
         );
         assert_eq!(span.name, "test-span");
         assert_eq!(span.duration_ns(), 1000);
@@ -129,10 +141,22 @@ mod tests {
     #[test]
     fn test_span_duration_ms() {
         let span = Span::new(
-            [0; 16], [0; 8], "tracestate".into(), "test-span".into(),
-            1, 1_000_000_000, 2_500_000_000, LabelSet::default(), vec![], vec![],
-            SpanStatus { code: 0, message: "".into() },
-            [0; 8], 0,
+            [0; 16],
+            [0; 8],
+            "tracestate".into(),
+            "test-span".into(),
+            1,
+            1_000_000_000,
+            2_500_000_000,
+            LabelSet::default(),
+            vec![],
+            vec![],
+            SpanStatus {
+                code: 0,
+                message: "".into(),
+            },
+            [0; 8],
+            0,
         );
         assert_eq!(span.duration_ms(), 1500.0);
     }
@@ -140,10 +164,22 @@ mod tests {
     #[test]
     fn test_span_serialization() {
         let span = Span::new(
-            [0; 16], [0; 8], "tracestate".into(), "test-span".into(),
-            1, 1000, 2000, LabelSet::default(), vec![], vec![],
-            SpanStatus { code: 0, message: "".into() },
-            [0; 8], 0,
+            [0; 16],
+            [0; 8],
+            "tracestate".into(),
+            "test-span".into(),
+            1,
+            1000,
+            2000,
+            LabelSet::default(),
+            vec![],
+            vec![],
+            SpanStatus {
+                code: 0,
+                message: "".into(),
+            },
+            [0; 8],
+            0,
         );
         let json = serde_json::to_string(&span).unwrap();
         let decoded: Span = serde_json::from_str(&json).unwrap();

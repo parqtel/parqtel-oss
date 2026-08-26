@@ -17,7 +17,10 @@ struct AlertResponse<T: Serialize> {
 }
 
 fn ok_json<T: Serialize>(data: T) -> impl IntoResponse {
-    Json(AlertResponse { status: "success", data })
+    Json(AlertResponse {
+        status: "success",
+        data,
+    })
 }
 
 /// GET /api/v1/alerts
@@ -27,16 +30,21 @@ pub async fn list_alerts(State(state): State<AppState>) -> impl IntoResponse {
 }
 
 /// GET /api/v1/alerts/:id
-pub async fn get_alert(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> impl IntoResponse {
+pub async fn get_alert(State(state): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
     let Ok(ulid) = id.parse::<Ulid>() else {
-        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "invalid alert id"}))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "invalid alert id"})),
+        )
+            .into_response();
     };
     match state.inner.alert_store.get_by_id(ulid).await {
         Some(alert) => ok_json(alert).into_response(),
-        None => (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "alert not found"}))).into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "alert not found"})),
+        )
+            .into_response(),
     }
 }
 
@@ -47,15 +55,28 @@ pub async fn acknowledge_alert(
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
     let Ok(ulid) = id.parse::<Ulid>() else {
-        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "invalid alert id"}))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "invalid alert id"})),
+        )
+            .into_response();
     };
     let Some(mut instance) = state.inner.alert_store.get_by_id(ulid).await else {
-        return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "alert not found"}))).into_response();
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "alert not found"})),
+        )
+            .into_response();
     };
-    let by = body.get("by").and_then(|v| v.as_str()).unwrap_or("anonymous").to_string();
-    if let Some((new_state, transition)) =
-        AlertStateMachine::transition(instance.state, TransitionEvent::Acknowledged { by: by.clone() })
-    {
+    let by = body
+        .get("by")
+        .and_then(|v| v.as_str())
+        .unwrap_or("anonymous")
+        .to_string();
+    if let Some((new_state, transition)) = AlertStateMachine::transition(
+        instance.state,
+        TransitionEvent::Acknowledged { by: by.clone() },
+    ) {
         instance.state = new_state;
         instance.acknowledged_by = Some(by);
         instance.updated_at = chrono::Utc::now();
@@ -63,7 +84,11 @@ pub async fn acknowledge_alert(
         state.inner.alert_store.save(&instance).await;
         ok_json(instance).into_response()
     } else {
-        (StatusCode::CONFLICT, Json(serde_json::json!({"error": "invalid state transition"}))).into_response()
+        (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({"error": "invalid state transition"})),
+        )
+            .into_response()
     }
 }
 
@@ -73,10 +98,18 @@ pub async fn resolve_alert(
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     let Ok(ulid) = id.parse::<Ulid>() else {
-        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "invalid alert id"}))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "invalid alert id"})),
+        )
+            .into_response();
     };
     let Some(mut instance) = state.inner.alert_store.get_by_id(ulid).await else {
-        return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "alert not found"}))).into_response();
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "alert not found"})),
+        )
+            .into_response();
     };
     if let Some((new_state, transition)) =
         AlertStateMachine::transition(instance.state, TransitionEvent::ConditionCleared)
@@ -88,7 +121,11 @@ pub async fn resolve_alert(
         state.inner.alert_store.save(&instance).await;
         ok_json(instance).into_response()
     } else {
-        (StatusCode::CONFLICT, Json(serde_json::json!({"error": "invalid state transition"}))).into_response()
+        (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({"error": "invalid state transition"})),
+        )
+            .into_response()
     }
 }
 
@@ -99,18 +136,17 @@ pub async fn list_rules(State(state): State<AppState>) -> impl IntoResponse {
 }
 
 /// POST /api/v1/rules
-pub async fn create_rule(
-    State(state): State<AppState>,
-    body: String,
-) -> impl IntoResponse {
+pub async fn create_rule(State(state): State<AppState>, body: String) -> impl IntoResponse {
     match parqtel_alert::rule::yaml::parse_rule(&body) {
         Ok(rule) => {
             state.inner.alert_registry.insert(rule.clone()).await;
             (StatusCode::CREATED, ok_json(rule)).into_response()
         }
-        Err(e) => {
-            (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": e.to_string()}))).into_response()
-        }
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+            .into_response(),
     }
 }
 
@@ -125,12 +161,18 @@ pub async fn update_rule(
             if state.inner.alert_registry.update(rule.clone()).await {
                 ok_json(rule).into_response()
             } else {
-                (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "rule not found"}))).into_response()
+                (
+                    StatusCode::NOT_FOUND,
+                    Json(serde_json::json!({"error": "rule not found"})),
+                )
+                    .into_response()
             }
         }
-        Err(e) => {
-            (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": e.to_string()}))).into_response()
-        }
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+            .into_response(),
     }
 }
 
@@ -142,6 +184,10 @@ pub async fn delete_rule(
     if state.inner.alert_registry.disable(&id).await {
         ok_json(serde_json::json!({"disabled": true})).into_response()
     } else {
-        (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "rule not found"}))).into_response()
+        (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "rule not found"})),
+        )
+            .into_response()
     }
 }

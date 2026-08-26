@@ -1,17 +1,17 @@
+use chrono::Utc;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
-use chrono::Utc;
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use ulid::Ulid;
 
-use crate::{AlertFiringEvent, AlertInstance};
+use crate::evaluator::threshold::evaluate_threshold;
 use crate::rule::registry::AlertRuleRegistry;
 use crate::rule::types::AlertRule;
 use crate::state::machine::{AlertState, AlertStateMachine, TransitionEvent};
 use crate::store::alert_store::AlertStore;
-use crate::evaluator::threshold::evaluate_threshold;
+use crate::{AlertFiringEvent, AlertInstance};
 
 /// Configuration for the evaluation engine.
 #[derive(Debug, Clone)]
@@ -35,7 +35,12 @@ impl EvaluationEngine {
         store: AlertStore,
         event_tx: mpsc::UnboundedSender<AlertFiringEvent>,
     ) -> Self {
-        Self { config, registry, store, event_tx }
+        Self {
+            config,
+            registry,
+            store,
+            event_tx,
+        }
     }
 
     /// Start the evaluation loop as a background task.
@@ -65,7 +70,8 @@ impl EvaluationEngine {
             join_set.spawn(async move {
                 let result = tokio::time::timeout(timeout, async {
                     Self::evaluate_rule(&rule, &store, &event_tx).await;
-                }).await;
+                })
+                .await;
                 if result.is_err() {
                     tracing::warn!(rule_id = %rule.id, "rule evaluation timed out");
                 }
@@ -193,15 +199,30 @@ mod tests {
 
     fn test_rule() -> AlertRule {
         AlertRule {
-            id: "t".into(), name: "t".into(), signal: "metrics".into(), query: "t{}".into(),
-            condition: Condition { condition_type: "threshold".into(), operator: Operator::Gt, value: 0.5, for_duration_secs: 0 },
-            severity: Severity::Warning, labels: BTreeMap::new(), annotations: BTreeMap::new(),
-            enabled: true, noise_suppression_threshold: 0.7, source: None,
+            id: "t".into(),
+            name: "t".into(),
+            signal: "metrics".into(),
+            query: "t{}".into(),
+            condition: Condition {
+                condition_type: "threshold".into(),
+                operator: Operator::Gt,
+                value: 0.5,
+                for_duration_secs: 0,
+            },
+            severity: Severity::Warning,
+            labels: BTreeMap::new(),
+            annotations: BTreeMap::new(),
+            enabled: true,
+            noise_suppression_threshold: 0.7,
+            source: None,
         }
     }
 
     fn test_config() -> EvalConfig {
-        EvalConfig { evaluation_interval_secs: 1, evaluation_timeout_secs: 10 }
+        EvalConfig {
+            evaluation_interval_secs: 1,
+            evaluation_timeout_secs: 10,
+        }
     }
 
     #[tokio::test]

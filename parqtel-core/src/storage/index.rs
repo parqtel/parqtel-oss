@@ -1,8 +1,8 @@
+use crate::error::{Error, Result};
+use crate::models::storage::BlockMetadata;
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
-use crate::error::{Error, Result};
-use crate::models::storage::BlockMetadata;
 
 /// In-memory index of all Parquet blocks on disk.
 pub struct BlockIndex {
@@ -31,7 +31,7 @@ impl BlockIndex {
 
     /// Persists the index to the JSON sidecar file atomically.
     pub fn save(&self) -> Result<()> {
-        let content = serde_json::to_string_pretty(&self.blocks).map_err(Error::Serde)?;
+        let content = serde_json::to_string(&self.blocks).map_err(Error::Serde)?;
         let tmp_path = self.sidecar_path.with_extension("tmp");
         fs::write(&tmp_path, content)?;
         fs::rename(tmp_path, &self.sidecar_path)?;
@@ -52,18 +52,36 @@ impl BlockIndex {
     }
 
     /// Finds blocks overlapping a time range, optionally filtered by metric name.
-    pub fn query(&self, start_ns: i64, end_ns: i64, metric_name: Option<&str>) -> Vec<BlockMetadata> {
-        let start_idx = self.blocks.partition_point(|b| b.end_timestamp_ns < start_ns);
-        self.blocks[start_idx..].iter()
+    pub fn query(
+        &self,
+        start_ns: i64,
+        end_ns: i64,
+        metric_name: Option<&str>,
+    ) -> Vec<BlockMetadata> {
+        let start_idx = self
+            .blocks
+            .partition_point(|b| b.end_timestamp_ns < start_ns);
+        self.blocks[start_idx..]
+            .iter()
             .take_while(|b| b.start_timestamp_ns <= end_ns)
-            .filter(|b| metric_name.as_ref().is_none_or(|n| b.metric_names.contains(*n)))
+            .filter(|b| {
+                metric_name
+                    .as_ref()
+                    .is_none_or(|n| b.metric_names.contains(*n))
+            })
             .cloned()
             .collect()
     }
 
-    pub fn total_blocks(&self) -> usize { self.blocks.len() }
-    pub fn total_rows(&self) -> usize { self.blocks.iter().map(|b| b.row_count).sum() }
-    pub fn total_bytes(&self) -> u64 { self.blocks.iter().map(|b| b.size_bytes).sum() }
+    pub fn total_blocks(&self) -> usize {
+        self.blocks.len()
+    }
+    pub fn total_rows(&self) -> usize {
+        self.blocks.iter().map(|b| b.row_count).sum()
+    }
+    pub fn total_bytes(&self) -> u64 {
+        self.blocks.iter().map(|b| b.size_bytes).sum()
+    }
     pub fn all_metrics(&self) -> HashSet<String> {
         let mut names = HashSet::new();
         for b in &self.blocks {

@@ -1,12 +1,16 @@
+use crate::matcher::{evaluate_matchers, LabelMatcher};
+use crate::models::{
+    CorrelatedEvent, CorrelationResult, LogQueryResult, QueryResult, Sample, TimeSeries,
+};
+use crate::plan::QueryPlan;
+use parqtel_core::{
+    BlockIndex, LabelSet, MemoryBuffer, MetricValue, Result, Scanner, StorageEngine,
+};
+use serde_json::json;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::RwLock;
-use std::collections::{BTreeMap, HashSet};
-use serde_json::json;
-use parqtel_core::{BlockIndex, Scanner, Result, LabelSet, MetricValue, StorageEngine, MemoryBuffer};
-use crate::models::{QueryResult, TimeSeries, Sample, LogQueryResult, CorrelatedEvent, CorrelationResult};
-use crate::plan::QueryPlan;
-use crate::matcher::{evaluate_matchers, LabelMatcher};
 
 /// Executes queries against the storage engine.
 pub struct QueryExecutor {
@@ -23,10 +27,18 @@ impl QueryExecutor {
     pub fn new(index: Arc<RwLock<BlockIndex>>, log_index: Arc<RwLock<BlockIndex>>) -> Self {
         let config = parqtel_core::BlockConfig::default();
         let storage: Arc<dyn StorageEngine> = Arc::new(
-            parqtel_core::engine::parquet::ParquetStorageEngine::new(config)
+            parqtel_core::engine::parquet::ParquetStorageEngine::new(config),
         );
-        let trace_index = Arc::new(RwLock::new(BlockIndex::new(std::path::Path::new("/tmp/parqtel-traces"))));
-        Self { storage, index, log_index, trace_index, buffer: MemoryBuffer::new() }
+        let trace_index = Arc::new(RwLock::new(BlockIndex::new(std::path::Path::new(
+            "/tmp/parqtel-traces",
+        ))));
+        Self {
+            storage,
+            index,
+            log_index,
+            trace_index,
+            buffer: MemoryBuffer::new(),
+        }
     }
 
     /// Creates a new [QueryExecutor] with a memory buffer for stream-queryable data.
@@ -37,10 +49,18 @@ impl QueryExecutor {
     ) -> Self {
         let config = parqtel_core::BlockConfig::default();
         let storage: Arc<dyn StorageEngine> = Arc::new(
-            parqtel_core::engine::parquet::ParquetStorageEngine::new(config)
+            parqtel_core::engine::parquet::ParquetStorageEngine::new(config),
         );
-        let trace_index = Arc::new(RwLock::new(BlockIndex::new(std::path::Path::new("/tmp/parqtel-traces"))));
-        Self { storage, index, log_index, trace_index, buffer }
+        let trace_index = Arc::new(RwLock::new(BlockIndex::new(std::path::Path::new(
+            "/tmp/parqtel-traces",
+        ))));
+        Self {
+            storage,
+            index,
+            log_index,
+            trace_index,
+            buffer,
+        }
     }
 
     /// Creates a new [QueryExecutor] with a trace index and memory buffer.
@@ -52,9 +72,15 @@ impl QueryExecutor {
     ) -> Self {
         let config = parqtel_core::BlockConfig::default();
         let storage: Arc<dyn StorageEngine> = Arc::new(
-            parqtel_core::engine::parquet::ParquetStorageEngine::new(config)
+            parqtel_core::engine::parquet::ParquetStorageEngine::new(config),
         );
-        Self { storage, index, log_index, trace_index, buffer }
+        Self {
+            storage,
+            index,
+            log_index,
+            trace_index,
+            buffer,
+        }
     }
 
     /// Creates a new [QueryExecutor] with a storage engine and block indexes.
@@ -63,8 +89,16 @@ impl QueryExecutor {
         index: Arc<RwLock<BlockIndex>>,
         log_index: Arc<RwLock<BlockIndex>>,
     ) -> Self {
-        let trace_index = Arc::new(RwLock::new(BlockIndex::new(std::path::Path::new("/tmp/parqtel-traces"))));
-        Self { storage, index, log_index, trace_index, buffer: MemoryBuffer::new() }
+        let trace_index = Arc::new(RwLock::new(BlockIndex::new(std::path::Path::new(
+            "/tmp/parqtel-traces",
+        ))));
+        Self {
+            storage,
+            index,
+            log_index,
+            trace_index,
+            buffer: MemoryBuffer::new(),
+        }
     }
 
     /// Returns a clone of the memory buffer for use by ingestion services.
@@ -84,7 +118,10 @@ impl QueryExecutor {
 
         if blocks.is_empty() {
             // Even with no disk blocks, check the in-memory buffer
-            let buffered = self.buffer.scan_metrics(&plan.metric_name, plan.start_ns, plan.end_ns).await;
+            let buffered = self
+                .buffer
+                .scan_metrics(&plan.metric_name, plan.start_ns, plan.end_ns)
+                .await;
             if buffered.is_empty() {
                 return Ok(QueryResult {
                     series: Vec::new(),
@@ -97,20 +134,24 @@ impl QueryExecutor {
             // Process buffered data through the same pipeline below
             let raw_points = buffered;
             let points_scanned = raw_points.len() as u64;
-            let mut series_map: BTreeMap<u64, (LabelSet, Vec<(i64, MetricValue)>)> = BTreeMap::new();
+            let mut series_map: BTreeMap<u64, (LabelSet, Vec<(i64, MetricValue)>)> =
+                BTreeMap::new();
             let mut matched_series_fps = HashSet::new();
             let mut volume_summary = vec![0u64; 60];
             let window_ns = (plan.end_ns - plan.start_ns) / 60;
             for dp in raw_points {
                 if evaluate_matchers(&plan.matchers, &dp.labels, &plan.metric_name) {
                     if window_ns > 0 {
-                        let bucket = ((dp.timestamp_ns - plan.start_ns) / window_ns).clamp(0, 59) as usize;
+                        let bucket =
+                            ((dp.timestamp_ns - plan.start_ns) / window_ns).clamp(0, 59) as usize;
                         volume_summary[bucket] += 1;
                     }
                     let fp = dp.labels.fingerprint();
                     matched_series_fps.insert(fp);
                     if series_map.contains_key(&fp) || series_map.len() < plan.max_series {
-                        let entry = series_map.entry(fp).or_insert_with(|| (dp.labels.clone(), Vec::new()));
+                        let entry = series_map
+                            .entry(fp)
+                            .or_insert_with(|| (dp.labels.clone(), Vec::new()));
                         if entry.1.len() < plan.max_samples_per_series {
                             entry.1.push((dp.timestamp_ns, dp.value));
                         }
@@ -120,32 +161,61 @@ impl QueryExecutor {
             let total_series_count = matched_series_fps.len();
             let mut results = Vec::new();
             for (_, (mut labels, points)) in series_map {
-                labels = labels.merge(&LabelSet::try_from_iter(vec![("__name__", plan.metric_name.clone())])?);
+                labels = labels.merge(&LabelSet::try_from_iter(vec![(
+                    "__name__",
+                    plan.metric_name.clone(),
+                )])?);
                 let samples = if let Some(step) = plan.step_ns {
                     if let Some(op) = plan.aggregation {
-                        crate::aggregation::downsample(points, plan.start_ns, plan.end_ns, step, op, plan.quantile, plan.scalar_param, plan.clamp)
+                        crate::aggregation::downsample(
+                            points,
+                            plan.start_ns,
+                            plan.end_ns,
+                            step,
+                            op,
+                            plan.quantile,
+                            plan.scalar_param,
+                            plan.clamp,
+                        )
                     } else {
-                        points.into_iter().map(|(t, v)| Sample { timestamp_ns: t, value: v_to_f64(&v) }).collect()
+                        points
+                            .into_iter()
+                            .map(|(t, v)| Sample {
+                                timestamp_ns: t,
+                                value: v_to_f64(&v),
+                            })
+                            .collect()
                     }
                 } else {
-                    points.into_iter().map(|(t, v)| Sample { timestamp_ns: t, value: v_to_f64(&v) }).collect()
+                    points
+                        .into_iter()
+                        .map(|(t, v)| Sample {
+                            timestamp_ns: t,
+                            value: v_to_f64(&v),
+                        })
+                        .collect()
                 };
                 results.push(TimeSeries { labels, samples });
             }
             results = apply_post_processing(results, &plan);
-            return Ok(QueryResult { series: results, execution_time: start_time.elapsed(), points_scanned, total_series_count, volume_summary });
+            return Ok(QueryResult {
+                series: results,
+                execution_time: start_time.elapsed(),
+                points_scanned,
+                total_series_count,
+                volume_summary,
+            });
         }
 
         // 2. Scan blocks concurrently
-        let mut raw_points = Scanner::scan(
-            blocks,
-            plan.metric_name.clone(),
-            plan.start_ns,
-            plan.end_ns,
-        ).await?;
+        let mut raw_points =
+            Scanner::scan(blocks, plan.metric_name.clone(), plan.start_ns, plan.end_ns).await?;
 
         // 2b. Merge in-memory buffer data (not yet flushed to disk)
-        let buffered = self.buffer.scan_metrics(&plan.metric_name, plan.start_ns, plan.end_ns).await;
+        let buffered = self
+            .buffer
+            .scan_metrics(&plan.metric_name, plan.start_ns, plan.end_ns)
+            .await;
         raw_points.extend(buffered);
 
         let points_scanned = raw_points.len() as u64;
@@ -160,7 +230,8 @@ impl QueryExecutor {
             if evaluate_matchers(&plan.matchers, &dp.labels, &plan.metric_name) {
                 // Update volume histogram regardless of truncation
                 if window_ns > 0 {
-                    let bucket = ((dp.timestamp_ns - plan.start_ns) / window_ns).clamp(0, 59) as usize;
+                    let bucket =
+                        ((dp.timestamp_ns - plan.start_ns) / window_ns).clamp(0, 59) as usize;
                     volume_summary[bucket] += 1;
                 }
 
@@ -169,8 +240,10 @@ impl QueryExecutor {
 
                 // Check if we already have this series or if we can add a new one
                 if series_map.contains_key(&fp) || series_map.len() < plan.max_series {
-                    let entry = series_map.entry(fp).or_insert_with(|| (dp.labels.clone(), Vec::new()));
-                    
+                    let entry = series_map
+                        .entry(fp)
+                        .or_insert_with(|| (dp.labels.clone(), Vec::new()));
+
                     if entry.1.len() < plan.max_samples_per_series {
                         entry.1.push((dp.timestamp_ns, dp.value));
                     }
@@ -183,8 +256,11 @@ impl QueryExecutor {
         // 4. Downsample and format results
         let mut results = Vec::new();
         for (_, (mut labels, points)) in series_map {
-            labels = labels.merge(&LabelSet::try_from_iter(vec![("__name__", plan.metric_name.clone())])?);
-            
+            labels = labels.merge(&LabelSet::try_from_iter(vec![(
+                "__name__",
+                plan.metric_name.clone(),
+            )])?);
+
             let samples = if let Some(step) = plan.step_ns {
                 if let Some(op) = plan.aggregation {
                     crate::aggregation::downsample(
@@ -198,16 +274,25 @@ impl QueryExecutor {
                         plan.clamp,
                     )
                 } else {
-                    points.into_iter().map(|(t, v)| Sample { timestamp_ns: t, value: v_to_f64(&v) }).collect()
+                    points
+                        .into_iter()
+                        .map(|(t, v)| Sample {
+                            timestamp_ns: t,
+                            value: v_to_f64(&v),
+                        })
+                        .collect()
                 }
             } else {
-                points.into_iter().map(|(t, v)| Sample { timestamp_ns: t, value: v_to_f64(&v) }).collect()
+                points
+                    .into_iter()
+                    .map(|(t, v)| Sample {
+                        timestamp_ns: t,
+                        value: v_to_f64(&v),
+                    })
+                    .collect()
             };
 
-            results.push(TimeSeries {
-                labels,
-                samples,
-            });
+            results.push(TimeSeries { labels, samples });
         }
         results = apply_post_processing(results, &plan);
 
@@ -247,7 +332,7 @@ impl QueryExecutor {
                 execution_time: start_time.elapsed(),
                 total_logs_count: 0,
                 volume_summary: vec![0; 60],
-            }); 
+            });
         }
 
         let mut raw_logs = if blocks.is_empty() {
@@ -257,36 +342,36 @@ impl QueryExecutor {
             disk_logs.extend(buffered_logs);
             disk_logs
         };
-        
-        // Apply ordering
-        if order_desc {
-            raw_logs.sort_by_key(|b| std::cmp::Reverse(b.timestamp_ns));
-        } else {
-            raw_logs.sort_by_key(|a| a.timestamp_ns);
-        }
 
+        // Filter first, then sort only the matching subset (total_logs_count
+        // needs the full pass anyway, but sorting all raw logs does not).
         let mut filtered = Vec::new();
         let mut volume_summary = vec![0u64; 60];
         let window_ns = (end_ns - start_ns) / 60;
         let mut total_logs_count = 0;
-        let search_pattern = search.map(|s| s.to_lowercase());
 
         for log in raw_logs {
             // 1. Severity filter
             if let Some(min) = severity_min {
-                if log.severity_number < min { continue; }
+                if log.severity_number < min {
+                    continue;
+                }
             }
 
-            // 2. Search filter
-            if let Some(ref pattern) = search_pattern {
-                if !log.body.to_lowercase().contains(pattern) { continue; }
+            // 2. Search filter — case-insensitive ASCII contains, no allocation.
+            // ponytail: non-ASCII case folding not handled; switch to a unicode
+            // crate if log bodies need it.
+            if let Some(ref pattern) = search {
+                if !contains_ci(&log.body, pattern) {
+                    continue;
+                }
             }
 
             // 3. Label matchers
             let all_labels = log.attributes.merge(&log.resource_attributes);
             if evaluate_matchers(&matchers, &all_labels, "") {
                 total_logs_count += 1;
-                
+
                 if window_ns > 0 {
                     let bucket = ((log.timestamp_ns - start_ns) / window_ns).clamp(0, 59) as usize;
                     volume_summary[bucket] += 1;
@@ -296,6 +381,13 @@ impl QueryExecutor {
                     filtered.push(log);
                 }
             }
+        }
+
+        // Apply ordering to the (much smaller) filtered set
+        if order_desc {
+            filtered.sort_by_key(|b| std::cmp::Reverse(b.timestamp_ns));
+        } else {
+            filtered.sort_by_key(|a| a.timestamp_ns);
         }
 
         Ok(LogQueryResult {
@@ -345,12 +437,16 @@ impl QueryExecutor {
     /// Returns all known field names across the log schema.
     pub async fn get_log_fields(&self) -> (Vec<String>, Vec<String>) {
         let dedicated = vec![
-            "service_name".into(), "service_version".into(),
-            "k8s_namespace".into(), "k8s_pod_name".into(),
-            "k8s_container_name".into(), "k8s_node_name".into(),
-            "severity_text".into(), "body".into()
+            "service_name".into(),
+            "service_version".into(),
+            "k8s_namespace".into(),
+            "k8s_pod_name".into(),
+            "k8s_container_name".into(),
+            "k8s_node_name".into(),
+            "severity_text".into(),
+            "body".into(),
         ];
-        
+
         // Sample common attributes from recent blocks
         let mut common = HashSet::new();
         let blocks = {
@@ -362,7 +458,9 @@ impl QueryExecutor {
 
         for b in blocks {
             for name in b.label_names {
-                if !dedicated.contains(&name) { common.insert(name); }
+                if !dedicated.contains(&name) {
+                    common.insert(name);
+                }
             }
         }
 
@@ -382,9 +480,12 @@ impl QueryExecutor {
         for block in blocks {
             if let Ok(logs) = Scanner::scan_logs(vec![block], 0, i64::MAX).await {
                 for l in logs {
-                    let val = if let Some(v) = l.attributes.get(field) { Some(v) }
-                             else { l.resource_attributes.get(field) };
-                    
+                    let val = if let Some(v) = l.attributes.get(field) {
+                        Some(v)
+                    } else {
+                        l.resource_attributes.get(field)
+                    };
+
                     if let Some(v) = val {
                         *freq.entry(v.to_string()).or_insert(0u64) += 1;
                     }
@@ -430,9 +531,15 @@ impl QueryExecutor {
         };
 
         for block in metric_blocks {
-            if !block.label_names.contains(label) { continue; }
+            if !block.label_names.contains(label) {
+                continue;
+            }
             if let Ok(points) = Scanner::scan(vec![block], "".into(), 0, i64::MAX).await {
-                for p in points { if let Some(v) = p.labels.get(label) { values.insert(v.to_string()); } }
+                for p in points {
+                    if let Some(v) = p.labels.get(label) {
+                        values.insert(v.to_string());
+                    }
+                }
             }
         }
 
@@ -444,11 +551,17 @@ impl QueryExecutor {
         };
 
         for block in log_blocks {
-            if !block.label_names.contains(label) { continue; }
+            if !block.label_names.contains(label) {
+                continue;
+            }
             if let Ok(logs) = Scanner::scan_logs(vec![block], 0, i64::MAX).await {
                 for l in logs {
-                    if let Some(v) = l.attributes.get(label) { values.insert(v.to_string()); }
-                    if let Some(v) = l.resource_attributes.get(label) { values.insert(v.to_string()); }
+                    if let Some(v) = l.attributes.get(label) {
+                        values.insert(v.to_string());
+                    }
+                    if let Some(v) = l.resource_attributes.get(label) {
+                        values.insert(v.to_string());
+                    }
                 }
             }
         }
@@ -470,18 +583,41 @@ impl QueryExecutor {
 
         // 1. Identify strongest dimension
         let (dimension, weight, matchers) = if let Some(trace_id) = anchor_labels.get("trace_id") {
-            ("trace_id", 100, vec![LabelMatcher::equal("trace_id", trace_id)])
+            (
+                "trace_id",
+                100,
+                vec![LabelMatcher::equal("trace_id", trace_id)],
+            )
         } else if let Some(pod_uid) = anchor_labels.get("k8s_pod_uid") {
-            ("k8s_pod_uid", 80, vec![LabelMatcher::equal("k8s_pod_uid", pod_uid)])
-        } else if let (Some(pod), Some(ns)) = (anchor_labels.get("k8s_pod_name"), anchor_labels.get("k8s_namespace")) {
-            ("k8s_pod_name+namespace", 60, vec![
-                LabelMatcher::equal("k8s_pod_name", pod),
-                LabelMatcher::equal("k8s_namespace", ns),
-            ])
+            (
+                "k8s_pod_uid",
+                80,
+                vec![LabelMatcher::equal("k8s_pod_uid", pod_uid)],
+            )
+        } else if let (Some(pod), Some(ns)) = (
+            anchor_labels.get("k8s_pod_name"),
+            anchor_labels.get("k8s_namespace"),
+        ) {
+            (
+                "k8s_pod_name+namespace",
+                60,
+                vec![
+                    LabelMatcher::equal("k8s_pod_name", pod),
+                    LabelMatcher::equal("k8s_namespace", ns),
+                ],
+            )
         } else if let Some(svc) = anchor_labels.get("service_name") {
-            ("service_name", 40, vec![LabelMatcher::equal("service_name", svc)])
+            (
+                "service_name",
+                40,
+                vec![LabelMatcher::equal("service_name", svc)],
+            )
         } else if let Some(ns) = anchor_labels.get("k8s_namespace") {
-            ("k8s_namespace", 20, vec![LabelMatcher::equal("k8s_namespace", ns)])
+            (
+                "k8s_namespace",
+                20,
+                vec![LabelMatcher::equal("k8s_namespace", ns)],
+            )
         } else {
             return Ok(CorrelationResult {
                 correlation_dimension_used: "none".into(),
@@ -496,7 +632,9 @@ impl QueryExecutor {
         let mut results = Vec::new();
 
         if target_signal == "log" {
-            let res = self.query_logs(start_ns, end_ns, matchers, limit, true, None, None).await?;
+            let res = self
+                .query_logs(start_ns, end_ns, matchers, limit, true, None, None)
+                .await?;
             for log in res.logs {
                 let time_delta = (log.timestamp_ns - anchor_timestamp_ns).abs();
                 let time_score = (window_ns - time_delta).max(0) as f64 / window_ns as f64 * 100.0;
@@ -533,7 +671,8 @@ impl QueryExecutor {
                 for series in res.series {
                     for sample in series.samples {
                         let time_delta = (sample.timestamp_ns - anchor_timestamp_ns).abs();
-                        let time_score = (window_ns - time_delta).max(0) as f64 / window_ns as f64 * 100.0;
+                        let time_score =
+                            (window_ns - time_delta).max(0) as f64 / window_ns as f64 * 100.0;
                         results.push(CorrelatedEvent {
                             signal: "metric".into(),
                             record: json!({
@@ -549,7 +688,11 @@ impl QueryExecutor {
             }
         }
 
-        results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        results.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         results.truncate(limit);
 
         Ok(CorrelationResult {
@@ -558,6 +701,18 @@ impl QueryExecutor {
             execution_time: start_time.elapsed(),
         })
     }
+}
+
+/// Case-insensitive ASCII substring search without allocating.
+fn contains_ci(haystack: &str, needle: &str) -> bool {
+    let (h, n) = (haystack.as_bytes(), needle.as_bytes());
+    if n.is_empty() {
+        return true;
+    }
+    if n.len() > h.len() {
+        return false;
+    }
+    h.windows(n.len()).any(|w| w.eq_ignore_ascii_case(n))
 }
 
 fn v_to_f64(v: &MetricValue) -> f64 {
@@ -581,21 +736,30 @@ fn apply_post_processing(
         let mut grouped: HashMap<Vec<(String, String)>, crate::models::TimeSeries> = HashMap::new();
         for ts in series {
             let key: Vec<(String, String)> = if !plan.group_by.is_empty() {
-                plan.group_by.iter()
+                plan.group_by
+                    .iter()
                     .filter_map(|l| ts.labels.get(l).map(|v| (l.clone(), v.to_string())))
                     .collect()
             } else {
-                ts.labels.iter()
+                ts.labels
+                    .iter()
                     .filter(|(k, _)| !plan.group_without.contains(&k.to_string()))
                     .map(|(k, v)| (k.to_string(), v.to_string()))
                     .collect()
             };
             let entry = grouped.entry(key.clone()).or_insert_with(|| {
                 let new_labels = LabelSet::try_from_iter(key).unwrap_or_default();
-                crate::models::TimeSeries { labels: new_labels, samples: Vec::new() }
+                crate::models::TimeSeries {
+                    labels: new_labels,
+                    samples: Vec::new(),
+                }
             });
             for s in ts.samples {
-                if let Some(existing) = entry.samples.iter_mut().find(|e| e.timestamp_ns == s.timestamp_ns) {
+                if let Some(existing) = entry
+                    .samples
+                    .iter_mut()
+                    .find(|e| e.timestamp_ns == s.timestamp_ns)
+                {
                     existing.value += s.value;
                 } else {
                     entry.samples.push(s);
@@ -614,7 +778,8 @@ fn apply_post_processing(
             for ts in &mut series {
                 let src_val = ts.labels.get(src).unwrap_or("").to_string();
                 let new_val = re.replace(&src_val, repl.as_str()).to_string();
-                let patch = LabelSet::try_from_iter(std::iter::once((dst.as_str(), new_val.as_str())));
+                let patch =
+                    LabelSet::try_from_iter(std::iter::once((dst.as_str(), new_val.as_str())));
                 if let Ok(patch) = patch {
                     ts.labels = ts.labels.merge(&patch);
                 }
@@ -624,14 +789,23 @@ fn apply_post_processing(
 
     // ── topk / bottomk ────────────────────────────────────────────────────
     if let Some(n) = plan.topk_n {
-        let last_val = |ts: &crate::models::TimeSeries| ts.samples.last().map(|s| s.value).unwrap_or(0.0);
+        let last_val =
+            |ts: &crate::models::TimeSeries| ts.samples.last().map(|s| s.value).unwrap_or(0.0);
         match plan.aggregation {
             Some(crate::plan::AggregationOp::TopK) => {
-                series.sort_by(|a, b| last_val(b).partial_cmp(&last_val(a)).unwrap_or(std::cmp::Ordering::Equal));
+                series.sort_by(|a, b| {
+                    last_val(b)
+                        .partial_cmp(&last_val(a))
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
                 series.truncate(n);
             }
             Some(crate::plan::AggregationOp::BottomK) => {
-                series.sort_by(|a, b| last_val(a).partial_cmp(&last_val(b)).unwrap_or(std::cmp::Ordering::Equal));
+                series.sort_by(|a, b| {
+                    last_val(a)
+                        .partial_cmp(&last_val(b))
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
                 series.truncate(n);
             }
             _ => {}
@@ -641,14 +815,13 @@ fn apply_post_processing(
     series
 }
 
-
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
-    use std::path::Path;
-    use parqtel_core::BlockConfig;
     use parqtel_core::engine::parquet::ParquetStorageEngine;
+    use parqtel_core::BlockConfig;
+    use std::path::Path;
     use tempfile::tempdir;
 
     /// Helper: create a ParquetStorageEngine-backed executor with real parquet files.
@@ -667,32 +840,54 @@ mod tests {
             kind: parqtel_core::MetricKind::Gauge,
             resource_attributes: LabelSet::try_from_iter(vec![("service_name", "web")]).unwrap(),
             data_points: vec![
-                parqtel_core::DataPoint::new(1000, parqtel_core::MetricValue::Double(10.0),
-                    LabelSet::try_from_iter(vec![("host", "h1")]).unwrap()).unwrap(),
-                parqtel_core::DataPoint::new(2000, parqtel_core::MetricValue::Double(20.0),
-                    LabelSet::try_from_iter(vec![("host", "h1")]).unwrap()).unwrap(),
-                parqtel_core::DataPoint::new(3000, parqtel_core::MetricValue::Double(30.0),
-                    LabelSet::try_from_iter(vec![("host", "h2")]).unwrap()).unwrap(),
+                parqtel_core::DataPoint::new(
+                    1000,
+                    parqtel_core::MetricValue::Double(10.0),
+                    LabelSet::try_from_iter(vec![("host", "h1")]).unwrap(),
+                )
+                .unwrap(),
+                parqtel_core::DataPoint::new(
+                    2000,
+                    parqtel_core::MetricValue::Double(20.0),
+                    LabelSet::try_from_iter(vec![("host", "h1")]).unwrap(),
+                )
+                .unwrap(),
+                parqtel_core::DataPoint::new(
+                    3000,
+                    parqtel_core::MetricValue::Double(30.0),
+                    LabelSet::try_from_iter(vec![("host", "h2")]).unwrap(),
+                )
+                .unwrap(),
             ],
             ..Default::default()
         };
         let m2 = parqtel_core::Metric {
             name: "mem".into(),
             kind: parqtel_core::MetricKind::Gauge,
-            data_points: vec![
-                parqtel_core::DataPoint::new(1500, parqtel_core::MetricValue::Double(512.0),
-                    LabelSet::try_from_iter(vec![("host", "h1")]).unwrap()).unwrap(),
-            ],
+            data_points: vec![parqtel_core::DataPoint::new(
+                1500,
+                parqtel_core::MetricValue::Double(512.0),
+                LabelSet::try_from_iter(vec![("host", "h1")]).unwrap(),
+            )
+            .unwrap()],
             ..Default::default()
         };
         storage.write_metrics_batch(vec![m1, m2]).await.unwrap();
 
         // Write logs
         let log = parqtel_core::LogRecord::new(
-            2000, 2000, 9, "INFO".into(), "request handled".into(),
+            2000,
+            2000,
+            9,
+            "INFO".into(),
+            "request handled".into(),
             LabelSet::try_from_iter(vec![("service_name", "web")]).unwrap(),
             LabelSet::try_from_iter(vec![("k8s_namespace", "prod")]).unwrap(),
-            [0u8; 16], [0u8; 8], 0, "".into(), "".into(),
+            [0u8; 16],
+            [0u8; 8],
+            0,
+            "".into(),
+            "".into(),
         );
         storage.write_logs_batch(vec![log]).await.unwrap();
 
@@ -726,7 +921,8 @@ mod tests {
     #[tokio::test]
     async fn test_execute_with_real_data() {
         let (exec, _dir) = setup_with_data().await;
-        let plan = QueryPlan::new("cpu".into(), vec![], 0, 5000, None, 10, 100, None, None).unwrap();
+        let plan =
+            QueryPlan::new("cpu".into(), vec![], 0, 5000, None, 10, 100, None, None).unwrap();
         let res = exec.execute(plan).await.unwrap();
         assert_eq!(res.points_scanned, 3);
         assert!(!res.series.is_empty());
@@ -737,7 +933,8 @@ mod tests {
     async fn test_execute_with_label_matcher() {
         let (exec, _dir) = setup_with_data().await;
         let matchers = vec![LabelMatcher::equal("host", "h1")];
-        let plan = QueryPlan::new("cpu".into(), matchers, 0, 5000, None, 10, 100, None, None).unwrap();
+        let plan =
+            QueryPlan::new("cpu".into(), matchers, 0, 5000, None, 10, 100, None, None).unwrap();
         let res = exec.execute(plan).await.unwrap();
         assert_eq!(res.total_series_count, 1);
         assert_eq!(res.series[0].samples.len(), 2);
@@ -757,9 +954,17 @@ mod tests {
     async fn test_execute_with_step_aggregation() {
         let (exec, _dir) = setup_with_data().await;
         let plan = QueryPlan::new(
-            "cpu".into(), vec![], 0, 5000, Some(5000), 10, 100,
-            Some(crate::plan::AggregationOp::Avg), None,
-        ).unwrap();
+            "cpu".into(),
+            vec![],
+            0,
+            5000,
+            Some(5000),
+            10,
+            100,
+            Some(crate::plan::AggregationOp::Avg),
+            None,
+        )
+        .unwrap();
         let res = exec.execute(plan).await.unwrap();
         assert!(!res.series.is_empty());
     }
@@ -769,7 +974,10 @@ mod tests {
         let index = Arc::new(RwLock::new(BlockIndex::new(Path::new("/tmp/ne"))));
         let log_index = Arc::new(RwLock::new(BlockIndex::new(Path::new("/tmp/ne"))));
         let exec = QueryExecutor::new(index, log_index);
-        let res = exec.query_logs(0, 100, vec![], 10, false, None, None).await.unwrap();
+        let res = exec
+            .query_logs(0, 100, vec![], 10, false, None, None)
+            .await
+            .unwrap();
         assert!(res.logs.is_empty());
         assert_eq!(res.total_logs_count, 0);
     }
@@ -777,7 +985,10 @@ mod tests {
     #[tokio::test]
     async fn test_query_logs_with_data() {
         let (exec, _dir) = setup_with_data().await;
-        let res = exec.query_logs(0, 5000, vec![], 10, false, None, None).await.unwrap();
+        let res = exec
+            .query_logs(0, 5000, vec![], 10, false, None, None)
+            .await
+            .unwrap();
         assert_eq!(res.logs.len(), 1);
         assert_eq!(res.total_logs_count, 1);
     }
@@ -786,23 +997,35 @@ mod tests {
     async fn test_query_logs_severity_filter() {
         let (exec, _dir) = setup_with_data().await;
         // severity_min=13 (WARN) should filter out our INFO (9) log
-        let res = exec.query_logs(0, 5000, vec![], 10, false, Some(13), None).await.unwrap();
+        let res = exec
+            .query_logs(0, 5000, vec![], 10, false, Some(13), None)
+            .await
+            .unwrap();
         assert!(res.logs.is_empty());
     }
 
     #[tokio::test]
     async fn test_query_logs_search_filter() {
         let (exec, _dir) = setup_with_data().await;
-        let res = exec.query_logs(0, 5000, vec![], 10, false, None, Some("request".into())).await.unwrap();
+        let res = exec
+            .query_logs(0, 5000, vec![], 10, false, None, Some("request".into()))
+            .await
+            .unwrap();
         assert_eq!(res.logs.len(), 1);
-        let res2 = exec.query_logs(0, 5000, vec![], 10, false, None, Some("nonexistent".into())).await.unwrap();
+        let res2 = exec
+            .query_logs(0, 5000, vec![], 10, false, None, Some("nonexistent".into()))
+            .await
+            .unwrap();
         assert!(res2.logs.is_empty());
     }
 
     #[tokio::test]
     async fn test_query_logs_ordering() {
         let (exec, _dir) = setup_with_data().await;
-        let res = exec.query_logs(0, 5000, vec![], 10, true, None, None).await.unwrap();
+        let res = exec
+            .query_logs(0, 5000, vec![], 10, true, None, None)
+            .await
+            .unwrap();
         assert_eq!(res.logs.len(), 1); // only 1 log, ordering still works
     }
 
@@ -848,7 +1071,10 @@ mod tests {
     async fn test_correlation_with_service_name() {
         let (exec, _dir) = setup_with_data().await;
         let labels = LabelSet::try_from_iter(vec![("service_name", "web")]).unwrap();
-        let res = exec.correlate("metric", 2000, labels, "log", 5000, 10).await.unwrap();
+        let res = exec
+            .correlate("metric", 2000, labels, "log", 5000, 10)
+            .await
+            .unwrap();
         assert_eq!(res.correlation_dimension_used, "service_name");
     }
 
@@ -856,17 +1082,23 @@ mod tests {
     async fn test_correlation_pod_uid_dimension() {
         let (exec, _dir) = setup_with_data().await;
         let labels = LabelSet::try_from_iter(vec![("k8s_pod_uid", "uid-123")]).unwrap();
-        let res = exec.correlate("metric", 2000, labels, "log", 5000, 10).await.unwrap();
+        let res = exec
+            .correlate("metric", 2000, labels, "log", 5000, 10)
+            .await
+            .unwrap();
         assert_eq!(res.correlation_dimension_used, "k8s_pod_uid");
     }
 
     #[tokio::test]
     async fn test_correlation_pod_namespace_dimension() {
         let (exec, _dir) = setup_with_data().await;
-        let labels = LabelSet::try_from_iter(vec![
-            ("k8s_pod_name", "pod-1"), ("k8s_namespace", "prod"),
-        ]).unwrap();
-        let res = exec.correlate("metric", 2000, labels, "log", 5000, 10).await.unwrap();
+        let labels =
+            LabelSet::try_from_iter(vec![("k8s_pod_name", "pod-1"), ("k8s_namespace", "prod")])
+                .unwrap();
+        let res = exec
+            .correlate("metric", 2000, labels, "log", 5000, 10)
+            .await
+            .unwrap();
         assert_eq!(res.correlation_dimension_used, "k8s_pod_name+namespace");
     }
 
@@ -874,7 +1106,10 @@ mod tests {
     async fn test_correlation_namespace_only() {
         let (exec, _dir) = setup_with_data().await;
         let labels = LabelSet::try_from_iter(vec![("k8s_namespace", "prod")]).unwrap();
-        let res = exec.correlate("metric", 2000, labels, "log", 5000, 10).await.unwrap();
+        let res = exec
+            .correlate("metric", 2000, labels, "log", 5000, 10)
+            .await
+            .unwrap();
         assert_eq!(res.correlation_dimension_used, "k8s_namespace");
     }
 
@@ -882,7 +1117,10 @@ mod tests {
     async fn test_correlation_metric_target() {
         let (exec, _dir) = setup_with_data().await;
         let labels = LabelSet::try_from_iter(vec![("service_name", "web")]).unwrap();
-        let res = exec.correlate("log", 2000, labels, "metric", 5000, 10).await.unwrap();
+        let res = exec
+            .correlate("log", 2000, labels, "metric", 5000, 10)
+            .await
+            .unwrap();
         assert_eq!(res.correlation_dimension_used, "service_name");
     }
 
@@ -890,7 +1128,10 @@ mod tests {
     async fn test_empty_correlation_no_dimension() {
         let (exec, _dir) = setup_with_data().await;
         let labels = LabelSet::try_from_iter(vec![("random_key", "val")]).unwrap();
-        let res = exec.correlate("metric", 2000, labels, "log", 5000, 10).await.unwrap();
+        let res = exec
+            .correlate("metric", 2000, labels, "log", 5000, 10)
+            .await
+            .unwrap();
         assert_eq!(res.correlation_dimension_used, "none");
         assert!(res.correlated.is_empty());
     }
@@ -899,18 +1140,32 @@ mod tests {
     fn test_v_to_f64() {
         assert_eq!(v_to_f64(&parqtel_core::MetricValue::Double(3.15)), 3.15);
         assert_eq!(v_to_f64(&parqtel_core::MetricValue::Int(42)), 42.0);
-        assert_eq!(v_to_f64(&parqtel_core::MetricValue::Histogram {
-            count: 1, sum: 99.0, min: None, max: None, boundaries: vec![], counts: vec![],
-        }), 99.0);
-        assert_eq!(v_to_f64(&parqtel_core::MetricValue::Summary {
-            count: 1, sum: 55.0, quantiles: vec![],
-        }), 55.0);
+        assert_eq!(
+            v_to_f64(&parqtel_core::MetricValue::Histogram {
+                count: 1,
+                sum: 99.0,
+                min: None,
+                max: None,
+                boundaries: vec![],
+                counts: vec![],
+            }),
+            99.0
+        );
+        assert_eq!(
+            v_to_f64(&parqtel_core::MetricValue::Summary {
+                count: 1,
+                sum: 55.0,
+                quantiles: vec![],
+            }),
+            55.0
+        );
     }
 
     #[tokio::test]
     async fn test_execute_volume_summary() {
         let (exec, _dir) = setup_with_data().await;
-        let plan = QueryPlan::new("cpu".into(), vec![], 0, 5000, None, 10, 100, None, None).unwrap();
+        let plan =
+            QueryPlan::new("cpu".into(), vec![], 0, 5000, None, 10, 100, None, None).unwrap();
         let res = exec.execute(plan).await.unwrap();
         assert_eq!(res.volume_summary.len(), 60);
         let total: u64 = res.volume_summary.iter().sum();

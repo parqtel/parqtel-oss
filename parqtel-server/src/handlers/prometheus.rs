@@ -1,13 +1,13 @@
+use crate::state::AppState;
 use axum::{
-    extract::{Query, State, rejection::QueryRejection},
+    extract::{rejection::QueryRejection, Query, State},
     http::StatusCode,
     response::{IntoResponse, Response},
     Json,
 };
+use parqtel_query::{parse_query, AggregationOp, QueryPlan};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use crate::state::AppState;
-use parqtel_query::{QueryPlan, AggregationOp, parse_query};
 
 #[derive(Debug, Deserialize)]
 pub struct InstantQuery {
@@ -99,12 +99,31 @@ pub async fn query_instant(
 ) -> Response {
     let Query(params) = match params {
         Ok(q) => q,
-        Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({"status": "error", "error": e.to_string()}))).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"status": "error", "error": e.to_string()})),
+            )
+                .into_response()
+        }
     };
 
-    let now = params.time.unwrap_or_else(|| chrono::Utc::now().timestamp() as f64);
-    
-    let (metric_name, matchers, aggregation, quantile, topk_n, group_by, group_without, label_replace, scalar_param, clamp) = match parse_query(&params.query) {
+    let now = params
+        .time
+        .unwrap_or_else(|| chrono::Utc::now().timestamp() as f64);
+
+    let (
+        metric_name,
+        matchers,
+        aggregation,
+        quantile,
+        topk_n,
+        group_by,
+        group_without,
+        label_replace,
+        scalar_param,
+        clamp,
+    ) = match parse_query(&params.query) {
         Ok(res) => res,
         Err(e) => return map_error(e),
     };
@@ -134,25 +153,31 @@ pub async fn query_instant(
         Ok(result) => {
             let mut res = Vec::new();
             for ts in result.series {
-                let values = ts.samples.into_iter()
+                let values = ts
+                    .samples
+                    .into_iter()
                     .map(|s| (s.timestamp_ns as f64 / 1_000_000_000.0, s.value.to_string()))
                     .collect();
-                
+
                 res.push(PrometheusResult {
                     metric: serde_json::to_value(&ts.labels).unwrap_or_default(),
                     values,
                 });
             }
 
-            (StatusCode::OK, Json(PrometheusResponse {
-                status: "success".into(),
-                data: PrometheusData {
-                    result_type: "vector".into(),
-                    result: res,
-                    total_series_count: Some(result.total_series_count),
-                    volume_summary: result.volume_summary,
-                }
-            })).into_response()
+            (
+                StatusCode::OK,
+                Json(PrometheusResponse {
+                    status: "success".into(),
+                    data: PrometheusData {
+                        result_type: "vector".into(),
+                        result: res,
+                        total_series_count: Some(result.total_series_count),
+                        volume_summary: result.volume_summary,
+                    },
+                }),
+            )
+                .into_response()
         }
         Err(e) => map_error(e),
     }
@@ -165,20 +190,43 @@ pub async fn query_range(
 ) -> Response {
     let Query(params) = match params {
         Ok(q) => q,
-        Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({"status": "error", "error": e.to_string()}))).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"status": "error", "error": e.to_string()})),
+            )
+                .into_response()
+        }
     };
 
-    let (metric_name, matchers, aggregation, quantile, topk_n, group_by, group_without, label_replace, scalar_param, clamp) = match parse_query(&params.query) {
+    let (
+        metric_name,
+        matchers,
+        aggregation,
+        quantile,
+        topk_n,
+        group_by,
+        group_without,
+        label_replace,
+        scalar_param,
+        clamp,
+    ) = match parse_query(&params.query) {
         Ok(res) => res,
         Err(e) => return map_error(e),
     };
 
     let start_ns = (params.start * 1_000_000_000.0) as i64;
     let end_ns = (params.end * 1_000_000_000.0) as i64;
-    
+
     let step_ns = match parse_duration(&params.step) {
         Ok(d) => d,
-        Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"status": "error", "error": "Invalid step duration"}))).into_response(),
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"status": "error", "error": "Invalid step duration"})),
+            )
+                .into_response()
+        }
     };
 
     let plan = match QueryPlan::new_full(
@@ -206,25 +254,31 @@ pub async fn query_range(
         Ok(result) => {
             let mut res = Vec::new();
             for ts in result.series {
-                let values = ts.samples.into_iter()
+                let values = ts
+                    .samples
+                    .into_iter()
                     .map(|s| (s.timestamp_ns as f64 / 1_000_000_000.0, s.value.to_string()))
                     .collect();
-                
+
                 res.push(PrometheusResult {
                     metric: serde_json::to_value(&ts.labels).unwrap_or_default(),
                     values,
                 });
             }
 
-            (StatusCode::OK, Json(PrometheusResponse {
-                status: "success".into(),
-                data: PrometheusData {
-                    result_type: "matrix".into(),
-                    result: res,
-                    total_series_count: Some(result.total_series_count),
-                    volume_summary: result.volume_summary,
-                }
-            })).into_response()
+            (
+                StatusCode::OK,
+                Json(PrometheusResponse {
+                    status: "success".into(),
+                    data: PrometheusData {
+                        result_type: "matrix".into(),
+                        result: res,
+                        total_series_count: Some(result.total_series_count),
+                        volume_summary: result.volume_summary,
+                    },
+                }),
+            )
+                .into_response()
         }
         Err(e) => map_error(e),
     }
@@ -237,7 +291,13 @@ pub async fn query_logs(
 ) -> Response {
     let Query(params) = match params {
         Ok(q) => q,
-        Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({"status": "error", "error": e.to_string()}))).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"status": "error", "error": e.to_string()})),
+            )
+                .into_response()
+        }
     };
 
     let (_, matchers) = match parqtel_query::parse_selector(&params.query) {
@@ -250,18 +310,33 @@ pub async fn query_logs(
     let limit = params.limit.unwrap_or(1000).min(10000);
     let order_desc = params.order.as_deref() != Some("asc");
 
-    match state.inner.query_executor.query_logs(
-        start_ns, end_ns, matchers, limit, order_desc, params.severity_min, params.search
-    ).await {
-        Ok(result) => (StatusCode::OK, Json(json!({
-            "status": "success",
-            "data": {
-                "logs": result.logs,
-                "total_matched": result.total_logs_count,
-                "truncated": result.total_logs_count > limit,
-                "volume_summary": result.volume_summary,
-            }
-        }))).into_response(),
+    match state
+        .inner
+        .query_executor
+        .query_logs(
+            start_ns,
+            end_ns,
+            matchers,
+            limit,
+            order_desc,
+            params.severity_min,
+            params.search,
+        )
+        .await
+    {
+        Ok(result) => (
+            StatusCode::OK,
+            Json(json!({
+                "status": "success",
+                "data": {
+                    "logs": result.logs,
+                    "total_matched": result.total_logs_count,
+                    "truncated": result.total_logs_count > limit,
+                    "volume_summary": result.volume_summary,
+                }
+            })),
+        )
+            .into_response(),
         Err(e) => map_error(e),
     }
 }
@@ -273,7 +348,13 @@ pub async fn query_logs_count(
 ) -> Response {
     let Query(params) = match params {
         Ok(q) => q,
-        Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({"status": "error", "error": e.to_string()}))).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"status": "error", "error": e.to_string()})),
+            )
+                .into_response()
+        }
     };
 
     let (_, matchers) = match parqtel_query::parse_selector(&params.query) {
@@ -284,31 +365,51 @@ pub async fn query_logs_count(
     let start_ns = (params.start * 1_000_000_000.0) as i64;
     let end_ns = (params.end * 1_000_000_000.0) as i64;
 
-    match state.inner.query_executor.query_logs(
-        start_ns, end_ns, matchers, 0, true, None, None
-    ).await {
+    match state
+        .inner
+        .query_executor
+        .query_logs(start_ns, end_ns, matchers, 0, true, None, None)
+        .await
+    {
         Ok(result) => {
             let win = (end_ns - start_ns) / 60;
-            let buckets = result.volume_summary.into_iter().enumerate().map(|(i, c)| LogBucket {
-                start_ns: start_ns + (i as i64 * win),
-                end_ns: start_ns + ((i + 1) as i64 * win),
-                count: c,
-            }).collect();
-            (StatusCode::OK, Json(LogCountResponse { status: "success".into(), data: buckets })).into_response()
-        },
+            let buckets = result
+                .volume_summary
+                .into_iter()
+                .enumerate()
+                .map(|(i, c)| LogBucket {
+                    start_ns: start_ns + (i as i64 * win),
+                    end_ns: start_ns + ((i + 1) as i64 * win),
+                    count: c,
+                })
+                .collect();
+            (
+                StatusCode::OK,
+                Json(LogCountResponse {
+                    status: "success".into(),
+                    data: buckets,
+                }),
+            )
+                .into_response()
+        }
         Err(e) => map_error(e),
     }
 }
 
 /// Handler for GET /v1/logs/fields.
-pub async fn list_log_fields(
-    State(state): State<AppState>,
-) -> Response {
+pub async fn list_log_fields(State(state): State<AppState>) -> Response {
     let (dedicated, common) = state.inner.query_executor.get_log_fields().await;
-    (StatusCode::OK, Json(PrometheusResponse {
-        status: "success".into(),
-        data: LogFieldsData { dedicated_columns: dedicated, common_attributes: common },
-    })).into_response()
+    (
+        StatusCode::OK,
+        Json(PrometheusResponse {
+            status: "success".into(),
+            data: LogFieldsData {
+                dedicated_columns: dedicated,
+                common_attributes: common,
+            },
+        }),
+    )
+        .into_response()
 }
 
 /// Handler for GET /v1/logs/field_values.
@@ -318,39 +419,60 @@ pub async fn list_log_field_values(
 ) -> Response {
     let Query(params) = match params {
         Ok(q) => q,
-        Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({"status": "error", "error": e.to_string()}))).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"status": "error", "error": e.to_string()})),
+            )
+                .into_response()
+        }
     };
 
-    let field = params.get("field_name").and_then(|v| v.as_str()).unwrap_or("");
+    let field = params
+        .get("field_name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
     let limit = params.get("limit").and_then(|v| v.as_u64()).unwrap_or(50) as usize;
 
-    let values = state.inner.query_executor.get_log_field_values(field, limit).await;
-    (StatusCode::OK, Json(PrometheusResponse {
-        status: "success".into(),
-        data: values,
-    })).into_response()
+    let values = state
+        .inner
+        .query_executor
+        .get_log_field_values(field, limit)
+        .await;
+    (
+        StatusCode::OK,
+        Json(PrometheusResponse {
+            status: "success".into(),
+            data: values,
+        }),
+    )
+        .into_response()
 }
 
 /// Handler for GET /api/v1/label/__name__/values.
-pub async fn list_metric_names(
-    State(state): State<AppState>,
-) -> Response {
+pub async fn list_metric_names(State(state): State<AppState>) -> Response {
     let names = state.inner.query_executor.list_metrics().await;
-    (StatusCode::OK, Json(PrometheusResponse {
-        status: "success".into(),
-        data: names.into_iter().collect::<Vec<_>>(),
-    })).into_response()
+    (
+        StatusCode::OK,
+        Json(PrometheusResponse {
+            status: "success".into(),
+            data: names.into_iter().collect::<Vec<_>>(),
+        }),
+    )
+        .into_response()
 }
 
 /// Handler for GET /api/v1/labels.
-pub async fn list_label_names(
-    State(state): State<AppState>,
-) -> Response {
+pub async fn list_label_names(State(state): State<AppState>) -> Response {
     let names = state.inner.query_executor.list_labels(None).await;
-    (StatusCode::OK, Json(PrometheusResponse {
-        status: "success".into(),
-        data: names.into_iter().collect::<Vec<_>>(),
-    })).into_response()
+    (
+        StatusCode::OK,
+        Json(PrometheusResponse {
+            status: "success".into(),
+            data: names.into_iter().collect::<Vec<_>>(),
+        }),
+    )
+        .into_response()
 }
 
 /// Handler for GET /api/v1/label/{name}/values.
@@ -359,10 +481,14 @@ pub async fn list_label_values(
     axum::extract::Path(name): axum::extract::Path<String>,
 ) -> Response {
     let values = state.inner.query_executor.list_label_values(&name).await;
-    (StatusCode::OK, Json(PrometheusResponse {
-        status: "success".into(),
-        data: values.into_iter().collect::<Vec<_>>(),
-    })).into_response()
+    (
+        StatusCode::OK,
+        Json(PrometheusResponse {
+            status: "success".into(),
+            data: values.into_iter().collect::<Vec<_>>(),
+        }),
+    )
+        .into_response()
 }
 
 /// Handler for GET /v1/correlate.
@@ -372,23 +498,44 @@ pub async fn correlate(
 ) -> Response {
     let Query(params) = match params {
         Ok(q) => q,
-        Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({"status": "error", "error": e.to_string()}))).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"status": "error", "error": e.to_string()})),
+            )
+                .into_response()
+        }
     };
 
     let labels: parqtel_core::LabelSet = match serde_json::from_str(&params.anchor_labels) {
         Ok(l) => l,
-        Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"status": "error", "error": "Invalid anchor_labels JSON"}))).into_response(),
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"status": "error", "error": "Invalid anchor_labels JSON"})),
+            )
+                .into_response()
+        }
     };
 
-    match state.inner.query_executor.correlate(
-        &params.anchor_signal,
-        params.anchor_timestamp_ns,
-        labels,
-        &params.target_signal,
-        params.window_ns.unwrap_or(5_000_000_000),
-        params.limit.unwrap_or(50),
-    ).await {
-        Ok(res) => (StatusCode::OK, Json(json!({ "status": "success", "data": res }))).into_response(),
+    match state
+        .inner
+        .query_executor
+        .correlate(
+            &params.anchor_signal,
+            params.anchor_timestamp_ns,
+            labels,
+            &params.target_signal,
+            params.window_ns.unwrap_or(5_000_000_000),
+            params.limit.unwrap_or(50),
+        )
+        .await
+    {
+        Ok(res) => (
+            StatusCode::OK,
+            Json(json!({ "status": "success", "data": res })),
+        )
+            .into_response(),
         Err(e) => map_error(e),
     }
 }
@@ -398,18 +545,41 @@ pub async fn search_traces(
     State(state): State<AppState>,
     params: Query<serde_json::Value>,
 ) -> Response {
-    let trace_id = params.get("trace_id").and_then(|v| v.as_str()).unwrap_or("");
-    let start = params.get("start").and_then(|v| v.as_str()).and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
-    let end = params.get("end").and_then(|v| v.as_str()).and_then(|s| s.parse::<f64>().ok())
+    let trace_id = params
+        .get("trace_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let start = params
+        .get("start")
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.parse::<f64>().ok())
+        .unwrap_or(0.0);
+    let end = params
+        .get("end")
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.parse::<f64>().ok())
         .unwrap_or_else(|| chrono::Utc::now().timestamp() as f64);
 
     let start_ns = (start * 1_000_000_000.0) as i64;
     let end_ns = (end * 1_000_000_000.0) as i64;
-    let filter = if trace_id.is_empty() { None } else { Some(trace_id) };
+    let filter = if trace_id.is_empty() {
+        None
+    } else {
+        Some(trace_id)
+    };
 
-    match state.inner.query_executor.query_traces(start_ns, end_ns, filter, 200).await {
+    match state
+        .inner
+        .query_executor
+        .query_traces(start_ns, end_ns, filter, 200)
+        .await
+    {
         Ok(spans) => {
-            let tid = if let Some(first) = spans.first() { hex::encode(first.trace_id) } else { trace_id.to_string() };
+            let tid = if let Some(first) = spans.first() {
+                hex::encode(first.trace_id)
+            } else {
+                trace_id.to_string()
+            };
             let span_json: Vec<serde_json::Value> = spans.iter().map(|s| {
                 let svc = s.attributes.get("service.name").unwrap_or("unknown").to_string();
                 let parent = hex::encode(s.parent_span_id);
@@ -432,15 +602,21 @@ pub async fn search_traces(
                     "links": links,
                 });
                 if s.parent_span_id != [0u8; 8] {
-                    obj.as_object_mut().unwrap().insert("parent_span_id".into(), json!(parent));
+                    if let Some(map) = obj.as_object_mut() {
+                        map.insert("parent_span_id".into(), json!(parent));
+                    }
                 }
                 obj
             }).collect();
 
-            (StatusCode::OK, Json(json!({
-                "status": "success",
-                "data": { "trace_id": tid, "spans": span_json }
-            }))).into_response()
+            (
+                StatusCode::OK,
+                Json(json!({
+                    "status": "success",
+                    "data": { "trace_id": tid, "spans": span_json }
+                })),
+            )
+                .into_response()
         }
         Err(e) => map_error(e),
     }
@@ -453,17 +629,23 @@ fn map_error(e: parqtel_core::Error) -> Response {
         _ => StatusCode::INTERNAL_SERVER_ERROR,
     };
 
-    (status, Json(json!({
-        "status": "error",
-        "errorType": "bad_data",
-        "error": e.to_string()
-    }))).into_response()
+    (
+        status,
+        Json(json!({
+            "status": "error",
+            "errorType": "bad_data",
+            "error": e.to_string()
+        })),
+    )
+        .into_response()
 }
 
 fn parse_duration(s: &str) -> Result<i64, ()> {
-    if s.is_empty() { return Err(()); }
-    let val: f64 = s[..s.len()-1].parse().map_err(|_| ())?;
-    let unit = &s[s.len()-1..];
+    if s.is_empty() {
+        return Err(());
+    }
+    let val: f64 = s[..s.len() - 1].parse().map_err(|_| ())?;
+    let unit = &s[s.len() - 1..];
     let multiplier: i64 = match unit {
         "s" => 1_000_000_000,
         "m" => 60 * 1_000_000_000,

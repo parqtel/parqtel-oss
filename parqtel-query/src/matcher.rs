@@ -1,5 +1,5 @@
+use parqtel_core::{Error, LabelSet, Result};
 use regex::Regex;
-use parqtel_core::{Error, Result, LabelSet};
 
 /// Operators for label matching.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,12 +38,18 @@ impl LabelMatcher {
     pub fn new(name: String, op: MatchOp, value: String) -> Result<Self> {
         let regex = match op {
             MatchOp::RegexMatch | MatchOp::RegexNotMatch => {
-                let re = Regex::new(&value).map_err(|e| Error::Validation(format!("Invalid regex '{}': {}", value, e)))?;
+                let re = Regex::new(&value)
+                    .map_err(|e| Error::Validation(format!("Invalid regex '{}': {}", value, e)))?;
                 Some(re)
             }
             _ => None,
         };
-        Ok(Self { name, op, value, regex })
+        Ok(Self {
+            name,
+            op,
+            value,
+            regex,
+        })
     }
 
     /// Evaluates this matcher against a label value.
@@ -86,7 +92,14 @@ pub fn parse_selector(selector: &str) -> Result<(Option<String>, Vec<LabelMatche
         }
         let name = selector[..start].trim();
         let labels = &selector[start + 1..selector.len() - 1];
-        (if name.is_empty() { None } else { Some(name.to_string()) }, labels)
+        (
+            if name.is_empty() {
+                None
+            } else {
+                Some(name.to_string())
+            },
+            labels,
+        )
     } else {
         (Some(selector.to_string()), "")
     };
@@ -95,8 +108,10 @@ pub fn parse_selector(selector: &str) -> Result<(Option<String>, Vec<LabelMatche
     if !labels_part.is_empty() {
         for part in labels_part.split(',') {
             let part = part.trim();
-            if part.is_empty() { continue; }
-            
+            if part.is_empty() {
+                continue;
+            }
+
             let (op, split_idx) = if let Some(idx) = part.find("=~") {
                 (MatchOp::RegexMatch, idx)
             } else if let Some(idx) = part.find("!~") {
@@ -106,12 +121,24 @@ pub fn parse_selector(selector: &str) -> Result<(Option<String>, Vec<LabelMatche
             } else if let Some(idx) = part.find('=') {
                 (MatchOp::Equal, idx)
             } else {
-                return Err(Error::Validation(format!("Invalid label matcher: {}", part)));
+                return Err(Error::Validation(format!(
+                    "Invalid label matcher: {}",
+                    part
+                )));
             };
 
             let name = part[..split_idx].trim().to_string();
-            let value = part[split_idx + (if op == MatchOp::RegexMatch || op == MatchOp::RegexNotMatch || op == MatchOp::NotEqual { 2 } else { 1 })..].trim();
-            
+            let value = part[split_idx
+                + (if op == MatchOp::RegexMatch
+                    || op == MatchOp::RegexNotMatch
+                    || op == MatchOp::NotEqual
+                {
+                    2
+                } else {
+                    1
+                })..]
+                .trim();
+
             // Strip quotes
             let value = if value.starts_with('"') && value.ends_with('"') {
                 &value[1..value.len() - 1]
@@ -127,16 +154,16 @@ pub fn parse_selector(selector: &str) -> Result<(Option<String>, Vec<LabelMatche
 }
 
 pub type ParsedQuery = (
-    String,                              // metric name
-    Vec<LabelMatcher>,                   // label matchers
-    Option<crate::plan::AggregationOp>,  // aggregation / transform op
-    Option<f64>,                         // quantile (histogram_quantile)
-    Option<usize>,                       // topk_n / bottomk_n
-    Vec<String>,                         // by() labels
-    Vec<String>,                         // without() labels
+    String,                                   // metric name
+    Vec<LabelMatcher>,                        // label matchers
+    Option<crate::plan::AggregationOp>,       // aggregation / transform op
+    Option<f64>,                              // quantile (histogram_quantile)
+    Option<usize>,                            // topk_n / bottomk_n
+    Vec<String>,                              // by() labels
+    Vec<String>,                              // without() labels
     Option<(String, String, String, String)>, // label_replace params
-    Option<f64>,                         // scalar_param (round to_nearest)
-    Option<(Option<f64>, Option<f64>)>,  // clamp (min, max)
+    Option<f64>,                              // scalar_param (round to_nearest)
+    Option<(Option<f64>, Option<f64>)>,       // clamp (min, max)
 );
 
 /// Parses a PromQL-style query including all supported aggregation functions.
@@ -146,25 +173,50 @@ pub fn parse_query(query: &str) -> Result<ParsedQuery> {
     // ── histogram_quantile(φ, selector) ────────────────────────────────────
     if let Some(inner) = strip_fn("histogram_quantile", query) {
         let (head, tail) = split_first_arg(inner)?;
-        let q: f64 = head.trim().parse()
+        let q: f64 = head
+            .trim()
+            .parse()
             .map_err(|_| Error::Validation("Invalid quantile value".into()))?;
         let (name, matchers) = parse_selector(tail.trim())?;
-        return Ok((name.unwrap_or_default(), matchers,
-            Some(crate::plan::AggregationOp::HistogramQuantile), Some(q),
-            None, vec![], vec![], None, None, None));
+        return Ok((
+            name.unwrap_or_default(),
+            matchers,
+            Some(crate::plan::AggregationOp::HistogramQuantile),
+            Some(q),
+            None,
+            vec![],
+            vec![],
+            None,
+            None,
+            None,
+        ));
     }
 
     // ── topk(N, selector) / bottomk(N, selector) ───────────────────────────
-    for (fname, op) in [("topk", crate::plan::AggregationOp::TopK),
-                        ("bottomk", crate::plan::AggregationOp::BottomK)] {
+    for (fname, op) in [
+        ("topk", crate::plan::AggregationOp::TopK),
+        ("bottomk", crate::plan::AggregationOp::BottomK),
+    ] {
         if let Some(inner) = strip_fn(fname, query) {
             let (head, tail) = split_first_arg(inner)?;
-            let n: usize = head.trim().parse()
+            let n: usize = head
+                .trim()
+                .parse()
                 .map_err(|_| Error::Validation(format!("{fname} N must be a positive integer")))?;
             let (selector, by, without) = parse_selector_with_grouping(tail.trim())?;
             let (name, matchers) = parse_selector(selector)?;
-            return Ok((name.unwrap_or_default(), matchers, Some(op), None,
-                Some(n), by, without, None, None, None));
+            return Ok((
+                name.unwrap_or_default(),
+                matchers,
+                Some(op),
+                None,
+                Some(n),
+                by,
+                without,
+                None,
+                None,
+                None,
+            ));
         }
     }
 
@@ -172,36 +224,69 @@ pub fn parse_query(query: &str) -> Result<ParsedQuery> {
     if let Some(inner) = strip_fn("label_replace", query) {
         let args = split_args(inner);
         if args.len() != 5 {
-            return Err(Error::Validation("label_replace requires 5 arguments".into()));
+            return Err(Error::Validation(
+                "label_replace requires 5 arguments".into(),
+            ));
         }
         let (name, matchers) = parse_selector(args[0].trim())?;
         let dst = unquote(args[1].trim()).to_string();
         let repl = unquote(args[2].trim()).to_string();
         let src = unquote(args[3].trim()).to_string();
         let regex = unquote(args[4].trim()).to_string();
-        return Ok((name.unwrap_or_default(), matchers,
-            Some(crate::plan::AggregationOp::LabelReplace), None,
-            None, vec![], vec![], Some((dst, repl, src, regex)), None, None));
+        return Ok((
+            name.unwrap_or_default(),
+            matchers,
+            Some(crate::plan::AggregationOp::LabelReplace),
+            None,
+            None,
+            vec![],
+            vec![],
+            Some((dst, repl, src, regex)),
+            None,
+            None,
+        ));
     }
 
     // ── clamp_min(selector, min) / clamp_max(selector, max) ────────────────
     if let Some(inner) = strip_fn("clamp_min", query) {
         let (selector, tail) = split_first_selector(inner)?;
-        let min: f64 = tail.trim().parse()
+        let min: f64 = tail
+            .trim()
+            .parse()
             .map_err(|_| Error::Validation("clamp_min: invalid min value".into()))?;
         let (name, matchers) = parse_selector(selector)?;
-        return Ok((name.unwrap_or_default(), matchers,
-            Some(crate::plan::AggregationOp::ClampMin), None,
-            None, vec![], vec![], None, None, Some((Some(min), None))));
+        return Ok((
+            name.unwrap_or_default(),
+            matchers,
+            Some(crate::plan::AggregationOp::ClampMin),
+            None,
+            None,
+            vec![],
+            vec![],
+            None,
+            None,
+            Some((Some(min), None)),
+        ));
     }
     if let Some(inner) = strip_fn("clamp_max", query) {
         let (selector, tail) = split_first_selector(inner)?;
-        let max: f64 = tail.trim().parse()
+        let max: f64 = tail
+            .trim()
+            .parse()
             .map_err(|_| Error::Validation("clamp_max: invalid max value".into()))?;
         let (name, matchers) = parse_selector(selector)?;
-        return Ok((name.unwrap_or_default(), matchers,
-            Some(crate::plan::AggregationOp::ClampMax), None,
-            None, vec![], vec![], None, None, Some((None, Some(max)))));
+        return Ok((
+            name.unwrap_or_default(),
+            matchers,
+            Some(crate::plan::AggregationOp::ClampMax),
+            None,
+            None,
+            vec![],
+            vec![],
+            None,
+            None,
+            Some((None, Some(max))),
+        ));
     }
 
     // ── round(selector[, to_nearest]) ──────────────────────────────────────
@@ -209,62 +294,103 @@ pub fn parse_query(query: &str) -> Result<ParsedQuery> {
         // round has optional second arg
         let (selector, scalar) = if inner.contains(',') {
             let (sel, tail) = split_first_selector(inner)?;
-            let s: f64 = tail.trim().parse()
+            let s: f64 = tail
+                .trim()
+                .parse()
                 .map_err(|_| Error::Validation("round: invalid to_nearest value".into()))?;
             (sel, Some(s))
         } else {
             (inner, None)
         };
         let (name, matchers) = parse_selector(selector.trim())?;
-        return Ok((name.unwrap_or_default(), matchers,
-            Some(crate::plan::AggregationOp::Round), None,
-            None, vec![], vec![], None, scalar, None));
+        return Ok((
+            name.unwrap_or_default(),
+            matchers,
+            Some(crate::plan::AggregationOp::Round),
+            None,
+            None,
+            vec![],
+            vec![],
+            None,
+            scalar,
+            None,
+        ));
     }
 
     // ── simple one-arg transforms: abs, ceil, floor ─────────────────────────
     for (fname, op) in [
-        ("abs",   crate::plan::AggregationOp::Abs),
-        ("ceil",  crate::plan::AggregationOp::Ceil),
+        ("abs", crate::plan::AggregationOp::Abs),
+        ("ceil", crate::plan::AggregationOp::Ceil),
         ("floor", crate::plan::AggregationOp::Floor),
     ] {
         if let Some(inner) = strip_fn(fname, query) {
             let (name, matchers) = parse_selector(inner.trim())?;
-            return Ok((name.unwrap_or_default(), matchers, Some(op), None,
-                None, vec![], vec![], None, None, None));
+            return Ok((
+                name.unwrap_or_default(),
+                matchers,
+                Some(op),
+                None,
+                None,
+                vec![],
+                vec![],
+                None,
+                None,
+                None,
+            ));
         }
     }
 
     // ── range functions: rate, irate, increase, delta ──────────────────────
     for (fname, op) in [
-        ("irate",    crate::plan::AggregationOp::Irate),
+        ("irate", crate::plan::AggregationOp::Irate),
         ("increase", crate::plan::AggregationOp::Increase),
-        ("delta",    crate::plan::AggregationOp::Delta),
-        ("rate",     crate::plan::AggregationOp::Rate),
+        ("delta", crate::plan::AggregationOp::Delta),
+        ("rate", crate::plan::AggregationOp::Rate),
     ] {
         if let Some(inner) = strip_fn(fname, query) {
             // Strip optional range selector [Xm]
             let sel = strip_range(inner);
             let (name, matchers) = parse_selector(sel)?;
-            return Ok((name.unwrap_or_default(), matchers, Some(op), None,
-                None, vec![], vec![], None, None, None));
+            return Ok((
+                name.unwrap_or_default(),
+                matchers,
+                Some(op),
+                None,
+                None,
+                vec![],
+                vec![],
+                None,
+                None,
+                None,
+            ));
         }
     }
 
     // ── standard aggregations with optional by/without ──────────────────────
     for (fname, op) in [
-        ("avg",    crate::plan::AggregationOp::Avg),
-        ("sum",    crate::plan::AggregationOp::Sum),
-        ("min",    crate::plan::AggregationOp::Min),
-        ("max",    crate::plan::AggregationOp::Max),
-        ("count",  crate::plan::AggregationOp::Count),
+        ("avg", crate::plan::AggregationOp::Avg),
+        ("sum", crate::plan::AggregationOp::Sum),
+        ("min", crate::plan::AggregationOp::Min),
+        ("max", crate::plan::AggregationOp::Max),
+        ("count", crate::plan::AggregationOp::Count),
         ("stddev", crate::plan::AggregationOp::Stddev),
         ("stdvar", crate::plan::AggregationOp::Stdvar),
     ] {
         if let Some(inner) = strip_fn(fname, query) {
             let (selector, by, without) = parse_selector_with_grouping(inner)?;
             let (name, matchers) = parse_selector(selector)?;
-            return Ok((name.unwrap_or_default(), matchers, Some(op), None,
-                None, by, without, None, None, None));
+            return Ok((
+                name.unwrap_or_default(),
+                matchers,
+                Some(op),
+                None,
+                None,
+                by,
+                without,
+                None,
+                None,
+                None,
+            ));
         }
         // Also handle `sum by (label) (selector)` form
         let by_prefix = format!("{fname} by (");
@@ -272,21 +398,45 @@ pub fn parse_query(query: &str) -> Result<ParsedQuery> {
         if query.starts_with(&by_prefix) || query.starts_with(&without_prefix) {
             let (grouping_labels, is_without, remainder) = parse_leading_grouping(query, fname)?;
             // remainder should be (selector)
-            let inner = remainder.trim().trim_start_matches('(').trim_end_matches(')');
+            let inner = remainder
+                .trim()
+                .trim_start_matches('(')
+                .trim_end_matches(')');
             let (name, matchers) = parse_selector(inner)?;
             let (by, without) = if is_without {
                 (vec![], grouping_labels)
             } else {
                 (grouping_labels, vec![])
             };
-            return Ok((name.unwrap_or_default(), matchers, Some(op), None,
-                None, by, without, None, None, None));
+            return Ok((
+                name.unwrap_or_default(),
+                matchers,
+                Some(op),
+                None,
+                None,
+                by,
+                without,
+                None,
+                None,
+                None,
+            ));
         }
     }
 
     // ── bare selector ───────────────────────────────────────────────────────
     let (name, matchers) = parse_selector(query)?;
-    Ok((name.unwrap_or_default(), matchers, None, None, None, vec![], vec![], None, None, None))
+    Ok((
+        name.unwrap_or_default(),
+        matchers,
+        None,
+        None,
+        None,
+        vec![],
+        vec![],
+        None,
+        None,
+        None,
+    ))
 }
 
 // ── helpers ─────────────────────────────────────────────────────────────────
@@ -326,10 +476,13 @@ fn split_first_selector(s: &str) -> Result<(&str, &str)> {
     } else if let Some(comma) = s.find(',') {
         comma
     } else {
-        return Err(Error::Validation("Expected two comma-separated arguments".into()));
+        return Err(Error::Validation(
+            "Expected two comma-separated arguments".into(),
+        ));
     };
     // Now find the comma after the selector end
-    s[after_sel..].find(',')
+    s[after_sel..]
+        .find(',')
         .map(|i| (&s[..after_sel + i], s[after_sel + i + 1..].trim()))
         .ok_or_else(|| Error::Validation("Expected comma after selector".into()))
 }
@@ -393,7 +546,9 @@ fn parse_leading_grouping<'a>(query: &'a str, fname: &str) -> Result<(Vec<String
     let keyword = if is_without { " without (" } else { " by (" };
     let skip_prefix = fname.len() + keyword.len();
     let rest = &query[skip_prefix..];
-    let close = rest.find(')').ok_or_else(|| Error::Validation("Missing closing ) in grouping clause".into()))?;
+    let close = rest
+        .find(')')
+        .ok_or_else(|| Error::Validation("Missing closing ) in grouping clause".into()))?;
     let labels = parse_label_list(&rest[..close]);
     Ok((labels, is_without, rest[close + 1..].trim()))
 }
@@ -403,7 +558,10 @@ fn find_keyword(s: &str, kw: &str) -> Option<usize> {
 }
 
 fn parse_label_list(s: &str) -> Vec<String> {
-    s.split(',').map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect()
+    s.split(',')
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect()
 }
 
 #[cfg(test)]
@@ -434,14 +592,15 @@ mod tests {
 
     #[test]
     fn test_selector_parsing() {
-        let (name, matchers) = parse_selector("http_requests_total{method=\"GET\", status!=\"500\"}").unwrap();
+        let (name, matchers) =
+            parse_selector("http_requests_total{method=\"GET\", status!=\"500\"}").unwrap();
         assert_eq!(name, Some("http_requests_total".into()));
         assert_eq!(matchers.len(), 2);
         assert_eq!(matchers[0].name, "method");
         assert_eq!(matchers[0].op, MatchOp::Equal);
         assert_eq!(matchers[1].name, "status");
         assert_eq!(matchers[1].op, MatchOp::NotEqual);
-        
+
         // Regex and quotes
         let (_, matchers) = parse_selector("m{a=~\"v.*\", b!~'x.*'}").unwrap();
         assert_eq!(matchers[0].op, MatchOp::RegexMatch);
@@ -535,7 +694,8 @@ mod tests {
 
         // label_replace
         let (name, _, agg, _, _, _, _, lr, ..) =
-            parse_query("label_replace(cpu, \"host_short\", \"$1\", \"host\", \"([^.]+).*\")").unwrap();
+            parse_query("label_replace(cpu, \"host_short\", \"$1\", \"host\", \"([^.]+).*\")")
+                .unwrap();
         assert_eq!(name, "cpu");
         assert_eq!(agg, Some(crate::plan::AggregationOp::LabelReplace));
         let lr = lr.unwrap();

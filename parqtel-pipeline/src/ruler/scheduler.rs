@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use tokio::sync::RwLock;
-use tokio::time::{Duration, interval};
+use tokio::time::{interval, Duration};
 use tracing::{error, info};
 
 use crate::config::RulerConfig;
@@ -20,7 +20,11 @@ pub struct RulerScheduler {
 }
 
 impl RulerScheduler {
-    pub fn new(config: RulerConfig, registry: RuleRegistry, evaluator: Arc<RulerEvaluator>) -> Self {
+    pub fn new(
+        config: RulerConfig,
+        registry: RuleRegistry,
+        evaluator: Arc<RulerEvaluator>,
+    ) -> Self {
         Self {
             config,
             registry,
@@ -82,8 +86,8 @@ impl RulerScheduler {
     /// Persist state to disk.
     pub async fn save_state(&self) -> crate::Result<()> {
         let state = self.last_eval.read().await;
-        let json = serde_json::to_string_pretty(&*state)
-            .map_err(|e| crate::Error::Io(e.to_string()))?;
+        let json =
+            serde_json::to_string_pretty(&*state).map_err(|e| crate::Error::Io(e.to_string()))?;
         if let Some(parent) = std::path::Path::new(&self.config.state_file).parent() {
             std::fs::create_dir_all(parent).map_err(|e| crate::Error::Io(e.to_string()))?;
         }

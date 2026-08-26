@@ -1,28 +1,36 @@
+pub(crate) mod correlation;
+mod reader;
 mod schema;
 mod writer;
-mod reader;
-pub(crate) mod correlation;
 
-pub use schema::{BlockMetadata, SignalType, metrics_schema, logs_schema, traces_schema};
+pub use schema::{logs_schema, metrics_schema, traces_schema, BlockMetadata, SignalType};
 
-use std::sync::Arc;
+use crate::error::Result;
+use crate::models::labels::LabelSet;
+use crate::models::logs::LogRecord;
+use crate::models::metrics::{DataPoint, Metric, MetricKind};
+use crate::models::traces::Span;
 use arrow2::array::Array;
 use arrow2::chunk::Chunk;
 use arrow2::datatypes::Schema;
-use crate::error::Result;
-use crate::models::metrics::{DataPoint, Metric, MetricKind};
-use crate::models::logs::LogRecord;
-use crate::models::labels::LabelSet;
-use crate::models::traces::Span;
+use std::sync::Arc;
 
 /// Facade that delegates to schema/writer/reader submodules.
 pub struct StorageModel;
 
 impl StorageModel {
-    pub fn metrics_schema() -> Schema { schema::metrics_schema() }
-    pub fn logs_schema() -> Schema { schema::logs_schema() }
-    pub fn traces_schema() -> Schema { schema::traces_schema() }
-    pub fn schema() -> Schema { schema::metrics_schema() }
+    pub fn metrics_schema() -> Schema {
+        schema::metrics_schema()
+    }
+    pub fn logs_schema() -> Schema {
+        schema::logs_schema()
+    }
+    pub fn traces_schema() -> Schema {
+        schema::traces_schema()
+    }
+    pub fn schema() -> Schema {
+        schema::metrics_schema()
+    }
 
     pub fn metrics_to_chunk(metrics: &[Metric]) -> Result<Chunk<Arc<dyn Array>>> {
         writer::metrics_to_chunk(metrics)
@@ -34,11 +42,19 @@ impl StorageModel {
         writer::traces_to_chunk(spans)
     }
 
-    pub fn row_to_point<A: AsRef<dyn Array>>(chunk: &Chunk<A>, row: usize) -> Result<(String, MetricKind, LabelSet, DataPoint)> {
+    pub fn row_to_point<A: AsRef<dyn Array>>(
+        chunk: &Chunk<A>,
+        row: usize,
+    ) -> Result<(String, MetricKind, LabelSet, DataPoint)> {
         reader::row_to_point(chunk, row)
     }
-    pub fn row_to_log<A: AsRef<dyn Array>>(chunk: &Chunk<A>, row: usize) -> Result<LogRecord> {
-        reader::row_to_log(chunk, row)
+    pub fn row_to_log<'a, A: AsRef<dyn Array>>(
+        chunk: &'a Chunk<A>,
+        row: usize,
+        attr_cache: &mut std::collections::HashMap<&'a str, crate::LabelSet>,
+        res_cache: &mut std::collections::HashMap<&'a str, crate::LabelSet>,
+    ) -> Result<LogRecord> {
+        reader::row_to_log(chunk, row, attr_cache, res_cache)
     }
     pub fn row_to_span<A: AsRef<dyn Array>>(chunk: &Chunk<A>, row: usize) -> Result<Span> {
         reader::row_to_span(chunk, row)
@@ -49,7 +65,7 @@ impl StorageModel {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
-    use crate::models::metrics::{MetricValue, MetricKind};
+    use crate::models::metrics::{MetricKind, MetricValue};
     use crate::models::traces::SpanStatus;
 
     #[test]
@@ -72,8 +88,17 @@ mod tests {
         let metric = Metric {
             name: "test_metric".into(),
             kind: MetricKind::Gauge,
-            resource_attributes: LabelSet::try_from_iter(vec![("host", "localhost"), ("service.name", "test-svc")]).unwrap_or_default(),
-            data_points: vec![DataPoint::new(100, MetricValue::Double(42.0), LabelSet::try_from_iter(vec![("env", "prod")]).unwrap_or_default()).unwrap()],
+            resource_attributes: LabelSet::try_from_iter(vec![
+                ("host", "localhost"),
+                ("service.name", "test-svc"),
+            ])
+            .unwrap_or_default(),
+            data_points: vec![DataPoint::new(
+                100,
+                MetricValue::Double(42.0),
+                LabelSet::try_from_iter(vec![("env", "prod")]).unwrap_or_default(),
+            )
+            .unwrap()],
             ..Default::default()
         };
         let chunk = StorageModel::metrics_to_chunk(&[metric]).unwrap();
@@ -87,9 +112,22 @@ mod tests {
     #[test]
     fn test_traces_to_chunk() {
         let span = Span::new(
-            [1; 16], [1; 8], "".into(), "test-span".into(), 2,
-            1000, 2000, LabelSet::default(), vec![], vec![],
-            SpanStatus { code: 1, message: "OK".into() }, [0; 8], 0,
+            [1; 16],
+            [1; 8],
+            "".into(),
+            "test-span".into(),
+            2,
+            1000,
+            2000,
+            LabelSet::default(),
+            vec![],
+            vec![],
+            SpanStatus {
+                code: 1,
+                message: "OK".into(),
+            },
+            [0; 8],
+            0,
         );
         let chunk = StorageModel::traces_to_chunk(&[span]).unwrap();
         assert_eq!(chunk.len(), 1);
@@ -98,10 +136,22 @@ mod tests {
     #[test]
     fn test_traces_roundtrip() {
         let span = Span::new(
-            [1; 16], [2; 8], "state".into(), "my-span".into(), 2,
-            1000, 2000, LabelSet::try_from_iter(vec![("key", "val")]).unwrap_or_default(),
-            vec![], vec![],
-            SpanStatus { code: 1, message: "OK".into() }, [3; 8], 5,
+            [1; 16],
+            [2; 8],
+            "state".into(),
+            "my-span".into(),
+            2,
+            1000,
+            2000,
+            LabelSet::try_from_iter(vec![("key", "val")]).unwrap_or_default(),
+            vec![],
+            vec![],
+            SpanStatus {
+                code: 1,
+                message: "OK".into(),
+            },
+            [3; 8],
+            5,
         );
         let chunk = StorageModel::traces_to_chunk(&[span.clone()]).unwrap();
         let decoded = StorageModel::row_to_span(&chunk, 0).unwrap();
@@ -122,21 +172,35 @@ mod tests {
     #[test]
     fn test_logs_to_chunk() {
         let log = LogRecord::new(
-            5000, 5001, 9, "INFO".into(), "hello".into(),
-            LabelSet::default(), LabelSet::try_from_iter(vec![("service.name", "web")]).unwrap_or_default(),
-            [0u8; 16], [0u8; 8], 0, "scope".into(), "1.0".into(),
+            5000,
+            5001,
+            9,
+            "INFO".into(),
+            "hello".into(),
+            LabelSet::default(),
+            LabelSet::try_from_iter(vec![("service.name", "web")]).unwrap_or_default(),
+            [0u8; 16],
+            [0u8; 8],
+            0,
+            "scope".into(),
+            "1.0".into(),
         );
         let chunk = StorageModel::logs_to_chunk(&[log]).unwrap();
         assert_eq!(chunk.len(), 1);
-        assert_eq!(chunk.arrays().len(), StorageModel::logs_schema().fields.len());
+        assert_eq!(
+            chunk.arrays().len(),
+            StorageModel::logs_schema().fields.len()
+        );
     }
 
     #[test]
     fn test_block_metadata_serialization() {
         let meta = BlockMetadata {
             path: std::path::PathBuf::from("/data/block1.parquet"),
-            start_timestamp_ns: 1000, end_timestamp_ns: 2000,
-            row_count: 100, size_bytes: 4096,
+            start_timestamp_ns: 1000,
+            end_timestamp_ns: 2000,
+            row_count: 100,
+            size_bytes: 4096,
             metric_names: std::collections::HashSet::from(["cpu".into()]),
             label_names: std::collections::HashSet::from(["host".into()]),
             signal_type: SignalType::Metrics,

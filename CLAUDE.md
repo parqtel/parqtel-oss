@@ -150,10 +150,14 @@ Key env vars: `PARQTEL_BIND`, `PARQTEL_DATA_DIR`, `PARQTEL__STORAGE__COMPRESSION
 
 ## Performance Optimizations
 
-- **Lock-free ingest handlers** — no outer Mutex; IngestionService uses internal Arc<Mutex<BlockRotator>>
-- **Zero-copy ownership** — `into_iter()` instead of `.clone()` in process_metrics/process_logs
+- **Non-blocking flushes** — Parquet encode + compression + disk I/O run on `tokio::task::spawn_blocking`; the rotator swaps out its writer so ingest continues during flushes. Flush is idempotent on an empty buffer.
+- **Capacity pre-check** — rotators flush before a batch would exceed block capacity (no error-string matching, no dropped overflow points); push reports whether it flushed so callers drain the memory buffer correctly.
+- **Scanner on blocking pool** — block scans use bounded `spawn_blocking` tasks (semaphore acquired before spawn), never blocking async workers.
+- **Row-group statistics pruning** — row groups are skipped via timestamp min/max statistics; blocks are written with ~25K-row groups to make pruning effective.
+- **Per-chunk label caching** — parsed LabelSets cached by raw JSON text per chunk; metric scans skip resource-attribute parsing entirely and filter timestamp/metric name before any allocation.
 - **Indexed MemoryBuffer** — `HashMap<String, Vec<DataPoint>>` for O(1) metric lookup (was O(n) linear scan)
 - **Buffer drain on flush** — memory stays bounded; buffer cleared when data hits Parquet
+- **OTLP content negotiation** — `/v1/{metrics,logs,traces}` accept both protobuf and JSON via content-type dispatch
 
 ### Benchmarks (sustained 15 min, 1000 samples/sec)
 
@@ -166,6 +170,8 @@ Key env vars: `PARQTEL_BIND`, `PARQTEL_DATA_DIR`, `PARQTEL__STORAGE__COMPRESSION
 | Immediate queryability | 1.7ms |
 | Total ingested | 875,100 samples |
 | Errors | 0 |
+
+Hot-path micro-benchmarks (ingest/flush/scan/query throughput, before/after): [docs/benchmarks/PERFORMANCE.md](docs/benchmarks/PERFORMANCE.md). Reproduce with `cargo run --release -p parqtel-server --example perf_bench`.
 
 ## Dependencies (key)
 

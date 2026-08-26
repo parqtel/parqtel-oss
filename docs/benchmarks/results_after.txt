@@ -1,0 +1,21 @@
+--- RUN 1 ---
+--- summary (points/s, higher is better) ---
+ingest : 529831
+flush  : 849534
+scan   : 6571553
+query  : 1996343
+q-narr : 11855846
+--- RUN 2 ---
+--- summary (points/s, higher is better) ---
+ingest : 526502
+flush  : 827498
+scan   : 6399863
+query  : 1957811
+q-narr : 11584243
+--- RUN 3 ---
+--- summary (points/s, higher is better) ---
+ingest : 528969
+flush  : 797679
+scan   : 6246119
+query  : 1927398
+q-narr : 11297292

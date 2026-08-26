@@ -6,13 +6,13 @@
 pub mod parquet;
 pub mod registry;
 
-use std::collections::BTreeSet;
+use crate::error::Result;
+use crate::models::logs::LogRecord;
+use crate::models::metrics::{DataPoint, Metric};
+use crate::models::storage::SignalType;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use crate::error::Result;
-use crate::models::metrics::{DataPoint, Metric};
-use crate::models::logs::LogRecord;
-use crate::models::storage::SignalType;
+use std::collections::BTreeSet;
 
 /// Metadata returned after writing a batch of data.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -71,8 +71,15 @@ pub struct LogFieldSnapshot {
 /// Health status of the storage engine.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum StorageHealth {
-    Ok { backend: String, metrics_blocks: u64, logs_blocks: u64 },
-    Degraded { backend: String, reason: String },
+    Ok {
+        backend: String,
+        metrics_blocks: u64,
+        logs_blocks: u64,
+    },
+    Degraded {
+        backend: String,
+        reason: String,
+    },
 }
 
 /// The primary storage abstraction. All consumers depend on this trait,
@@ -116,14 +123,14 @@ pub trait StorageEngine: Send + Sync {
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
-    use super::*;
     use super::parquet::ParquetStorageEngine;
     use super::registry::StorageEngineRegistry;
+    use super::*;
     use crate::config::BlockConfig;
-    use crate::models::metrics::{MetricValue, MetricKind};
     use crate::models::labels::LabelSet;
-    use tempfile::tempdir;
+    use crate::models::metrics::{MetricKind, MetricValue};
     use std::sync::Arc;
+    use tempfile::tempdir;
 
     #[tokio::test]
     async fn test_parquet_engine_implements_trait() {
@@ -134,28 +141,33 @@ mod tests {
         let engine = ParquetStorageEngine::new(config);
         let engine: Arc<dyn StorageEngine> = Arc::new(engine);
 
-        let metrics: Vec<Metric> = (0..10).map(|i| Metric {
-            name: "test_metric".into(),
-            description: "".into(),
-            unit: "".into(),
-            kind: MetricKind::Gauge,
-            resource_attributes: LabelSet::default(),
-            data_points: vec![DataPoint {
-                timestamp_ns: 1_000_000_000 + i * 1_000_000,
-                value: MetricValue::Double(i as f64),
-                labels: LabelSet::default(),
-            }],
-        }).collect();
+        let metrics: Vec<Metric> = (0..10)
+            .map(|i| Metric {
+                name: "test_metric".into(),
+                description: "".into(),
+                unit: "".into(),
+                kind: MetricKind::Gauge,
+                resource_attributes: LabelSet::default(),
+                data_points: vec![DataPoint {
+                    timestamp_ns: 1_000_000_000 + i * 1_000_000,
+                    value: MetricValue::Double(i as f64),
+                    labels: LabelSet::default(),
+                }],
+            })
+            .collect();
 
         let meta = engine.write_metrics_batch(metrics).await.unwrap();
         assert_eq!(meta.row_count, 10);
         assert_eq!(meta.signal_type, SignalType::Metrics);
 
-        let results = engine.scan_metrics(MetricScanRequest {
-            metric_name: "test_metric".into(),
-            start_ns: 0,
-            end_ns: i64::MAX,
-        }).await.unwrap();
+        let results = engine
+            .scan_metrics(MetricScanRequest {
+                metric_name: "test_metric".into(),
+                start_ns: 0,
+                end_ns: i64::MAX,
+            })
+            .await
+            .unwrap();
         assert_eq!(results.len(), 10);
     }
 

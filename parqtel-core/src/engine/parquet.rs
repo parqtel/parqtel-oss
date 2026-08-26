@@ -1,14 +1,14 @@
 //! Parquet-based implementation of [`StorageEngine`].
 
-use std::collections::{BTreeSet, HashSet};
-use std::fs::{self, File};
-use std::sync::Arc;
-use async_trait::async_trait;
-use tokio::sync::RwLock;
-use uuid::Uuid;
 use arrow2::io::parquet::write::{
     CompressionOptions, Encoding, FileWriter, RowGroupIterator, Version, WriteOptions,
 };
+use async_trait::async_trait;
+use std::collections::{BTreeSet, HashSet};
+use std::fs::{self, File};
+use std::sync::Arc;
+use tokio::sync::RwLock;
+use uuid::Uuid;
 
 use crate::config::BlockConfig;
 use crate::error::{Error, Result};
@@ -18,8 +18,8 @@ use crate::models::storage::{BlockMetadata, SignalType, StorageModel};
 use crate::storage::{BlockIndex, Scanner};
 
 use super::{
-    CompactionStats, LogFieldSnapshot, LogScanRequest, MetricScanRequest,
-    StorageEngine, StorageHealth, StorageIndexSnapshot, WrittenBlockMeta,
+    CompactionStats, LogFieldSnapshot, LogScanRequest, MetricScanRequest, StorageEngine,
+    StorageHealth, StorageIndexSnapshot, WrittenBlockMeta,
 };
 
 /// Parquet-based storage engine wrapping existing BlockIndex + Scanner.
@@ -101,10 +101,14 @@ impl ParquetStorageEngine {
 
         for m in metrics {
             metric_names.insert(m.name.clone());
-            for l in m.resource_attributes.keys() { label_names.insert(l.clone()); }
+            for l in m.resource_attributes.keys() {
+                label_names.insert(l.clone());
+            }
             for dp in &m.data_points {
                 all_timestamps.push(dp.timestamp_ns);
-                for l in dp.labels.keys() { label_names.insert(l.clone()); }
+                for l in dp.labels.keys() {
+                    label_names.insert(l.clone());
+                }
                 row_count += 1;
             }
         }
@@ -115,14 +119,26 @@ impl ParquetStorageEngine {
 
         all_timestamps.sort();
         let start_ts = all_timestamps[0];
-        let end_ts = *all_timestamps.last().ok_or_else(|| Error::Internal("empty".into()))?;
+        let end_ts = *all_timestamps
+            .last()
+            .ok_or_else(|| Error::Internal("empty".into()))?;
 
         let chunk = StorageModel::metrics_to_chunk(metrics)?;
-        let filename = format!("{}_{}_{}.parquet", start_ts, end_ts, Uuid::new_v4().simple());
+        let filename = format!(
+            "{}_{}_{}.parquet",
+            start_ts,
+            end_ts,
+            Uuid::new_v4().simple()
+        );
         let final_path = self.config.data_dir.join(&filename);
         let tmp_path = self.config.data_dir.join(format!(".tmp_{}", filename));
 
-        write_parquet(&tmp_path, chunk, &self.config.compression, StorageModel::metrics_schema())?;
+        write_parquet(
+            &tmp_path,
+            chunk,
+            &self.config.compression,
+            StorageModel::metrics_schema(),
+        )?;
         fs::rename(&tmp_path, &final_path)?;
         let size_bytes = fs::metadata(&final_path)?.len();
 
@@ -147,21 +163,38 @@ impl ParquetStorageEngine {
         sorted.sort_by_key(|l| l.timestamp_ns);
 
         let start_ts = sorted[0].timestamp_ns;
-        let end_ts = sorted.last().ok_or_else(|| Error::Internal("empty".into()))?.timestamp_ns;
+        let end_ts = sorted
+            .last()
+            .ok_or_else(|| Error::Internal("empty".into()))?
+            .timestamp_ns;
         let row_count = logs.len();
 
         let mut label_names = HashSet::new();
         for log in logs {
-            for l in log.attributes.keys() { label_names.insert(l.clone()); }
-            for l in log.resource_attributes.keys() { label_names.insert(l.clone()); }
+            for l in log.attributes.keys() {
+                label_names.insert(l.clone());
+            }
+            for l in log.resource_attributes.keys() {
+                label_names.insert(l.clone());
+            }
         }
 
         let chunk = StorageModel::logs_to_chunk(logs)?;
-        let filename = format!("logs_{}_{}_{}.parquet", start_ts, end_ts, Uuid::new_v4().simple());
+        let filename = format!(
+            "logs_{}_{}_{}.parquet",
+            start_ts,
+            end_ts,
+            Uuid::new_v4().simple()
+        );
         let final_path = self.log_config.data_dir.join(&filename);
         let tmp_path = self.log_config.data_dir.join(format!(".tmp_{}", filename));
 
-        write_parquet(&tmp_path, chunk, &self.log_config.compression, StorageModel::logs_schema())?;
+        write_parquet(
+            &tmp_path,
+            chunk,
+            &self.log_config.compression,
+            StorageModel::logs_schema(),
+        )?;
         fs::rename(&tmp_path, &final_path)?;
         let size_bytes = fs::metadata(&final_path)?.len();
 
@@ -182,7 +215,9 @@ impl ParquetStorageEngine {
 impl StorageEngine for ParquetStorageEngine {
     async fn write_metrics_batch(&self, metrics: Vec<Metric>) -> Result<WrittenBlockMeta> {
         let meta = self.write_metrics_to_parquet(&metrics)?;
-        let block_id = meta.path.file_stem()
+        let block_id = meta
+            .path
+            .file_stem()
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_default();
         let written = WrittenBlockMeta {
@@ -200,7 +235,9 @@ impl StorageEngine for ParquetStorageEngine {
 
     async fn write_logs_batch(&self, logs: Vec<LogRecord>) -> Result<WrittenBlockMeta> {
         let meta = self.write_logs_to_parquet(&logs)?;
-        let block_id = meta.path.file_stem()
+        let block_id = meta
+            .path
+            .file_stem()
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_default();
         let written = WrittenBlockMeta {
@@ -219,10 +256,20 @@ impl StorageEngine for ParquetStorageEngine {
     async fn scan_metrics(&self, request: MetricScanRequest) -> Result<Vec<DataPoint>> {
         let blocks = {
             let idx = self.metrics_index.read().await;
-            let name = if request.metric_name.is_empty() { None } else { Some(request.metric_name.as_str()) };
+            let name = if request.metric_name.is_empty() {
+                None
+            } else {
+                Some(request.metric_name.as_str())
+            };
             idx.query(request.start_ns, request.end_ns, name)
         };
-        Scanner::scan(blocks, request.metric_name, request.start_ns, request.end_ns).await
+        Scanner::scan(
+            blocks,
+            request.metric_name,
+            request.start_ns,
+            request.end_ns,
+        )
+        .await
     }
 
     async fn scan_logs(&self, request: LogScanRequest) -> Result<Vec<LogRecord>> {
@@ -257,7 +304,9 @@ impl StorageEngine for ParquetStorageEngine {
         });
         if deleted > 0 {
             idx.save()?;
-            for path in to_delete { let _ = fs::remove_file(path); }
+            for path in to_delete {
+                let _ = fs::remove_file(path);
+            }
         }
         Ok(deleted)
     }
@@ -277,7 +326,9 @@ impl StorageEngine for ParquetStorageEngine {
         });
         if deleted > 0 {
             idx.save()?;
-            for path in to_delete { let _ = fs::remove_file(path); }
+            for path in to_delete {
+                let _ = fs::remove_file(path);
+            }
         }
         Ok(deleted)
     }
@@ -289,8 +340,18 @@ impl StorageEngine for ParquetStorageEngine {
         let time_range = if idx.blocks.is_empty() {
             None
         } else {
-            let oldest = idx.blocks.iter().map(|b| b.start_timestamp_ns).min().unwrap_or(0);
-            let newest = idx.blocks.iter().map(|b| b.end_timestamp_ns).max().unwrap_or(0);
+            let oldest = idx
+                .blocks
+                .iter()
+                .map(|b| b.start_timestamp_ns)
+                .min()
+                .unwrap_or(0);
+            let newest = idx
+                .blocks
+                .iter()
+                .map(|b| b.end_timestamp_ns)
+                .max()
+                .unwrap_or(0);
             Some((oldest, newest))
         };
         Ok(StorageIndexSnapshot {
@@ -342,25 +403,27 @@ fn write_parquet(
         version: Version::V2,
         data_pagesize_limit: None,
     };
-    let encodings: Vec<Vec<Encoding>> = schema.fields.iter().map(|f| {
-        match f.data_type() {
+    let encodings: Vec<Vec<Encoding>> = schema
+        .fields
+        .iter()
+        .map(|f| match f.data_type() {
             arrow2::datatypes::DataType::Dictionary(_, _, _) => vec![Encoding::RleDictionary],
             _ => vec![Encoding::Plain],
-        }
-    }).collect();
-    let row_groups = RowGroupIterator::try_new(
-        vec![Ok(chunk)].into_iter(),
-        &schema,
-        options,
-        encodings,
-    ).map_err(|e| Error::Parquet(e.to_string()))?;
-    let mut writer = FileWriter::try_new(file, schema, options)
-        .map_err(|e| Error::Parquet(e.to_string()))?;
+        })
+        .collect();
+    let row_groups =
+        RowGroupIterator::try_new(vec![Ok(chunk)].into_iter(), &schema, options, encodings)
+            .map_err(|e| Error::Parquet(e.to_string()))?;
+    let mut writer =
+        FileWriter::try_new(file, schema, options).map_err(|e| Error::Parquet(e.to_string()))?;
     for group in row_groups {
-        writer.write(group.map_err(|e| Error::Parquet(e.to_string()))?)
+        writer
+            .write(group.map_err(|e| Error::Parquet(e.to_string()))?)
             .map_err(|e| Error::Parquet(e.to_string()))?;
     }
-    writer.end(None).map_err(|e| Error::Parquet(e.to_string()))?;
+    writer
+        .end(None)
+        .map_err(|e| Error::Parquet(e.to_string()))?;
     Ok(())
 }
 
@@ -375,7 +438,10 @@ mod tests {
     use tempfile::tempdir;
 
     fn test_config(dir: &std::path::Path) -> BlockConfig {
-        BlockConfig { data_dir: dir.to_path_buf(), ..BlockConfig::default() }
+        BlockConfig {
+            data_dir: dir.to_path_buf(),
+            ..BlockConfig::default()
+        }
     }
 
     fn sample_metric(ts: i64) -> Metric {
@@ -385,14 +451,29 @@ mod tests {
             unit: "percent".into(),
             kind: MetricKind::Gauge,
             resource_attributes: LabelSet::try_from_iter(vec![("service.name", "web")]).unwrap(),
-            data_points: vec![DataPoint { timestamp_ns: ts, value: MetricValue::Double(42.0), labels: LabelSet::default() }],
+            data_points: vec![DataPoint {
+                timestamp_ns: ts,
+                value: MetricValue::Double(42.0),
+                labels: LabelSet::default(),
+            }],
         }
     }
 
     fn sample_log(ts: i64) -> LogRecord {
-        LogRecord::new(ts, ts + 1, 9, "INFO".into(), "test log".into(),
-            LabelSet::default(), LabelSet::try_from_iter(vec![("service.name", "api")]).unwrap(),
-            [0; 16], [0; 8], 0, "scope".into(), "1.0".into())
+        LogRecord::new(
+            ts,
+            ts + 1,
+            9,
+            "INFO".into(),
+            "test log".into(),
+            LabelSet::default(),
+            LabelSet::try_from_iter(vec![("service.name", "api")]).unwrap(),
+            [0; 16],
+            [0; 8],
+            0,
+            "scope".into(),
+            "1.0".into(),
+        )
     }
 
     #[tokio::test]
@@ -404,7 +485,13 @@ mod tests {
         assert_eq!(meta.row_count, 3);
         assert_eq!(meta.signal_type, SignalType::Logs);
 
-        let results = engine.scan_logs(LogScanRequest { start_ns: 0, end_ns: 5000 }).await.unwrap();
+        let results = engine
+            .scan_logs(LogScanRequest {
+                start_ns: 0,
+                end_ns: 5000,
+            })
+            .await
+            .unwrap();
         assert_eq!(results.len(), 3);
     }
 
@@ -428,12 +515,25 @@ mod tests {
     async fn test_expire_metrics() {
         let dir = tempdir().unwrap();
         let engine = ParquetStorageEngine::new(test_config(dir.path()));
-        engine.write_metrics_batch(vec![sample_metric(100)]).await.unwrap();
-        engine.write_metrics_batch(vec![sample_metric(5000)]).await.unwrap();
+        engine
+            .write_metrics_batch(vec![sample_metric(100)])
+            .await
+            .unwrap();
+        engine
+            .write_metrics_batch(vec![sample_metric(5000)])
+            .await
+            .unwrap();
 
         let deleted = engine.expire_metrics(1000).await.unwrap();
         assert_eq!(deleted, 1);
-        let remaining = engine.scan_metrics(MetricScanRequest { metric_name: "cpu_usage".into(), start_ns: 0, end_ns: i64::MAX }).await.unwrap();
+        let remaining = engine
+            .scan_metrics(MetricScanRequest {
+                metric_name: "cpu_usage".into(),
+                start_ns: 0,
+                end_ns: i64::MAX,
+            })
+            .await
+            .unwrap();
         assert_eq!(remaining.len(), 1);
     }
 
@@ -441,8 +541,14 @@ mod tests {
     async fn test_expire_logs() {
         let dir = tempdir().unwrap();
         let engine = ParquetStorageEngine::new(test_config(dir.path()));
-        engine.write_logs_batch(vec![sample_log(100)]).await.unwrap();
-        engine.write_logs_batch(vec![sample_log(5000)]).await.unwrap();
+        engine
+            .write_logs_batch(vec![sample_log(100)])
+            .await
+            .unwrap();
+        engine
+            .write_logs_batch(vec![sample_log(5000)])
+            .await
+            .unwrap();
 
         let deleted = engine.expire_logs(1000).await.unwrap();
         assert_eq!(deleted, 1);
@@ -452,7 +558,10 @@ mod tests {
     async fn test_log_field_snapshot() {
         let dir = tempdir().unwrap();
         let engine = ParquetStorageEngine::new(test_config(dir.path()));
-        engine.write_logs_batch(vec![sample_log(1000)]).await.unwrap();
+        engine
+            .write_logs_batch(vec![sample_log(1000)])
+            .await
+            .unwrap();
 
         let snapshot = engine.log_field_snapshot().await.unwrap();
         assert_eq!(snapshot.block_count, 1);
@@ -463,11 +572,23 @@ mod tests {
     async fn test_with_log_config() {
         let dir = tempdir().unwrap();
         let metrics_config = test_config(dir.path());
-        let log_config = BlockConfig { data_dir: dir.path().join("custom_logs"), ..BlockConfig::default() };
+        let log_config = BlockConfig {
+            data_dir: dir.path().join("custom_logs"),
+            ..BlockConfig::default()
+        };
         let engine = ParquetStorageEngine::with_log_config(metrics_config, log_config);
 
-        engine.write_logs_batch(vec![sample_log(1000)]).await.unwrap();
-        let results = engine.scan_logs(LogScanRequest { start_ns: 0, end_ns: 5000 }).await.unwrap();
+        engine
+            .write_logs_batch(vec![sample_log(1000)])
+            .await
+            .unwrap();
+        let results = engine
+            .scan_logs(LogScanRequest {
+                start_ns: 0,
+                end_ns: 5000,
+            })
+            .await
+            .unwrap();
         assert_eq!(results.len(), 1);
     }
 
