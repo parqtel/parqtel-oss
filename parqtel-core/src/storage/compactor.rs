@@ -1,18 +1,18 @@
-use std::collections::{HashSet, BTreeMap};
+use super::index::BlockIndex;
+use crate::config::BlockConfig;
+use crate::error::{Error, Result};
+use crate::models::labels::LabelSet;
+use crate::models::logs::LogRecord;
+use crate::models::metrics::{DataPoint, Metric, MetricKind};
+use crate::models::storage::{BlockMetadata, SignalType, StorageModel};
+use arrow2::io::parquet::read;
+use arrow2::io::parquet::write::{self, CompressionOptions, Encoding, Version, WriteOptions};
+use std::collections::{BTreeMap, HashSet};
 use std::fs::{self, File};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
 use uuid::Uuid;
-use arrow2::io::parquet::read;
-use arrow2::io::parquet::write::{self, CompressionOptions, Encoding, WriteOptions, Version};
-use crate::error::{Error, Result};
-use crate::models::storage::{BlockMetadata, StorageModel, SignalType};
-use crate::models::metrics::{DataPoint, Metric, MetricKind};
-use crate::models::logs::LogRecord;
-use crate::models::labels::LabelSet;
-use crate::config::BlockConfig;
-use super::index::BlockIndex;
 
 /// Background task that merges small adjacent blocks and implements tiered compaction.
 /// Tier strategy:
@@ -36,14 +36,21 @@ impl Compactor {
         }
     }
 
-    pub(crate) async fn compact_once(index: &Arc<RwLock<BlockIndex>>, config: &BlockConfig) -> Result<()> {
+    pub(crate) async fn compact_once(
+        index: &Arc<RwLock<BlockIndex>>,
+        config: &BlockConfig,
+    ) -> Result<()> {
         let (to_compact, original_paths, signal_type) = {
             let idx = index.read().await;
-            let mut small_blocks: Vec<_> = idx.blocks.iter()
+            let mut small_blocks: Vec<_> = idx
+                .blocks
+                .iter()
                 .filter(|b| b.row_count < 10000)
                 .cloned()
                 .collect();
-            if small_blocks.len() < 2 { return Ok(()); }
+            if small_blocks.len() < 2 {
+                return Ok(());
+            }
             let count = std::cmp::min(8, small_blocks.len());
             small_blocks.truncate(count);
             let paths: Vec<_> = small_blocks.iter().map(|b| b.path.clone()).collect();
@@ -89,7 +96,9 @@ impl Compactor {
         for signal_type in &[SignalType::Metrics, SignalType::Logs, SignalType::Traces] {
             let candidates = {
                 let idx = index.read().await;
-                let mut blocks: Vec<_> = idx.blocks.iter()
+                let mut blocks: Vec<_> = idx
+                    .blocks
+                    .iter()
                     .filter(|b| b.signal_type == *signal_type)
                     .filter(|b| now_ns - b.end_timestamp_ns > six_hours_ns)
                     .filter(|b| b.row_count < 500_000) // don't re-merge already large blocks
@@ -99,10 +108,15 @@ impl Compactor {
                 blocks
             };
 
-            if candidates.len() < 2 { continue; }
+            if candidates.len() < 2 {
+                continue;
+            }
 
             // Find adjacent blocks within a 6h window that can be merged
-            let tier_window = if candidates.iter().any(|b| now_ns - b.end_timestamp_ns > twenty_four_hours_ns) {
+            let tier_window = if candidates
+                .iter()
+                .any(|b| now_ns - b.end_timestamp_ns > twenty_four_hours_ns)
+            {
                 twenty_four_hours_ns // cold tier: 24h target
             } else {
                 six_hours_ns // warm tier: 6h target
@@ -120,7 +134,9 @@ impl Compactor {
                 }
                 i = j;
 
-                if group.len() < 2 { continue; }
+                if group.len() < 2 {
+                    continue;
+                }
                 // Limit merge group to 12 blocks per pass
                 group.truncate(12);
 
@@ -133,7 +149,9 @@ impl Compactor {
                 }
 
                 let (all_points, all_logs) = Self::read_source_blocks(&group, *signal_type)?;
-                if all_points.is_empty() && all_logs.is_empty() { continue; }
+                if all_points.is_empty() && all_logs.is_empty() {
+                    continue;
+                }
 
                 let new_meta = Self::write_merged(config, *signal_type, all_points, all_logs)?;
 
@@ -158,7 +176,10 @@ impl Compactor {
     fn read_source_blocks(
         blocks: &[BlockMetadata],
         signal_type: SignalType,
-    ) -> Result<(Vec<(String, MetricKind, LabelSet, DataPoint)>, Vec<LogRecord>)> {
+    ) -> Result<(
+        Vec<(String, MetricKind, LabelSet, DataPoint)>,
+        Vec<LogRecord>,
+    )> {
         let mut all_points = Vec::new();
         let mut all_logs = Vec::new();
 
@@ -171,7 +192,8 @@ impl Compactor {
                 }
                 Err(e) => return Err(Error::Io(e)),
             };
-            let metadata = read::read_metadata(&mut file).map_err(|e| Error::Parquet(e.to_string()))?;
+            let metadata =
+                read::read_metadata(&mut file).map_err(|e| Error::Parquet(e.to_string()))?;
             let schema = if signal_type == SignalType::Metrics {
                 StorageModel::metrics_schema()
             } else {
@@ -181,11 +203,19 @@ impl Compactor {
 
             for chunk in reader {
                 let chunk = chunk.map_err(|e| Error::Parquet(e.to_string()))?;
+                // Cache keys borrow from this chunk — recreate per chunk.
+                let mut attr_cache = std::collections::HashMap::new();
+                let mut res_cache = std::collections::HashMap::new();
                 for row in 0..chunk.len() {
                     if signal_type == SignalType::Metrics {
                         all_points.push(StorageModel::row_to_point(&chunk, row)?);
                     } else {
-                        all_logs.push(StorageModel::row_to_log(&chunk, row)?);
+                        all_logs.push(StorageModel::row_to_log(
+                            &chunk,
+                            row,
+                            &mut attr_cache,
+                            &mut res_cache,
+                        )?);
                     }
                 }
             }
@@ -203,37 +233,78 @@ impl Compactor {
             if signal_type == SignalType::Metrics {
                 all_points.sort_by_key(|(_, _, _, dp)| dp.timestamp_ns);
                 let start = all_points[0].3.timestamp_ns;
-                let end = all_points.last()
-                    .ok_or_else(|| Error::Internal("No points".into()))?.3.timestamp_ns;
+                let end = all_points
+                    .last()
+                    .ok_or_else(|| Error::Internal("No points".into()))?
+                    .3
+                    .timestamp_ns;
                 let rows = all_points.len();
                 let mut m_names = HashSet::new();
                 let mut l_names = HashSet::new();
-                let mut groups: BTreeMap<(String, MetricKind, LabelSet), Vec<DataPoint>> = BTreeMap::new();
+                let mut groups: BTreeMap<(String, MetricKind, LabelSet), Vec<DataPoint>> =
+                    BTreeMap::new();
                 for (name, kind, resource, dp) in all_points {
                     m_names.insert(name.clone());
-                    for l in resource.keys() { l_names.insert(l.clone()); }
-                    for l in dp.labels.keys() { l_names.insert(l.clone()); }
+                    for l in resource.keys() {
+                        l_names.insert(l.clone());
+                    }
+                    for l in dp.labels.keys() {
+                        l_names.insert(l.clone());
+                    }
                     groups.entry((name, kind, resource)).or_default().push(dp);
                 }
-                let metrics: Vec<_> = groups.into_iter().map(|((name, kind, resource), dps)| {
-                    Metric { name, description: "".into(), unit: "".into(), kind, resource_attributes: resource, data_points: dps }
-                }).collect();
-                (StorageModel::metrics_to_chunk(&metrics)?, start, end, rows, m_names, l_names)
+                let metrics: Vec<_> = groups
+                    .into_iter()
+                    .map(|((name, kind, resource), dps)| Metric {
+                        name,
+                        description: "".into(),
+                        unit: "".into(),
+                        kind,
+                        resource_attributes: resource,
+                        data_points: dps,
+                    })
+                    .collect();
+                (
+                    StorageModel::metrics_to_chunk(&metrics)?,
+                    start,
+                    end,
+                    rows,
+                    m_names,
+                    l_names,
+                )
             } else {
                 all_logs.sort_by_key(|l| l.timestamp_ns);
                 let start = all_logs[0].timestamp_ns;
-                let end = all_logs.last()
-                    .ok_or_else(|| Error::Internal("No logs".into()))?.timestamp_ns;
+                let end = all_logs
+                    .last()
+                    .ok_or_else(|| Error::Internal("No logs".into()))?
+                    .timestamp_ns;
                 let rows = all_logs.len();
                 let mut l_names = HashSet::new();
                 for log in &all_logs {
-                    for l in log.attributes.keys() { l_names.insert(l.clone()); }
-                    for l in log.resource_attributes.keys() { l_names.insert(l.clone()); }
+                    for l in log.attributes.keys() {
+                        l_names.insert(l.clone());
+                    }
+                    for l in log.resource_attributes.keys() {
+                        l_names.insert(l.clone());
+                    }
                 }
-                (StorageModel::logs_to_chunk(&all_logs)?, start, end, rows, HashSet::new(), l_names)
+                (
+                    StorageModel::logs_to_chunk(&all_logs)?,
+                    start,
+                    end,
+                    rows,
+                    HashSet::new(),
+                    l_names,
+                )
             };
 
-        let filename = format!("{}_{}_{}.parquet", start_ts, end_ts, Uuid::new_v4().simple());
+        let filename = format!(
+            "{}_{}_{}.parquet",
+            start_ts,
+            end_ts,
+            Uuid::new_v4().simple()
+        );
         let final_path = config.data_dir.join(&filename);
         let tmp_path = config.data_dir.join(format!(".tmp_{}", filename));
 
@@ -256,24 +327,33 @@ impl Compactor {
             version: Version::V2,
             data_pagesize_limit: None,
         };
-        let encodings: Vec<Vec<Encoding>> = schema.fields.iter().map(|f| {
-            match f.data_type() {
+        let encodings: Vec<Vec<Encoding>> = schema
+            .fields
+            .iter()
+            .map(|f| match f.data_type() {
                 arrow2::datatypes::DataType::Dictionary(_, _, _) => vec![Encoding::RleDictionary],
                 _ => vec![Encoding::Plain],
-            }
-        }).collect();
+            })
+            .collect();
 
         let row_groups = write::RowGroupIterator::try_new(
-            std::iter::once(Ok(chunk)), &schema, options, encodings,
-        ).map_err(|e| Error::Parquet(e.to_string()))?;
+            std::iter::once(Ok(chunk)),
+            &schema,
+            options,
+            encodings,
+        )
+        .map_err(|e| Error::Parquet(e.to_string()))?;
 
         let mut writer = write::FileWriter::try_new(file, schema, options)
             .map_err(|e| Error::Parquet(e.to_string()))?;
         for group in row_groups {
-            writer.write(group.map_err(|e| Error::Parquet(e.to_string()))?)
+            writer
+                .write(group.map_err(|e| Error::Parquet(e.to_string()))?)
                 .map_err(|e| Error::Parquet(e.to_string()))?;
         }
-        writer.end(None).map_err(|e| Error::Parquet(e.to_string()))?;
+        writer
+            .end(None)
+            .map_err(|e| Error::Parquet(e.to_string()))?;
 
         fs::rename(&tmp_path, &final_path)?;
         let size_bytes = fs::metadata(&final_path)?.len();

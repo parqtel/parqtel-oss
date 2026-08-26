@@ -95,7 +95,8 @@ mod tests {
             _expr: &str,
             _timestamp_ns: i64,
         ) -> crate::Result<Vec<(LabelSet, f64)>> {
-            self.call_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.call_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let labels = LabelSet::try_from_iter(vec![("k", "v")]).unwrap();
             Ok(vec![(labels, 1.0)])
         }
@@ -109,7 +110,9 @@ mod tests {
         let storage = Arc::new(ParquetStorageEngine::new(config));
 
         let call_count = Arc::new(std::sync::atomic::AtomicU64::new(0));
-        let executor = Arc::new(CountingExecutor { call_count: call_count.clone() });
+        let executor = Arc::new(CountingExecutor {
+            call_count: call_count.clone(),
+        });
         let evaluator = Arc::new(RulerEvaluator::new(executor, storage));
 
         let backfiller = Backfiller::new(evaluator, 10);

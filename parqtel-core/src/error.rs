@@ -68,8 +68,13 @@ mod tests {
         let arrow_err = Error::Arrow("arrow".into());
         assert!(arrow_err.to_string().contains("Arrow error: arrow"));
 
-        let schema_err = Error::SchemaMismatch { expected: "e".into(), found: "f".into() };
-        assert!(schema_err.to_string().contains("Schema mismatch: expected e, found f"));
+        let schema_err = Error::SchemaMismatch {
+            expected: "e".into(),
+            found: "f".into(),
+        };
+        assert!(schema_err
+            .to_string()
+            .contains("Schema mismatch: expected e, found f"));
 
         let otlp_err = Error::InvalidOtlp("otlp".into());
         assert!(otlp_err.to_string().contains("Invalid OTLP payload: otlp"));
@@ -78,13 +83,19 @@ mod tests {
         assert!(query_err.to_string().contains("Query error: query"));
 
         let config_err = Error::Config("config".into());
-        assert!(config_err.to_string().contains("Configuration error: config"));
+        assert!(config_err
+            .to_string()
+            .contains("Configuration error: config"));
 
         let validation_err = Error::Validation("validation".into());
-        assert!(validation_err.to_string().contains("Validation error: validation"));
+        assert!(validation_err
+            .to_string()
+            .contains("Validation error: validation"));
 
         let internal_err = Error::Internal("internal".into());
-        assert!(internal_err.to_string().contains("Internal error: internal"));
+        assert!(internal_err
+            .to_string()
+            .contains("Internal error: internal"));
 
         let serde_err = Error::Serde(serde_json::from_str::<serde_json::Value>("{").unwrap_err());
         assert!(serde_err.to_string().contains("Serde error:"));

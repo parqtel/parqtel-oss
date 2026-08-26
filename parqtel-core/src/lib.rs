@@ -11,8 +11,8 @@ pub mod models;
 pub mod storage;
 
 pub use buffer::MemoryBuffer;
-pub use config::{BlockConfig, LogBlockConfig, RetentionConfig, ServerConfig, Config};
+pub use config::{BlockConfig, Config, LogBlockConfig, RetentionConfig, ServerConfig};
 pub use engine::StorageEngine;
 pub use error::{Error, Result};
 pub use models::*;
-pub use storage::{BlockIndex, Scanner, start_maintenance};
+pub use storage::{start_maintenance, BlockIndex, Scanner};

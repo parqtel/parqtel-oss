@@ -1,12 +1,12 @@
 mod common;
-mod metrics;
 mod logs;
+mod metrics;
 mod traces;
 
-use crate::otel::collector::metrics::v1::ExportMetricsServiceRequest;
 use crate::otel::collector::logs::v1::ExportLogsServiceRequest;
+use crate::otel::collector::metrics::v1::ExportMetricsServiceRequest;
 use crate::otel::collector::trace::v1::ExportTraceServiceRequest;
-use parqtel_core::{Metric, LogRecord, Result, Span};
+use parqtel_core::{LogRecord, Metric, Result, Span};
 
 /// Decodes OTLP metric, log, and trace payloads into internal types.
 pub struct OtlpDecoder;
@@ -39,19 +39,26 @@ mod tests {
 
     #[test]
     fn test_decode_metrics_proto_gauge() {
-        use crate::otel::metrics::v1::{ResourceMetrics, ScopeMetrics, Metric as PM, Gauge, NumberDataPoint, number_data_point};
+        use crate::otel::metrics::v1::{
+            number_data_point, Gauge, Metric as PM, NumberDataPoint, ResourceMetrics, ScopeMetrics,
+        };
         let req = ExportMetricsServiceRequest {
             resource_metrics: vec![ResourceMetrics {
                 resource: None,
                 scope_metrics: vec![ScopeMetrics {
                     scope: None,
                     metrics: vec![PM {
-                        name: "cpu".into(), description: "".into(), unit: "".into(),
+                        name: "cpu".into(),
+                        description: "".into(),
+                        unit: "".into(),
                         data: Some(crate::otel::metrics::v1::metric::Data::Gauge(Gauge {
                             data_points: vec![NumberDataPoint {
                                 time_unix_nano: 1000,
                                 value: Some(number_data_point::Value::AsDouble(42.5)),
-                                attributes: vec![], start_time_unix_nano: 0, exemplars: vec![], flags: 0,
+                                attributes: vec![],
+                                start_time_unix_nano: 0,
+                                exemplars: vec![],
+                                flags: 0,
                             }],
                         })),
                     }],
@@ -68,17 +75,26 @@ mod tests {
 
     #[test]
     fn test_decode_logs_proto() {
-        use crate::otel::logs::v1::{ResourceLogs, ScopeLogs, LogRecord as PLR};
+        use crate::otel::logs::v1::{LogRecord as PLR, ResourceLogs, ScopeLogs};
         let req = ExportLogsServiceRequest {
             resource_logs: vec![ResourceLogs {
                 resource: None,
                 scope_logs: vec![ScopeLogs {
                     scope: None,
                     log_records: vec![PLR {
-                        time_unix_nano: 5000, observed_time_unix_nano: 5001,
-                        severity_number: 9, severity_text: "INFO".into(),
-                        body: Some(crate::otel::common::v1::AnyValue { value: Some(crate::otel::common::v1::any_value::Value::StringValue("hello".into())) }),
-                        attributes: vec![], flags: 0, trace_id: vec![0; 16], span_id: vec![0; 8],
+                        time_unix_nano: 5000,
+                        observed_time_unix_nano: 5001,
+                        severity_number: 9,
+                        severity_text: "INFO".into(),
+                        body: Some(crate::otel::common::v1::AnyValue {
+                            value: Some(crate::otel::common::v1::any_value::Value::StringValue(
+                                "hello".into(),
+                            )),
+                        }),
+                        attributes: vec![],
+                        flags: 0,
+                        trace_id: vec![0; 16],
+                        span_id: vec![0; 8],
                         dropped_attributes_count: 0,
                     }],
                     schema_url: "".into(),
@@ -100,12 +116,22 @@ mod tests {
                 scope_spans: vec![ScopeSpans {
                     scope: None,
                     spans: vec![PS {
-                        trace_id: vec![1; 16], span_id: vec![2; 8], parent_span_id: vec![],
-                        name: "test-span".into(), kind: 2,
-                        start_time_unix_nano: 1000, end_time_unix_nano: 2000,
-                        attributes: vec![], events: vec![], links: vec![],
-                        status: None, trace_state: "".into(), flags: 0,
-                        dropped_attributes_count: 0, dropped_events_count: 0, dropped_links_count: 0,
+                        trace_id: vec![1; 16],
+                        span_id: vec![2; 8],
+                        parent_span_id: vec![],
+                        name: "test-span".into(),
+                        kind: 2,
+                        start_time_unix_nano: 1000,
+                        end_time_unix_nano: 2000,
+                        attributes: vec![],
+                        events: vec![],
+                        links: vec![],
+                        status: None,
+                        trace_state: "".into(),
+                        flags: 0,
+                        dropped_attributes_count: 0,
+                        dropped_events_count: 0,
+                        dropped_links_count: 0,
                     }],
                     schema_url: "".into(),
                 }],

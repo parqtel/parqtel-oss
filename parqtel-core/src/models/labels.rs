@@ -1,8 +1,8 @@
-use std::collections::BTreeMap;
-use std::hash::{Hash, Hasher};
+use crate::error::{Error, Result};
 use ahash::AHasher;
 use serde::{Deserialize, Serialize};
-use crate::error::{Error, Result};
+use std::collections::BTreeMap;
+use std::hash::{Hash, Hasher};
 
 /// A set of labels (key-value pairs) associated with a metric data point.
 ///
@@ -28,7 +28,10 @@ impl LabelSet {
         for (k, v) in iter {
             let key = k.into();
             if inner.contains_key(&key) {
-                return Err(Error::Validation(format!("Duplicate key found in label set: {}", key)));
+                return Err(Error::Validation(format!(
+                    "Duplicate key found in label set: {}",
+                    key
+                )));
             }
             inner.insert(key, v.into());
         }
@@ -85,8 +88,6 @@ impl LabelSet {
     }
 }
 
-
-
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -111,10 +112,10 @@ mod tests {
     fn test_label_set_fingerprint_stability() {
         let labels1 = vec![("a", "1"), ("b", "2")];
         let labels2 = vec![("b", "2"), ("a", "1")];
-        
+
         let set1 = LabelSet::try_from_iter(labels1).unwrap();
         let set2 = LabelSet::try_from_iter(labels2).unwrap();
-        
+
         assert_eq!(set1.fingerprint(), set2.fingerprint());
     }
 

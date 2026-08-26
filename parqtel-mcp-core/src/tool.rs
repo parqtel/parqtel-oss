@@ -18,7 +18,13 @@ pub fn sanitize_params(params: &Value) -> Value {
     }
 
     let sensitive_keys = [
-        "token", "api_key", "apikey", "password", "secret", "credential", "key",
+        "token",
+        "api_key",
+        "apikey",
+        "password",
+        "secret",
+        "credential",
+        "key",
     ];
 
     let obj = params.as_object().unwrap();

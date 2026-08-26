@@ -47,9 +47,10 @@ impl CompiledCondition {
                 .and_then(|v| v.parse::<f64>().ok())
                 .map(|v| v <= *value)
                 .unwrap_or(false),
-            Self::Contains { field, value } => {
-                fields.get(field).map(|v| v.contains(value.as_str())).unwrap_or(false)
-            }
+            Self::Contains { field, value } => fields
+                .get(field)
+                .map(|v| v.contains(value.as_str()))
+                .unwrap_or(false),
             Self::Matches { field, re } => {
                 fields.get(field).map(|v| re.is_match(v)).unwrap_or(false)
             }
@@ -59,9 +60,10 @@ impl CompiledCondition {
                 .and_then(|v| v.parse::<f64>().ok())
                 .map(|v| v >= *low && v <= *high)
                 .unwrap_or(false),
-            Self::In { field, values } => {
-                fields.get(field).map(|v| values.contains(v)).unwrap_or(false)
-            }
+            Self::In { field, values } => fields
+                .get(field)
+                .map(|v| values.contains(v))
+                .unwrap_or(false),
             Self::And(a, b) => a.evaluate(fields) && b.evaluate(fields),
             Self::Or(a, b) => a.evaluate(fields) || b.evaluate(fields),
             Self::Not(inner) => !inner.evaluate(fields),
@@ -109,11 +111,26 @@ impl Lexer {
         while i < chars.len() {
             match chars[i] {
                 ' ' | '\t' | '\n' | '\r' => i += 1,
-                '(' => { tokens.push(Token::LParen); i += 1; }
-                ')' => { tokens.push(Token::RParen); i += 1; }
-                '[' => { tokens.push(Token::LBracket); i += 1; }
-                ']' => { tokens.push(Token::RBracket); i += 1; }
-                ',' => { tokens.push(Token::Comma); i += 1; }
+                '(' => {
+                    tokens.push(Token::LParen);
+                    i += 1;
+                }
+                ')' => {
+                    tokens.push(Token::RParen);
+                    i += 1;
+                }
+                '[' => {
+                    tokens.push(Token::LBracket);
+                    i += 1;
+                }
+                ']' => {
+                    tokens.push(Token::RBracket);
+                    i += 1;
+                }
+                ',' => {
+                    tokens.push(Token::Comma);
+                    i += 1;
+                }
                 '"' => {
                     i += 1;
                     let start = i;
@@ -139,19 +156,30 @@ impl Lexer {
                     tokens.push(Token::Op("=~".into()));
                     i += 2;
                 }
-                '=' => { tokens.push(Token::Op("=".into())); i += 1; }
-                '>' => { tokens.push(Token::Op(">".into())); i += 1; }
-                '<' => { tokens.push(Token::Op("<".into())); i += 1; }
+                '=' => {
+                    tokens.push(Token::Op("=".into()));
+                    i += 1;
+                }
+                '>' => {
+                    tokens.push(Token::Op(">".into()));
+                    i += 1;
+                }
+                '<' => {
+                    tokens.push(Token::Op("<".into()));
+                    i += 1;
+                }
                 c if c.is_ascii_digit() || c == '-' => {
                     let start = i;
-                    if c == '-' { i += 1; }
+                    if c == '-' {
+                        i += 1;
+                    }
                     while i < chars.len() && (chars[i].is_ascii_digit() || chars[i] == '.') {
                         i += 1;
                     }
                     let num_str: String = chars[start..i].iter().collect();
-                    let num = num_str.parse::<f64>().map_err(|_| {
-                        crate::Error::Parse(format!("Invalid number: {}", num_str))
-                    })?;
+                    let num = num_str
+                        .parse::<f64>()
+                        .map_err(|_| crate::Error::Parse(format!("Invalid number: {}", num_str)))?;
                     tokens.push(Token::Num(num));
                 }
                 c if c.is_alphanumeric() || c == '_' || c == '.' => {
@@ -345,9 +373,18 @@ impl<'a> Parser<'a> {
                 loop {
                     values.push(self.parse_value_string()?);
                     match self.peek() {
-                        Some(Token::Comma) => { self.advance(); }
-                        Some(Token::RParen) => { self.advance(); break; }
-                        _ => return Err(crate::Error::Parse("Expected ',' or ')' in 'in' list".into())),
+                        Some(Token::Comma) => {
+                            self.advance();
+                        }
+                        Some(Token::RParen) => {
+                            self.advance();
+                            break;
+                        }
+                        _ => {
+                            return Err(crate::Error::Parse(
+                                "Expected ',' or ')' in 'in' list".into(),
+                            ))
+                        }
                     }
                 }
                 Ok(CompiledCondition::In { field, values })
@@ -389,7 +426,10 @@ mod tests {
     use super::*;
 
     fn fields(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
-        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
     }
 
     #[test]
@@ -474,8 +514,14 @@ mod tests {
     #[test]
     fn test_and_logic() {
         let cond = DqlParser::parse(r#"service_name = "api" AND severity_number >= 9"#).unwrap();
-        assert!(cond.evaluate(&fields(&[("service_name", "api"), ("severity_number", "9")])));
-        assert!(!cond.evaluate(&fields(&[("service_name", "api"), ("severity_number", "5")])));
+        assert!(cond.evaluate(&fields(&[
+            ("service_name", "api"),
+            ("severity_number", "9")
+        ])));
+        assert!(!cond.evaluate(&fields(&[
+            ("service_name", "api"),
+            ("severity_number", "5")
+        ])));
     }
 
     #[test]
@@ -495,7 +541,8 @@ mod tests {
 
     #[test]
     fn test_parenthesized_expression() {
-        let cond = DqlParser::parse(r#"(env = "prod" OR env = "staging") AND severity_number > 8"#).unwrap();
+        let cond = DqlParser::parse(r#"(env = "prod" OR env = "staging") AND severity_number > 8"#)
+            .unwrap();
         assert!(cond.evaluate(&fields(&[("env", "prod"), ("severity_number", "9")])));
         assert!(!cond.evaluate(&fields(&[("env", "dev"), ("severity_number", "9")])));
     }

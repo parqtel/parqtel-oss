@@ -1,5 +1,5 @@
-use std::path::Path;
 use crate::rule::types::AlertRule;
+use std::path::Path;
 
 /// Parse a single alert rule from a YAML string.
 pub fn parse_rule(yaml: &str) -> Result<AlertRule, serde_yaml::Error> {
@@ -17,7 +17,9 @@ pub fn parse_rules_from_str(yaml: &str) -> Result<Vec<AlertRule>, serde_yaml::Er
 }
 
 /// Load all YAML rule files from a directory.
-pub fn load_rules_dir(dir: &Path) -> Result<Vec<AlertRule>, Box<dyn std::error::Error + Send + Sync>> {
+pub fn load_rules_dir(
+    dir: &Path,
+) -> Result<Vec<AlertRule>, Box<dyn std::error::Error + Send + Sync>> {
     let mut rules = Vec::new();
     if !dir.exists() {
         return Ok(rules);
