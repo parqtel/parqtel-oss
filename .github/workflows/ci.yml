@@ -18,7 +18,7 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
-  MSRV: "1.85"
+  MSRV: "1.86" # icu 2.x (via url/reqwest) requires 1.86; matches Dockerfile RUST_VERSION
 
 jobs:
   # ── What changed? Gates the expensive jobs below ──────────────────────────
@@ -93,7 +93,7 @@ jobs:
     if: needs.changes.outputs.rust == 'true' || github.event_name == 'push'
     strategy:
       matrix:
-        msrv: ["1.85"]
+        msrv: ["1.86"]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
