@@ -14,11 +14,6 @@ use std::time::Duration;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
-/// Background task that merges small adjacent blocks and implements tiered compaction.
-/// Tier strategy:
-///   - Small blocks (< 10K rows): merge up to 8 into one (existing behavior)
-///   - Warm tier (blocks > 6h old, same signal): merge adjacent into ~6h blocks
-///   - Cold tier (blocks > 24h old): merge adjacent into ~24h blocks
 /// Points grouped with their metric metadata, plus log records — the decoded
 /// contents of source blocks awaiting compaction.
 type DecodedBlocks = (
@@ -26,6 +21,11 @@ type DecodedBlocks = (
     Vec<LogRecord>,
 );
 
+/// Background task that merges small adjacent blocks and implements tiered compaction.
+/// Tier strategy:
+///   - Small blocks (< 10K rows): merge up to 8 into one (existing behavior)
+///   - Warm tier (blocks > 6h old, same signal): merge adjacent into ~6h blocks
+///   - Cold tier (blocks > 24h old): merge adjacent into ~24h blocks
 pub struct Compactor;
 
 impl Compactor {
