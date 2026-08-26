@@ -1,26 +1,45 @@
-use arrow2::array::{Array, BinaryArray, DictionaryArray, Int64Array, Float64Array, Int32Array, Utf8Array, PrimitiveArray, FixedSizeBinaryArray};
-use arrow2::chunk::Chunk;
+use super::correlation::{inject_correlation, row_to_correlation};
 use crate::error::{Error, Result};
 use crate::models::labels::LabelSet;
-use crate::models::metrics::{DataPoint, MetricKind, MetricValue};
 use crate::models::logs::LogRecord;
+use crate::models::metrics::{DataPoint, MetricKind, MetricValue};
 use crate::models::traces::{Span, SpanEvent, SpanLink, SpanStatus};
-use super::correlation::{row_to_correlation, inject_correlation};
+use arrow2::array::{
+    Array, BinaryArray, DictionaryArray, FixedSizeBinaryArray, Float64Array, Int32Array,
+    Int64Array, PrimitiveArray, Utf8Array,
+};
+use arrow2::chunk::Chunk;
+use std::collections::HashMap;
 
 /// Reads a single row from an Arrow [Chunk] back into a [DataPoint] and its metric metadata.
-pub fn row_to_point<A: AsRef<dyn Array>>(chunk: &Chunk<A>, row: usize) -> Result<(String, MetricKind, LabelSet, DataPoint)> {
-    let timestamp_ns = chunk.arrays()[0].as_ref().as_any().downcast_ref::<Int64Array>()
+pub fn row_to_point<A: AsRef<dyn Array>>(
+    chunk: &Chunk<A>,
+    row: usize,
+) -> Result<(String, MetricKind, LabelSet, DataPoint)> {
+    let timestamp_ns = chunk.arrays()[0]
+        .as_ref()
+        .as_any()
+        .downcast_ref::<Int64Array>()
         .ok_or_else(|| Error::Arrow("Invalid timestamp column".into()))?
         .value(row);
 
-    let metric_name_arr = chunk.arrays()[1].as_ref().as_any().downcast_ref::<DictionaryArray<i32>>()
+    let metric_name_arr = chunk.arrays()[1]
+        .as_ref()
+        .as_any()
+        .downcast_ref::<DictionaryArray<i32>>()
         .ok_or_else(|| Error::Arrow("Invalid metric_name column".into()))?;
-    let metric_name = metric_name_arr.values().as_any().downcast_ref::<Utf8Array<i32>>()
+    let metric_name = metric_name_arr
+        .values()
+        .as_any()
+        .downcast_ref::<Utf8Array<i32>>()
         .ok_or_else(|| Error::Arrow("Invalid metric_name values".into()))?
         .value(metric_name_arr.keys().value(row) as usize)
         .to_string();
 
-    let kind_str = chunk.arrays()[2].as_ref().as_any().downcast_ref::<Utf8Array<i32>>()
+    let kind_str = chunk.arrays()[2]
+        .as_ref()
+        .as_any()
+        .downcast_ref::<Utf8Array<i32>>()
         .ok_or_else(|| Error::Arrow("Invalid metric_kind column".into()))?
         .value(row);
     let kind = match kind_str {
@@ -31,25 +50,43 @@ pub fn row_to_point<A: AsRef<dyn Array>>(chunk: &Chunk<A>, row: usize) -> Result
         _ => MetricKind::Gauge,
     };
 
-    let resource_attr_arr = chunk.arrays()[10].as_ref().as_any().downcast_ref::<DictionaryArray<i32>>()
+    let resource_attr_arr = chunk.arrays()[10]
+        .as_ref()
+        .as_any()
+        .downcast_ref::<DictionaryArray<i32>>()
         .ok_or_else(|| Error::Arrow("Invalid resource_attributes column".into()))?;
-    let resource_attr_json = resource_attr_arr.values().as_any().downcast_ref::<Utf8Array<i32>>()
+    let resource_attr_json = resource_attr_arr
+        .values()
+        .as_any()
+        .downcast_ref::<Utf8Array<i32>>()
         .ok_or_else(|| Error::Arrow("Invalid resource_attributes values".into()))?
         .value(resource_attr_arr.keys().value(row) as usize);
     let resource_attributes = LabelSet::from_json(resource_attr_json)?;
     let correlation = row_to_correlation(chunk, row, 3);
     let resource_attributes = inject_correlation(resource_attributes, correlation);
 
-    let labels_json = chunk.arrays()[11].as_ref().as_any().downcast_ref::<Utf8Array<i32>>()
+    let labels_json = chunk.arrays()[11]
+        .as_ref()
+        .as_any()
+        .downcast_ref::<Utf8Array<i32>>()
         .ok_or_else(|| Error::Arrow("Invalid labels column".into()))?
         .value(row);
     let labels = LabelSet::from_json(labels_json)?;
 
-    let value_float = chunk.arrays()[12].as_ref().as_any().downcast_ref::<Float64Array>()
+    let value_float = chunk.arrays()[12]
+        .as_ref()
+        .as_any()
+        .downcast_ref::<Float64Array>()
         .ok_or_else(|| Error::Arrow("Invalid value_float column".into()))?;
-    let value_int = chunk.arrays()[13].as_ref().as_any().downcast_ref::<Int64Array>()
+    let value_int = chunk.arrays()[13]
+        .as_ref()
+        .as_any()
+        .downcast_ref::<Int64Array>()
         .ok_or_else(|| Error::Arrow("Invalid value_int column".into()))?;
-    let value_complex = chunk.arrays()[14].as_ref().as_any().downcast_ref::<Utf8Array<i32>>()
+    let value_complex = chunk.arrays()[14]
+        .as_ref()
+        .as_any()
+        .downcast_ref::<Utf8Array<i32>>()
         .ok_or_else(|| Error::Arrow("Invalid value_complex column".into()))?;
 
     let value = if !value_float.is_null(row) {
@@ -61,40 +98,102 @@ pub fn row_to_point<A: AsRef<dyn Array>>(chunk: &Chunk<A>, row: usize) -> Result
         serde_json::from_str(json).map_err(Error::Serde)?
     };
 
-    Ok((metric_name, kind, resource_attributes, DataPoint::new(timestamp_ns, value, labels)?))
+    Ok((
+        metric_name,
+        kind,
+        resource_attributes,
+        DataPoint::new(timestamp_ns, value, labels)?,
+    ))
 }
 
 /// Reads a single row from an Arrow [Chunk] back into a [LogRecord].
-pub fn row_to_log<A: AsRef<dyn Array>>(chunk: &Chunk<A>, row: usize) -> Result<LogRecord> {
-    let timestamp_ns = chunk.arrays()[0].as_ref().as_any().downcast_ref::<Int64Array>()
-        .ok_or_else(|| Error::Arrow("Invalid timestamp column".into()))?.value(row);
-    let observed_timestamp_ns = chunk.arrays()[1].as_ref().as_any().downcast_ref::<Int64Array>()
-        .ok_or_else(|| Error::Arrow("Invalid observed_timestamp column".into()))?.value(row);
-    let severity_number = chunk.arrays()[2].as_ref().as_any().downcast_ref::<Int32Array>()
-        .ok_or_else(|| Error::Arrow("Invalid severity_number column".into()))?.value(row);
+///
+/// `attr_cache` / `res_cache` map raw attribute-JSON text to parsed [LabelSet]s.
+/// Attribute sets repeat once per series across many rows, so caching removes
+/// a serde_json round-trip per repeated row. Cache keys borrow from `chunk`
+/// arrays — callers must clear or recreate the caches per chunk.
+pub fn row_to_log<'a, A: AsRef<dyn Array>>(
+    chunk: &'a Chunk<A>,
+    row: usize,
+    attr_cache: &mut HashMap<&'a str, LabelSet>,
+    res_cache: &mut HashMap<&'a str, LabelSet>,
+) -> Result<LogRecord> {
+    let timestamp_ns = chunk.arrays()[0]
+        .as_ref()
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .ok_or_else(|| Error::Arrow("Invalid timestamp column".into()))?
+        .value(row);
+    let observed_timestamp_ns = chunk.arrays()[1]
+        .as_ref()
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .ok_or_else(|| Error::Arrow("Invalid observed_timestamp column".into()))?
+        .value(row);
+    let severity_number = chunk.arrays()[2]
+        .as_ref()
+        .as_any()
+        .downcast_ref::<Int32Array>()
+        .ok_or_else(|| Error::Arrow("Invalid severity_number column".into()))?
+        .value(row);
 
-    let severity_text_arr = chunk.arrays()[3].as_ref().as_any().downcast_ref::<DictionaryArray<i32>>()
+    let severity_text_arr = chunk.arrays()[3]
+        .as_ref()
+        .as_any()
+        .downcast_ref::<DictionaryArray<i32>>()
         .ok_or_else(|| Error::Arrow("Invalid severity_text column".into()))?;
-    let severity_text = severity_text_arr.values().as_any().downcast_ref::<Utf8Array<i32>>()
+    let severity_text = severity_text_arr
+        .values()
+        .as_any()
+        .downcast_ref::<Utf8Array<i32>>()
         .ok_or_else(|| Error::Arrow("Invalid severity_text values".into()))?
-        .value(severity_text_arr.keys().value(row) as usize).to_string();
+        .value(severity_text_arr.keys().value(row) as usize)
+        .to_string();
 
-    let body = chunk.arrays()[4].as_ref().as_any().downcast_ref::<Utf8Array<i32>>()
-        .ok_or_else(|| Error::Arrow("Invalid body column".into()))?.value(row).to_string();
+    let body = chunk.arrays()[4]
+        .as_ref()
+        .as_any()
+        .downcast_ref::<Utf8Array<i32>>()
+        .ok_or_else(|| Error::Arrow("Invalid body column".into()))?
+        .value(row)
+        .to_string();
 
-    let resource_attributes = LabelSet::from_json(
-        chunk.arrays()[18].as_ref().as_any().downcast_ref::<Utf8Array<i32>>()
-            .ok_or_else(|| Error::Arrow("Invalid resource_attributes column".into()))?.value(row)
-    )?;
+    let res_json = chunk.arrays()[18]
+        .as_ref()
+        .as_any()
+        .downcast_ref::<Utf8Array<i32>>()
+        .ok_or_else(|| Error::Arrow("Invalid resource_attributes column".into()))?
+        .value(row);
+    let resource_attributes = match res_cache.get(res_json) {
+        Some(l) => l.clone(),
+        None => {
+            let l = LabelSet::from_json(res_json)?;
+            res_cache.insert(res_json, l.clone());
+            l
+        }
+    };
     let correlation = row_to_correlation(chunk, row, 5);
     let resource_attributes = inject_correlation(resource_attributes, correlation);
 
-    let attributes = LabelSet::from_json(
-        chunk.arrays()[17].as_ref().as_any().downcast_ref::<Utf8Array<i32>>()
-            .ok_or_else(|| Error::Arrow("Invalid attributes column".into()))?.value(row)
-    )?;
+    let attr_json = chunk.arrays()[17]
+        .as_ref()
+        .as_any()
+        .downcast_ref::<Utf8Array<i32>>()
+        .ok_or_else(|| Error::Arrow("Invalid attributes column".into()))?
+        .value(row);
+    let attributes = match attr_cache.get(attr_json) {
+        Some(l) => l.clone(),
+        None => {
+            let l = LabelSet::from_json(attr_json)?;
+            attr_cache.insert(attr_json, l.clone());
+            l
+        }
+    };
 
-    let trace_id_arr = chunk.arrays()[12].as_ref().as_any().downcast_ref::<FixedSizeBinaryArray>()
+    let trace_id_arr = chunk.arrays()[12]
+        .as_ref()
+        .as_any()
+        .downcast_ref::<FixedSizeBinaryArray>()
         .ok_or_else(|| Error::Arrow("Invalid trace_id column".into()))?;
     let mut trace_id = [0u8; 16];
     if !trace_id_arr.is_null(row) {
@@ -103,7 +202,10 @@ pub fn row_to_log<A: AsRef<dyn Array>>(chunk: &Chunk<A>, row: usize) -> Result<L
         trace_id[..len].copy_from_slice(&val[..len]);
     }
 
-    let span_id_arr = chunk.arrays()[13].as_ref().as_any().downcast_ref::<FixedSizeBinaryArray>()
+    let span_id_arr = chunk.arrays()[13]
+        .as_ref()
+        .as_any()
+        .downcast_ref::<FixedSizeBinaryArray>()
         .ok_or_else(|| Error::Arrow("Invalid span_id column".into()))?;
     let mut span_id = [0u8; 8];
     if !span_id_arr.is_null(row) {
@@ -112,16 +214,40 @@ pub fn row_to_log<A: AsRef<dyn Array>>(chunk: &Chunk<A>, row: usize) -> Result<L
         span_id[..len].copy_from_slice(&val[..len]);
     }
 
-    let flags = chunk.arrays()[14].as_ref().as_any().downcast_ref::<PrimitiveArray<u32>>()
-        .ok_or_else(|| Error::Arrow("Invalid flags column".into()))?.value(row);
-    let scope_name = chunk.arrays()[15].as_ref().as_any().downcast_ref::<Utf8Array<i32>>()
-        .ok_or_else(|| Error::Arrow("Invalid scope_name column".into()))?.value(row).to_string();
-    let scope_version = chunk.arrays()[16].as_ref().as_any().downcast_ref::<Utf8Array<i32>>()
-        .ok_or_else(|| Error::Arrow("Invalid scope_version column".into()))?.value(row).to_string();
+    let flags = chunk.arrays()[14]
+        .as_ref()
+        .as_any()
+        .downcast_ref::<PrimitiveArray<u32>>()
+        .ok_or_else(|| Error::Arrow("Invalid flags column".into()))?
+        .value(row);
+    let scope_name = chunk.arrays()[15]
+        .as_ref()
+        .as_any()
+        .downcast_ref::<Utf8Array<i32>>()
+        .ok_or_else(|| Error::Arrow("Invalid scope_name column".into()))?
+        .value(row)
+        .to_string();
+    let scope_version = chunk.arrays()[16]
+        .as_ref()
+        .as_any()
+        .downcast_ref::<Utf8Array<i32>>()
+        .ok_or_else(|| Error::Arrow("Invalid scope_version column".into()))?
+        .value(row)
+        .to_string();
 
     Ok(LogRecord::new(
-        timestamp_ns, observed_timestamp_ns, severity_number, severity_text, body,
-        attributes, resource_attributes, trace_id, span_id, flags, scope_name, scope_version
+        timestamp_ns,
+        observed_timestamp_ns,
+        severity_number,
+        severity_text,
+        body,
+        attributes,
+        resource_attributes,
+        trace_id,
+        span_id,
+        flags,
+        scope_name,
+        scope_version,
     ))
 }
 
@@ -132,37 +258,73 @@ pub fn row_to_span<A: AsRef<dyn Array>>(chunk: &Chunk<A>, row: usize) -> Result<
     read_binary_field(chunk.arrays()[1].as_ref(), row, &mut span_id)?;
 
     // Column 2: span_name (Dictionary)
-    let span_name_arr = chunk.arrays()[2].as_ref().as_any().downcast_ref::<DictionaryArray<i32>>()
+    let span_name_arr = chunk.arrays()[2]
+        .as_ref()
+        .as_any()
+        .downcast_ref::<DictionaryArray<i32>>()
         .ok_or_else(|| Error::Arrow("Invalid span_name column".into()))?;
-    let name = span_name_arr.values().as_any().downcast_ref::<Utf8Array<i32>>()
+    let name = span_name_arr
+        .values()
+        .as_any()
+        .downcast_ref::<Utf8Array<i32>>()
         .ok_or_else(|| Error::Arrow("Invalid span_name values".into()))?
-        .value(span_name_arr.keys().value(row) as usize).to_string();
+        .value(span_name_arr.keys().value(row) as usize)
+        .to_string();
 
     // Column 3: span_kind (Utf8)
-    let kind_str = chunk.arrays()[3].as_ref().as_any().downcast_ref::<Utf8Array<i32>>()
-        .ok_or_else(|| Error::Arrow("Invalid span_kind column".into()))?.value(row);
+    let kind_str = chunk.arrays()[3]
+        .as_ref()
+        .as_any()
+        .downcast_ref::<Utf8Array<i32>>()
+        .ok_or_else(|| Error::Arrow("Invalid span_kind column".into()))?
+        .value(row);
     let kind = match kind_str {
-        "SPAN_KIND_INTERNAL" => 1, "SPAN_KIND_SERVER" => 2, "SPAN_KIND_CLIENT" => 3,
-        "SPAN_KIND_PRODUCER" => 4, "SPAN_KIND_CONSUMER" => 5, _ => 0,
+        "SPAN_KIND_INTERNAL" => 1,
+        "SPAN_KIND_SERVER" => 2,
+        "SPAN_KIND_CLIENT" => 3,
+        "SPAN_KIND_PRODUCER" => 4,
+        "SPAN_KIND_CONSUMER" => 5,
+        _ => 0,
     };
 
     // Columns 4,5: start_time_ns, end_time_ns
-    let start_time_ns = chunk.arrays()[4].as_ref().as_any().downcast_ref::<Int64Array>()
-        .ok_or_else(|| Error::Arrow("Invalid start_time_ns column".into()))?.value(row);
-    let end_time_ns = chunk.arrays()[5].as_ref().as_any().downcast_ref::<Int64Array>()
-        .ok_or_else(|| Error::Arrow("Invalid end_time_ns column".into()))?.value(row);
+    let start_time_ns = chunk.arrays()[4]
+        .as_ref()
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .ok_or_else(|| Error::Arrow("Invalid start_time_ns column".into()))?
+        .value(row);
+    let end_time_ns = chunk.arrays()[5]
+        .as_ref()
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .ok_or_else(|| Error::Arrow("Invalid end_time_ns column".into()))?
+        .value(row);
 
     // Column 7: status_code (Utf8)
-    let status_code_str = chunk.arrays()[7].as_ref().as_any().downcast_ref::<Utf8Array<i32>>()
-        .ok_or_else(|| Error::Arrow("Invalid status_code column".into()))?.value(row);
+    let status_code_str = chunk.arrays()[7]
+        .as_ref()
+        .as_any()
+        .downcast_ref::<Utf8Array<i32>>()
+        .ok_or_else(|| Error::Arrow("Invalid status_code column".into()))?
+        .value(row);
     let status_code = match status_code_str {
-        "STATUS_CODE_OK" => 1, "STATUS_CODE_ERROR" => 2, _ => 0,
+        "STATUS_CODE_OK" => 1,
+        "STATUS_CODE_ERROR" => 2,
+        _ => 0,
     };
 
     // Column 8: status_message (Utf8, nullable)
-    let status_message = chunk.arrays()[8].as_ref().as_any().downcast_ref::<Utf8Array<i32>>()
+    let status_message = chunk.arrays()[8]
+        .as_ref()
+        .as_any()
+        .downcast_ref::<Utf8Array<i32>>()
         .ok_or_else(|| Error::Arrow("Invalid status_message column".into()))?;
-    let status_msg = if status_message.is_null(row) { String::new() } else { status_message.value(row).to_string() };
+    let status_msg = if status_message.is_null(row) {
+        String::new()
+    } else {
+        status_message.value(row).to_string()
+    };
 
     // Column 16: trace_id (FixedSizeBinary(16) or Binary)
     let mut trace_id = [0u8; 16];
@@ -175,29 +337,55 @@ pub fn row_to_span<A: AsRef<dyn Array>>(chunk: &Chunk<A>, row: usize) -> Result<
     }
 
     // Column 18: flags (UInt32, nullable)
-    let flags_arr = chunk.arrays()[18].as_ref().as_any().downcast_ref::<PrimitiveArray<u32>>()
+    let flags_arr = chunk.arrays()[18]
+        .as_ref()
+        .as_any()
+        .downcast_ref::<PrimitiveArray<u32>>()
         .ok_or_else(|| Error::Arrow("Invalid flags column".into()))?;
-    let flags = if flags_arr.is_null(row) { 0 } else { flags_arr.value(row) };
+    let flags = if flags_arr.is_null(row) {
+        0
+    } else {
+        flags_arr.value(row)
+    };
 
     // Column 19: trace_state (Utf8, nullable)
-    let trace_state_arr = chunk.arrays()[19].as_ref().as_any().downcast_ref::<Utf8Array<i32>>()
+    let trace_state_arr = chunk.arrays()[19]
+        .as_ref()
+        .as_any()
+        .downcast_ref::<Utf8Array<i32>>()
         .ok_or_else(|| Error::Arrow("Invalid trace_state column".into()))?;
-    let trace_state = if trace_state_arr.is_null(row) { String::new() } else { trace_state_arr.value(row).to_string() };
+    let trace_state = if trace_state_arr.is_null(row) {
+        String::new()
+    } else {
+        trace_state_arr.value(row).to_string()
+    };
 
     // Column 20: attributes (Utf8 JSON)
     let attributes = LabelSet::from_json(
-        chunk.arrays()[20].as_ref().as_any().downcast_ref::<Utf8Array<i32>>()
-            .ok_or_else(|| Error::Arrow("Invalid attributes column".into()))?.value(row)
+        chunk.arrays()[20]
+            .as_ref()
+            .as_any()
+            .downcast_ref::<Utf8Array<i32>>()
+            .ok_or_else(|| Error::Arrow("Invalid attributes column".into()))?
+            .value(row),
     )?;
 
     // Column 22: events (Utf8 JSON)
-    let events_json = chunk.arrays()[22].as_ref().as_any().downcast_ref::<Utf8Array<i32>>()
-        .ok_or_else(|| Error::Arrow("Invalid events column".into()))?.value(row);
+    let events_json = chunk.arrays()[22]
+        .as_ref()
+        .as_any()
+        .downcast_ref::<Utf8Array<i32>>()
+        .ok_or_else(|| Error::Arrow("Invalid events column".into()))?
+        .value(row);
     let events: Vec<SpanEvent> = serde_json::from_str(events_json).unwrap_or_default();
 
     // Column 23: links (Utf8 JSON)
-    let links_json = chunk.arrays()[23].as_ref().as_any().downcast_ref::<Utf8Array<i32>>()
-        .ok_or_else(|| Error::Arrow("Invalid links column".into()))?.value(row);
+    let links_json = chunk.arrays()[23]
+        .as_ref()
+        .as_any()
+        .downcast_ref::<Utf8Array<i32>>()
+        .ok_or_else(|| Error::Arrow("Invalid links column".into()))?
+        .value(row);
     let links: Vec<SpanLink> = serde_json::from_str(links_json).unwrap_or_default();
 
     // Correlation columns 9-15 → inject back into attributes
@@ -205,10 +393,22 @@ pub fn row_to_span<A: AsRef<dyn Array>>(chunk: &Chunk<A>, row: usize) -> Result<
     let attributes = inject_correlation(attributes, correlation);
 
     Ok(Span::new(
-        trace_id, span_id, trace_state, name, kind,
-        start_time_ns, end_time_ns, attributes, events, links,
-        SpanStatus { code: status_code, message: status_msg },
-        parent_span_id, flags,
+        trace_id,
+        span_id,
+        trace_state,
+        name,
+        kind,
+        start_time_ns,
+        end_time_ns,
+        attributes,
+        events,
+        links,
+        SpanStatus {
+            code: status_code,
+            message: status_msg,
+        },
+        parent_span_id,
+        flags,
     ))
 }
 

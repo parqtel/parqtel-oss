@@ -1,0 +1,18 @@
+--- RUN 1 ---
+--- summary (points/s, higher is better) ---
+ingest : 578007
+flush  : 881857
+scan   : 4590159
+query  : 2005640
+--- RUN 2 ---
+--- summary (points/s, higher is better) ---
+ingest : 581853
+flush  : 837915
+scan   : 4555719
+query  : 1996592
+--- RUN 3 ---
+--- summary (points/s, higher is better) ---
+ingest : 558116
+flush  : 842040
+scan   : 4605250
+query  : 1992756
