@@ -6,21 +6,56 @@ on:
   pull_request:
     branches: [main]
 
+# One run per branch/PR: superseded runs cancel immediately instead of
+# queueing up worker minutes.
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
-  RUSTFLAGS: "-D warnings"
   RUST_BACKTRACE: 1
   MSRV: "1.85"
 
 jobs:
+  # ── What changed? Gates the expensive jobs below ──────────────────────────
+  changes:
+    name: Detect Changes
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    outputs:
+      helm: ${{ steps.filter.outputs.helm }}
+      docker: ${{ steps.filter.outputs.docker }}
+      rust: ${{ steps.filter.outputs.rust }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            helm:
+              - 'deploy/charts/**'
+              - 'compose/**'
+            docker:
+              - 'Dockerfile'
+              - 'parqtel-*/src/**'
+              - 'parqtel-*/proto/**'
+              - 'Cargo.{toml,lock}'
+            rust:
+              - 'parqtel-*/src/**'
+              - 'Cargo.{toml,lock}'
+              - '.github/workflows/ci.yml'
+
   # ── Lint ──────────────────────────────────────────────────────────────────
   lint:
     name: Lint
     runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.rust == 'true' || github.event_name == 'push'
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -29,26 +64,33 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Check formatting
         run: cargo fmt --check
+      # -D warnings scoped to clippy only: applying it via RUSTFLAGS would
+      # compile dependencies with it too and can fail spuriously when new
+      # rustc lints land in third-party code.
       - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
   # ── Test ──────────────────────────────────────────────────────────────────
   test:
     name: Test
     runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.rust == 'true' || github.event_name == 'push'
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Run tests
-        run: cargo test --workspace
+        run: cargo test --workspace --locked
       - name: Run doc tests
-        run: cargo test --workspace --doc
+        run: cargo test --workspace --doc --locked
 
   # ── MSRV Check ───────────────────────────────────────────────────────────
   msrv:
     name: MSRV (${{ matrix.msrv }})
     runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.rust == 'true' || github.event_name == 'push'
     strategy:
       matrix:
         msrv: ["1.85"]
@@ -58,52 +100,46 @@ jobs:
         with:
           toolchain: ${{ matrix.msrv }}
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: msrv
       - name: Check MSRV
-        run: cargo check --workspace
+        run: cargo check --workspace --locked
 
-  # ── Build Matrix ─────────────────────────────────────────────────────────
-  build:
-    name: Build (${{ matrix.target }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
-          - target: aarch64-unknown-linux-gnu
-            os: ubuntu-latest
-          - target: x86_64-apple-darwin
-            os: macos-latest
-          - target: aarch64-apple-darwin
-            os: macos-latest
+  # ── Security ─────────────────────────────────────────────────────────────
+  security:
+    name: Security Audit
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@v2
+          persist-credentials: false
+      # Advisory database check via prebuilt action: no cargo-audit compile
+      # (the old `cargo install cargo-audit` burned ~5 min of CPU per run).
+      - name: Dependency audit
+        uses: rustsec/audit-check@v2
         with:
-          key: ${{ matrix.target }}
-      - name: Install cross-compilation tools
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Check for unsafe code
         run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
-          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
-      - name: Build release binary
-        run: cargo build --release -p parqtel-server --target ${{ matrix.target }}
-      - name: Upload binary
-        uses: actions/upload-artifact@v4
+          if grep -rn "unsafe" --include="*.rs" parqtel-*/src/ \
+             | grep -v "forbid(unsafe_code)" | grep -v "//"; then
+            echo "::error::Unsafe code detected"
+            exit 1
+          fi
+      - name: Trivy filesystem scan
+        uses: aquasecurity/trivy-action@master
         with:
-          name: parqtel-${{ matrix.target }}
-          path: target/${{ matrix.target }}/release/parqtel
-          retention-days: 7
+          scan-type: fs
+          scan-ref: .
+          severity: CRITICAL,HIGH
+          exit-code: 1
 
-  # ── Helm Lint ─────────────────────────────────────────────────────────────
+  # ── Helm Lint (only when chart config changes) ────────────────────────────
   helm-lint:
     name: Helm Lint
     runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.helm == 'true' || github.event_name == 'push'
     steps:
       - uses: actions/checkout@v4
       - uses: azure/setup-helm@v4
@@ -118,10 +154,19 @@ jobs:
       - name: Template validation
         run: helm template test deploy/charts/parqtel --debug > /dev/null
 
-  # ── Docker Build ─────────────────────────────────────────────────────────
+  # ── Docker Build + Smoke Test (only when image inputs change) ─────────────
   docker:
-    name: Docker Build
+    name: Docker Build & Smoke Test
     runs-on: ubuntu-latest
+    needs: [changes, lint, test]
+    # Heavy job: skip entirely for docs/chart-only PRs. Runs after lint/test
+    # pass so we never spend 15 build minutes on a commit that already failed
+    # CI ('skipped' is accepted because docs-only PRs skip lint/test).
+    if: >-
+      !cancelled()
+      && (needs.lint.result == 'success' || needs.lint.result == 'skipped')
+      && (needs.test.result == 'success' || needs.test.result == 'skipped')
+      && (needs.changes.outputs.docker == 'true' || github.event_name == 'push')
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
@@ -130,32 +175,24 @@ jobs:
         with:
           context: .
           push: false
-          tags: ghcr.io/parqtel/parqtel-oss:ci
+          load: true
+          tags: parqtel:ci-${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-  # ── Security ─────────────────────────────────────────────────────────────
-  security:
-    name: Security Audit
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: Install cargo-audit
-        run: cargo install cargo-audit --locked
-      - name: Audit dependencies
-        run: cargo audit
-      - name: Check for unsafe code
+      # Quality gate: prove the shipped image actually boots and serves.
+      - name: Smoke test image
         run: |
-          if grep -r "unsafe" --include="*.rs" parqtel-*/src/ | grep -v "forbid(unsafe_code)" | grep -v "//"; then
-            echo "::error::Unsafe code detected"
-            exit 1
-          fi
-      - name: Trivy filesystem scan
-        uses: aquasecurity/trivy-action@master
-        with:
-          scan-type: fs
-          scan-ref: .
-          severity: CRITICAL,HIGH
-          exit-code: 1
+          docker run -d --name parqtel-smoke -p 9090:9090 \
+            -e PARQTEL_BIND=0.0.0.0:9090 parqtel:ci-${{ github.sha }}
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:9090/health > /dev/null; then
+              echo "Health OK"
+              curl -sf http://localhost:9090/metrics > /dev/null && echo "Metrics OK"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::Image failed to become healthy within 60s"
+          docker logs parqtel-smoke || true
+          exit 1

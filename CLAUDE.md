@@ -40,9 +40,9 @@ cd e2e && go test -v ./...
 ### Helm Chart
 
 ```bash
-helm lint charts/parqtel
-helm template test charts/parqtel
-helm install parqtel charts/parqtel -n parqtel --create-namespace
+helm lint deploy/charts/parqtel
+helm template test deploy/charts/parqtel
+helm install parqtel deploy/charts/parqtel -n parqtel --create-namespace
 ```
 
 ## Architecture
@@ -84,7 +84,7 @@ Rust workspace with 14 crates:
 - Resource limits, healthchecks (wget-based for distroless compatibility)
 - Configurable ports via `.env`
 
-### Helm Chart (`charts/parqtel/`)
+### Helm Chart (`deploy/charts/parqtel/`)
 
 - **values.schema.json** — Full JSON Schema validation, passes `helm lint`
 - **CI test values** — `ci/minimal-values.yaml`, `ci/default-values.yaml`, `ci/full-values.yaml`
