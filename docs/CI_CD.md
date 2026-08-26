@@ -74,6 +74,8 @@ make docker      # same multi-stage build CI validates
 helm lint deploy/charts/parqtel   # note: charts live under deploy/, not charts/
 ```
 
+Local builds of `parqtel-ingest` need `protoc` (prost-build compiles the OTLP schema in `build.rs`): `sudo apt-get install protobuf-compiler`. CI installs it via the shared composite action `.github/actions/setup-rust`, which also owns toolchain setup and cache keys — change toolchain/cache config there, not per-job.
+
 ## Maintenance notes
 
 - **MSRV is 1.86** and lives in three places that must move together: `ci.yml` (`MSRV` env + toolchain matrix), `Cargo.toml` `[workspace.package].rust-version`, and `Dockerfile` `RUST_VERSION`. It's pinned by the lockfile: ICU 2.x (pulled in via `url` → `reqwest`) requires rustc 1.86, so lowering it needs precise dependency pins.

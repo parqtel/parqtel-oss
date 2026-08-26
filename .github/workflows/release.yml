@@ -23,12 +23,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/setup-rust
         with:
           components: clippy
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: release-gate
+          cache-key: release-gate
       - name: Clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Run tests
@@ -56,12 +54,10 @@ jobs:
             artifact: parqtel-darwin-arm64
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/setup-rust
         with:
           targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: release-${{ matrix.target }}
+          cache-key: release-${{ matrix.target }}
       - name: Install cross tools
         if: matrix.target == 'aarch64-unknown-linux-gnu'
         run: |
