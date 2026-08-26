@@ -59,7 +59,10 @@ impl RateLimiter {
         let now = Utc::now().timestamp() as u64;
         let tokens_per_second = self.requests_per_minute as f64 / 60.0;
 
-        let entry = self.tokens.entry(client_id.to_string()).or_insert(tokens_per_second);
+        let entry = self
+            .tokens
+            .entry(client_id.to_string())
+            .or_insert(tokens_per_second);
         let last = self.last_update.entry(client_id.to_string()).or_insert(now);
 
         let elapsed = (now - *last) as f64;
@@ -146,17 +149,17 @@ async fn health_handler() -> Json<Value> {
 }
 
 /// Tools list handler
-async fn tools_list_handler(
-    State(server): State<Arc<McpServer>>,
-) -> Json<Value> {
+async fn tools_list_handler(State(server): State<Arc<McpServer>>) -> Json<Value> {
     let tools: Vec<Value> = server
         .get_tools()
         .iter()
-        .map(|t| serde_json::json!({
-            "name": t.name,
-            "description": t.description,
-            "input_schema": t.input_schema
-        }))
+        .map(|t| {
+            serde_json::json!({
+                "name": t.name,
+                "description": t.description,
+                "input_schema": t.input_schema
+            })
+        })
         .collect();
 
     Json(serde_json::json!({
@@ -169,7 +172,10 @@ async fn tools_call_handler(
     State(server): State<Arc<McpServer>>,
     Json(request): Json<Value>,
 ) -> (StatusCode, Json<Value>) {
-    let id = request.get("id").and_then(|v| v.as_str()).unwrap_or("unknown");
+    let id = request
+        .get("id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
     let method = request.get("method").and_then(|v| v.as_str());
 
     match method {
@@ -184,7 +190,7 @@ async fn tools_call_handler(
                         "message": format!("Method not found: {}", m)
                     },
                     "id": id
-                }))
+                })),
             );
         }
         None => {
@@ -197,7 +203,7 @@ async fn tools_call_handler(
                         "message": "Missing 'method' field"
                     },
                     "id": id
-                }))
+                })),
             );
         }
     }
@@ -217,7 +223,7 @@ async fn tools_call_handler(
                         "message": "Missing 'name' in params"
                     },
                     "id": id
-                }))
+                })),
             );
         }
     };
@@ -234,12 +240,15 @@ async fn tools_call_handler(
                         "message": format!("Tool not found: {}", tool_name)
                     },
                     "id": id
-                }))
+                })),
             );
         }
     };
 
-    let client_id = params.get("client_id").and_then(|v| v.as_str()).unwrap_or("anonymous");
+    let client_id = params
+        .get("client_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("anonymous");
     {
         let mut limiter = server.rate_limiter.lock().unwrap();
         if !limiter.allow(client_id) {
@@ -252,7 +261,7 @@ async fn tools_call_handler(
                         "message": "Rate limit exceeded"
                     },
                     "id": id
-                }))
+                })),
             );
         }
     }
@@ -263,19 +272,33 @@ async fn tools_call_handler(
     let result = match execute_tool(server.get_tools(), tool_name, &params) {
         Ok(value) => {
             let _duration = (Utc::now() - start_time).num_milliseconds();
-            log_audit(&request_id, tool_name, client_id, &params, "success", _duration);
+            log_audit(
+                &request_id,
+                tool_name,
+                client_id,
+                &params,
+                "success",
+                _duration,
+            );
             value
         }
         Err(e) => {
             let _duration = (Utc::now() - start_time).num_milliseconds();
-            log_audit(&request_id, tool_name, client_id, &params, "error", _duration);
+            log_audit(
+                &request_id,
+                tool_name,
+                client_id,
+                &params,
+                "error",
+                _duration,
+            );
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({
                     "jsonrpc": "2.0",
                     "error": e.to_json_rpc_error(),
                     "id": id
-                }))
+                })),
             );
         }
     };
@@ -291,14 +314,11 @@ async fn tools_call_handler(
 }
 
 /// Execute a tool by name
-fn execute_tool(
-    tools: &[McpTool],
-    tool_name: &str,
-    params: &Value,
-) -> Result<Value, McpError> {
-    let _tool = tools.iter().find(|t| t.name == tool_name).ok_or_else(|| {
-        McpError::MethodNotFound(format!("Tool not found: {}", tool_name))
-    })?;
+fn execute_tool(tools: &[McpTool], tool_name: &str, params: &Value) -> Result<Value, McpError> {
+    let _tool = tools
+        .iter()
+        .find(|t| t.name == tool_name)
+        .ok_or_else(|| McpError::MethodNotFound(format!("Tool not found: {}", tool_name)))?;
 
     let mut tool_params = params.clone();
     if let Some(obj) = tool_params.as_object_mut() {

@@ -1,18 +1,18 @@
 //! Alert engine for parqtel: rules, state machine, evaluation, and storage.
 
-pub mod rule;
 pub mod evaluator;
+pub mod rule;
 pub mod state;
 pub mod store;
 
-pub use rule::types::{AlertRule, RuleType, Severity, Condition, RuleSource};
 pub use rule::registry::AlertRuleRegistry;
+pub use rule::types::{AlertRule, Condition, RuleSource, RuleType, Severity};
 pub use state::machine::{AlertState, AlertStateMachine, StateTransition};
 pub use store::alert_store::AlertStore;
 
-use std::collections::BTreeMap;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use ulid::Ulid;
 
 /// A single firing of a rule for a specific label set.

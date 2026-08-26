@@ -1,5 +1,5 @@
-use serde::{Deserialize, Serialize};
 use crate::models::labels::LabelSet;
+use serde::{Deserialize, Serialize};
 
 /// Represents a single log record, compatible with the OTLP log data model.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -71,9 +71,18 @@ mod tests {
     #[test]
     fn test_log_record_creation() {
         let record = LogRecord::new(
-            1000, 1001, 9, "INFO".into(), "test message".into(),
-            LabelSet::default(), LabelSet::default(),
-            [0; 16], [0; 8], 0, "test".into(), "1.0".into()
+            1000,
+            1001,
+            9,
+            "INFO".into(),
+            "test message".into(),
+            LabelSet::default(),
+            LabelSet::default(),
+            [0; 16],
+            [0; 8],
+            0,
+            "test".into(),
+            "1.0".into(),
         );
         assert_eq!(record.timestamp_ns, 1000);
         assert_eq!(record.body, "test message");
@@ -83,9 +92,18 @@ mod tests {
     #[test]
     fn test_log_record_serialization() {
         let record = LogRecord::new(
-            1000, 1001, 9, "INFO".into(), "test message".into(),
-            LabelSet::default(), LabelSet::default(),
-            [0; 16], [0; 8], 0, "test".into(), "1.0".into()
+            1000,
+            1001,
+            9,
+            "INFO".into(),
+            "test message".into(),
+            LabelSet::default(),
+            LabelSet::default(),
+            [0; 16],
+            [0; 8],
+            0,
+            "test".into(),
+            "1.0".into(),
         );
         let json = serde_json::to_string(&record).unwrap();
         let decoded: LogRecord = serde_json::from_str(&json).unwrap();

@@ -1,13 +1,13 @@
+use chrono::{DateTime, Utc};
 use std::cmp::Reverse;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use chrono::{DateTime, Utc};
 use tokio::sync::RwLock;
 use ulid::Ulid;
 
-use crate::AlertInstance;
 use crate::state::machine::AlertState;
+use crate::AlertInstance;
 
 /// Persisted alert store backed by JSON files.
 /// In production this would use Parquet via the storage layer;
@@ -63,14 +63,26 @@ impl AlertStore {
     }
 
     pub async fn list_active(&self) -> Vec<AlertInstance> {
-        self.instances.read().await.values()
-            .filter(|i| matches!(i.state, AlertState::Firing | AlertState::Acknowledged | AlertState::Pending))
+        self.instances
+            .read()
+            .await
+            .values()
+            .filter(|i| {
+                matches!(
+                    i.state,
+                    AlertState::Firing | AlertState::Acknowledged | AlertState::Pending
+                )
+            })
             .cloned()
             .collect()
     }
 
     pub async fn list_recent(&self, since: DateTime<Utc>, limit: usize) -> Vec<AlertInstance> {
-        let mut results: Vec<_> = self.instances.read().await.values()
+        let mut results: Vec<_> = self
+            .instances
+            .read()
+            .await
+            .values()
             .filter(|i| i.updated_at >= since)
             .cloned()
             .collect();
@@ -80,14 +92,20 @@ impl AlertStore {
     }
 
     pub async fn list_by_rule(&self, rule_id: &str, since: DateTime<Utc>) -> Vec<AlertInstance> {
-        self.instances.read().await.values()
+        self.instances
+            .read()
+            .await
+            .values()
             .filter(|i| i.rule_id == rule_id && i.updated_at >= since)
             .cloned()
             .collect()
     }
 
     pub async fn list_suppressed(&self) -> Vec<AlertInstance> {
-        self.instances.read().await.values()
+        self.instances
+            .read()
+            .await
+            .values()
             .filter(|i| i.state == AlertState::Suppressed)
             .cloned()
             .collect()
@@ -112,8 +130,12 @@ impl AlertStore {
         if !path.exists() {
             return;
         }
-        let Ok(content) = std::fs::read_to_string(&path) else { return };
-        let Ok(alerts): Result<Vec<AlertInstance>, _> = serde_json::from_str(&content) else { return };
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            return;
+        };
+        let Ok(alerts): Result<Vec<AlertInstance>, _> = serde_json::from_str(&content) else {
+            return;
+        };
         let mut instances = self.instances.write().await;
         let mut fp_index = self.fingerprint_index.write().await;
         for alert in alerts {
@@ -127,19 +149,30 @@ impl AlertStore {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
-    use crate::{AlertInstance, Severity, RuleType};
+    use crate::{AlertInstance, RuleType, Severity};
     use std::collections::BTreeMap;
 
     fn sample_instance(rule_id: &str) -> AlertInstance {
         let labels = BTreeMap::from([("env".to_string(), "prod".to_string())]);
         let fp = AlertInstance::compute_fingerprint(rule_id, &labels);
         AlertInstance {
-            id: Ulid::new(), rule_id: rule_id.into(), rule_name: "test".into(),
-            fingerprint: fp, labels, annotations: BTreeMap::new(),
-            state: AlertState::Firing, severity: Severity::Warning, value: Some(95.0),
-            started_at: Utc::now(), updated_at: Utc::now(), resolved_at: None,
-            acknowledged_by: None, noise_score: 0.0, transition_log: vec![],
-            notification_sent: false, source_rule_type: RuleType::Static,
+            id: Ulid::new(),
+            rule_id: rule_id.into(),
+            rule_name: "test".into(),
+            fingerprint: fp,
+            labels,
+            annotations: BTreeMap::new(),
+            state: AlertState::Firing,
+            severity: Severity::Warning,
+            value: Some(95.0),
+            started_at: Utc::now(),
+            updated_at: Utc::now(),
+            resolved_at: None,
+            acknowledged_by: None,
+            noise_score: 0.0,
+            transition_log: vec![],
+            notification_sent: false,
+            source_rule_type: RuleType::Static,
         }
     }
 
@@ -179,7 +212,9 @@ mod tests {
     async fn test_list_recent() {
         let store = AlertStore::in_memory();
         store.save(&sample_instance("r1")).await;
-        let recent = store.list_recent(Utc::now() - chrono::Duration::hours(1), 10).await;
+        let recent = store
+            .list_recent(Utc::now() - chrono::Duration::hours(1), 10)
+            .await;
         assert_eq!(recent.len(), 1);
     }
 
@@ -188,7 +223,9 @@ mod tests {
         let store = AlertStore::in_memory();
         store.save(&sample_instance("target")).await;
         store.save(&sample_instance("other")).await;
-        let results = store.list_by_rule("target", Utc::now() - chrono::Duration::hours(1)).await;
+        let results = store
+            .list_by_rule("target", Utc::now() - chrono::Duration::hours(1))
+            .await;
         assert_eq!(results.len(), 1);
     }
 }

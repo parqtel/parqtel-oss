@@ -1,24 +1,24 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+use crate::router::build_router;
+use crate::state::AppState;
 #[cfg(test)]
 use axum::{
-    body::{Body, to_bytes},
-    http::{Request, StatusCode, header},
+    body::{to_bytes, Body},
+    http::{header, Request, StatusCode},
 };
-use tower::util::ServiceExt;
-use serde_json::Value;
-use std::sync::Arc;
-use tokio::sync::mpsc;
+use flate2::write::GzEncoder;
+use flate2::Compression;
 use parqtel_core::{BlockIndex, Config, StorageEngine};
+use parqtel_ingest::otel::collector::metrics::v1::ExportMetricsServiceRequest;
 use parqtel_ingest::{IngestionService, LogIngestionService, TraceIngestionService};
 use parqtel_query::QueryExecutor;
-use crate::state::AppState;
-use crate::router::build_router;
-use std::io::Write;
-use flate2::Compression;
-use flate2::write::GzEncoder;
-use sha2::{Sha256, Digest};
 use prost::Message;
-use parqtel_ingest::otel::collector::metrics::v1::ExportMetricsServiceRequest;
+use serde_json::Value;
+use sha2::{Digest, Sha256};
+use std::io::Write;
+use std::sync::Arc;
+use tokio::sync::mpsc;
+use tower::util::ServiceExt;
 
 #[cfg(test)]
 async fn setup_test_app() -> axum::Router {
@@ -28,10 +28,12 @@ async fn setup_test_app() -> axum::Router {
     let (ltx, _) = mpsc::unbounded_channel();
     let (ttx, _) = mpsc::unbounded_channel();
     let index = Arc::new(tokio::sync::RwLock::new(BlockIndex::new(dir.path())));
-    let log_index = Arc::new(tokio::sync::RwLock::new(BlockIndex::new(&dir.path().join("logs"))));
+    let log_index = Arc::new(tokio::sync::RwLock::new(BlockIndex::new(
+        &dir.path().join("logs"),
+    )));
 
     let storage_engine: Arc<dyn StorageEngine> = Arc::new(
-        parqtel_core::engine::parquet::ParquetStorageEngine::new(config.storage.clone())
+        parqtel_core::engine::parquet::ParquetStorageEngine::new(config.storage.clone()),
     );
 
     let ui_html = "<html><body>Test</body></html>";
@@ -55,7 +57,8 @@ async fn setup_test_app() -> axum::Router {
         config,
         ui_content,
         ui_etag,
-    ).await;
+    )
+    .await;
 
     build_router(state)
 }
@@ -81,7 +84,13 @@ async fn test_ui_headers() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::OK);
-    assert!(response.headers().get("content-type").unwrap().to_str().unwrap().contains("text/html"));
+    assert!(response
+        .headers()
+        .get("content-type")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .contains("text/html"));
     assert_eq!(response.headers().get("content-encoding").unwrap(), "gzip");
     assert!(response.headers().contains_key("etag"));
 }
@@ -89,7 +98,8 @@ async fn test_ui_headers() {
 #[tokio::test]
 async fn test_ui_caching() {
     let app = setup_test_app().await;
-    let response1 = app.clone()
+    let response1 = app
+        .clone()
         .oneshot(Request::builder().uri("/ui").body(Body::empty()).unwrap())
         .await
         .unwrap();
@@ -114,7 +124,12 @@ async fn test_ui_caching() {
 async fn test_metrics_endpoint() {
     let app = setup_test_app().await;
     let response = app
-        .oneshot(Request::builder().uri("/metrics").body(Body::empty()).unwrap())
+        .oneshot(
+            Request::builder()
+                .uri("/metrics")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
 
@@ -128,7 +143,12 @@ async fn test_metrics_endpoint() {
 async fn test_prometheus_query_range_missing_params() {
     let app = setup_test_app().await;
     let response = app
-        .oneshot(Request::builder().uri("/api/v1/query_range").body(Body::empty()).unwrap())
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/query_range")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
 
@@ -208,19 +228,31 @@ async fn test_ingest_logs_json() {
 async fn test_prometheus_list_handlers() {
     let app = setup_test_app().await;
 
-    let req = Request::builder().uri("/api/v1/labels").body(Body::empty()).unwrap();
+    let req = Request::builder()
+        .uri("/api/v1/labels")
+        .body(Body::empty())
+        .unwrap();
     let res = app.clone().oneshot(req).await.unwrap();
     assert_eq!(res.status(), StatusCode::OK);
 
-    let req = Request::builder().uri("/api/v1/label/__name__/values").body(Body::empty()).unwrap();
+    let req = Request::builder()
+        .uri("/api/v1/label/__name__/values")
+        .body(Body::empty())
+        .unwrap();
     let res = app.clone().oneshot(req).await.unwrap();
     assert_eq!(res.status(), StatusCode::OK);
 
-    let req = Request::builder().uri("/api/v1/label/host/values").body(Body::empty()).unwrap();
+    let req = Request::builder()
+        .uri("/api/v1/label/host/values")
+        .body(Body::empty())
+        .unwrap();
     let res = app.clone().oneshot(req).await.unwrap();
     assert_eq!(res.status(), StatusCode::OK);
-    
-    let req = Request::builder().uri("/v1/logs/fields").body(Body::empty()).unwrap();
+
+    let req = Request::builder()
+        .uri("/v1/logs/fields")
+        .body(Body::empty())
+        .unwrap();
     let res = app.clone().oneshot(req).await.unwrap();
     assert_eq!(res.status(), StatusCode::OK);
 }
@@ -231,7 +263,7 @@ async fn test_correlate_handler() {
     let labels = serde_json::json!({"service_name": "test"}).to_string();
     let uri = format!("/v1/correlate?anchor_signal=metric&anchor_timestamp_ns=1000&anchor_labels={}&target_signal=log", 
                       urlencoding::encode(&labels));
-    
+
     let req = Request::builder().uri(uri).body(Body::empty()).unwrap();
     let res = app.clone().oneshot(req).await.unwrap();
     assert_eq!(res.status(), StatusCode::OK);
@@ -240,7 +272,10 @@ async fn test_correlate_handler() {
 #[tokio::test]
 async fn test_query_instant() {
     let app = setup_test_app().await;
-    let req = Request::builder().uri("/api/v1/query?query=up").body(Body::empty()).unwrap();
+    let req = Request::builder()
+        .uri("/api/v1/query?query=up")
+        .body(Body::empty())
+        .unwrap();
     let res = app.clone().oneshot(req).await.unwrap();
     assert_eq!(res.status(), StatusCode::OK);
 }
@@ -248,7 +283,10 @@ async fn test_query_instant() {
 #[tokio::test]
 async fn test_query_logs() {
     let app = setup_test_app().await;
-    let req = Request::builder().uri("/api/v1/logs?query=m&start=0&end=100").body(Body::empty()).unwrap();
+    let req = Request::builder()
+        .uri("/api/v1/logs?query=m&start=0&end=100")
+        .body(Body::empty())
+        .unwrap();
     let res = app.clone().oneshot(req).await.unwrap();
     assert_eq!(res.status(), StatusCode::OK);
 }
@@ -256,7 +294,10 @@ async fn test_query_logs() {
 #[tokio::test]
 async fn test_search_traces() {
     let app = setup_test_app().await;
-    let req = Request::builder().uri("/v1/traces/search?trace_id=123").body(Body::empty()).unwrap();
+    let req = Request::builder()
+        .uri("/v1/traces/search?trace_id=123")
+        .body(Body::empty())
+        .unwrap();
     let res = app.clone().oneshot(req).await.unwrap();
     assert_eq!(res.status(), StatusCode::OK);
 }
@@ -265,8 +306,10 @@ async fn test_search_traces() {
 async fn test_inspect_logic() {
     let dir = tempfile::tempdir().unwrap();
     let index = Arc::new(tokio::sync::RwLock::new(BlockIndex::new(dir.path())));
-    let log_index = Arc::new(tokio::sync::RwLock::new(BlockIndex::new(&dir.path().join("logs"))));
-    
+    let log_index = Arc::new(tokio::sync::RwLock::new(BlockIndex::new(
+        &dir.path().join("logs"),
+    )));
+
     super::run_inspect(index, log_index).await.unwrap();
 }
 
@@ -280,7 +323,10 @@ fn test_v_to_f64() {
 #[tokio::test]
 async fn test_prometheus_query_range() {
     let app = setup_test_app().await;
-    let req = Request::builder().uri("/api/v1/query_range?query=cpu&start=0&end=100&step=10s").body(Body::empty()).unwrap();
+    let req = Request::builder()
+        .uri("/api/v1/query_range?query=cpu&start=0&end=100&step=10s")
+        .body(Body::empty())
+        .unwrap();
     let res = app.clone().oneshot(req).await.unwrap();
     assert_eq!(res.status(), StatusCode::OK);
 }
@@ -288,7 +334,10 @@ async fn test_prometheus_query_range() {
 #[tokio::test]
 async fn test_prometheus_invalid_step() {
     let app = setup_test_app().await;
-    let req = Request::builder().uri("/api/v1/query_range?query=cpu&start=0&end=100&step=invalid").body(Body::empty()).unwrap();
+    let req = Request::builder()
+        .uri("/api/v1/query_range?query=cpu&start=0&end=100&step=invalid")
+        .body(Body::empty())
+        .unwrap();
     let res = app.clone().oneshot(req).await.unwrap();
     assert_eq!(res.status(), StatusCode::BAD_REQUEST);
 }
@@ -296,7 +345,10 @@ async fn test_prometheus_invalid_step() {
 #[tokio::test]
 async fn test_query_instant_missing_query() {
     let app = setup_test_app().await;
-    let req = Request::builder().uri("/api/v1/query").body(Body::empty()).unwrap();
+    let req = Request::builder()
+        .uri("/api/v1/query")
+        .body(Body::empty())
+        .unwrap();
     let res = app.clone().oneshot(req).await.unwrap();
     assert_eq!(res.status(), StatusCode::BAD_REQUEST);
 }
@@ -304,7 +356,10 @@ async fn test_query_instant_missing_query() {
 #[tokio::test]
 async fn test_list_log_field_values() {
     let app = setup_test_app().await;
-    let req = Request::builder().uri("/v1/logs/field_values?field_name=host").body(Body::empty()).unwrap();
+    let req = Request::builder()
+        .uri("/v1/logs/field_values?field_name=host")
+        .body(Body::empty())
+        .unwrap();
     let res = app.clone().oneshot(req).await.unwrap();
     assert_eq!(res.status(), StatusCode::OK);
 }
@@ -312,7 +367,10 @@ async fn test_list_log_field_values() {
 #[tokio::test]
 async fn test_query_logs_count() {
     let app = setup_test_app().await;
-    let req = Request::builder().uri("/v1/logs/count?query=m&start=0&end=100").body(Body::empty()).unwrap();
+    let req = Request::builder()
+        .uri("/v1/logs/count?query=m&start=0&end=100")
+        .body(Body::empty())
+        .unwrap();
     let res = app.clone().oneshot(req).await.unwrap();
     assert_eq!(res.status(), StatusCode::OK);
 }
@@ -320,9 +378,11 @@ async fn test_query_logs_count() {
 #[tokio::test]
 async fn test_ingest_metrics_proto() {
     let app = setup_test_app().await;
-    use parqtel_ingest::otel::metrics::v1::{ResourceMetrics, ScopeMetrics, Metric as ProtoMetric, Gauge, NumberDataPoint};
     use parqtel_ingest::otel::metrics::v1::metric::Data;
     use parqtel_ingest::otel::metrics::v1::number_data_point::Value;
+    use parqtel_ingest::otel::metrics::v1::{
+        Gauge, Metric as ProtoMetric, NumberDataPoint, ResourceMetrics, ScopeMetrics,
+    };
 
     let req_proto = ExportMetricsServiceRequest {
         resource_metrics: vec![ResourceMetrics {
@@ -368,16 +428,18 @@ async fn test_export_logic() {
     let dir = tempfile::tempdir().unwrap();
     let index = Arc::new(tokio::sync::RwLock::new(BlockIndex::new(dir.path())));
     let output = dir.path().join("export.csv");
-    
+
     super::run_export(
         Config::default(),
         index,
         "cpu".into(),
         "2023-01-01T00:00:00Z".into(),
         "2023-01-01T01:00:00Z".into(),
-        output.clone()
-    ).await.unwrap();
-    
+        output.clone(),
+    )
+    .await
+    .unwrap();
+
     assert!(output.exists());
 }
 
@@ -385,7 +447,11 @@ async fn test_export_logic() {
 async fn test_simplejson_handlers() {
     let app = setup_test_app().await;
 
-    let req = Request::builder().method("POST").uri("/search").body(Body::empty()).unwrap();
+    let req = Request::builder()
+        .method("POST")
+        .uri("/search")
+        .body(Body::empty())
+        .unwrap();
     let res = app.clone().oneshot(req).await.unwrap();
     assert_eq!(res.status(), StatusCode::OK);
 
@@ -395,21 +461,36 @@ async fn test_simplejson_handlers() {
         "targets": [{"target": "cpu"}],
         "max_data_points": 100
     });
-    let req = Request::builder().method("POST").uri("/query")
+    let req = Request::builder()
+        .method("POST")
+        .uri("/query")
         .header(header::CONTENT_TYPE, "application/json")
-        .body(Body::from(payload.to_string())).unwrap();
+        .body(Body::from(payload.to_string()))
+        .unwrap();
     let res = app.clone().oneshot(req).await.unwrap();
     assert_eq!(res.status(), StatusCode::OK);
 
-    let req = Request::builder().method("POST").uri("/tag-keys").body(Body::empty()).unwrap();
+    let req = Request::builder()
+        .method("POST")
+        .uri("/tag-keys")
+        .body(Body::empty())
+        .unwrap();
     let res = app.clone().oneshot(req).await.unwrap();
     assert_eq!(res.status(), StatusCode::OK);
 
-    let req = Request::builder().method("POST").uri("/tag-values").body(Body::empty()).unwrap();
+    let req = Request::builder()
+        .method("POST")
+        .uri("/tag-values")
+        .body(Body::empty())
+        .unwrap();
     let res = app.clone().oneshot(req).await.unwrap();
     assert_eq!(res.status(), StatusCode::OK);
 
-    let req = Request::builder().method("POST").uri("/annotations").body(Body::empty()).unwrap();
+    let req = Request::builder()
+        .method("POST")
+        .uri("/annotations")
+        .body(Body::empty())
+        .unwrap();
     let res = app.clone().oneshot(req).await.unwrap();
     assert_eq!(res.status(), StatusCode::OK);
 }

@@ -2,11 +2,11 @@
 //!
 //! Uses a HashMap indexed by metric name for O(1) lookup instead of O(n) scan.
 
+use crate::models::logs::LogRecord;
+use crate::models::metrics::DataPoint;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use crate::models::metrics::DataPoint;
-use crate::models::logs::LogRecord;
 
 /// Thread-safe in-memory buffer indexed by metric name for fast lookups.
 #[derive(Clone)]
@@ -37,10 +37,16 @@ impl MemoryBuffer {
     }
 
     /// O(1) lookup by metric name + time range filter.
-    pub async fn scan_metrics(&self, metric_name: &str, start_ns: i64, end_ns: i64) -> Vec<DataPoint> {
+    pub async fn scan_metrics(
+        &self,
+        metric_name: &str,
+        start_ns: i64,
+        end_ns: i64,
+    ) -> Vec<DataPoint> {
         let buf = self.metrics.read().await;
         match buf.get(metric_name) {
-            Some(points) => points.iter()
+            Some(points) => points
+                .iter()
                 .filter(|dp| dp.timestamp_ns >= start_ns && dp.timestamp_ns <= end_ns)
                 .cloned()
                 .collect(),
@@ -66,7 +72,8 @@ impl MemoryBuffer {
     /// Get all unique label names from buffered metrics.
     pub async fn label_names(&self) -> Vec<String> {
         let buf = self.metrics.read().await;
-        let mut labels: Vec<String> = buf.values()
+        let mut labels: Vec<String> = buf
+            .values()
             .flat_map(|points| points.iter().flat_map(|dp| dp.labels.keys().cloned()))
             .collect();
         labels.sort_unstable();

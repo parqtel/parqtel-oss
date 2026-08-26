@@ -23,7 +23,10 @@ impl SignalRecord {
             fields.insert(k.to_string(), v.to_string());
         }
         fields.insert("body".to_string(), log.body.clone());
-        fields.insert("severity_number".to_string(), log.severity_number.to_string());
+        fields.insert(
+            "severity_number".to_string(),
+            log.severity_number.to_string(),
+        );
         fields.insert("severity_text".to_string(), log.severity_text.clone());
         Self { log, fields }
     }
@@ -33,7 +36,10 @@ impl SignalRecord {
 pub enum StageResult {
     Continue(SignalRecord),
     Drop,
-    RouteTo { destination: String, record: SignalRecord },
+    RouteTo {
+        destination: String,
+        record: SignalRecord,
+    },
 }
 
 /// Trait for pipeline stages.
@@ -94,17 +100,27 @@ mod tests {
 
     fn make_log(body: &str, severity: i32) -> LogRecord {
         LogRecord::new(
-            1_000_000_000, 1_000_000_001, severity, "INFO".into(),
-            body.into(), LabelSet::default(), LabelSet::default(),
-            [0; 16], [0; 8], 0, "test".into(), "1.0".into(),
+            1_000_000_000,
+            1_000_000_001,
+            severity,
+            "INFO".into(),
+            body.into(),
+            LabelSet::default(),
+            LabelSet::default(),
+            [0; 16],
+            [0; 8],
+            0,
+            "test".into(),
+            "1.0".into(),
         )
     }
 
     #[test]
     fn test_regex_processor_extracts_fields() {
         let re = regex::Regex::new(
-            r"(?P<method>[A-Z]+) (?P<path>/[^ ]*) HTTP/[\d.]+ (?P<status>\d+) (?P<duration>\d+)ms"
-        ).unwrap();
+            r"(?P<method>[A-Z]+) (?P<path>/[^ ]*) HTTP/[\d.]+ (?P<status>\d+) (?P<duration>\d+)ms",
+        )
+        .unwrap();
         let mut target_fields = BTreeMap::new();
         target_fields.insert("http.method".into(), "method".into());
         target_fields.insert("http.target".into(), "path".into());

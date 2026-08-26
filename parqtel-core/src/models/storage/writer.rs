@@ -1,14 +1,14 @@
-use std::sync::Arc;
+use super::correlation::extract_correlation_labels;
+use crate::error::{Error, Result};
+use crate::models::logs::LogRecord;
+use crate::models::metrics::{Metric, MetricValue};
+use crate::models::traces::Span;
 use arrow2::array::{
-    Array, DictionaryArray, MutableDictionaryArray, MutablePrimitiveArray, MutableUtf8Array,
-    PrimitiveArray, TryPush, Utf8Array, BinaryArray, MutableBinaryArray,
+    Array, BinaryArray, DictionaryArray, MutableBinaryArray, MutableDictionaryArray,
+    MutablePrimitiveArray, MutableUtf8Array, PrimitiveArray, TryPush, Utf8Array,
 };
 use arrow2::chunk::Chunk;
-use crate::error::{Error, Result};
-use crate::models::metrics::{Metric, MetricValue};
-use crate::models::logs::LogRecord;
-use crate::models::traces::Span;
-use super::correlation::extract_correlation_labels;
+use std::sync::Arc;
 
 /// Converts a list of [Metric]s into a single Arrow [Chunk].
 pub fn metrics_to_chunk(metrics: &[Metric]) -> Result<Chunk<Arc<dyn Array>>> {
@@ -29,28 +29,60 @@ pub fn metrics_to_chunk(metrics: &[Metric]) -> Result<Chunk<Arc<dyn Array>>> {
     let mut value_complex = MutableUtf8Array::<i32>::new();
 
     for metric in metrics {
-        let (resource_labels, correlation) = extract_correlation_labels(&metric.resource_attributes);
+        let (resource_labels, correlation) =
+            extract_correlation_labels(&metric.resource_attributes);
         let resource_attr_json = resource_labels.to_json()?;
         let kind_str = format!("{:?}", metric.kind);
 
         for dp in &metric.data_points {
             timestamp_ns.push(Some(dp.timestamp_ns));
-            metric_name.try_push(Some(&metric.name)).map_err(|e| Error::Arrow(e.to_string()))?;
+            metric_name
+                .try_push(Some(&metric.name))
+                .map_err(|e| Error::Arrow(e.to_string()))?;
             metric_kind.push(Some(&kind_str));
-            service_name.try_push(correlation.service_name.as_deref()).map_err(|e| Error::Arrow(e.to_string()))?;
-            service_version.try_push(correlation.service_version.as_deref()).map_err(|e| Error::Arrow(e.to_string()))?;
-            k8s_namespace.try_push(correlation.k8s_namespace.as_deref()).map_err(|e| Error::Arrow(e.to_string()))?;
-            k8s_pod_name.try_push(correlation.k8s_pod_name.as_deref()).map_err(|e| Error::Arrow(e.to_string()))?;
-            k8s_pod_uid.try_push(correlation.k8s_pod_uid.as_deref()).map_err(|e| Error::Arrow(e.to_string()))?;
-            k8s_container_name.try_push(correlation.k8s_container_name.as_deref()).map_err(|e| Error::Arrow(e.to_string()))?;
-            k8s_node_name.try_push(correlation.k8s_node_name.as_deref()).map_err(|e| Error::Arrow(e.to_string()))?;
-            resource_attributes.try_push(Some(&resource_attr_json)).map_err(|e| Error::Arrow(e.to_string()))?;
+            service_name
+                .try_push(correlation.service_name.as_deref())
+                .map_err(|e| Error::Arrow(e.to_string()))?;
+            service_version
+                .try_push(correlation.service_version.as_deref())
+                .map_err(|e| Error::Arrow(e.to_string()))?;
+            k8s_namespace
+                .try_push(correlation.k8s_namespace.as_deref())
+                .map_err(|e| Error::Arrow(e.to_string()))?;
+            k8s_pod_name
+                .try_push(correlation.k8s_pod_name.as_deref())
+                .map_err(|e| Error::Arrow(e.to_string()))?;
+            k8s_pod_uid
+                .try_push(correlation.k8s_pod_uid.as_deref())
+                .map_err(|e| Error::Arrow(e.to_string()))?;
+            k8s_container_name
+                .try_push(correlation.k8s_container_name.as_deref())
+                .map_err(|e| Error::Arrow(e.to_string()))?;
+            k8s_node_name
+                .try_push(correlation.k8s_node_name.as_deref())
+                .map_err(|e| Error::Arrow(e.to_string()))?;
+            resource_attributes
+                .try_push(Some(&resource_attr_json))
+                .map_err(|e| Error::Arrow(e.to_string()))?;
             labels.push(Some(&dp.labels.to_json()?));
 
             match &dp.value {
-                MetricValue::Double(v) => { value_float.push(Some(*v)); value_int.push(None); value_complex.push(None::<&str>); }
-                MetricValue::Int(v) => { value_float.push(None); value_int.push(Some(*v)); value_complex.push(None::<&str>); }
-                complex => { value_float.push(None); value_int.push(None); value_complex.push(Some(&serde_json::to_string(complex).map_err(Error::Serde)?)); }
+                MetricValue::Double(v) => {
+                    value_float.push(Some(*v));
+                    value_int.push(None);
+                    value_complex.push(None::<&str>);
+                }
+                MetricValue::Int(v) => {
+                    value_float.push(None);
+                    value_int.push(Some(*v));
+                    value_complex.push(None::<&str>);
+                }
+                complex => {
+                    value_float.push(None);
+                    value_int.push(None);
+                    value_complex
+                        .push(Some(&serde_json::to_string(complex).map_err(Error::Serde)?));
+                }
             }
         }
     }
@@ -101,15 +133,31 @@ pub fn logs_to_chunk(logs: &[LogRecord]) -> Result<Chunk<Arc<dyn Array>>> {
         timestamp_ns.push(Some(log.timestamp_ns));
         observed_timestamp_ns.push(Some(log.observed_timestamp_ns));
         severity_number.push(Some(log.severity_number));
-        severity_text.try_push(Some(&log.severity_text)).map_err(|e| Error::Arrow(e.to_string()))?;
+        severity_text
+            .try_push(Some(&log.severity_text))
+            .map_err(|e| Error::Arrow(e.to_string()))?;
         body.push(Some(&log.body));
-        service_name.try_push(correlation.service_name.as_deref()).map_err(|e| Error::Arrow(e.to_string()))?;
-        service_version.try_push(correlation.service_version.as_deref()).map_err(|e| Error::Arrow(e.to_string()))?;
-        k8s_namespace.try_push(correlation.k8s_namespace.as_deref()).map_err(|e| Error::Arrow(e.to_string()))?;
-        k8s_pod_name.try_push(correlation.k8s_pod_name.as_deref()).map_err(|e| Error::Arrow(e.to_string()))?;
-        k8s_pod_uid.try_push(correlation.k8s_pod_uid.as_deref()).map_err(|e| Error::Arrow(e.to_string()))?;
-        k8s_container_name.try_push(correlation.k8s_container_name.as_deref()).map_err(|e| Error::Arrow(e.to_string()))?;
-        k8s_node_name.try_push(correlation.k8s_node_name.as_deref()).map_err(|e| Error::Arrow(e.to_string()))?;
+        service_name
+            .try_push(correlation.service_name.as_deref())
+            .map_err(|e| Error::Arrow(e.to_string()))?;
+        service_version
+            .try_push(correlation.service_version.as_deref())
+            .map_err(|e| Error::Arrow(e.to_string()))?;
+        k8s_namespace
+            .try_push(correlation.k8s_namespace.as_deref())
+            .map_err(|e| Error::Arrow(e.to_string()))?;
+        k8s_pod_name
+            .try_push(correlation.k8s_pod_name.as_deref())
+            .map_err(|e| Error::Arrow(e.to_string()))?;
+        k8s_pod_uid
+            .try_push(correlation.k8s_pod_uid.as_deref())
+            .map_err(|e| Error::Arrow(e.to_string()))?;
+        k8s_container_name
+            .try_push(correlation.k8s_container_name.as_deref())
+            .map_err(|e| Error::Arrow(e.to_string()))?;
+        k8s_node_name
+            .try_push(correlation.k8s_node_name.as_deref())
+            .map_err(|e| Error::Arrow(e.to_string()))?;
         trace_id.push(Some(&log.trace_id));
         span_id.push(Some(&log.span_id));
         flags.push(Some(log.flags));
@@ -171,33 +219,64 @@ pub fn traces_to_chunk(spans: &[Span]) -> Result<Chunk<Arc<dyn Array>>> {
 
     for span in spans {
         let (resource_labels, correlation) = extract_correlation_labels(&span.attributes);
-        let kind_str = match span.kind { 1 => "SPAN_KIND_INTERNAL", 2 => "SPAN_KIND_SERVER", 3 => "SPAN_KIND_CLIENT", 4 => "SPAN_KIND_PRODUCER", 5 => "SPAN_KIND_CONSUMER", _ => "SPAN_KIND_UNSPECIFIED" };
-        let status_str = match span.status.code { 1 => "STATUS_CODE_OK", 2 => "STATUS_CODE_ERROR", _ => "STATUS_CODE_UNSET" };
+        let kind_str = match span.kind {
+            1 => "SPAN_KIND_INTERNAL",
+            2 => "SPAN_KIND_SERVER",
+            3 => "SPAN_KIND_CLIENT",
+            4 => "SPAN_KIND_PRODUCER",
+            5 => "SPAN_KIND_CONSUMER",
+            _ => "SPAN_KIND_UNSPECIFIED",
+        };
+        let status_str = match span.status.code {
+            1 => "STATUS_CODE_OK",
+            2 => "STATUS_CODE_ERROR",
+            _ => "STATUS_CODE_UNSET",
+        };
 
         timestamp_ns.push(Some(span.start_time_ns));
         span_id_col.push(Some(&span.span_id));
-        span_name.try_push(Some(&span.name)).map_err(|e| Error::Arrow(e.to_string()))?;
+        span_name
+            .try_push(Some(&span.name))
+            .map_err(|e| Error::Arrow(e.to_string()))?;
         span_kind.push(Some(kind_str));
         start_time_ns.push(Some(span.start_time_ns));
         end_time_ns.push(Some(span.end_time_ns));
         duration_ns.push(Some(span.duration_ns()));
         status_code.push(Some(status_str));
         status_message.push(Some(&span.status.message));
-        service_name.try_push(correlation.service_name.as_deref()).map_err(|e| Error::Arrow(e.to_string()))?;
-        service_version.try_push(correlation.service_version.as_deref()).map_err(|e| Error::Arrow(e.to_string()))?;
-        k8s_namespace.try_push(correlation.k8s_namespace.as_deref()).map_err(|e| Error::Arrow(e.to_string()))?;
-        k8s_pod_name.try_push(correlation.k8s_pod_name.as_deref()).map_err(|e| Error::Arrow(e.to_string()))?;
-        k8s_pod_uid.try_push(correlation.k8s_pod_uid.as_deref()).map_err(|e| Error::Arrow(e.to_string()))?;
-        k8s_container_name.try_push(correlation.k8s_container_name.as_deref()).map_err(|e| Error::Arrow(e.to_string()))?;
-        k8s_node_name.try_push(correlation.k8s_node_name.as_deref()).map_err(|e| Error::Arrow(e.to_string()))?;
+        service_name
+            .try_push(correlation.service_name.as_deref())
+            .map_err(|e| Error::Arrow(e.to_string()))?;
+        service_version
+            .try_push(correlation.service_version.as_deref())
+            .map_err(|e| Error::Arrow(e.to_string()))?;
+        k8s_namespace
+            .try_push(correlation.k8s_namespace.as_deref())
+            .map_err(|e| Error::Arrow(e.to_string()))?;
+        k8s_pod_name
+            .try_push(correlation.k8s_pod_name.as_deref())
+            .map_err(|e| Error::Arrow(e.to_string()))?;
+        k8s_pod_uid
+            .try_push(correlation.k8s_pod_uid.as_deref())
+            .map_err(|e| Error::Arrow(e.to_string()))?;
+        k8s_container_name
+            .try_push(correlation.k8s_container_name.as_deref())
+            .map_err(|e| Error::Arrow(e.to_string()))?;
+        k8s_node_name
+            .try_push(correlation.k8s_node_name.as_deref())
+            .map_err(|e| Error::Arrow(e.to_string()))?;
         trace_id.push(Some(&span.trace_id));
         parent_span_id.push(Some(&span.parent_span_id));
         flags.push(Some(span.flags));
         trace_state.push(Some(&span.trace_state));
         attributes.push(Some(&span.attributes.to_json()?));
         resource_attributes.push(Some(&resource_labels.to_json()?));
-        events.push(Some(&serde_json::to_string(&span.events).map_err(Error::Serde)?));
-        links.push(Some(&serde_json::to_string(&span.links).map_err(Error::Serde)?));
+        events.push(Some(
+            &serde_json::to_string(&span.events).map_err(Error::Serde)?,
+        ));
+        links.push(Some(
+            &serde_json::to_string(&span.links).map_err(Error::Serde)?,
+        ));
     }
 
     Ok(Chunk::new(vec![

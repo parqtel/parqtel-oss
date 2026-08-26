@@ -1,12 +1,12 @@
-use std::sync::Arc;
-use tokio::sync::RwLock;
-use parqtel_core::{BlockIndex, Config, StorageEngine, MemoryBuffer};
-use parqtel_ingest::{IngestionService, LogIngestionService, TraceIngestionService};
-use parqtel_query::QueryExecutor;
+use parqtel_alert::evaluator::engine::{EvalConfig, EvaluationEngine};
 use parqtel_alert::AlertRuleRegistry;
 use parqtel_alert::AlertStore;
-use parqtel_alert::evaluator::engine::{EvaluationEngine, EvalConfig};
+use parqtel_core::{BlockIndex, Config, MemoryBuffer, StorageEngine};
+use parqtel_ingest::{IngestionService, LogIngestionService, TraceIngestionService};
 use parqtel_pipeline::rule::registry::RuleRegistry as PipelineRegistry;
+use parqtel_query::QueryExecutor;
+use std::sync::Arc;
+use tokio::sync::RwLock;
 
 /// Shared application state for the HTTP server.
 #[derive(Clone)]
@@ -50,7 +50,10 @@ impl AppState {
         let alert_store = AlertStore::new(Some(data_dir)).await;
         let (alert_tx, _) = tokio::sync::mpsc::unbounded_channel();
         let alert_engine = Arc::new(EvaluationEngine::new(
-            EvalConfig { evaluation_interval_secs: 15, evaluation_timeout_secs: 10 },
+            EvalConfig {
+                evaluation_interval_secs: 15,
+                evaluation_timeout_secs: 10,
+            },
             alert_registry.clone(),
             alert_store.clone(),
             alert_tx,
@@ -90,7 +93,7 @@ impl AppState {
         let log_index = Arc::new(RwLock::new(BlockIndex::new(&dir.path().join("logs"))));
 
         let storage_engine: Arc<dyn StorageEngine> = Arc::new(
-            parqtel_core::engine::parquet::ParquetStorageEngine::new(config.storage.clone())
+            parqtel_core::engine::parquet::ParquetStorageEngine::new(config.storage.clone()),
         );
 
         Self::new(
@@ -104,6 +107,7 @@ impl AppState {
             config,
             vec![],
             "".into(),
-        ).await
+        )
+        .await
     }
 }

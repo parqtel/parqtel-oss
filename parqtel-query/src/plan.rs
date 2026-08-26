@@ -1,5 +1,5 @@
-use parqtel_core::{Error, Result};
 use crate::matcher::LabelMatcher;
+use parqtel_core::{Error, Result};
 
 /// A validated, normalized representation of a metrics query.
 #[derive(Debug)]
@@ -73,10 +73,21 @@ impl QueryPlan {
         quantile: Option<f64>,
     ) -> Result<Self> {
         Self::new_full(
-            metric_name, matchers, start_ns, end_ns, step_ns,
-            max_series, max_samples_per_series,
-            aggregation, quantile,
-            None, vec![], vec![], None, None, None,
+            metric_name,
+            matchers,
+            start_ns,
+            end_ns,
+            step_ns,
+            max_series,
+            max_samples_per_series,
+            aggregation,
+            quantile,
+            None,
+            vec![],
+            vec![],
+            None,
+            None,
+            None,
         )
     }
 
@@ -102,27 +113,46 @@ impl QueryPlan {
             return Err(Error::Validation("Metric name cannot be empty".into()));
         }
         if start_ns >= end_ns {
-            return Err(Error::Validation("Start time must be before end time".into()));
+            return Err(Error::Validation(
+                "Start time must be before end time".into(),
+            ));
         }
         if let Some(step) = step_ns {
             if step <= 0 {
-                return Err(Error::Validation("Step size must be greater than zero".into()));
+                return Err(Error::Validation(
+                    "Step size must be greater than zero".into(),
+                ));
             }
         }
         let thirty_days_ns = 30 * 24 * 3600 * 1_000_000_000i64;
         if end_ns - start_ns > thirty_days_ns {
-            return Err(Error::Validation("Time range cannot span more than 30 days".into()));
+            return Err(Error::Validation(
+                "Time range cannot span more than 30 days".into(),
+            ));
         }
         if let Some(q) = quantile {
             if q <= 0.0 || q >= 1.0 {
-                return Err(Error::Validation("Quantile must be in the open interval (0, 1)".into()));
+                return Err(Error::Validation(
+                    "Quantile must be in the open interval (0, 1)".into(),
+                ));
             }
         }
         Ok(Self {
-            metric_name, matchers, start_ns, end_ns, step_ns,
-            max_series, max_samples_per_series,
-            aggregation, quantile,
-            topk_n, group_by, group_without, label_replace, scalar_param, clamp,
+            metric_name,
+            matchers,
+            start_ns,
+            end_ns,
+            step_ns,
+            max_series,
+            max_samples_per_series,
+            aggregation,
+            quantile,
+            topk_n,
+            group_by,
+            group_without,
+            label_replace,
+            scalar_param,
+            clamp,
         })
     }
 }
@@ -135,17 +165,61 @@ mod tests {
     #[test]
     fn test_plan_validation() {
         assert!(QueryPlan::new("".into(), vec![], 100, 200, None, 100, 100, None, None).is_err());
-        assert!(QueryPlan::new("test".into(), vec![], 200, 100, None, 100, 100, None, None).is_err());
-        assert!(QueryPlan::new("test".into(), vec![], 100, 200, Some(0), 100, 100, None, None).is_err());
+        assert!(
+            QueryPlan::new("test".into(), vec![], 200, 100, None, 100, 100, None, None).is_err()
+        );
         assert!(QueryPlan::new(
-            "test".into(), vec![], 0, 40 * 24 * 3600 * 1_000_000_000, None, 100, 100, None, None
-        ).is_err());
-        assert!(QueryPlan::new("test".into(), vec![], 0, 100, None, 100, 100, None, Some(1.5)).is_err());
+            "test".into(),
+            vec![],
+            100,
+            200,
+            Some(0),
+            100,
+            100,
+            None,
+            None
+        )
+        .is_err());
+        assert!(QueryPlan::new(
+            "test".into(),
+            vec![],
+            0,
+            40 * 24 * 3600 * 1_000_000_000,
+            None,
+            100,
+            100,
+            None,
+            None
+        )
+        .is_err());
+        assert!(QueryPlan::new(
+            "test".into(),
+            vec![],
+            0,
+            100,
+            None,
+            100,
+            100,
+            None,
+            Some(1.5)
+        )
+        .is_err());
     }
 
     #[test]
     fn test_plan_ok() {
-        let p = QueryPlan::new("cpu".into(), vec![], 0, 100, None, 10, 100, Some(AggregationOp::Avg), None).unwrap();
+        let p = QueryPlan::new(
+            "cpu".into(),
+            vec![],
+            0,
+            100,
+            None,
+            10,
+            100,
+            Some(AggregationOp::Avg),
+            None,
+        )
+        .unwrap();
         assert_eq!(p.metric_name, "cpu");
         assert_eq!(p.aggregation, Some(AggregationOp::Avg));
         assert!(p.group_by.is_empty());

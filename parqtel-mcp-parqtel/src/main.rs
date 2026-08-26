@@ -33,7 +33,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         rate_limit_requests_per_minute: rate_limit,
     };
 
-    
     let addr = format!("{}:{}", config.host, config.port);
     let mut server = McpServer::new(config);
 
@@ -47,7 +46,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .merge(server.build_router())
         .route("/health", get(health_handler));
 
-    
     tracing::info!("Starting Parqtel self-MCP server on {}", addr);
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;

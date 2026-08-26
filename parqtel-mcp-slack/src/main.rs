@@ -5,8 +5,8 @@ use std::env;
 use axum::{routing::get, Router};
 use parqtel_mcp_core::{server::ServerConfig, McpServer};
 use parqtel_mcp_slack::{
-    make_create_incident_channel_tool, make_resolve_notification_tool, make_send_alert_message_tool,
-    make_send_rca_update_tool,
+    make_create_incident_channel_tool, make_resolve_notification_tool,
+    make_send_alert_message_tool, make_send_rca_update_tool,
 };
 use tracing_subscriber::EnvFilter;
 
@@ -36,7 +36,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // Create and configure the server
-    
+
     let addr = format!("{}:{}", config.host, config.port);
     let mut server = McpServer::new(config);
 
@@ -52,7 +52,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/health", get(health_handler));
 
     // Start the server
-    
+
     tracing::info!("Starting MCP server on {}", addr);
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;

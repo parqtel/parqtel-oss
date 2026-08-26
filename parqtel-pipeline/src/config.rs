@@ -30,15 +30,33 @@ pub struct PipelineConfig {
     pub max_concurrent_executions: usize,
 }
 
-fn default_true() -> bool { true }
-fn default_concurrency() -> usize { 4 }
-fn default_max_backfill() -> u64 { 10 }
-fn default_state_file() -> String { "./data/ruler/state.json".to_string() }
-fn default_rules_dir() -> String { "./rules/recording".to_string() }
-fn default_pipeline_rules_dir() -> String { "./rules/pipelines".to_string() }
-fn default_flush_interval() -> u64 { 60 }
-fn default_stage_timeout() -> u64 { 100 }
-fn default_max_concurrent() -> usize { 8 }
+fn default_true() -> bool {
+    true
+}
+fn default_concurrency() -> usize {
+    4
+}
+fn default_max_backfill() -> u64 {
+    10
+}
+fn default_state_file() -> String {
+    "./data/ruler/state.json".to_string()
+}
+fn default_rules_dir() -> String {
+    "./rules/recording".to_string()
+}
+fn default_pipeline_rules_dir() -> String {
+    "./rules/pipelines".to_string()
+}
+fn default_flush_interval() -> u64 {
+    60
+}
+fn default_stage_timeout() -> u64 {
+    100
+}
+fn default_max_concurrent() -> usize {
+    8
+}
 
 impl Default for RulerConfig {
     fn default() -> Self {

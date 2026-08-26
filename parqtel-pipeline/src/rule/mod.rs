@@ -4,7 +4,7 @@ pub mod validator;
 
 pub use registry::RuleRegistry;
 pub use schema::{
-    PipelineDefinition, PipelineStage, RecordingRule, RecordingRuleGroup, RuleSet,
-    StageCondition, StageType,
+    PipelineDefinition, PipelineStage, RecordingRule, RecordingRuleGroup, RuleSet, StageCondition,
+    StageType,
 };
 pub use validator::RuleValidator;
