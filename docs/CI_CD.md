@@ -76,6 +76,6 @@ helm lint deploy/charts/parqtel   # note: charts live under deploy/, not charts/
 
 ## Maintenance notes
 
-- `MSRV` is defined in both `ci.yml` env and the toolchain matrix — update together.
+- **MSRV is 1.86** and lives in three places that must move together: `ci.yml` (`MSRV` env + toolchain matrix), `Cargo.toml` `[workspace.package].rust-version`, and `Dockerfile` `RUST_VERSION`. It's pinned by the lockfile: ICU 2.x (pulled in via `url` → `reqwest`) requires rustc 1.86, so lowering it needs precise dependency pins.
 - `rustsec/audit-check` reads `Cargo.lock` only; run `cargo update` deliberately and review the audit diff.
 - If runner minutes ever matter less than latency again, the Docker job is safe to promote back to always-on via the `changes.outputs.docker` condition.
