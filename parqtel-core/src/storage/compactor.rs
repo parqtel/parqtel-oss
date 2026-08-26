@@ -19,6 +19,13 @@ use uuid::Uuid;
 ///   - Small blocks (< 10K rows): merge up to 8 into one (existing behavior)
 ///   - Warm tier (blocks > 6h old, same signal): merge adjacent into ~6h blocks
 ///   - Cold tier (blocks > 24h old): merge adjacent into ~24h blocks
+/// Points grouped with their metric metadata, plus log records — the decoded
+/// contents of source blocks awaiting compaction.
+type DecodedBlocks = (
+    Vec<(String, MetricKind, LabelSet, DataPoint)>,
+    Vec<LogRecord>,
+);
+
 pub struct Compactor;
 
 impl Compactor {
@@ -176,10 +183,7 @@ impl Compactor {
     fn read_source_blocks(
         blocks: &[BlockMetadata],
         signal_type: SignalType,
-    ) -> Result<(
-        Vec<(String, MetricKind, LabelSet, DataPoint)>,
-        Vec<LogRecord>,
-    )> {
+    ) -> Result<DecodedBlocks> {
         let mut all_points = Vec::new();
         let mut all_logs = Vec::new();
 
