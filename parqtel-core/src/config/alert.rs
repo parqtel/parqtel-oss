@@ -45,10 +45,18 @@ pub struct NotificationConfig {
     pub self_monitoring_failure_threshold: f64,
 }
 
-fn default_dedup_flush() -> u64 { 300 }
-fn default_max_concurrent() -> usize { 10 }
-fn default_send_timeout() -> u64 { 30 }
-fn default_failure_threshold() -> f64 { 0.5 }
+fn default_dedup_flush() -> u64 {
+    300
+}
+fn default_max_concurrent() -> usize {
+    10
+}
+fn default_send_timeout() -> u64 {
+    30
+}
+fn default_failure_threshold() -> f64 {
+    0.5
+}
 
 /// Configuration for the postmortem engine.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -105,8 +113,18 @@ impl Default for PostmortemConfig {
     }
 }
 
-fn default_postmortem_delay() -> u64 { 5 }
-fn default_true() -> bool { true }
-fn default_min_duration() -> u64 { 5 }
-fn default_min_severity() -> String { "warning".to_string() }
-fn default_max_knowledge_entries() -> usize { 1000 }
+fn default_postmortem_delay() -> u64 {
+    5
+}
+fn default_true() -> bool {
+    true
+}
+fn default_min_duration() -> u64 {
+    5
+}
+fn default_min_severity() -> String {
+    "warning".to_string()
+}
+fn default_max_knowledge_entries() -> usize {
+    1000
+}

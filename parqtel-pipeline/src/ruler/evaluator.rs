@@ -41,10 +41,7 @@ impl RulerEvaluator {
         for rule in &group.rules {
             // Validate expression
             if let Err(e) = PromQlExpr::parse(&rule.expr) {
-                error!(
-                    "Invalid expression for rule '{}': {}",
-                    rule.record, e
-                );
+                error!("Invalid expression for rule '{}': {}", rule.record, e);
                 continue;
             }
 
@@ -69,8 +66,8 @@ impl RulerEvaluator {
             let mut metrics = Vec::with_capacity(results.len());
             for (labels, value) in &results {
                 // Merge result labels with static rule labels
-                let static_labels = LabelSet::try_from_iter(rule.labels.clone())
-                    .unwrap_or_default();
+                let static_labels =
+                    LabelSet::try_from_iter(rule.labels.clone()).unwrap_or_default();
                 let merged = labels.merge(&static_labels);
 
                 let dp = DataPoint {
@@ -110,8 +107,8 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
     use crate::rule::schema::{RecordingRule, RecordingRuleGroup};
-    use parqtel_core::engine::parquet::ParquetStorageEngine;
     use parqtel_core::config::BlockConfig;
+    use parqtel_core::engine::parquet::ParquetStorageEngine;
     use std::collections::BTreeMap;
     use tempfile::tempdir;
 
@@ -156,7 +153,10 @@ mod tests {
             }],
         };
 
-        evaluator.evaluate_group(&group, 1_000_000_000).await.unwrap();
+        evaluator
+            .evaluate_group(&group, 1_000_000_000)
+            .await
+            .unwrap();
 
         let results = storage
             .scan_metrics(parqtel_core::engine::MetricScanRequest {
@@ -196,8 +196,14 @@ mod tests {
         };
 
         // Evaluate same timestamp twice
-        evaluator.evaluate_group(&group, 1_000_000_000).await.unwrap();
-        evaluator.evaluate_group(&group, 1_000_000_000).await.unwrap();
+        evaluator
+            .evaluate_group(&group, 1_000_000_000)
+            .await
+            .unwrap();
+        evaluator
+            .evaluate_group(&group, 1_000_000_000)
+            .await
+            .unwrap();
 
         let results = storage
             .scan_metrics(parqtel_core::engine::MetricScanRequest {

@@ -1,5 +1,5 @@
-use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// Top-level recording rule file.
 #[derive(Debug, Clone, Serialize, Deserialize)]

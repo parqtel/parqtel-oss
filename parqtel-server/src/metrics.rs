@@ -1,6 +1,6 @@
+use parqtel_core::BlockIndex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use parqtel_core::BlockIndex;
 use tokio::sync::RwLock;
 
 /// Internal metrics for self-observability.
@@ -64,28 +64,43 @@ impl Histogram {
 impl ServerMetrics {
     pub async fn render(&self, index: &Arc<RwLock<BlockIndex>>) -> String {
         let mut out = String::new();
-        
+
         let idx = index.read().await;
-        
+
         out.push_str("# HELP parqtel_ingested_points_total Total data points ingested\n");
         out.push_str("# TYPE parqtel_ingested_points_total counter\n");
-        out.push_str(&format!("parqtel_ingested_points_total {}\n", self.ingested_points.load(Ordering::Relaxed)));
+        out.push_str(&format!(
+            "parqtel_ingested_points_total {}\n",
+            self.ingested_points.load(Ordering::Relaxed)
+        ));
 
         out.push_str("# HELP parqtel_ingest_errors_total Total ingestion errors\n");
         out.push_str("# TYPE parqtel_ingest_errors_total counter\n");
-        out.push_str(&format!("parqtel_ingest_errors_total {}\n", self.ingest_errors.load(Ordering::Relaxed)));
+        out.push_str(&format!(
+            "parqtel_ingest_errors_total {}\n",
+            self.ingest_errors.load(Ordering::Relaxed)
+        ));
 
         out.push_str("# HELP parqtel_batches_received_total Total OTLP batches received\n");
         out.push_str("# TYPE parqtel_batches_received_total counter\n");
-        out.push_str(&format!("parqtel_batches_received_total {}\n", self.batches_received.load(Ordering::Relaxed)));
+        out.push_str(&format!(
+            "parqtel_batches_received_total {}\n",
+            self.batches_received.load(Ordering::Relaxed)
+        ));
 
         out.push_str("# HELP parqtel_queries_executed_total Total queries executed\n");
         out.push_str("# TYPE parqtel_queries_executed_total counter\n");
-        out.push_str(&format!("parqtel_queries_executed_total {}\n", self.queries_executed.load(Ordering::Relaxed)));
+        out.push_str(&format!(
+            "parqtel_queries_executed_total {}\n",
+            self.queries_executed.load(Ordering::Relaxed)
+        ));
 
         out.push_str("# HELP parqtel_query_errors_total Total query errors\n");
         out.push_str("# TYPE parqtel_query_errors_total counter\n");
-        out.push_str(&format!("parqtel_query_errors_total {}\n", self.query_errors.load(Ordering::Relaxed)));
+        out.push_str(&format!(
+            "parqtel_query_errors_total {}\n",
+            self.query_errors.load(Ordering::Relaxed)
+        ));
 
         out.push_str("# HELP parqtel_query_duration_ms Query duration in milliseconds\n");
         out.push_str("# TYPE parqtel_query_duration_ms histogram\n");

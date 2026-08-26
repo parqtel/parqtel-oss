@@ -1,6 +1,6 @@
+use crate::models::labels::LabelSet;
 use arrow2::array::{Array, DictionaryArray, Utf8Array};
 use arrow2::chunk::Chunk;
-use crate::models::labels::LabelSet;
 
 #[derive(Default)]
 pub(crate) struct CorrelationLabels {
@@ -31,11 +31,18 @@ pub(crate) fn extract_correlation_labels(labels: &LabelSet) -> (LabelSet, Correl
         }
     }
 
-    (LabelSet::try_from_iter(remaining).unwrap_or_default(), correlation)
+    (
+        LabelSet::try_from_iter(remaining).unwrap_or_default(),
+        correlation,
+    )
 }
 
 /// Reads correlation columns from a chunk row starting at `start_idx`.
-pub(crate) fn row_to_correlation<A: AsRef<dyn Array>>(chunk: &Chunk<A>, row: usize, start_idx: usize) -> CorrelationLabels {
+pub(crate) fn row_to_correlation<A: AsRef<dyn Array>>(
+    chunk: &Chunk<A>,
+    row: usize,
+    start_idx: usize,
+) -> CorrelationLabels {
     CorrelationLabels {
         service_name: get_dict_val(chunk, row, start_idx),
         service_version: get_dict_val(chunk, row, start_idx + 1),
@@ -49,19 +56,45 @@ pub(crate) fn row_to_correlation<A: AsRef<dyn Array>>(chunk: &Chunk<A>, row: usi
 
 /// Re-injects correlation labels back into a LabelSet.
 pub(crate) fn inject_correlation(mut labels: LabelSet, correlation: CorrelationLabels) -> LabelSet {
-    if let Some(v) = correlation.service_name { labels = labels.merge(&LabelSet::try_from_iter(vec![("service.name", v)]).unwrap_or_default()); }
-    if let Some(v) = correlation.service_version { labels = labels.merge(&LabelSet::try_from_iter(vec![("service.version", v)]).unwrap_or_default()); }
-    if let Some(v) = correlation.k8s_namespace { labels = labels.merge(&LabelSet::try_from_iter(vec![("k8s.namespace.name", v)]).unwrap_or_default()); }
-    if let Some(v) = correlation.k8s_pod_name { labels = labels.merge(&LabelSet::try_from_iter(vec![("k8s.pod.name", v)]).unwrap_or_default()); }
-    if let Some(v) = correlation.k8s_pod_uid { labels = labels.merge(&LabelSet::try_from_iter(vec![("k8s.pod.uid", v)]).unwrap_or_default()); }
-    if let Some(v) = correlation.k8s_container_name { labels = labels.merge(&LabelSet::try_from_iter(vec![("k8s.container.name", v)]).unwrap_or_default()); }
-    if let Some(v) = correlation.k8s_node_name { labels = labels.merge(&LabelSet::try_from_iter(vec![("k8s.node.name", v)]).unwrap_or_default()); }
+    if let Some(v) = correlation.service_name {
+        labels =
+            labels.merge(&LabelSet::try_from_iter(vec![("service.name", v)]).unwrap_or_default());
+    }
+    if let Some(v) = correlation.service_version {
+        labels = labels
+            .merge(&LabelSet::try_from_iter(vec![("service.version", v)]).unwrap_or_default());
+    }
+    if let Some(v) = correlation.k8s_namespace {
+        labels = labels
+            .merge(&LabelSet::try_from_iter(vec![("k8s.namespace.name", v)]).unwrap_or_default());
+    }
+    if let Some(v) = correlation.k8s_pod_name {
+        labels =
+            labels.merge(&LabelSet::try_from_iter(vec![("k8s.pod.name", v)]).unwrap_or_default());
+    }
+    if let Some(v) = correlation.k8s_pod_uid {
+        labels =
+            labels.merge(&LabelSet::try_from_iter(vec![("k8s.pod.uid", v)]).unwrap_or_default());
+    }
+    if let Some(v) = correlation.k8s_container_name {
+        labels = labels
+            .merge(&LabelSet::try_from_iter(vec![("k8s.container.name", v)]).unwrap_or_default());
+    }
+    if let Some(v) = correlation.k8s_node_name {
+        labels =
+            labels.merge(&LabelSet::try_from_iter(vec![("k8s.node.name", v)]).unwrap_or_default());
+    }
     labels
 }
 
 fn get_dict_val<A: AsRef<dyn Array>>(chunk: &Chunk<A>, row: usize, idx: usize) -> Option<String> {
-    let arr = chunk.arrays()[idx].as_ref().as_any().downcast_ref::<DictionaryArray<i32>>()?;
-    if arr.is_null(row) { return None; }
+    let arr = chunk.arrays()[idx]
+        .as_ref()
+        .as_any()
+        .downcast_ref::<DictionaryArray<i32>>()?;
+    if arr.is_null(row) {
+        return None;
+    }
     let values = arr.values().as_any().downcast_ref::<Utf8Array<i32>>()?;
     Some(values.value(arr.keys().value(row) as usize).to_string())
 }

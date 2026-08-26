@@ -1,11 +1,11 @@
+use crate::state::AppState;
 use axum::{
     extract::State,
     response::{IntoResponse, Response},
     Json,
 };
+use parqtel_query::{parse_selector, AggregationOp, QueryPlan};
 use serde::{Deserialize, Serialize};
-use crate::state::AppState;
-use parqtel_query::{QueryPlan, AggregationOp, parse_selector};
 
 #[derive(Debug, Deserialize)]
 pub struct SimpleJSONQuery {
@@ -33,22 +33,21 @@ pub struct SimpleJSONQueryResult {
 }
 
 /// Handler for POST /search.
-pub async fn search(
-    State(state): State<AppState>,
-) -> Json<Vec<String>> {
+pub async fn search(State(state): State<AppState>) -> Json<Vec<String>> {
     let metrics = state.inner.query_executor.list_metrics().await;
     Json(metrics.into_iter().collect())
 }
 
 /// Handler for POST /query.
-pub async fn query(
-    State(state): State<AppState>,
-    Json(params): Json<SimpleJSONQuery>,
-) -> Response {
+pub async fn query(State(state): State<AppState>, Json(params): Json<SimpleJSONQuery>) -> Response {
     let mut all_results = Vec::new();
 
-    let start_ns = chrono::DateTime::parse_from_rfc3339(&params.range.from).map(|dt| dt.timestamp_nanos_opt().unwrap_or(0)).unwrap_or(0);
-    let end_ns = chrono::DateTime::parse_from_rfc3339(&params.range.to).map(|dt| dt.timestamp_nanos_opt().unwrap_or(0)).unwrap_or(0);
+    let start_ns = chrono::DateTime::parse_from_rfc3339(&params.range.from)
+        .map(|dt| dt.timestamp_nanos_opt().unwrap_or(0))
+        .unwrap_or(0);
+    let end_ns = chrono::DateTime::parse_from_rfc3339(&params.range.to)
+        .map(|dt| dt.timestamp_nanos_opt().unwrap_or(0))
+        .unwrap_or(0);
 
     for target in params.targets {
         let (metric_name, matchers) = match parse_selector(&target.target) {
@@ -89,18 +88,17 @@ pub async fn query(
 }
 
 /// Handler for POST /tag-keys.
-pub async fn tag_keys(
-    State(state): State<AppState>,
-) -> Json<Vec<serde_json::Value>> {
+pub async fn tag_keys(State(state): State<AppState>) -> Json<Vec<serde_json::Value>> {
     let labels = state.inner.query_executor.list_labels(None).await;
-    let res = labels.into_iter().map(|l| serde_json::json!({"type": "string", "text": l})).collect();
+    let res = labels
+        .into_iter()
+        .map(|l| serde_json::json!({"type": "string", "text": l}))
+        .collect();
     Json(res)
 }
 
 /// Handler for POST /tag-values.
-pub async fn tag_values(
-    State(_state): State<AppState>,
-) -> Json<Vec<serde_json::Value>> {
+pub async fn tag_values(State(_state): State<AppState>) -> Json<Vec<serde_json::Value>> {
     // Stub
     Json(vec![])
 }

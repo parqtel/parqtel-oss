@@ -1,6 +1,6 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
-use parqtel_ingest::decode::OtlpDecoder;
 use parqtel_core::{MetricKind, MetricValue};
+use parqtel_ingest::decode::OtlpDecoder;
 use serde_json::json;
 
 #[test]
@@ -122,8 +122,8 @@ fn test_decode_metrics_json_histogram() {
             }]
         }]
     });
-    
-    // This currently just tests the JSON skeleton; 
+
+    // This currently just tests the JSON skeleton;
     // real histograms in OTLP JSON usually have values inside.
     let _metrics = OtlpDecoder::decode_metrics_json(payload).unwrap();
 }
@@ -131,9 +131,11 @@ fn test_decode_metrics_json_histogram() {
 #[test]
 fn test_decode_metrics_proto() {
     use parqtel_ingest::otel::collector::metrics::v1::ExportMetricsServiceRequest;
-    use parqtel_ingest::otel::metrics::v1::{ResourceMetrics, ScopeMetrics, Metric as ProtoMetric, Gauge, NumberDataPoint};
     use parqtel_ingest::otel::metrics::v1::metric::Data;
     use parqtel_ingest::otel::metrics::v1::number_data_point::Value;
+    use parqtel_ingest::otel::metrics::v1::{
+        Gauge, Metric as ProtoMetric, NumberDataPoint, ResourceMetrics, ScopeMetrics,
+    };
 
     let req = ExportMetricsServiceRequest {
         resource_metrics: vec![ResourceMetrics {
@@ -169,7 +171,6 @@ fn test_decode_metrics_proto() {
     }
 }
 
-
 #[test]
 fn test_decode_invalid_json() {
     let payload = serde_json::json!({"resourceMetrics": [{"scopeMetrics": [{"metrics": [{"name": "bad", "gauge": {"dataPoints": [{"timeUnixNano": "not-a-number"}]}}]}]}]});
@@ -188,8 +189,8 @@ fn test_decode_missing_fields() {
 #[test]
 fn test_decode_traces_proto() {
     use parqtel_ingest::otel::collector::trace::v1::ExportTraceServiceRequest;
-    use parqtel_ingest::otel::trace::v1::{ResourceSpans, ScopeSpans, Span as ProtoSpan};
     use parqtel_ingest::otel::common::v1::KeyValue;
+    use parqtel_ingest::otel::trace::v1::{ResourceSpans, ScopeSpans, Span as ProtoSpan};
 
     let req = ExportTraceServiceRequest {
         resource_spans: vec![ResourceSpans {
@@ -204,7 +205,10 @@ fn test_decode_traces_proto() {
                     kind: 1,
                     start_time_unix_nano: 1000,
                     end_time_unix_nano: 2000,
-                    attributes: vec![KeyValue { key: "env".into(), value: None }],
+                    attributes: vec![KeyValue {
+                        key: "env".into(),
+                        value: None,
+                    }],
                     events: vec![],
                     links: vec![],
                     status: None,
@@ -301,7 +305,8 @@ fn test_decode_traces_with_events_and_links() {
 
 #[test]
 fn test_decode_traces_invalid_json() {
-    let payload = json!({"resource_spans": [{"scope_spans": [{"spans": [{"trace_id": "invalid"}]}]}]});
+    let payload =
+        json!({"resource_spans": [{"scope_spans": [{"spans": [{"trace_id": "invalid"}]}]}]});
     let res = OtlpDecoder::decode_traces_json(payload);
     assert!(res.is_err());
 }

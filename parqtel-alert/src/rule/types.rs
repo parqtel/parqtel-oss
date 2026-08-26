@@ -1,6 +1,6 @@
-use std::collections::BTreeMap;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// Severity levels for alerts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -150,7 +150,12 @@ mod tests {
 
     #[test]
     fn test_condition_evaluate_gt() {
-        let c = Condition { condition_type: "threshold".into(), operator: Operator::Gt, value: 90.0, for_duration_secs: 0 };
+        let c = Condition {
+            condition_type: "threshold".into(),
+            operator: Operator::Gt,
+            value: 90.0,
+            for_duration_secs: 0,
+        };
         assert!(c.evaluate(91.0));
         assert!(!c.evaluate(90.0));
         assert!(!c.evaluate(89.0));
@@ -158,28 +163,48 @@ mod tests {
 
     #[test]
     fn test_condition_evaluate_gte() {
-        let c = Condition { condition_type: "threshold".into(), operator: Operator::Gte, value: 90.0, for_duration_secs: 0 };
+        let c = Condition {
+            condition_type: "threshold".into(),
+            operator: Operator::Gte,
+            value: 90.0,
+            for_duration_secs: 0,
+        };
         assert!(c.evaluate(90.0));
         assert!(!c.evaluate(89.9));
     }
 
     #[test]
     fn test_condition_evaluate_lt() {
-        let c = Condition { condition_type: "threshold".into(), operator: Operator::Lt, value: 10.0, for_duration_secs: 0 };
+        let c = Condition {
+            condition_type: "threshold".into(),
+            operator: Operator::Lt,
+            value: 10.0,
+            for_duration_secs: 0,
+        };
         assert!(c.evaluate(9.0));
         assert!(!c.evaluate(10.0));
     }
 
     #[test]
     fn test_condition_evaluate_eq() {
-        let c = Condition { condition_type: "threshold".into(), operator: Operator::Eq, value: 42.0, for_duration_secs: 0 };
+        let c = Condition {
+            condition_type: "threshold".into(),
+            operator: Operator::Eq,
+            value: 42.0,
+            for_duration_secs: 0,
+        };
         assert!(c.evaluate(42.0));
         assert!(!c.evaluate(42.1));
     }
 
     #[test]
     fn test_condition_evaluate_ne() {
-        let c = Condition { condition_type: "threshold".into(), operator: Operator::Ne, value: 42.0, for_duration_secs: 0 };
+        let c = Condition {
+            condition_type: "threshold".into(),
+            operator: Operator::Ne,
+            value: 42.0,
+            for_duration_secs: 0,
+        };
         assert!(c.evaluate(43.0));
         assert!(!c.evaluate(42.0));
     }
@@ -187,10 +212,22 @@ mod tests {
     #[test]
     fn test_alert_rule_type_static() {
         let rule = AlertRule {
-            id: "r1".into(), name: "test".into(), signal: "metrics".into(), query: "cpu".into(),
-            condition: Condition { condition_type: "threshold".into(), operator: Operator::Gt, value: 90.0, for_duration_secs: 0 },
-            severity: Severity::Warning, labels: BTreeMap::new(), annotations: BTreeMap::new(),
-            enabled: true, noise_suppression_threshold: 0.7, source: None,
+            id: "r1".into(),
+            name: "test".into(),
+            signal: "metrics".into(),
+            query: "cpu".into(),
+            condition: Condition {
+                condition_type: "threshold".into(),
+                operator: Operator::Gt,
+                value: 90.0,
+                for_duration_secs: 0,
+            },
+            severity: Severity::Warning,
+            labels: BTreeMap::new(),
+            annotations: BTreeMap::new(),
+            enabled: true,
+            noise_suppression_threshold: 0.7,
+            source: None,
         };
         assert_eq!(rule.rule_type(), RuleType::Static);
         assert!(rule.is_approved());
@@ -199,13 +236,28 @@ mod tests {
     #[test]
     fn test_alert_rule_type_ai_derived_unapproved() {
         let rule = AlertRule {
-            id: "r2".into(), name: "ai".into(), signal: "metrics".into(), query: "mem".into(),
-            condition: Condition { condition_type: "threshold".into(), operator: Operator::Gt, value: 80.0, for_duration_secs: 0 },
-            severity: Severity::Critical, labels: BTreeMap::new(), annotations: BTreeMap::new(),
-            enabled: true, noise_suppression_threshold: 0.7,
+            id: "r2".into(),
+            name: "ai".into(),
+            signal: "metrics".into(),
+            query: "mem".into(),
+            condition: Condition {
+                condition_type: "threshold".into(),
+                operator: Operator::Gt,
+                value: 80.0,
+                for_duration_secs: 0,
+            },
+            severity: Severity::Critical,
+            labels: BTreeMap::new(),
+            annotations: BTreeMap::new(),
+            enabled: true,
+            noise_suppression_threshold: 0.7,
             source: Some(RuleSource::AiDerived(AiDerivedSource {
-                derived_from_rule: "r1".into(), ai_model: "gpt-4".into(), confidence: 0.9,
-                proposed_at: Utc::now(), approved_by: None, approved_at: None,
+                derived_from_rule: "r1".into(),
+                ai_model: "gpt-4".into(),
+                confidence: 0.9,
+                proposed_at: Utc::now(),
+                approved_by: None,
+                approved_at: None,
             })),
         };
         assert_eq!(rule.rule_type(), RuleType::AiDerived);

@@ -4,7 +4,9 @@ use std::env;
 
 use axum::{routing::get, Router};
 use parqtel_mcp_core::{server::ServerConfig, McpServer};
-use parqtel_mcp_gdocs::{make_append_timeline_tool, make_create_postmortem_doc_tool, make_share_document_tool};
+use parqtel_mcp_gdocs::{
+    make_append_timeline_tool, make_create_postmortem_doc_tool, make_share_document_tool,
+};
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
@@ -30,7 +32,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         rate_limit_requests_per_minute: rate_limit,
     };
 
-    
     let addr = format!("{}:{}", config.host, config.port);
     let mut server = McpServer::new(config);
 
@@ -42,7 +43,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .merge(server.build_router())
         .route("/health", get(health_handler));
 
-    
     tracing::info!("Starting MCP server on {}", addr);
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
