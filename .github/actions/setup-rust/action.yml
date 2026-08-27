@@ -41,4 +41,18 @@ runs:
 
     - uses: Swatinem/rust-cache@v2
       with:
-        key: ${{ inputs.cache-key }}
+        # Save the full registry+incremental so the next job reuses the
+        # compiled dependencies instead of redoing 8-10 min of cold work.
+        # `sharedKey` is appended to the cache key so MSRV / release /
+        # build-binary caches don't collide.
+        sharedKey: ${{ inputs.cache-key }}
+        cache-on-failure: true
+        cache-all-crates: true
+        # Cache CARGO_HOME_REGISTRY (= $CARGO_HOME/registry) by default;
+        # workspace + target are already covered. `cache-dir` is left to
+        # the action's default ($CARGO_HOME) to keep hits high.
+        # Sharing across branches: rust-cache v2 already uses the GHA cache,
+        # which is branch-shared by default for tags but ref-scoped for
+        # PRs — that is exactly what we want.
+        # Pruning disabled: reaping old artifacts on a busy repo makes
+        # cold-cache hits worse, not better.
