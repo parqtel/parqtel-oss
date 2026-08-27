@@ -4,10 +4,9 @@
 # Final image: distroless/static (~15MB), nonroot, no shell
 #
 # Optimization goals:
-#   • Split deps → binary build so only crates that changed are recompiled
-#   • Parallel build with CARGO_BUILD_JOBS and cargo-chef layer reuse
-#   • BuildKit cache mounts avoid re-downloading the Cargo registry
-#   • Cross-compilation via CARGO_TARGET_<TRIPLE>_LINKER + TARGETARCH
+#   • cargo-chef so only crates that changed recompile
+#   • Cache mounts for cargo registry/git/target — never re-download deps
+#   • Parallel build with CARGO_BUILD_JOBS
 # ─────────────────────────────────────────────────────────────────────────────
 
 ARG RUST_VERSION=1.86
@@ -24,54 +23,31 @@ FROM chef AS planner
 COPY . .
 RUN cargo chef prepare --recipe-path recipe.json
 
-# ── Stage 3a: Build workspace dependencies (cached unless Cargo.toml/lock changes)
-FROM chef AS deps
-ARG TARGETARCH
-ARG CARGO_BUILD_JOBS=8
-
-# Install build dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        pkg-config libssl-dev cmake g++ protobuf-compiler \
-    && rm -rf /var/lib/apt/lists/*
-
-COPY --from=planner /app/recipe.json recipe.json
-
-# Cook dependencies once; store in a dedicated output dir so this stage
-# can be cached independently of the binary build stage.
-RUN cargo chef cook --release --recipe-path recipe.json --target-dir /target \
-    && cp -r /target/debug/deps /deps-debug \
-    && cp -r /target/release/deps /deps-release \
-    && cp -r /target/debug/.fingerprint /fp-debug \
-    && cp -r /target/release/.fingerprint /fp-release \
-    && cp -r /target/debug/incremental /inc-debug \
-    && cp -r /target/release/incremental /inc-release
-
-# ── Stage 3b: Build the binary (deps stage cached; only recompiles changed crates)
+# ── Stage 3: Build workspace dependencies + binary in one cached stage ──────
 FROM chef AS builder
-ARG TARGETARCH
 ARG CARGO_BUILD_JOBS=8
-COPY --from=deps /deps-release /target/release/deps
-COPY --from=deps /fp-release  /target/release/.fingerprint
-COPY --from=deps /inc-release /target/release/incremental
+ARG DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         pkg-config libssl-dev cmake g++ protobuf-compiler \
     && rm -rf /var/lib/apt/lists/*
 
+# Build dependencies only (cached unless Cargo.toml/lock change).
+# Cache mounts keep the cargo registry / git index between runs so
+# incremental CI builds don't re-download megabytes of metadata.
 COPY --from=planner /app/recipe.json recipe.json
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,target=/app/target,sharing=locked \
+    cargo chef cook --release --recipe-path recipe.json -j ${CARGO_BUILD_JOBS} -p parqtel-server
 
-# Restore the pre-built dependency artifacts so cargo only recompiles the
-# workspace crates that changed since deps was built.
-RUN mkdir -p /target/release/deps /target/release/.fingerprint /target/release/incremental \
-    && cp -r /deps-release/* /target/release/deps/ \
-    && cp -r /fp-release/*  /target/release/.fingerprint/ \
-    && cp -r /inc-release/* /target/release/incremental/ \
-    # Mark all deps as freshly built so cargo doesn't think they're stale
-    && find /target/release/.fingerprint -type f -exec touch -d now {} \; 2>/dev/null || true
-
-# Build the actual binary; cargo will reuse cached deps and only rebuild changed crates.
+# Build the binary. Cargo reuses the cooked deps in /app/target and only
+# recompiles workspace crates that changed since the previous layer.
 COPY . .
-RUN cargo build --release -p parqtel-server -j ${CARGO_BUILD_JOBS} \
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,target=/app/target,sharing=locked \
+    cargo build --release -j ${CARGO_BUILD_JOBS} -p parqtel-server \
     && strip -s target/release/parqtel \
     && cp target/release/parqtel /usr/local/bin/parqtel
 
