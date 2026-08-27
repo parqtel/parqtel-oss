@@ -208,6 +208,7 @@ fn estimate_quantile(boundaries: &[f64], counts: &[u64], q: f64) -> f64 {
 }
 
 /// Divides a time range into equal-width step windows and applies an aggregation.
+#[allow(clippy::too_many_arguments)]
 pub fn downsample(
     points: Vec<(i64, MetricValue)>,
     start_ns: i64,

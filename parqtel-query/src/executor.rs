@@ -335,7 +335,7 @@ impl QueryExecutor {
             });
         }
 
-        let mut raw_logs = if blocks.is_empty() {
+        let raw_logs = if blocks.is_empty() {
             buffered_logs
         } else {
             let mut disk_logs = Scanner::scan_logs(blocks, start_ns, end_ns).await?;
