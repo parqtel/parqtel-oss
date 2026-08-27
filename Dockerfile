@@ -2,6 +2,11 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # Parqtel — Multi-stage build with cargo-chef for optimal layer caching
 # Final image: distroless/static (~15MB), nonroot, no shell
+#
+# Optimization goals:
+#   • cargo-chef so only crates that changed recompile
+#   • Cache mounts for cargo registry/git/target — never re-download deps
+#   • Parallel build with CARGO_BUILD_JOBS
 # ─────────────────────────────────────────────────────────────────────────────
 
 ARG RUST_VERSION=1.86
@@ -18,20 +23,32 @@ FROM chef AS planner
 COPY . .
 RUN cargo chef prepare --recipe-path recipe.json
 
-# ── Stage 3: Build dependencies (cached unless Cargo.toml/lock changes) ──────
+# ── Stage 3: Build workspace dependencies + binary in one cached stage ──────
 FROM chef AS builder
+ARG CARGO_BUILD_JOBS=8
+ARG DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    pkg-config libssl-dev cmake g++ protobuf-compiler \
+        pkg-config libssl-dev cmake g++ protobuf-compiler \
     && rm -rf /var/lib/apt/lists/*
 
+# Build dependencies only (cached unless Cargo.toml/lock change).
+# Cache mounts keep the cargo registry / git index between runs so
+# incremental CI builds don't re-download megabytes of metadata.
 COPY --from=planner /app/recipe.json recipe.json
-RUN cargo chef cook --release --recipe-path recipe.json -p parqtel-server
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,target=/app/target,sharing=locked \
+    cargo chef cook --release --recipe-path recipe.json -j ${CARGO_BUILD_JOBS} -p parqtel-server
 
-# Build the actual binary
+# Build the binary. Cargo reuses the cooked deps in /app/target and only
+# recompiles workspace crates that changed since the previous layer.
 COPY . .
-RUN cargo build --release -p parqtel-server \
-    && strip target/release/parqtel \
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,target=/app/target,sharing=locked \
+    cargo build --release -j ${CARGO_BUILD_JOBS} -p parqtel-server \
+    && strip -s target/release/parqtel \
     && cp target/release/parqtel /usr/local/bin/parqtel
 
 # ── Stage 4: Final distroless image ─────────────────────────────────────────
