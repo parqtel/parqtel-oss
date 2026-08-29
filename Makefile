@@ -1,4 +1,4 @@
-.PHONY: help dev-setup build release test lint bench docker \
+.PHONY: help dev-setup build release test lint bench docker docker-smoke \
         local-up local-down local-logs local-ps local-rebuild test-api \
         run inspect load load-test perf-audit clean \
         k8s-install k8s-validate k8s-sre-validate k8s-undeploy \
@@ -47,9 +47,24 @@ bench: ## Run benchmarks
 
 # ─── Docker ────────────────────────────────────────────────────────────────────
 docker: ## Build production Docker image (distroless) and report size
-	docker build -t parqtel:local .
+	docker buildx build --load -t parqtel:local .
 	@echo "Image size:"
 	@docker images parqtel:local --format "{{.Size}}"
+
+docker-smoke: ## Run built image and verify HEALTHCHECK reaches 'healthy'
+	@test -n "$$(docker images -q parqtel:local)" || { echo "error: parqtel:local missing — run 'make docker' first"; exit 1; }
+	@CID=$$(docker run -d --name parqtel-smoke -p 127.0.0.1:8099:8080 parqtel:local serve); \
+	trap 'docker rm -f parqtel-smoke >/dev/null 2>&1' EXIT; \
+	echo "Waiting for container to become healthy..."; \
+	for i in $$(seq 1 40); do \
+	  if [ "$$(docker inspect -f '{{.State.Running}}' parqtel-smoke 2>/dev/null)" != "true" ]; then \
+	    echo "container exited early:"; docker logs --tail 20 parqtel-smoke; exit 1; fi; \
+	  st=$$(docker inspect -f '{{.State.Health.Status}}' parqtel-smoke 2>/dev/null); \
+	  if [ "$$st" = "healthy" ]; then echo "OK: healthy after ~$$((i*2))s"; exit 0; fi; \
+	  if [ "$$st" = "unhealthy" ]; then echo "FAILED: marked unhealthy"; docker logs --tail 20 parqtel-smoke; exit 1; fi; \
+	  sleep 2; \
+	done; \
+	echo "FAILED: timed out waiting for healthy"; docker logs --tail 20 parqtel-smoke; exit 1
 
 # ─── Local dev (Docker Compose) ────────────────────────────────────────────────
 local-up: ## Start full local stack (Parqtel + Grafana + Prometheus + load-generator)
