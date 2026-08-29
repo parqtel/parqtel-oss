@@ -27,12 +27,23 @@ deploy/
 # Environment & secrets
 .env*
 *.log
+*.pid
 
-# OS
+# OS / Python cruft
 .DS_Store
 Thumbs.db
-
-# Python
 __pycache__/
 *.pyc
 .venv/
+
+# Runtime/build cruft that should never enter the build context.
+# None of these are copied by any Dockerfile; keeping them out shrinks the
+# context sent to `docker build` and prevents the planner's COPY . . from
+# dragging in dev data or generated graphs.
+data/
+graphify-out/
+.rtk/
+.kiro/
+charts/
+compose/
+rules/
