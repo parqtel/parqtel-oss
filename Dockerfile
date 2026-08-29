@@ -1,7 +1,8 @@
 # syntax=docker/dockerfile:1
 # ─────────────────────────────────────────────────────────────────────────────
 # Parqtel — Multi-stage build with cargo-chef for optimal layer caching.
-# Final image: gcr.io/distroless/cc-debian12:nonroot (~15MB, glibc-based, no shell).
+# Final image: scratch + only the glibc/libgcc libraries parqtel NEEDEDs
+# (~15MB, no OS packages, no shell, no OpenSSL).
 #
 # Linkage note: parqtel-server links rustls, NOT OpenSSL. openssl-sys is only
 # pulled by the standalone parqtel-mcp-* servers (not compiled into this binary),
@@ -90,26 +91,57 @@ fn main() {
     exit(1);
 }
 EOF
-RUN rustc -O /src/healthcheck.rs -o /usr/local/bin/healthcheck
+RUN rustc -O /src/healthcheck.rs -o /usr/local/bin/healthcheck && strip /usr/local/bin/healthcheck
 
-# ── Stage 4: Final distroless image ─────────────────────────────────────────
-# Pinned by digest for supply-chain reproducibility. Refresh with:
-#   docker buildx imagetools inspect gcr.io/distroless/cc-debian12:nonroot
-FROM gcr.io/distroless/cc-debian12:nonroot@sha256:9dac0a79194e45a7da0158a9c6da57b217585af0786db3845d1f0ec1a0dd182f AS runtime
+# ── Stage 4: Collect minimal glibc runtime (drops OpenSSL/libstdc++/gconv) ──
+# parqtel NEEDEDs only glibc + libgcc (verified via readelf). The distroless cc
+# base also ships OpenSSL + libstdc++ we never use, and a later `RUN rm` can't
+# shrink the image (base layers still ship them). So we build a scratch rootfs
+# with exactly the shared libraries the binaries require.
+FROM rust:${RUST_VERSION}-slim AS runtime-libs
+COPY --from=builder /usr/local/bin/parqtel /usr/local/bin/parqtel
+COPY --from=probe /usr/local/bin/healthcheck /usr/local/bin/healthcheck
+RUN set -eux; \
+    rm -rf /out && mkdir -p /out; \
+    for b in /usr/local/bin/parqtel /usr/local/bin/healthcheck; do \
+      ldd "$b" | awk '($2=="=>"){print $3; next} ($1 ~ /ld-linux/){print $1}'; \
+    done | sort -u | while read -r f; do \
+      [ -e "$f" ] || continue; \
+      mkdir -p "/out$(dirname "$f")"; \
+      cp -L "$f" "/out$f"; \
+    done; \
+    mkdir -p /out/dev /out/tmp /out/etc; \
+    mknod /out/dev/null c 1 3; mknod /out/dev/zero c 1 5; \
+    mknod /out/dev/urandom c 1 9; mknod /out/dev/random c 1 8; \
+    chmod 666 /out/dev/null /out/dev/zero /out/dev/urandom /out/dev/random; \
+    chmod 1777 /out/tmp; \
+    mkdir -p /out/data && chown 65532:65532 /out/data; \
+    printf 'nonroot:x:65532:65532::/nonexistent:/sbin/nologin\n' > /out/etc/passwd; \
+    printf 'nonroot:x:65532:\n' > /out/etc/group; \
+    if [ -d /etc/ssl/certs ]; then cp -rL /etc/ssl/certs /out/etc/ssl; fi; \
+    echo '--- runtime rootfs ---'; find /out -type f | sort
+
+# ── Stage 5: Final scratch image ────────────────────────────────────────────
+# No OS packages, no shell, no OpenSSL — just the binary + its glibc deps.
+FROM scratch AS runtime
 
 LABEL org.opencontainers.image.source="https://github.com/parqtel/parqtel-oss"
 LABEL org.opencontainers.image.description="Ultra-lightweight SRE observability engine"
 LABEL org.opencontainers.image.licenses="Apache-2.0"
 
-COPY --from=builder --chown=nonroot:nonroot /usr/local/bin/parqtel /usr/local/bin/parqtel
-COPY --from=probe --chown=nonroot:nonroot /usr/local/bin/healthcheck /usr/local/bin/healthcheck
+COPY --from=runtime-libs /out/ /
+COPY --from=builder /usr/local/bin/parqtel /usr/local/bin/parqtel
+COPY --from=probe /usr/local/bin/healthcheck /usr/local/bin/healthcheck
 
 HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
     CMD ["/usr/local/bin/healthcheck"]
 
 EXPOSE 8080
-VOLUME ["/data"]
+# NOTE: do not declare VOLUME ["/data"] — it makes Docker mount a root-owned
+# anonymous volume that the nonroot (65532) process cannot write. The image's
+# own /data (owned 65532) is used instead; orchestrators mount a PVC/emptyDir
+# here which overrides it with appropriate ownership.
 
-USER nonroot:nonroot
+USER 65532:65532
 ENTRYPOINT ["parqtel"]
 CMD ["serve"]
