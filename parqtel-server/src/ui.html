@@ -131,6 +131,21 @@ header{height:48px;flex-shrink:0;background:var(--bg-void);border-bottom:1px sol
 #logs-facets-toggle{display:none;position:absolute;top:8px;right:12px;z-index:5;font-size:10px;padding:3px 10px;border-radius:12px;border:1px solid var(--border-default);background:var(--bg-surface);color:var(--text-secondary);cursor:pointer;}
 #view-logs #logs-facets-toggle{display:block;}
 #facets-panel.open ~ #logs-facets-toggle{display:none;}
+/* HELP MODAL */
+#help-modal{display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:300;align-items:center;justify-content:center;}
+#help-modal.open{display:flex;}
+.hm-card{background:var(--bg-surface);border:1px solid var(--border-default);border-radius:var(--radius-md);width:420px;max-width:92vw;max-height:80vh;display:flex;flex-direction:column;box-shadow:0 8px 24px rgba(0,0,0,.6);}
+.hm-hdr{padding:12px 16px;border-bottom:1px solid var(--border-subtle);display:flex;justify-content:space-between;align-items:center;font-weight:700;font-size:13px;}
+.hm-hdr button{background:none;border:none;color:var(--text-muted);cursor:pointer;font-size:14px;}
+.hm-body{padding:12px 16px;overflow-y:auto;}
+.hm-sec{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--text-muted);margin:10px 0 6px;}
+.hm-sec:first-child{margin-top:0;}
+.hm-row{display:flex;justify-content:space-between;align-items:center;padding:4px 0;font-size:12px;color:var(--text-primary);}
+.hm-desc{color:var(--text-muted);font-size:11px;}
+/* RULE FORM */
+.rf-row{display:flex;align-items:center;gap:8px;margin-bottom:10px;}
+.rf-lbl{font-size:11px;color:var(--text-secondary);width:140px;flex-shrink:0;}
+.rf-in{flex:1;min-width:0;}
 /* OVERVIEW */
 .ovw-wrap{max-width:860px;margin:0 auto;padding:24px 20px;overflow-y:auto;height:100%;}
 .ovw-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin-bottom:20px;}
@@ -574,7 +589,26 @@ header{height:48px;flex-shrink:0;background:var(--bg-void);border-bottom:1px sol
     </div>
   </div>
 </main>
-<div id="kb-hints" aria-hidden="true"><span class="kb-key">j</span>/<span class="kb-key">k</span> navigate <span class="kb-key">Enter</span> open <span class="kb-key">Esc</span> close <span class="kb-key">A</span> ack <span class="kb-key">R</span> resolve <span class="kb-key">N</span> noise <span class="kb-key">p</span> proposals</div>
+<div id="kb-hints" aria-hidden="true"><span class="kb-key">j</span>/<span class="kb-key">k</span> navigate <span class="kb-key">Enter</span> open <span class="kb-key">Esc</span> close <span class="kb-key">A</span> ack <span class="kb-key">R</span> resolve <span class="kb-key">N</span> noise <span class="kb-key">p</span> proposals <span class="kb-key">?</span> all shortcuts</div>
+<div id="help-modal" role="dialog" aria-modal="true" aria-label="Keyboard shortcuts">
+  <div class="hm-card">
+    <div class="hm-hdr"><span>Keyboard shortcuts</span><button id="help-close" aria-label="Close">✕</button></div>
+    <div class="hm-body">
+      <div class="hm-sec">Global</div>
+      <div class="hm-row"><span><span class="kb-key">Ctrl/⌘</span>+<span class="kb-key">K</span> focus search</span><span class="hm-desc">jump to query box</span></div>
+      <div class="hm-row"><span><span class="kb-key">Ctrl/⌘</span>+<span class="kb-key">Enter</span> run query</span><span class="hm-desc">execute current query</span></div>
+      <div class="hm-row"><span><span class="kb-key">Esc</span> close/cancel</span><span class="hm-desc">dismiss panels, abort query</span></div>
+      <div class="hm-row"><span><span class="kb-key">?</span> this help</span><span class="hm-desc">toggle shortcut list</span></div>
+      <div class="hm-sec">Alerts</div>
+      <div class="hm-row"><span><span class="kb-key">j</span>/<span class="kb-key">k</span> or ↑/↓ navigate</span><span class="hm-desc">move selection</span></div>
+      <div class="hm-row"><span><span class="kb-key">Enter</span> open detail</span><span class="hm-desc">inspect alert</span></div>
+      <div class="hm-row"><span><span class="kb-key">A</span> acknowledge</span><span class="hm-desc">ack selected alert</span></div>
+      <div class="hm-row"><span><span class="kb-key">R</span> resolve</span><span class="hm-desc">resolve selected alert</span></div>
+      <div class="hm-row"><span><span class="kb-key">N</span> mark noise</span><span class="hm-desc">suppress as noise</span></div>
+      <div class="hm-row"><span><span class="kb-key">p</span> proposals</span><span class="hm-desc">open AI proposals</span></div>
+    </div>
+  </div>
+</div>
 <div id="toast-container" aria-live="polite" aria-atomic="true"></div>
 <div id="settings-panel">
   <div class="set-hdr"><span>Settings</span><button id="settings-close" style="background:none;border:none;cursor:pointer;color:var(--text-muted);font-size:18px;">✕</button></div>
@@ -974,11 +1008,11 @@ function filteredAlerts(){
   return ST.alerts.list.filter(a=>{
     const sev=(a.severity||'info').toUpperCase();
     const state=(a.state||'firing').toUpperCase();
-    if(!ST.alerts.sevOn.has(sev)&&!ST.alerts.sevOn.has(sev==='CRITICAL'?'CRITICAL':'X'))return false;
-    const sevMatch=['PAGE','CRITICAL','WARNING','INFO'].some(s=>ST.alerts.sevOn.has(s)&&(sev===s||(s==='CRITICAL'&&sev==='PAGE')));
-    if(!sevMatch)return false;
+    // PAGE and CRITICAL share the PAGE chip; map one to the other's bucket
+    const sevKey=(sev==='CRITICAL'||sev==='PAGE')?'PAGE':sev;
+    if(!ST.alerts.sevOn.has(sevKey))return false;
     if(!ST.alerts.statusOn.has(state))return false;
-    if(ST.alerts.searchQ){const q=ST.alerts.searchQ.toLowerCase();const hay=`${a.name||''} ${a.rule_id||''} ${JSON.stringify(a.labels||{})}`.toLowerCase();if(!hay.includes(q))return false;}
+    if(ST.alerts.searchQ){const q=ST.alerts.searchQ.toLowerCase();const hay=`${a.name||''} ${a.rule_name||''} ${a.rule_id||''} ${JSON.stringify(a.labels||{})}`.toLowerCase();if(!hay.includes(q))return false;}
     return true;
   }).sort((a,b)=>{const so={page:0,critical:1,warning:2,info:3};const sa=so[(a.severity||'info').toLowerCase()]??3;const sb=so[(b.severity||'info').toLowerCase()]??3;if(sa!==sb)return sa-sb;return new Date(b.started_at||0)-new Date(a.started_at||0);});
 }
@@ -998,12 +1032,12 @@ function renderAlertList(prev){
     const sevSpan=document.createElement('span');sevSpan.className=`alert-sev ${resolved?'resolved':sev}`;sevSpan.textContent=(a.severity||'INFO').toUpperCase();
     titleDiv.appendChild(sevSpan);
     if(!resolved&&(sev==='critical'||sev==='page')){const pd=document.createElement('span');pd.className='pulse-dot';titleDiv.appendChild(pd);}
-    const nameSpan=document.createElement('span');nameSpan.textContent=a.name||a.rule_id||'Alert';titleDiv.appendChild(nameSpan);
+    const nameSpan=document.createElement('span');nameSpan.textContent=a.name||a.rule_name||a.rule_id||'Alert';titleDiv.appendChild(nameSpan);
     const ago=document.createElement('span');ago.style.cssText='margin-left:auto;font-size:10px;color:var(--text-muted);font-family:var(--mono);';ago.textContent=timeAgo(a.started_at);titleDiv.appendChild(ago);
     const meta=document.createElement('div');meta.className='alert-meta';
     const lbls=a.labels||{};meta.textContent=Object.entries(lbls).slice(0,4).map(([k,v])=>`${k}=${v}`).join('  ');
     const status=document.createElement('div');status.className='alert-status';
-    status.innerHTML=`<span>value: ${a.current_value!=null?Number(a.current_value).toPrecision(3):'—'}</span><span>rule: ${a.rule_id||'—'}</span><span>● ${(a.state||'FIRING').toUpperCase()}</span>`;
+    const val=a.current_value!=null?a.current_value:a.value;status.innerHTML=`<span>value: ${val!=null?Number(val).toPrecision(3):'—'}</span><span>rule: ${a.rule_id||'—'}</span><span>● ${(a.state||'FIRING').toUpperCase()}</span>`;
     row.append(titleDiv,meta,status);
     row.addEventListener('click',()=>{ST.alerts.selIdx=i;renderAlertList();openAlertDetail(a);});
     list.appendChild(row);
@@ -1027,7 +1061,7 @@ function renderDetailTab(a){
 function renderOverview(a,body){
   // Alert metadata
   const sec=document.createElement('div');sec.className='rca-box';
-  sec.innerHTML=`<div class="kv-grid"><div class="kv-key">Rule</div><div class="kv-val">${a.rule_id||'—'}</div><div class="kv-key">Severity</div><div class="kv-val">${(a.severity||'').toUpperCase()}</div><div class="kv-key">State</div><div class="kv-val">${(a.state||'').toUpperCase()}</div><div class="kv-key">Started</div><div class="kv-val">${a.started_at||'—'}</div><div class="kv-key">Duration</div><div class="kv-val">${a.started_at?timeAgo(a.started_at):'—'}</div><div class="kv-key">Value</div><div class="kv-val">${a.current_value!=null?a.current_value:'—'}</div></div>`;
+  sec.innerHTML=`<div class="kv-grid"><div class="kv-key">Rule</div><div class="kv-val">${a.rule_id||'—'}</div><div class="kv-key">Severity</div><div class="kv-val">${(a.severity||'').toUpperCase()}</div><div class="kv-key">State</div><div class="kv-val">${(a.state||'').toUpperCase()}</div><div class="kv-key">Started</div><div class="kv-val">${a.started_at||'—'}</div><div class="kv-key">Duration</div><div class="kv-val">${a.started_at?timeAgo(a.started_at):'—'}</div><div class="kv-key">Value</div><div class="kv-val">${a.current_value!=null?a.current_value:(a.value!=null?a.value:'—')}</div></div>`;
   body.appendChild(sec);
   // RCA section
   if(a.rca){renderRCA(a.rca,body);}
@@ -1060,7 +1094,75 @@ function renderTimeline(a,body){
     body.appendChild(tl);
   }).catch(()=>{body.innerHTML='<div class="empty-c"><p>Timeline unavailable</p></div>';});
 }
-function renderEvidence(a,body){body.innerHTML='<div style="display:flex;gap:12px;height:100%;"><div style="flex:1;"><div class="rca-section-title">Metric</div><div style="height:200px;background:var(--bg-raised);border-radius:4px;display:flex;align-items:center;justify-content:center;color:var(--text-muted);font-size:11px;">Chart loads with metric data</div></div><div style="flex:1;overflow-y:auto;"><div class="rca-section-title">Correlated Logs</div><p style="font-size:11px;color:var(--text-muted);">Logs from incident window will appear here</p></div></div>';}
+async function renderEvidence(a,body){
+  body.innerHTML='<div class="skel skel-chart"></div><div class="skel skel-row"></div><div class="skel skel-row" style="width:90%"></div>';
+  // Fetch the rule to get its query
+  let query=a.query||'';
+  if(!query&&a.rule_id){
+    try{const r=await fetch('/api/v1/rules');const j=await r.json();const rules=j.data||[];const rule=rules.find(x=>x.id===a.rule_id);if(rule)query=rule.query||'';}catch{}
+  }
+  const anchorTs=a.started_at?new Date(a.started_at).getTime()/1000:Date.now()/1000;
+  const s=Math.floor(anchorTs-300),e=Math.floor(anchorTs+300);
+  const wrap=document.createElement('div');wrap.style.cssText='display:flex;gap:12px;height:100%;';
+  // Metric panel
+  const mPanel=document.createElement('div');mPanel.style.cssText='flex:1;display:flex;flex-direction:column;min-width:0;';
+  mPanel.innerHTML='<div class="rca-section-title">Metric</div>';
+  if(query){
+    try{
+      const r=await fetch(`/api/v1/query_range?query=${encodeURIComponent(query)}&start=${s}&end=${e}&step=30s`);
+      const j=await r.json();const series=(j.data||{}).result||[];
+      if(series.length){
+        const cv=document.createElement('canvas');cv.style.cssText='width:100%;height:180px;flex-shrink:0;';mPanel.appendChild(cv);
+        drawMiniChart(cv,series);
+        const qEl=document.createElement('div');qEl.style.cssText='font-family:var(--mono);font-size:10px;color:var(--text-muted);margin-top:6px;word-break:break-all;';qEl.textContent=query;mPanel.appendChild(qEl);
+      }else{
+        mPanel.innerHTML+='<div style="flex:1;display:flex;align-items:center;justify-content:center;color:var(--text-muted);font-size:11px;background:var(--bg-raised);border-radius:4px;">No data in incident window</div>';
+      }
+    }catch{mPanel.innerHTML+='<p style="font-size:11px;color:var(--text-muted);">Metric query failed</p>';}
+  }else{
+    mPanel.innerHTML+='<div style="flex:1;display:flex;align-items:center;justify-content:center;color:var(--text-muted);font-size:11px;background:var(--bg-raised);border-radius:4px;">Rule query unavailable</div>';
+  }
+  // Logs panel
+  const lPanel=document.createElement('div');lPanel.style.cssText='flex:1;display:flex;flex-direction:column;min-width:0;';
+  lPanel.innerHTML='<div class="rca-section-title">Correlated logs (±5 min)</div>';
+  const lList=document.createElement('div');lList.style.cssText='flex:1;overflow-y:auto;font-family:var(--mono);font-size:10px;';
+  lPanel.appendChild(lList);
+  try{
+    const svc=(a.labels||{})['service.name']||'';
+    const q=svc?`service="${svc}"`:'{}';
+    const r=await fetch(`/api/v1/logs?query=${encodeURIComponent(q)}&start=${s}&end=${e}&limit=50&order=desc`);
+    const j=await r.json();const logs=Array.isArray(j.data)?j.data:(j.data||{}).logs||[];
+    if(logs.length){
+      logs.forEach(l=>{
+        const row=document.createElement('div');row.style.cssText='padding:3px 6px;border-bottom:1px solid rgba(255,255,255,.04);';
+        const sev=normSev(l.severity_text||l.severity_number);
+        row.innerHTML=`<span style="color:var(--${sev==='ERROR'?'err':sev==='WARN'?'warn':'text-secondary'});">${sev}</span> <span style="color:var(--text-secondary);">${fmtTs(l.timestamp_ns)}</span> <span style="color:var(--text-primary);">${esc((l.body||'').slice(0,120))}</span>`;
+        lList.appendChild(row);
+      });
+    }else{
+      lList.innerHTML='<p style="color:var(--text-muted);font-size:11px;padding:8px;">No logs in incident window</p>';
+    }
+  }catch{lList.innerHTML='<p style="color:var(--text-muted);font-size:11px;padding:8px;">Logs unavailable</p>';}
+  wrap.append(mPanel,lPanel);
+  body.innerHTML='';body.appendChild(wrap);
+}
+function drawMiniChart(cv,series){
+  const dpr=window.devicePixelRatio||1;
+  const W=cv.clientWidth||300,H=180;cv.width=W*dpr;cv.height=H*dpr;
+  const ctx=cv.getContext('2d');ctx.scale(dpr,dpr);
+  const pts=[];let yMin=Infinity,yMax=-Infinity;
+  series.slice(0,5).forEach(s=>(s.values||[]).forEach(([t,v])=>{const n=parseFloat(v);if(isFinite(n)){pts.push([t,n]);yMin=Math.min(yMin,n);yMax=Math.max(yMax,n);}}));
+  if(!pts.length)return;
+  if(!isFinite(yMin)){yMin=0;yMax=1;}
+  const pad=10;if(yMax===yMin){yMax=yMin+1;}
+  const xs=pts.map(p=>p[0]);const xMin=Math.min(...xs),xMax=Math.max(...xs)||xMin+1;
+  ctx.strokeStyle='rgba(255,255,255,.06)';for(let i=0;i<=3;i++){const y=pad+(H-2*pad)*i/3;ctx.beginPath();ctx.moveTo(pad,y);ctx.lineTo(W-pad,y);ctx.stroke();}
+  series.slice(0,5).forEach((s,i)=>{
+    const color=COLORS[i%COLORS.length];ctx.strokeStyle=color;ctx.lineWidth=1.5;ctx.beginPath();let started=false;
+    (s.values||[]).forEach(([t,v])=>{const n=parseFloat(v);if(!isFinite(n))return;const x=pad+(t-xMin)/(xMax-xMin)*(W-2*pad);const y=H-pad-(n-yMin)/(yMax-yMin)*(H-2*pad);if(!started){ctx.moveTo(x,y);started=true;}else ctx.lineTo(x,y);});
+    ctx.stroke();
+  });
+}
 function renderActions(a,body){
   const id=a.id;
   body.innerHTML=`<div style="display:flex;flex-direction:column;gap:8px;"><button class="rca-btn" id="act-ack">Acknowledge</button><button class="rca-btn" id="act-resolve">Resolve</button><button class="rca-btn" id="act-noise">Mark as Noise</button><button class="rca-btn" id="act-signal">Mark as Signal</button><button class="rca-btn" id="act-postmortem" style="display:${a.state==='resolved'||a.state==='Resolved'?'block':'none'}">View Postmortem</button></div>`;
@@ -1072,6 +1174,13 @@ function renderActions(a,body){
 }
 function esc(s){const d=document.createElement('div');d.textContent=s;return d.innerHTML;}
 /* RULES VIEW */
+function ruleToYaml(r){
+  const lines=[`id: ${r.id}`,`name: ${r.name}`,`signal: ${r.signal||'metrics'}`,`query: ${r.query||''}`,
+    'condition:',`  type: ${(r.condition&&r.condition.type)||'threshold'}`,`  operator: ${(r.condition&&r.condition.operator)||'>'}`,`  value: ${(r.condition&&r.condition.value)||0}`,
+    `severity: ${(r.severity||'warning').toLowerCase()}`,`enabled: ${r.enabled!==false}`];
+  if(r.labels&&Object.keys(r.labels).length){lines.push('labels:');Object.entries(r.labels).forEach(([k,v])=>lines.push(`  ${k}: "${v}"`));}
+  return lines.join('\n');
+}
 async function renderRulesView(){
   const container=$('alert-rules-view');container.innerHTML='<div style="padding:12px"><div class="skel skel-row"></div><div class="skel skel-row" style="width:90%"></div><div class="skel skel-row" style="width:85%"></div></div>';
   try{const r=await fetch('/api/v1/rules');const j=await r.json();const rules=j.data||[];
@@ -1084,7 +1193,18 @@ async function renderRulesView(){
   });
   html+='</tbody></table>';container.innerHTML=html;
   container.onclick=e=>{
-    const tog=e.target.closest('.rule-toggle');if(tog){tog.classList.toggle('on');return;}
+    const tog=e.target.closest('.rule-toggle');
+    if(tog){
+      const rid=tog.dataset.rid;
+      const rule=rules.find(r=>r.id===rid);
+      const nextOn=!tog.classList.contains('on');
+      tog.classList.toggle('on',nextOn);
+      if(rule){
+        const yaml=ruleToYaml({...rule,enabled:nextOn});
+        fetch(`/api/v1/rules/${encodeURIComponent(rid)}`,{method:'PUT',headers:{'Content-Type':'text/plain'},body:yaml}).then(r=>{if(!r.ok)throw r;toast(nextOn?'Rule enabled':'Rule disabled');renderRulesView();}).catch(()=>{toast('Failed to update rule','error');tog.classList.toggle('on',!nextOn);});
+      }
+      return;
+    }
     const edit=e.target.closest('[data-edit]');if(edit){openRuleEditor(edit.dataset.edit,rules);return;}
     const del=e.target.closest('[data-del]');if(del&&confirm('Delete this rule?')){fetch(`/api/v1/rules/${del.dataset.del}`,{method:'DELETE'}).then(()=>renderRulesView());}
   };
@@ -1093,12 +1213,47 @@ async function renderRulesView(){
 function openRuleEditor(id,rules){
   const rule=rules.find(r=>r.id===id);if(!rule)return;
   const panel=$('rule-editor-panel');const body=$('rule-editor-body');
-  body.innerHTML=`<div style="margin-bottom:8px;font-size:11px;color:var(--text-muted);">Edit YAML for rule: ${esc(rule.name||id)}</div><textarea id="rule-yaml" style="width:100%;height:300px;background:var(--bg-raised);color:var(--text-primary);border:1px solid var(--border-default);border-radius:4px;font-family:var(--mono);font-size:11px;padding:10px;resize:vertical;">${esc(rule.yaml||`id: ${rule.id}\nname: ${rule.name}\nseverity: ${rule.severity||'warning'}\nquery: ${rule.query||''}\ncondition:\n  operator: '>'\n  value: ${rule.condition?.value||0}`)}</textarea><div id="yaml-err" style="font-size:10px;color:var(--err);margin-top:4px;min-height:14px;"></div><button id="rule-save" class="rca-btn" style="margin-top:8px;">Save</button>`;
+  const cond=rule.condition||{};
+  const F=(id2,label,val,type='text')=>`<div class="rf-row"><label class="rf-lbl" for="rf-${id2}">${label}</label><input class="toolbar-input rf-in" id="rf-${id2}" type="${type}" value="${esc(String(val))}"></div>`;
+  const S=(id2,label,val,opts)=>`<div class="rf-row"><label class="rf-lbl" for="rf-${id2}">${label}</label><select class="toolbar-select rf-in" id="rf-${id2}">${opts.map(o=>`<option value="${o}" ${o===val?'selected':''}>${o}</option>`).join('')}</select></div>`;
+  body.innerHTML=`<div style="margin-bottom:10px;font-size:11px;color:var(--text-muted);">Editing rule: <span style="color:var(--accent);font-family:var(--mono);">${esc(rule.name||id)}</span></div>
+  ${F('name','Name',rule.name||'')}
+  ${F('query','Query (PromQL)',rule.query||'')}
+  <div class="rf-row"><span class="rf-lbl">Condition</span><span style="display:flex;gap:6px;align-items:center;"><select class="toolbar-select" id="rf-op">${['>','<','>=','<=','==','!='].map(o=>`<option ${o===(cond.operator||'>')?'selected':''}>${o}</option>`).join('')}</select><input class="toolbar-input" id="rf-val" type="number" step="any" value="${cond.value??0}" style="width:100px;"></span></div>
+  ${S('sev','Severity',(rule.severity||'warning').toLowerCase(),['critical','page','warning','info'])}
+  ${S('signal','Signal',rule.signal||'metrics',['metrics','logs'])}
+  ${F('for','For (e.g. 5m, 30s)',rule.for||'')}
+  <div class="rf-row"><span class="rf-lbl">Enabled</span><span class="rule-toggle ${rule.enabled!==false?'on':''}" id="rf-enabled"></span></div>
+  <div class="rf-row"><button class="rca-btn" id="rf-yaml-toggle">YAML mode</button></div>
+  <textarea id="rule-yaml" style="display:none;width:100%;height:260px;background:var(--bg-raised);color:var(--text-primary);border:1px solid var(--border-default);border-radius:4px;font-family:var(--mono);font-size:11px;padding:10px;resize:vertical;"></textarea>
+  <div id="yaml-err" style="font-size:10px;color:var(--err);margin-top:4px;min-height:14px;"></div>
+  <button id="rule-save" class="rca-btn" style="margin-top:8px;">Save</button>`;
   panel.classList.add('open');
-  body.querySelector('#rule-save').onclick=async()=>{
-    const yaml=body.querySelector('#rule-yaml').value;
-    if(!yaml.includes('id:')||!yaml.includes('name:')){body.querySelector('#yaml-err').textContent='Missing required fields: id, name';return;}
-    try{await fetch(`/api/v1/rules/${id}`,{method:'PUT',headers:{'Content-Type':'text/plain'},body:yaml});panel.classList.remove('open');renderRulesView();}catch(e){body.querySelector('#yaml-err').textContent=e.message;}
+  const $b=sel=>body.querySelector(sel);
+  const enabledEl=$b('#rf-enabled');
+  enabledEl.onclick=()=>enabledEl.classList.toggle('on');
+  let yamlMode=false;
+  $b('#rf-yaml-toggle').onclick=()=>{
+    yamlMode=!yamlMode;
+    const ta=$b('#rule-yaml');
+    if(yamlMode){ta.style.display='block';ta.value=ruleToYaml(collectForm());}
+    else{ta.style.display='none';}
+    $b('#rf-yaml-toggle').textContent=yamlMode?'Form mode':'YAML mode';
+  };
+  function collectForm(){
+    return{id:rule.id,name:$b('#rf-name').value,signal:$b('#rf-signal').value,query:$b('#rf-query').value,
+      condition:{operator:$b('#rf-op').value,value:parseFloat($b('#rf-val').value)||0},
+      severity:$b('#rf-sev').value,enabled:enabledEl.classList.contains('on')};
+  }
+  $b('#rule-save').onclick=async()=>{
+    const yaml=yamlMode?$b('#rule-yaml').value:ruleToYaml(collectForm());
+    const errEl=$b('#yaml-err');errEl.textContent='';
+    if(!yaml.includes('id:')||!yaml.includes('name:')){errEl.textContent='Missing required fields: id, name';return;}
+    try{
+      const r=await fetch(`/api/v1/rules/${id}`,{method:'PUT',headers:{'Content-Type':'text/plain'},body:yaml});
+      if(!r.ok){const j=await r.json().catch(()=>({}));throw new Error(j.error||`HTTP ${r.status}`);}
+      toast('Rule saved');panel.classList.remove('open');renderRulesView();
+    }catch(e){errEl.textContent=e.message;}
   };
 }
 
@@ -1260,7 +1415,7 @@ function switchSig(sig,fromUrl=false){
   document.querySelectorAll('.viewer-pane').forEach(p=>p.classList.toggle('active',p.id===`view-${sig}`));
   E.sevBar.classList.toggle('visible',sig==='logs');
   E.mCtrls.style.display=sig==='metrics'?'flex':'none';
-  E.kbHints.classList.toggle('visible',sig==='alerts');
+  E.kbHints.classList.add('visible');
   $('toolbar').style.display=sig==='alerts'||sig==='overview'?'none':'flex';
   $('volume-histogram').style.display=sig==='alerts'||sig==='traces'||sig==='overview'?'none':'block';
   // Context-aware search: clear value, update placeholder + signal badge
@@ -1323,7 +1478,8 @@ document.addEventListener('keydown',e=>{
   if(e.target.tagName==='INPUT'||e.target.tagName==='TEXTAREA'||e.target.tagName==='SELECT')return;
   if((e.ctrlKey||e.metaKey)&&e.key==='Enter'){e.preventDefault();runQuery();return;}
   if((e.ctrlKey||e.metaKey)&&e.key==='k'){e.preventDefault();E.qIn.focus();E.qIn.select();return;}
-  if(e.key==='Escape'){if(abortCtrl)abortCtrl.abort();closeAC();closeInspector();ST.metrics.selIdx=-1;if(ST.sig==='alerts'){closeAlertDetail();}return;}
+  if(e.key==='Escape'){if($('help-modal').classList.contains('open')){$('help-modal').classList.remove('open');return;}if(abortCtrl)abortCtrl.abort();closeAC();closeInspector();ST.metrics.selIdx=-1;if(ST.sig==='alerts'){closeAlertDetail();}return;}
+  if(e.key==='?'){$('help-modal').classList.add('open');return;}
   if(ST.sig!=='alerts')return;
   const alerts=filteredAlerts();
   if(e.key==='j'||e.key==='ArrowDown'){e.preventDefault();ST.alerts.selIdx=Math.min(ST.alerts.selIdx+1,alerts.length-1);renderAlertList();return;}
@@ -1369,6 +1525,9 @@ function openSavedView(sig,view){
 }
 
 $('btn-star').onclick=starCurrentView;
+
+$('help-close').onclick=()=>$('help-modal').classList.remove('open');
+$('help-modal').addEventListener('click',e=>{if(e.target.id==='help-modal')$('help-modal').classList.remove('open');});
 
 /* INIT */
 function init(){
