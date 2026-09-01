@@ -7,8 +7,7 @@ use figment::{
 };
 use flate2::write::GzEncoder;
 use flate2::Compression;
-use parqtel_core::engine::registry::StorageEngineRegistry;
-use parqtel_core::{start_maintenance, BlockIndex, Config, StorageEngine};
+use parqtel_core::{start_maintenance, BlockIndex, Config};
 use parqtel_ingest::{IngestionService, LogIngestionService, TraceIngestionService};
 use parqtel_query::QueryExecutor;
 use sha2::{Digest, Sha256};
@@ -148,12 +147,6 @@ async fn run_server(
     index: Arc<tokio::sync::RwLock<BlockIndex>>,
     log_index: Arc<tokio::sync::RwLock<BlockIndex>>,
 ) -> anyhow::Result<()> {
-    // Build storage engine via registry
-    let registry = StorageEngineRegistry::default();
-    let storage_engine: Arc<dyn StorageEngine> = registry
-        .build(&config.storage.backend, config.storage.clone())
-        .map_err(|e| anyhow::anyhow!("{}", e))?;
-
     // Prepare UI assets
     let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
     encoder.write_all(UI_HTML.as_bytes())?;
@@ -219,19 +212,18 @@ async fn run_server(
         log_index.clone(),
         trace_index.clone(),
         memory_buffer.clone(),
+        trace_data_dir.clone(),
     );
 
     start_maintenance(index.clone(), config.storage.clone());
     start_maintenance(log_index.clone(), config.logs.clone().into());
 
     let state = AppState::new(
-        storage_engine,
         ingestion_service,
         log_ingestion_service,
         trace_ingestion_service,
         query_executor,
         index.clone(),
-        memory_buffer.clone(),
         config.clone(),
         ui_content,
         ui_etag,
@@ -392,13 +384,33 @@ async fn run_inspect(
 }
 
 async fn run_export(
-    _config: Config,
+    config: Config,
     index: Arc<tokio::sync::RwLock<BlockIndex>>,
     metric: String,
     start: String,
     end: String,
     output: PathBuf,
 ) -> anyhow::Result<()> {
+    // Prevent path traversal: ensure output is within data directory
+    let data_dir = config
+        .storage
+        .data_dir
+        .canonicalize()
+        .unwrap_or_else(|_| config.storage.data_dir.clone());
+
+    // For output path, canonicalize the parent directory since file may not exist yet
+    let output_parent = output.parent().unwrap_or(&output);
+    let output_path = output_parent
+        .canonicalize()
+        .unwrap_or_else(|_| output_parent.to_path_buf());
+
+    if !output_path.starts_with(&data_dir) {
+        return Err(anyhow::anyhow!(
+            "Output path must be within data directory: {}",
+            data_dir.display()
+        ));
+    }
+
     let start_dt = chrono::DateTime::parse_from_rfc3339(&start)?;
     let end_dt = chrono::DateTime::parse_from_rfc3339(&end)?;
     let start_ns = start_dt.timestamp_nanos_opt().unwrap_or(0);
