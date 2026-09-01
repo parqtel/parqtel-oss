@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>parqtel | console</title>
 <style>
-:root{--bg-void:#070a0e;--bg-surface:#0f141c;--bg-raised:#161d28;--bg-overlay:#1e293b;--border-subtle:#1e293b;--border-default:#2d3f55;--border-focus:#00F5D4;--text-primary:#e2e8f0;--text-secondary:#7a8fa6;--text-muted:#3d5166;--accent:#00F5D4;--accent-dim:#00b89e;--err:#f87171;--warn:#fbbf24;--info:#00F5D4;--debug:#475569;--fatal:#ff1a40;--mono:ui-monospace,'SF Mono',Menlo,Consolas,'Liberation Mono',monospace;--sans:ui-sans-serif,-apple-system,'Segoe UI',Roboto,sans-serif;--c0:#00F5D4;--c1:#4488ff;--c2:#ffcc00;--c3:#ff6688;--c4:#88ffcc;--c5:#ff8844;--c6:#cc88ff;--c7:#44ccff;--space-1:4px;--space-2:8px;--space-3:12px;--space-4:16px;--space-5:20px;--space-6:24px;--space-7:28px;--space-8:32px;}
+:root{--bg-void:#070a0e;--bg-surface:#0f141c;--bg-raised:#161d28;--bg-overlay:#1e293b;--border-subtle:#1e293b;--border-default:#2d3f55;--border-focus:#00F5D4;--text-primary:#e2e8f0;--text-secondary:#8fa3ba;--text-muted:#74889f;--accent:#00F5D4;--accent-dim:#00b89e;--err:#f87171;--warn:#fbbf24;--info:#00F5D4;--debug:#8b9bb4;--fatal:#ff1a40;--radius-sm:4px;--radius-md:6px;--mono:ui-monospace,'SF Mono',Menlo,Consolas,'Liberation Mono',monospace;--sans:ui-sans-serif,-apple-system,'Segoe UI',Roboto,sans-serif;--c0:#00F5D4;--c1:#4488ff;--c2:#ffcc00;--c3:#ff6688;--c4:#88ffcc;--c5:#ff8844;--c6:#cc88ff;--c7:#44ccff;--space-1:4px;--space-2:8px;--space-3:12px;--space-4:16px;--space-5:20px;--space-6:24px;--space-7:28px;--space-8:32px;}
 *{box-sizing:border-box;margin:0;padding:0;}
 body{background:var(--bg-void);color:var(--text-primary);font-family:var(--sans);font-size:13px;line-height:1.5;height:100vh;overflow:hidden;display:flex;flex-direction:column;color-scheme:dark;}
 header{height:48px;flex-shrink:0;background:var(--bg-void);border-bottom:1px solid var(--border-subtle);display:flex;align-items:center;padding:0 16px;gap:12px;z-index:50;}
@@ -44,6 +44,14 @@ header{height:48px;flex-shrink:0;background:var(--bg-void);border-bottom:1px sol
 @keyframes toastIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
 /* LIVE TAIL */
 .live-dot{width:6px;height:6px;border-radius:50%;background:#10b981;animation:pulse 1.5s infinite;margin-right:4px;}
+
+/* REDUCED MOTION */
+@media (prefers-reduced-motion: reduce){*,*::before,*::after{animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important;}.sdot.ok{animation:none;}}
+/* SKELETON */
+.skel{background:linear-gradient(90deg,var(--bg-raised) 25%,var(--bg-overlay) 50%,var(--bg-raised) 75%);background-size:200% 100%;animation:shimmer 1.2s infinite linear;border-radius:var(--radius-sm);}
+@keyframes shimmer{0%{background-position:200% 0}100%{background-position:-200% 0}}
+.skel-row{height:30px;margin-bottom:8px;}
+.skel-chart{height:200px;margin:12px 14px;}
 /* TRACES */
 #trace-waterfall{flex:1;display:flex;flex-direction:column;min-height:0;}
 #trace-header{flex-shrink:0;display:flex;align-items:center;padding:8px 12px;gap:12px;border-bottom:1px solid var(--border-subtle);background:var(--bg-surface);font-family:var(--mono);font-size:11px;}
@@ -178,7 +186,8 @@ header{height:48px;flex-shrink:0;background:var(--bg-void);border-bottom:1px sol
 #step-lbl{font-size:10px;color:var(--text-muted);font-family:var(--mono);white-space:nowrap;}
 .tsep{width:1px;height:18px;background:var(--border-default);flex-shrink:0;}
 .nav-tabs{display:flex;gap:2px;background:var(--bg-surface);padding:2px;border-radius:6px;}
-.nav-tab{padding:4px 12px;border-radius:4px;font-size:11px;font-weight:800;text-transform:uppercase;color:var(--text-secondary);cursor:pointer;border:none;background:transparent;letter-spacing:.05em;display:flex;align-items:center;gap:4px;}
+.nav-tab{padding:4px 12px;border-radius:4px;font-size:11px;font-weight:800;text-transform:uppercase;color:var(--text-secondary);cursor:pointer;border:none;background:transparent;letter-spacing:.05em;display:flex;align-items:center;gap:5px;}
+.nav-tab .tab-ic{width:13px;height:13px;flex-shrink:0;}
 .nav-tab.active{background:var(--bg-raised);color:var(--accent);}
 .nav-badge{display:inline-block;min-width:16px;height:16px;border-radius:8px;font-size:9px;font-weight:700;text-align:center;line-height:16px;padding:0 4px;}
 .nav-badge.crit{background:var(--err);color:#fff;}
@@ -336,6 +345,30 @@ header{height:48px;flex-shrink:0;background:var(--bg-void);border-bottom:1px sol
 </style>
 </head>
 <body>
+<svg style="display:none" aria-hidden="true"><defs>
+<symbol id="i-activity" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></symbol>
+<symbol id="i-logs" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M16 13H8M16 17H8M10 9H8"/></symbol>
+<symbol id="i-trace" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12h4l3-8 4 16 3-8h4"/></symbol>
+<symbol id="i-traces" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 6h4l2-4 4 12 2-4h8"/><path d="M2 18h4l2-4 2 6"/></symbol>
+<symbol id="i-bell" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></symbol>
+<symbol id="i-settings" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9c.14.35.4.64.72.84"/></symbol>
+<symbol id="i-search" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></symbol>
+<symbol id="i-clock" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></symbol>
+<symbol id="i-x" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18M6 6l12 12"/></symbol>
+<symbol id="i-chev-l" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></symbol>
+<symbol id="i-chev-r" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></symbol>
+<symbol id="i-zoom-out" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35M8 11h6"/></symbol>
+<symbol id="i-star" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 2 3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01z"/></symbol>
+<symbol id="i-link" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></symbol>
+<symbol id="i-cpu" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M9 1v3M15 1v3M9 20v3M15 20v3M20 9h3M20 14h3M1 9h3M1 14h3"/></symbol>
+<symbol id="i-zap" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z"/></symbol>
+<symbol id="i-keyboard" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="M6 8h.01M10 8h.01M14 8h.01M18 8h.01M8 12h.01M12 12h.01M16 12h.01M7 16h10"/></symbol>
+<symbol id="i-bot" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="8" width="16" height="12" rx="2"/><path d="M12 8V4M8 4h8"/><circle cx="9" cy="13" r=".5"/><circle cx="15" cy="13" r=".5"/><path d="M9 17h6"/></symbol>
+<symbol id="i-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></symbol>
+<symbol id="i-thumbs-up" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 10v12"/><path d="M15 5.88 14 10h5.83a2 2 0 0 1 1.92 2.56l-2.33 8A2 2 0 0 1 16.5 22H2"/><path d="M7 10H4.12a2 2 0 0 0-1.98 2.36l1.6 9A2 2 0 0 0 5.72 24H7"/></symbol>
+<symbol id="i-thumbs-down" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 14V2"/><path d="M9 18.12 10 14H4.17a2 2 0 0 1-1.92-2.56l2.33-8A2 2 0 0 1 7.5 2H22"/><path d="M17 14h2.88a2 2 0 0 0 1.98-2.36l-1.6-9A2 2 0 0 0 18.28 0H17"/></symbol>
+<symbol id="i-copy" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></symbol>
+</defs></svg>
 <div id="loading-bar"></div>
 <header>
   <div style="display:flex;align-items:center;gap:8px;">
@@ -347,10 +380,10 @@ header{height:48px;flex-shrink:0;background:var(--bg-void);border-bottom:1px sol
     <div id="ac-drop"></div>
   </div>
   <nav class="nav-tabs" id="signal-tabs" role="tablist" aria-label="Signal type">
-    <button class="nav-tab active" data-sig="metrics" role="tab" aria-selected="true" aria-controls="view-metrics">📈 Metrics</button>
-    <button class="nav-tab" data-sig="logs" role="tab" aria-selected="false" aria-controls="view-logs">🪵 Logs</button>
-    <button class="nav-tab" data-sig="traces" role="tab" aria-selected="false" aria-controls="view-traces">🧬 Traces</button>
-    <button class="nav-tab" data-sig="alerts" role="tab" aria-selected="false" aria-controls="view-alerts">🔔 Alerts<span class="nav-badge crit" id="alert-badge" style="display:none" aria-live="polite">0</span></button>
+    <button class="nav-tab active" data-sig="metrics" role="tab" aria-selected="true" aria-controls="view-metrics"><svg class="tab-ic"><use href="#i-activity"/></svg> Metrics</button>
+    <button class="nav-tab" data-sig="logs" role="tab" aria-selected="false" aria-controls="view-logs"><svg class="tab-ic"><use href="#i-logs"/></svg> Logs</button>
+    <button class="nav-tab" data-sig="traces" role="tab" aria-selected="false" aria-controls="view-traces"><svg class="tab-ic"><use href="#i-traces"/></svg> Traces</button>
+    <button class="nav-tab" data-sig="alerts" role="tab" aria-selected="false" aria-controls="view-alerts"><svg class="tab-ic"><use href="#i-bell"/></svg> Alerts<span class="nav-badge crit" id="alert-badge" style="display:none" aria-live="polite">0</span></button>
   </nav>
   <div class="sdot" id="sdot" title="Connecting…"></div>
   <div style="flex:1"></div>
@@ -523,7 +556,8 @@ function showWarn(msg){tx(E.bannerTxt,msg);E.banner.classList.add('visible');E.b
 function showError(msg){tx(E.bannerTxt,msg);E.banner.classList.add('visible');E.banner.style.cssText='display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid rgba(244,63,94,.3);background:rgba(244,63,94,.07);padding:5px 16px;font-size:11px;font-family:var(--mono);color:var(--err);';setStatus(false);}
 
 /* QUERY */
-async function runQuery(){if(ST.sig==='alerts')return;E.lb.classList.add('on');closeBanner();if(E.tFrom.value&&E.tTo.value){ST.range.startNs=new Date(E.tFrom.value).getTime()*1e6;ST.range.endNs=new Date(E.tTo.value).getTime()*1e6;}const step=computeStep();const raw=(E.qIn.value||'').trim();try{if(ST.sig==='metrics')await queryMetrics(raw,step);else if(ST.sig==='logs')await queryLogs(raw);else if(ST.sig==='traces')await queryTraces(raw);renderHistogram();}catch(e){if(e.name==='AbortError')return;if(!raw){setStatus(true);renderMetrics();return;}showError(e.message);}finally{E.lb.classList.remove('on');}}
+async function runQuery(){if(ST.sig==='alerts')return;E.lb.classList.add('on');closeBanner();showSkeleton(ST.sig);if(E.tFrom.value&&E.tTo.value){ST.range.startNs=new Date(E.tFrom.value).getTime()*1e6;ST.range.endNs=new Date(E.tTo.value).getTime()*1e6;}const step=computeStep();const raw=(E.qIn.value||'').trim();try{if(ST.sig==='metrics')await queryMetrics(raw,step);else if(ST.sig==='logs')await queryLogs(raw);else if(ST.sig==='traces')await queryTraces(raw);renderHistogram();}catch(e){if(e.name==='AbortError')return;if(!raw){setStatus(true);renderMetrics();return;}showError(e.message);}finally{E.lb.classList.remove('on');}}
+function showSkeleton(sig){if(sig==='metrics'){E.chartArea.innerHTML='<div class="skel skel-chart"></div>';E.legend.innerHTML='';E.tblCanvas.innerHTML='';}else if(sig==='logs'){E.logsScroll.innerHTML='<div style="padding:12px"><div class="skel skel-row"></div><div class="skel skel-row" style="width:92%"></div><div class="skel skel-row" style="width:97%"></div><div class="skel skel-row" style="width:88%"></div><div class="skel skel-row" style="width:95%"></div><div class="skel skel-row" style="width:90%"></div><div class="skel skel-row" style="width:93%"></div></div>';}else if(sig==='traces'){$('trace-chart').innerHTML='<div style="padding:12px"><div class="skel skel-row"></div><div class="skel skel-row" style="width:85%"></div><div class="skel skel-row" style="width:95%"></div><div class="skel skel-row" style="width:80%"></div><div class="skel skel-row" style="width:90%"></div></div>';}}
 async function queryMetrics(raw,step){const start=ST.range.startNs/1e9,end=ST.range.endNs/1e9;let q=raw;if(q&&!q.includes('{')&&!q.includes('(')&&q!=='{}')q=q+'{}';if(!q||q==='{}'){if(ST.server.names.length>0){q=ST.server.names[0];if(!raw)E.qIn.value=q;}else{await prefetch();if(ST.server.names.length>0){q=ST.server.names[0];if(!raw)E.qIn.value=q;}else{ST.metrics.result=[];renderMetrics();return;}}}const url=`/api/v1/query_range?query=${encodeURIComponent(q)}&start=${start}&end=${end}&step=${Math.max(1,Math.floor(step))}s`;const res=await apiFetch(url);if(res.status!=='success'){throw new Error(res.error||'Query failed');}const data=res.data||{};ST.metrics.result=data.result||[];ST.metrics.total=data.totalSeriesCount||ST.metrics.result.length;ST.metrics.volSummary=data.volumeSummary||null;setStatus(true);renderMetrics();}
 async function queryLogs(raw){const start=ST.range.startNs/1e9,end=ST.range.endNs/1e9;const q=raw||'{}';const url=`/api/v1/logs?query=${encodeURIComponent(q)}&start=${start}&end=${end}&limit=2000&order=desc`;try{const r=await apiFetch(url);const d=r.data||r;ST.logs.result=d.logs||d||[];}catch(e){ST.logs.result=[];if(e.name!=='AbortError')showWarn('Logs: '+e.message);}setStatus(true);renderLogs();}
 /* HISTOGRAM */
@@ -664,7 +698,7 @@ function buildCard(rec){const card=document.createElement('div');card.className=
   const tid=attrs.trace_id||attrs.traceId||rec.trace_id;const sid=attrs.span_id||attrs.spanId||rec.span_id;
   if(tid||sid){const s4=mkLogSec('Trace Context');if(tid){const tb=document.createElement('div');tb.className='log-kvpair';const tk=document.createElement('span');tk.className='log-kvkey';tk.textContent='trace_id';const tv=document.createElement('span');tv.className='lbadge';tv.textContent=tid;tv.style.cursor='pointer';tv.title='View trace';tv.onclick=()=>{E.qIn.value=tid;switchSig('traces');};tb.append(tk,tv);s4.appendChild(tb);}if(sid){const sb=document.createElement('div');sb.className='log-kvpair';const sk=document.createElement('span');sk.className='log-kvkey';sk.textContent='span_id';const sv=document.createElement('span');sv.className='lbadge';sv.textContent=sid;sb.append(sk,sv);s4.appendChild(sb);}card.appendChild(s4);}
   const acts=document.createElement('div');acts.style.cssText='margin-top:8px;display:flex;gap:6px;';
-  const relBtn=document.createElement('button');relBtn.className='log-actbtn';relBtn.textContent='📈 Find related metrics';relBtn.onclick=()=>{const svc=res['service.name']||'';const pod=res['k8s.pod.name']||'';const dim=pod?'k8s.pod.name':svc?'service.name':'';if(dim)enterCorrelation(rec.timestamp_ns/1e6,dim,'logs');else{switchSig('metrics');}};
+  const relBtn=document.createElement('button');relBtn.className='log-actbtn';relBtn.textContent='Find related metrics';relBtn.onclick=()=>{const svc=res['service.name']||'';const pod=res['k8s.pod.name']||'';const dim=pod?'k8s.pod.name':svc?'service.name':'';if(dim)enterCorrelation(rec.timestamp_ns/1e6,dim,'logs');else{switchSig('metrics');}};
   acts.appendChild(relBtn);card.appendChild(acts);
   return card;}
 function mkLogSec(t){const d=document.createElement('div');d.className='log-card-section';const h=document.createElement('div');h.className='log-card-title';h.textContent=t;d.appendChild(h);return d;}
@@ -783,14 +817,14 @@ function renderOverview(a,body){
   // RCA section
   if(a.rca){renderRCA(a.rca,body);}
   else if(a.state==='Firing'||a.state==='firing'){
-    const ai=document.createElement('div');ai.className='rca-box';ai.innerHTML='<div class="rca-header"><span style="font-size:12px;">🤖 Root Cause Analysis</span><span class="rca-model">Analysing…</span></div><div class="rca-conf"><div class="rca-conf-fill" style="width:0%;animation:sweep 2s infinite;"></div></div><p style="font-size:11px;color:var(--text-muted);">AI is investigating this alert…</p>';
+    const ai=document.createElement('div');ai.className='rca-box';ai.innerHTML='<div class="rca-header"><span style="font-size:12px;display:flex;align-items:center;gap:6px;"><svg class="tab-ic"><use href="#i-bot"/></svg> Root Cause Analysis</span><span class="rca-model">Analysing…</span></div>'<div class="rca-conf"><div class="rca-conf-fill" style="width:0%;animation:sweep 2s infinite;"></div></div><p style="font-size:11px;color:var(--text-muted);">AI is investigating this alert…</p>';
     body.appendChild(ai);
   }
 }
 function renderRCA(rca,body){
   const box=document.createElement('div');box.className='rca-box';
   const hdr=document.createElement('div');hdr.className='rca-header';
-  hdr.innerHTML=`<span style="font-size:12px;">🤖 Root Cause Analysis</span><span class="rca-model">Model: ${rca.model||'claude-sonnet'}</span>`;
+  hdr.innerHTML=`<span style="font-size:12px;display:flex;align-items:center;gap:6px;"><svg class="tab-ic"><use href="#i-bot"/></svg> Root Cause Analysis</span><span class="rca-model">Model: ${rca.model||'claude-sonnet'}</span>`;
   box.appendChild(hdr);
   const conf=document.createElement('div');conf.innerHTML=`<span style="font-size:10px;color:var(--text-muted);">Confidence: ${Math.round((rca.confidence||0)*100)}%</span><div class="rca-conf"><div class="rca-conf-fill" style="width:${(rca.confidence||0)*100}%"></div></div>`;
   box.appendChild(conf);
@@ -798,7 +832,7 @@ function renderRCA(rca,body){
   if(rca.evidence&&rca.evidence.length){const s=document.createElement('div');s.className='rca-section';s.innerHTML=`<div class="rca-section-title">Evidence Used</div><ul style="margin-left:16px;font-size:11px;color:var(--text-secondary);">${rca.evidence.map(e=>`<li>${esc(e)}</li>`).join('')}</ul>`;box.appendChild(s);}
   if(rca.actions&&rca.actions.length){const s=document.createElement('div');s.className='rca-section';s.innerHTML=`<div class="rca-section-title">Recommended Actions</div><ol style="margin-left:16px;font-size:11px;color:var(--text-secondary);">${rca.actions.map(e=>`<li>${esc(e)}</li>`).join('')}</ol>`;box.appendChild(s);}
   const acts=document.createElement('div');acts.className='rca-actions';
-  acts.innerHTML=`<button class="rca-btn" data-act="signal">👍 This helped</button><button class="rca-btn" data-act="noise">👎 Incorrect</button><button class="rca-btn" data-act="copy">📋 Copy</button>`;
+  acts.innerHTML=`<button class="rca-btn" data-act="signal">This helped</button><button class="rca-btn" data-act="noise">Incorrect</button><button class="rca-btn" data-act="copy">Copy</button>`;
   box.appendChild(acts);body.appendChild(box);
   acts.addEventListener('click',e=>{const btn=e.target.closest('[data-act]');if(!btn)return;const id=ST.alerts.list[ST.alerts.selIdx]?.id;if(!id)return;if(btn.dataset.act==='signal')apiPost(`/api/v1/alerts/${id}/signal`);else if(btn.dataset.act==='noise')apiPost(`/api/v1/alerts/${id}/noise`);else if(btn.dataset.act==='copy')navigator.clipboard.writeText(rca.primary_cause||'');});
 }
@@ -824,7 +858,7 @@ function renderActions(a,body){
 function esc(s){const d=document.createElement('div');d.textContent=s;return d.innerHTML;}
 /* RULES VIEW */
 async function renderRulesView(){
-  const container=$('alert-rules-view');container.innerHTML='<p style="color:var(--text-muted);font-size:11px;">Loading rules…</p>';
+  const container=$('alert-rules-view');container.innerHTML='<div style="padding:12px"><div class="skel skel-row"></div><div class="skel skel-row" style="width:90%"></div><div class="skel skel-row" style="width:85%"></div></div>';
   try{const r=await fetch('/api/v1/rules');const j=await r.json();const rules=j.data||[];
   if(!rules.length){container.innerHTML='<div class="empty-c"><p>No alert rules configured</p></div>';return;}
   let html='<table class="rules-table"><thead><tr><th>Name</th><th>Type</th><th>Severity</th><th>Noise</th><th>Enabled</th><th>Actions</th></tr></thead><tbody>';
@@ -863,7 +897,7 @@ async function renderProposalsView(){
   proposals.forEach(p=>{
     const card=document.createElement('div');card.className='proposal-card';
     const prop=p.proposal||p;
-    card.innerHTML=`<div class="proposal-header"><span style="font-size:12px;font-weight:600;">Rule: ${esc(prop.rule_id||p.rule_id||'')}</span><span class="proposal-badge">🤖 AI Proposed</span></div><div class="proposal-meta">Noise Score: ${(prop.noise_score||0).toFixed(2)} | Confidence: ${Math.round((prop.confidence||0)*100)}%</div><div class="rca-section"><div class="rca-section-title">Proposed Change</div><p style="font-size:12px;color:var(--text-primary);">${esc(prop.description||prop.change_description||'')}</p></div>${prop.rationale?`<div class="rca-section"><div class="rca-section-title">Rationale</div><p style="font-size:11px;color:var(--text-secondary);">${esc(prop.rationale)}</p></div>`:''}<div class="proposal-diff">${prop.before?`<div class="before">BEFORE: ${esc(prop.before)}</div>`:''} ${prop.after?`<div class="after">AFTER: ${esc(prop.after)}</div>`:''}</div><div class="proposal-actions"><button class="btn-approve" data-pid="${p.id||p.proposal_id}">✓ Approve</button><button class="btn-reject" data-pid="${p.id||p.proposal_id}">✗ Reject</button></div><div class="reject-input" id="rej-${p.id||p.proposal_id}"><input type="text" placeholder="Why are you rejecting? (required)"><button disabled>Confirm Reject</button></div>`;
+    card.innerHTML=`<div class="proposal-header"><span style="font-size:12px;font-weight:600;">Rule: ${esc(prop.rule_id||p.rule_id||'')}</span><span class="proposal-badge">AI Proposed</span></div><div class="proposal-meta">Noise Score: ${(prop.noise_score||0).toFixed(2)} | Confidence: ${Math.round((prop.confidence||0)*100)}%</div><div class="rca-section"><div class="rca-section-title">Proposed Change</div><p style="font-size:12px;color:var(--text-primary);">${esc(prop.description||prop.change_description||'')}</p></div>${prop.rationale?`<div class="rca-section"><div class="rca-section-title">Rationale</div><p style="font-size:11px;color:var(--text-secondary);">${esc(prop.rationale)}</p></div>`:''}<div class="proposal-diff">${prop.before?`<div class="before">BEFORE: ${esc(prop.before)}</div>`:''} ${prop.after?`<div class="after">AFTER: ${esc(prop.after)}</div>`:''}</div><div class="proposal-actions"><button class="btn-approve" data-pid="${p.id||p.proposal_id}">Approve</button><button class="btn-reject" data-pid="${p.id||p.proposal_id}">Reject</button></div><div class="reject-input" id="rej-${p.id||p.proposal_id}"><input type="text" placeholder="Why are you rejecting? (required)"><button disabled>Confirm Reject</button></div>`;
     container.appendChild(card);
   });
   container.addEventListener('click',e=>{
