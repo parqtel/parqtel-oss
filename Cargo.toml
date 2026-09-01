@@ -20,7 +20,7 @@ resolver = "2"
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.86" # icu 2.x (via url/reqwest) requires 1.86; keep in sync with Dockerfile RUST_VERSION and ci.yml MSRV
+rust-version = "1.87" # comfy-table 7.2+ (via arrow 59) requires 1.87
 authors = ["parqtel team"]
 license = "Apache-2.0"
 description = "An ultra-lightweight SRE observability tool for streaming OTel metrics and logs into compressed Parquet chunks"
@@ -48,6 +48,7 @@ hex = "0.4"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "chrono"] }
 tower = "0.4"
+comfy-table = "7.1"
 tower-http = { version = "0.5", features = ["cors", "trace", "limit", "timeout"] }
 ahash = "0.8"
 tempfile = "3"
