@@ -1,6 +1,6 @@
 use crate::models::labels::LabelSet;
-use arrow2::array::{Array, DictionaryArray, Utf8Array};
-use arrow2::chunk::Chunk;
+use arrow::record_batch::RecordBatch;
+use arrow_array::{Array, DictionaryArray, StringArray};
 
 #[derive(Default)]
 pub(crate) struct CorrelationLabels {
@@ -37,20 +37,20 @@ pub(crate) fn extract_correlation_labels(labels: &LabelSet) -> (LabelSet, Correl
     )
 }
 
-/// Reads correlation columns from a chunk row starting at `start_idx`.
-pub(crate) fn row_to_correlation<A: AsRef<dyn Array>>(
-    chunk: &Chunk<A>,
+/// Reads correlation columns from a record batch row starting at `start_idx`.
+pub(crate) fn row_to_correlation(
+    batch: &RecordBatch,
     row: usize,
     start_idx: usize,
 ) -> CorrelationLabels {
     CorrelationLabels {
-        service_name: get_dict_val(chunk, row, start_idx),
-        service_version: get_dict_val(chunk, row, start_idx + 1),
-        k8s_namespace: get_dict_val(chunk, row, start_idx + 2),
-        k8s_pod_name: get_dict_val(chunk, row, start_idx + 3),
-        k8s_pod_uid: get_dict_val(chunk, row, start_idx + 4),
-        k8s_container_name: get_dict_val(chunk, row, start_idx + 5),
-        k8s_node_name: get_dict_val(chunk, row, start_idx + 6),
+        service_name: get_dict_val(batch, row, start_idx),
+        service_version: get_dict_val(batch, row, start_idx + 1),
+        k8s_namespace: get_dict_val(batch, row, start_idx + 2),
+        k8s_pod_name: get_dict_val(batch, row, start_idx + 3),
+        k8s_pod_uid: get_dict_val(batch, row, start_idx + 4),
+        k8s_container_name: get_dict_val(batch, row, start_idx + 5),
+        k8s_node_name: get_dict_val(batch, row, start_idx + 6),
     }
 }
 
@@ -87,14 +87,14 @@ pub(crate) fn inject_correlation(mut labels: LabelSet, correlation: CorrelationL
     labels
 }
 
-fn get_dict_val<A: AsRef<dyn Array>>(chunk: &Chunk<A>, row: usize, idx: usize) -> Option<String> {
-    let arr = chunk.arrays()[idx]
-        .as_ref()
+fn get_dict_val(batch: &RecordBatch, row: usize, idx: usize) -> Option<String> {
+    let arr = batch
+        .column(idx)
         .as_any()
-        .downcast_ref::<DictionaryArray<i32>>()?;
+        .downcast_ref::<DictionaryArray<arrow_array::types::Int32Type>>()?;
     if arr.is_null(row) {
         return None;
     }
-    let values = arr.values().as_any().downcast_ref::<Utf8Array<i32>>()?;
+    let values = arr.values().as_any().downcast_ref::<StringArray>()?;
     Some(values.value(arr.keys().value(row) as usize).to_string())
 }

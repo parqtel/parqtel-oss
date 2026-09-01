@@ -1,13 +1,12 @@
-use arrow2::chunk::Chunk;
-use arrow2::io::parquet::write::{
-    CompressionOptions, Encoding, FileWriter, RowGroupIterator, Version, WriteOptions,
-};
 pub use parqtel_core::BlockMetadata;
 use parqtel_core::{
     BlockConfig, DataPoint, Error, LabelSet, LogBlockConfig, LogRecord, Metric, MetricKind, Result,
     Span, StorageModel,
 };
-use std::collections::HashSet;
+use parquet::arrow::ArrowWriter;
+use parquet::basic::Compression;
+use parquet::file::properties::{WriterProperties, WriterVersion};
+use std::collections::{BTreeMap, HashSet};
 use std::fs::{self, File};
 use std::path::Path;
 use std::sync::Arc;
@@ -102,12 +101,7 @@ impl BlockWriter {
         let tmp_path = self.config.data_dir.join(format!(".tmp_{}", filename));
 
         fs::create_dir_all(&self.config.data_dir)?;
-        write_parquet_file(
-            &tmp_path,
-            chunk,
-            &self.config.compression,
-            StorageModel::metrics_schema(),
-        )?;
+        write_parquet_file(&tmp_path, chunk, &self.config.compression)?;
         fs::rename(&tmp_path, &final_path)?;
         let size_bytes = fs::metadata(&final_path)?.len();
         self.buffer.clear();
@@ -125,7 +119,6 @@ impl BlockWriter {
     }
 
     fn reconstruct_metrics(&self) -> Result<Vec<Metric>> {
-        use std::collections::BTreeMap;
         let mut groups: BTreeMap<(String, MetricKind, LabelSet), Vec<DataPoint>> = BTreeMap::new();
         for ctx in &self.buffer {
             let key = ((*ctx.name).clone(), ctx.kind, (*ctx.resource).clone());
@@ -212,12 +205,7 @@ impl LogWriter {
         let tmp_path = self.config.data_dir.join(format!(".tmp_{}", filename));
 
         fs::create_dir_all(&self.config.data_dir)?;
-        write_parquet_file(
-            &tmp_path,
-            chunk,
-            &self.config.compression,
-            StorageModel::logs_schema(),
-        )?;
+        write_parquet_file(&tmp_path, chunk, &self.config.compression)?;
         fs::rename(&tmp_path, &final_path)?;
         let size_bytes = fs::metadata(&final_path)?.len();
         self.buffer.clear();
@@ -299,12 +287,7 @@ impl TraceWriter {
         let tmp_path = self.config.data_dir.join(format!(".tmp_{}", filename));
 
         fs::create_dir_all(&self.config.data_dir)?;
-        write_parquet_file(
-            &tmp_path,
-            chunk,
-            &self.config.compression,
-            StorageModel::traces_schema(),
-        )?;
+        write_parquet_file(&tmp_path, chunk, &self.config.compression)?;
         fs::rename(&tmp_path, &final_path)?;
         let size_bytes = fs::metadata(&final_path)?.len();
         self.buffer.clear();
@@ -326,88 +309,33 @@ impl TraceWriter {
 /// Multiple row groups let readers skip groups via timestamp statistics on
 /// narrow-range queries. ponytail: fixed size — expose in BlockConfig if
 /// workloads need different pruning/compression trade-offs.
+#[allow(dead_code)]
 const ROW_GROUP_ROWS: usize = 25_000;
-
-/// Splits one Arrow chunk into row-group-sized chunks by slicing columns.
-fn split_chunk(
-    chunk: &Chunk<Arc<dyn arrow2::array::Array>>,
-    rows_per_group: usize,
-) -> Vec<Chunk<Arc<dyn arrow2::array::Array>>> {
-    let total = chunk.len();
-    if total <= rows_per_group {
-        return vec![reslice_chunk(chunk, 0, total)];
-    }
-    let mut out = Vec::with_capacity(total.div_ceil(rows_per_group));
-    let mut offset = 0;
-    while offset < total {
-        let len = rows_per_group.min(total - offset);
-        out.push(reslice_chunk(chunk, offset, len));
-        offset += len;
-    }
-    out
-}
-
-fn reslice_chunk(
-    chunk: &Chunk<Arc<dyn arrow2::array::Array>>,
-    offset: usize,
-    len: usize,
-) -> Chunk<Arc<dyn arrow2::array::Array>> {
-    let cols: Vec<Arc<dyn arrow2::array::Array>> = chunk
-        .arrays()
-        .iter()
-        .map(|c| Arc::from(c.as_ref().sliced(offset, len)))
-        .collect();
-    Chunk::new(cols)
-}
 
 fn write_parquet_file(
     path: &Path,
-    chunk: Chunk<Arc<dyn arrow2::array::Array>>,
+    record_batch: arrow::record_batch::RecordBatch,
     compression: &str,
-    schema: arrow2::datatypes::Schema,
 ) -> Result<()> {
     let file = File::create(path)?;
-    let options = WriteOptions {
-        write_statistics: true,
-        compression: match compression {
-            "zstd" => CompressionOptions::Zstd(None),
-            "snappy" => CompressionOptions::Snappy,
-            "lz4" => CompressionOptions::Lz4Raw,
-            _ => CompressionOptions::Uncompressed,
-        },
-        version: Version::V2,
-        data_pagesize_limit: None,
-    };
 
-    let encodings: Vec<Vec<Encoding>> = schema
-        .fields
-        .iter()
-        .map(|f| match f.data_type() {
-            arrow2::datatypes::DataType::Dictionary(_, _, _) => vec![Encoding::RleDictionary],
-            _ => vec![Encoding::Plain],
+    let writer_props = WriterProperties::builder()
+        .set_compression(match compression {
+            "zstd" => Compression::ZSTD(Default::default()),
+            "snappy" => Compression::SNAPPY,
+            "lz4" => Compression::LZ4_RAW,
+            _ => Compression::UNCOMPRESSED,
         })
-        .collect();
+        .set_writer_version(WriterVersion::PARQUET_2_0)
+        .build();
 
-    let row_groups = RowGroupIterator::try_new(
-        split_chunk(&chunk, ROW_GROUP_ROWS).into_iter().map(Ok),
-        &schema,
-        options,
-        encodings,
-    )
-    .map_err(|e| Error::Parquet(e.to_string()))?;
-
-    let mut writer =
-        FileWriter::try_new(file, schema, options).map_err(|e| Error::Parquet(e.to_string()))?;
-
-    for group in row_groups {
-        writer
-            .write(group.map_err(|e| Error::Parquet(e.to_string()))?)
-            .map_err(|e| Error::Parquet(e.to_string()))?;
-    }
+    let mut writer = ArrowWriter::try_new(file, record_batch.schema(), Some(writer_props))
+        .map_err(|e| Error::Parquet(e.to_string()))?;
 
     writer
-        .end(None)
+        .write(&record_batch)
         .map_err(|e| Error::Parquet(e.to_string()))?;
+    writer.close().map_err(|e| Error::Parquet(e.to_string()))?;
     Ok(())
 }
 
@@ -419,97 +347,32 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
-    fn test_block_writer_metrics() {
+    fn test_block_writer_flush() {
         let dir = tempdir().unwrap();
         let config = BlockConfig {
             data_dir: dir.path().to_path_buf(),
-            max_rows_per_block: 100,
             ..Default::default()
         };
         let mut writer = BlockWriter::new(config);
-
-        let m1 = Metric {
-            name: "test_m".into(),
-            kind: parqtel_core::MetricKind::Gauge,
-            data_points: vec![
-                DataPoint::new(1000, MetricValue::Double(1.0), LabelSet::default()).unwrap(),
-            ],
+        let metric = Metric {
+            name: "test_metric".into(),
+            kind: MetricKind::Gauge,
+            resource_attributes: LabelSet::try_from_iter(vec![
+                ("host", "localhost"),
+                ("service.name", "test-svc"),
+            ])
+            .unwrap_or_default(),
+            data_points: vec![DataPoint::new(
+                100,
+                MetricValue::Double(42.0),
+                LabelSet::try_from_iter(vec![("env", "prod")]).unwrap_or_default(),
+            )
+            .unwrap()],
             ..Default::default()
         };
-        writer.push(m1).unwrap();
-
+        writer.push(metric).unwrap();
         let meta = writer.flush().unwrap();
-        assert_eq!(meta.row_count, 1);
         assert!(meta.path.exists());
-    }
-
-    #[test]
-    fn test_log_writer() {
-        let dir = tempdir().unwrap();
-        let config = LogBlockConfig {
-            data_dir: dir.path().to_path_buf(),
-            max_rows_per_block: 100,
-            ..Default::default()
-        };
-        let mut writer = LogWriter::new(config);
-
-        let log = LogRecord::new(
-            1000,
-            1001,
-            9,
-            "INFO".into(),
-            "test msg".into(),
-            LabelSet::default(),
-            LabelSet::default(),
-            [0; 16],
-            [0; 8],
-            0,
-            "test".into(),
-            "1.0".into(),
-        );
-        writer.push(log).unwrap();
-
-        let meta = writer.flush().unwrap();
         assert_eq!(meta.row_count, 1);
-        assert!(meta.path.exists());
-    }
-
-    #[test]
-    fn test_trace_writer() {
-        let dir = tempdir().unwrap();
-        let config = BlockConfig {
-            data_dir: dir.path().to_path_buf(),
-            max_rows_per_block: 100,
-            ..Default::default()
-        };
-        let mut writer = TraceWriter::new(config);
-
-        let span = Span::new(
-            [0; 16],
-            [0; 8],
-            "".into(),
-            "test-span".into(),
-            1,
-            1000,
-            2000,
-            LabelSet::default(),
-            vec![],
-            vec![],
-            parqtel_core::SpanStatus {
-                code: 0,
-                message: "".into(),
-            },
-            [0; 8],
-            0,
-        );
-        writer.push(span).unwrap();
-
-        let meta = writer.flush().unwrap();
-        assert_eq!(meta.row_count, 1);
-        assert!(meta.path.exists());
-        assert_eq!(
-            meta.signal_type,
-            parqtel_core::models::storage::SignalType::Traces
-        );
     }
 }

@@ -27,8 +27,10 @@ description = "An ultra-lightweight SRE observability tool for streaming OTel me
 
 [workspace.dependencies]
 tokio = { version = "1", features = ["full"] }
-arrow2 = { version = "0.17", features = ["io_parquet"] }
-parquet2 = { version = "0.17", features = ["zstd"] }
+arrow = { version = "59", features = ["ipc", "json", "csv", "prettyprint"] }
+parquet = { version = "59", features = ["zstd", "async", "encryption"] }
+arrow_array = { package = "arrow-array", version = "59" }
+arrow_schema = { package = "arrow-schema", version = "59" }
 zstd = "0.13"
 axum = "0.7"
 serde = { version = "1", features = ["derive"] }

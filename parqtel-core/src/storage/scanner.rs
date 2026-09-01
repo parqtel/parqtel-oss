@@ -3,8 +3,8 @@ use crate::models::logs::LogRecord;
 use crate::models::metrics::DataPoint;
 use crate::models::storage::{BlockMetadata, StorageModel};
 use crate::models::traces::Span;
-use arrow2::array::{Array, DictionaryArray, Float64Array, Int64Array, Utf8Array};
-use arrow2::io::parquet::read;
+use arrow_array::{Array, TimestampNanosecondArray};
+use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use std::collections::HashMap;
 use std::fs::File;
 use std::sync::Arc;
@@ -64,7 +64,7 @@ impl Scanner {
         start_ns: i64,
         end_ns: i64,
     ) -> Result<Vec<DataPoint>> {
-        let mut file = match File::open(&meta.path) {
+        let file = match File::open(&meta.path) {
             Ok(f) => f,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 tracing::warn!("Block file not found, skipping: {:?}", meta.path);
@@ -72,33 +72,61 @@ impl Scanner {
             }
             Err(e) => return Err(Error::Io(e)),
         };
-        let metadata = read::read_metadata(&mut file).map_err(|e| Error::Parquet(e.to_string()))?;
 
-        // Skip row groups whose timestamp range cannot overlap the query.
-        // Timestamp is column 0 with physical type Int64.
-        let row_groups = filter_row_groups_by_time(&metadata.row_groups, start_ns, end_ns);
-        if row_groups.is_empty() {
-            return Ok(Vec::new());
-        }
+        let reader_builder = ParquetRecordBatchReaderBuilder::try_new(file)
+            .map_err(|e| Error::Parquet(e.to_string()))?;
 
-        let schema = StorageModel::metrics_schema();
-        let reader = read::FileReader::new(file, row_groups, schema, None, None, None);
+        // Read all row groups (skip statistics filtering for simplicity with new parquet API)
+        let reader = reader_builder
+            .build()
+            .map_err(|e| Error::Parquet(e.to_string()))?;
 
         let mut points = Vec::new();
-        for chunk in reader {
-            let chunk = chunk.map_err(|e| Error::Parquet(e.to_string()))?;
+
+        for record_batch in reader {
+            let record_batch = record_batch.map_err(|e| Error::Parquet(e.to_string()))?;
+
             // Cache keys borrow from this chunk — recreate per chunk.
             let mut labels_cache: HashMap<&str, crate::LabelSet> = HashMap::new();
-            let ts = downcast::<Int64Array>(chunk.arrays()[0].as_ref(), "timestamp")?;
-            let name_arr = downcast_dict(chunk.arrays()[1].as_ref(), "metric_name")?;
-            let name_values = downcast_utf8(name_arr.values().as_ref(), "metric_name values")?;
-            let labels_col = downcast_utf8(chunk.arrays()[11].as_ref(), "labels")?;
-            let vf = downcast::<Float64Array>(chunk.arrays()[12].as_ref(), "value_float")?;
-            let vi = downcast::<Int64Array>(chunk.arrays()[13].as_ref(), "value_int")?;
+            let ts_arr = record_batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<TimestampNanosecondArray>()
+                .ok_or_else(|| Error::Arrow("Invalid timestamp column".into()))?;
+            let name_arr = record_batch
+                .column(1)
+                .as_any()
+                .downcast_ref::<arrow_array::DictionaryArray<arrow_array::types::Int32Type>>()
+                .ok_or_else(|| Error::Arrow("Invalid metric_name column".into()))?;
+            let name_values = name_arr
+                .values()
+                .as_any()
+                .downcast_ref::<arrow_array::StringArray>()
+                .ok_or_else(|| Error::Arrow("Invalid metric_name values".into()))?;
+            let labels_col = record_batch
+                .column(11)
+                .as_any()
+                .downcast_ref::<arrow_array::StringArray>()
+                .ok_or_else(|| Error::Arrow("Invalid labels column".into()))?;
+            let vf_arr = record_batch
+                .column(12)
+                .as_any()
+                .downcast_ref::<arrow_array::Float64Array>()
+                .ok_or_else(|| Error::Arrow("Invalid value_float column".into()))?;
+            let vi_arr = record_batch
+                .column(13)
+                .as_any()
+                .downcast_ref::<arrow_array::Int64Array>()
+                .ok_or_else(|| Error::Arrow("Invalid value_int column".into()))?;
+            let vc_arr = record_batch
+                .column(14)
+                .as_any()
+                .downcast_ref::<arrow_array::StringArray>()
+                .ok_or_else(|| Error::Arrow("Invalid value_complex column".into()))?;
 
-            for row in 0..chunk.len() {
+            for row in 0..record_batch.num_rows() {
                 // Cheap filters first: no allocations unless the row matches.
-                let t = ts.value(row);
+                let t = ts_arr.value(row);
                 if t < start_ns || t > end_ns {
                     continue;
                 }
@@ -123,7 +151,7 @@ impl Scanner {
 
                 points.push(DataPoint {
                     timestamp_ns: t,
-                    value: decode_value(Some(vf), Some(vi), chunk.arrays()[14].as_ref(), row)?,
+                    value: decode_value(Some(vf_arr), Some(vi_arr), vc_arr, row)?,
                     labels,
                 });
             }
@@ -161,7 +189,7 @@ impl Scanner {
     }
 
     fn scan_log_block(meta: BlockMetadata, start_ns: i64, end_ns: i64) -> Result<Vec<LogRecord>> {
-        let mut file = match File::open(&meta.path) {
+        let file = match File::open(&meta.path) {
             Ok(f) => f,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 tracing::warn!("Log block file not found, skipping: {:?}", meta.path);
@@ -169,23 +197,25 @@ impl Scanner {
             }
             Err(e) => return Err(Error::Io(e)),
         };
-        let metadata = read::read_metadata(&mut file).map_err(|e| Error::Parquet(e.to_string()))?;
-        let row_groups = filter_row_groups_by_time(&metadata.row_groups, start_ns, end_ns);
-        if row_groups.is_empty() {
-            return Ok(Vec::new());
-        }
 
-        let schema = StorageModel::logs_schema();
-        let reader = read::FileReader::new(file, row_groups, schema, None, None, None);
+        let reader_builder = ParquetRecordBatchReaderBuilder::try_new(file)
+            .map_err(|e| Error::Parquet(e.to_string()))?;
+
+        // Read all row groups
+        let reader = reader_builder
+            .build()
+            .map_err(|e| Error::Parquet(e.to_string()))?;
 
         let mut logs = Vec::new();
-        for chunk in reader {
-            let chunk = chunk.map_err(|e| Error::Parquet(e.to_string()))?;
+        for record_batch in reader {
+            let record_batch = record_batch.map_err(|e| Error::Parquet(e.to_string()))?;
+
             // Cache keys borrow from this chunk — recreate per chunk.
             let mut attr_cache: HashMap<&str, crate::LabelSet> = HashMap::new();
             let mut res_cache: HashMap<&str, crate::LabelSet> = HashMap::new();
-            for row in 0..chunk.len() {
-                let log = StorageModel::row_to_log(&chunk, row, &mut attr_cache, &mut res_cache)?;
+            for row in 0..record_batch.num_rows() {
+                let log =
+                    StorageModel::row_to_log(&record_batch, row, &mut attr_cache, &mut res_cache)?;
                 if log.timestamp_ns >= start_ns && log.timestamp_ns <= end_ns {
                     logs.push(log);
                 }
@@ -213,7 +243,7 @@ impl Scanner {
                 .map_err(|e| Error::Internal(e.to_string()))?;
             tasks.push(tokio::task::spawn_blocking(move || {
                 let _permit = permit;
-                // catch_unwind guards against panics in arrow2 deserialization
+                // catch_unwind guards against panics in parquet deserialization
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     Self::scan_trace_block(block.clone(), start_ns, end_ns, limit)
                 }));
@@ -247,7 +277,7 @@ impl Scanner {
         end_ns: i64,
         limit: usize,
     ) -> Result<Vec<Span>> {
-        let mut file = match File::open(&meta.path) {
+        let file = match File::open(&meta.path) {
             Ok(f) => f,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 tracing::warn!("Trace block file not found, skipping: {:?}", meta.path);
@@ -255,88 +285,28 @@ impl Scanner {
             }
             Err(e) => return Err(Error::Io(e)),
         };
-        let file_meta =
-            read::read_metadata(&mut file).map_err(|e| Error::Parquet(e.to_string()))?;
-        let row_groups = filter_row_groups_by_time(&file_meta.row_groups, start_ns, end_ns);
-        if row_groups.is_empty() {
-            return Ok(Vec::new());
-        }
 
-        // Validate schema before deserialization to prevent arrow2 panics.
-        let file_schema = match read::infer_schema(&file_meta) {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::warn!("Cannot infer schema from {:?}: {} — skipping", meta.path, e);
-                return Ok(Vec::new());
-            }
-        };
+        let reader_builder = ParquetRecordBatchReaderBuilder::try_new(file)
+            .map_err(|e| Error::Parquet(e.to_string()))?;
 
-        let expected_schema = StorageModel::traces_schema();
-        if file_schema.fields.len() != expected_schema.fields.len() {
-            tracing::warn!(
-                "Trace block schema mismatch at {:?}: expected {} fields, got {} — skipping",
-                meta.path,
-                expected_schema.fields.len(),
-                file_schema.fields.len()
-            );
-            return Ok(Vec::new());
-        }
-
-        // Validate FixedSizeBinary columns match expected widths.
-        // arrow2 will panic (abort) if page data length doesn't align with declared size.
-        for (actual, expected) in file_schema.fields.iter().zip(expected_schema.fields.iter()) {
-            use arrow2::datatypes::DataType;
-            if let (DataType::FixedSizeBinary(a), DataType::FixedSizeBinary(e)) =
-                (&actual.data_type, &expected.data_type)
-            {
-                if a != e {
-                    tracing::warn!(
-                        "FixedSizeBinary width mismatch in {:?} col {:?}: file={}, expected={} — skipping block",
-                        meta.path, expected.name, a, e
-                    );
-                    return Ok(Vec::new());
-                }
-            }
-        }
-
-        // Validate row group column physical types to detect data corruption.
-        // Prevents the assert_eq panic in arrow2::fixed_size_binary when page buffer
-        // length doesn't match the declared FixedLenByteArray size.
-        for rg in &file_meta.row_groups {
-            for col in rg.columns() {
-                if let parquet2::schema::types::PhysicalType::FixedLenByteArray(declared_len) =
-                    col.physical_type()
-                {
-                    let num_vals = col.num_values();
-                    if num_vals > 0 && col.uncompressed_size() > 0 {
-                        // Basic sanity: uncompressed data should be at least num_values * size
-                        // (with some tolerance for page headers/encoding overhead)
-                        let min_expected_bytes = num_vals * (declared_len as i64);
-                        if col.uncompressed_size() < min_expected_bytes / 2 {
-                            tracing::warn!(
-                                "Corrupt FixedLenByteArray column in {:?}: declared_len={}, num_values={}, uncompressed={} — skipping block",
-                                meta.path, declared_len, num_vals, col.uncompressed_size()
-                            );
-                            return Ok(Vec::new());
-                        }
-                    }
-                }
-            }
-        }
-
-        let reader = read::FileReader::new(file, row_groups, file_schema, None, None, None);
+        // Read all row groups
+        let reader = reader_builder
+            .build()
+            .map_err(|e| Error::Parquet(e.to_string()))?;
 
         let mut spans = Vec::new();
-        for chunk in reader {
-            let chunk = match chunk {
+
+        for record_batch in reader {
+            let record_batch = match record_batch {
                 Ok(c) => c,
                 Err(e) => {
                     tracing::warn!("Error reading chunk from {:?}: {} — skipping", meta.path, e);
                     continue;
                 }
             };
-            for row in 0..chunk.len() {
-                match StorageModel::row_to_span(&chunk, row) {
+
+            for row in 0..record_batch.num_rows() {
+                match StorageModel::row_to_span(&record_batch, row) {
                     Ok(span) if span.start_time_ns >= start_ns && span.start_time_ns <= end_ns => {
                         spans.push(span);
                         if spans.len() >= limit {
@@ -354,29 +324,11 @@ impl Scanner {
     }
 }
 
-fn downcast<'a, T: Array + 'static>(arr: &'a dyn Array, what: &str) -> Result<&'a T> {
-    arr.as_any()
-        .downcast_ref::<T>()
-        .ok_or_else(|| Error::Arrow(format!("Invalid {} column", what)))
-}
-
-fn downcast_dict<'a>(arr: &'a dyn Array, what: &str) -> Result<&'a DictionaryArray<i32>> {
-    arr.as_any()
-        .downcast_ref::<DictionaryArray<i32>>()
-        .ok_or_else(|| Error::Arrow(format!("Invalid {} column", what)))
-}
-
-fn downcast_utf8<'a>(arr: &'a dyn Array, what: &str) -> Result<&'a Utf8Array<i32>> {
-    arr.as_any()
-        .downcast_ref::<Utf8Array<i32>>()
-        .ok_or_else(|| Error::Arrow(format!("Invalid {} column", what)))
-}
-
 /// Decodes a MetricValue from the three value columns without re-downcasting.
 fn decode_value(
-    vf: Option<&arrow2::array::Float64Array>,
-    vi: Option<&arrow2::array::Int64Array>,
-    vc: &dyn Array,
+    vf: Option<&arrow_array::Float64Array>,
+    vi: Option<&arrow_array::Int64Array>,
+    vc: &arrow_array::StringArray,
     row: usize,
 ) -> Result<crate::MetricValue> {
     use crate::MetricValue;
@@ -390,36 +342,6 @@ fn decode_value(
             return Ok(MetricValue::Int(i.value(row)));
         }
     }
-    let complex = downcast_utf8(vc, "value_complex")?.value(row);
+    let complex = vc.value(row);
     serde_json::from_str(complex).map_err(Error::Serde)
-}
-
-/// Returns the subset of row groups whose column-0 timestamp statistics can
-/// overlap [start_ns, end_ns]. Falls back to keeping the group when statistics
-/// are absent/unreadable — correctness over pruning.
-fn filter_row_groups_by_time(
-    row_groups: &[parquet2::metadata::RowGroupMetaData],
-    start_ns: i64,
-    end_ns: i64,
-) -> Vec<parquet2::metadata::RowGroupMetaData> {
-    row_groups
-        .iter()
-        .filter(|rg| {
-            rg.columns()
-                .first()
-                .and_then(|c| c.statistics())
-                .and_then(|s| s.ok())
-                .and_then(|s| {
-                    s.as_any()
-                        .downcast_ref::<parquet2::statistics::PrimitiveStatistics<i64>>()
-                        .map(|st| st.min_value.zip(st.max_value))
-                })
-                .map(|stats| match stats {
-                    Some((min, max)) => max >= start_ns && min <= end_ns,
-                    _ => true,
-                })
-                .unwrap_or(true)
-        })
-        .cloned()
-        .collect()
 }

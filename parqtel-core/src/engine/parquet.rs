@@ -1,9 +1,9 @@
 //! Parquet-based implementation of [`StorageEngine`].
 
-use arrow2::io::parquet::write::{
-    CompressionOptions, Encoding, FileWriter, RowGroupIterator, Version, WriteOptions,
-};
 use async_trait::async_trait;
+use parquet::arrow::ArrowWriter;
+use parquet::basic::Compression;
+use parquet::file::properties::{WriterProperties, WriterVersion};
 use std::collections::{BTreeSet, HashSet};
 use std::fs::{self, File};
 use std::sync::Arc;
@@ -133,12 +133,7 @@ impl ParquetStorageEngine {
         let final_path = self.config.data_dir.join(&filename);
         let tmp_path = self.config.data_dir.join(format!(".tmp_{}", filename));
 
-        write_parquet(
-            &tmp_path,
-            chunk,
-            &self.config.compression,
-            StorageModel::metrics_schema(),
-        )?;
+        write_parquet(&tmp_path, chunk, &self.config.compression)?;
         fs::rename(&tmp_path, &final_path)?;
         let size_bytes = fs::metadata(&final_path)?.len();
 
@@ -189,12 +184,7 @@ impl ParquetStorageEngine {
         let final_path = self.log_config.data_dir.join(&filename);
         let tmp_path = self.log_config.data_dir.join(format!(".tmp_{}", filename));
 
-        write_parquet(
-            &tmp_path,
-            chunk,
-            &self.log_config.compression,
-            StorageModel::logs_schema(),
-        )?;
+        write_parquet(&tmp_path, chunk, &self.log_config.compression)?;
         fs::rename(&tmp_path, &final_path)?;
         let size_bytes = fs::metadata(&final_path)?.len();
 
@@ -387,43 +377,28 @@ impl StorageEngine for ParquetStorageEngine {
 
 fn write_parquet(
     path: &std::path::Path,
-    chunk: arrow2::chunk::Chunk<Arc<dyn arrow2::array::Array>>,
+    record_batch: arrow::record_batch::RecordBatch,
     compression: &str,
-    schema: arrow2::datatypes::Schema,
 ) -> Result<()> {
     let file = File::create(path)?;
-    let options = WriteOptions {
-        write_statistics: true,
-        compression: match compression {
-            "zstd" => CompressionOptions::Zstd(None),
-            "snappy" => CompressionOptions::Snappy,
-            "lz4" => CompressionOptions::Lz4Raw,
-            _ => CompressionOptions::Uncompressed,
-        },
-        version: Version::V2,
-        data_pagesize_limit: None,
-    };
-    let encodings: Vec<Vec<Encoding>> = schema
-        .fields
-        .iter()
-        .map(|f| match f.data_type() {
-            arrow2::datatypes::DataType::Dictionary(_, _, _) => vec![Encoding::RleDictionary],
-            _ => vec![Encoding::Plain],
+
+    let writer_props = WriterProperties::builder()
+        .set_compression(match compression {
+            "zstd" => Compression::ZSTD(Default::default()),
+            "snappy" => Compression::SNAPPY,
+            "lz4" => Compression::LZ4_RAW,
+            _ => Compression::UNCOMPRESSED,
         })
-        .collect();
-    let row_groups =
-        RowGroupIterator::try_new(vec![Ok(chunk)].into_iter(), &schema, options, encodings)
-            .map_err(|e| Error::Parquet(e.to_string()))?;
-    let mut writer =
-        FileWriter::try_new(file, schema, options).map_err(|e| Error::Parquet(e.to_string()))?;
-    for group in row_groups {
-        writer
-            .write(group.map_err(|e| Error::Parquet(e.to_string()))?)
-            .map_err(|e| Error::Parquet(e.to_string()))?;
-    }
-    writer
-        .end(None)
+        .set_writer_version(WriterVersion::PARQUET_2_0)
+        .build();
+
+    let mut writer = ArrowWriter::try_new(file, record_batch.schema(), Some(writer_props))
         .map_err(|e| Error::Parquet(e.to_string()))?;
+
+    writer
+        .write(&record_batch)
+        .map_err(|e| Error::Parquet(e.to_string()))?;
+    writer.close().map_err(|e| Error::Parquet(e.to_string()))?;
     Ok(())
 }
 

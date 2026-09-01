@@ -2,31 +2,39 @@ use super::correlation::extract_correlation_labels;
 use crate::error::{Error, Result};
 use crate::models::logs::LogRecord;
 use crate::models::metrics::{Metric, MetricValue};
+use crate::models::storage::{logs_schema, metrics_schema, traces_schema};
 use crate::models::traces::Span;
-use arrow2::array::{
-    Array, BinaryArray, DictionaryArray, MutableBinaryArray, MutableDictionaryArray,
-    MutablePrimitiveArray, MutableUtf8Array, PrimitiveArray, TryPush, Utf8Array,
+use arrow::record_batch::RecordBatch;
+use arrow_array::{
+    builder::{
+        FixedSizeBinaryBuilder, Float64Builder, Int32Builder, Int64Builder, StringBuilder,
+        StringDictionaryBuilder, TimestampNanosecondBuilder, UInt32Builder,
+    },
+    types::Int32Type,
 };
-use arrow2::chunk::Chunk;
 use std::sync::Arc;
 
-/// Converts a list of [Metric]s into a single Arrow [Chunk].
-pub fn metrics_to_chunk(metrics: &[Metric]) -> Result<Chunk<Arc<dyn Array>>> {
-    let mut timestamp_ns = MutablePrimitiveArray::<i64>::new();
-    let mut metric_name = MutableDictionaryArray::<i32, MutableUtf8Array<i32>>::new();
-    let mut metric_kind = MutableUtf8Array::<i32>::new();
-    let mut service_name = MutableDictionaryArray::<i32, MutableUtf8Array<i32>>::new();
-    let mut service_version = MutableDictionaryArray::<i32, MutableUtf8Array<i32>>::new();
-    let mut k8s_namespace = MutableDictionaryArray::<i32, MutableUtf8Array<i32>>::new();
-    let mut k8s_pod_name = MutableDictionaryArray::<i32, MutableUtf8Array<i32>>::new();
-    let mut k8s_pod_uid = MutableDictionaryArray::<i32, MutableUtf8Array<i32>>::new();
-    let mut k8s_container_name = MutableDictionaryArray::<i32, MutableUtf8Array<i32>>::new();
-    let mut k8s_node_name = MutableDictionaryArray::<i32, MutableUtf8Array<i32>>::new();
-    let mut resource_attributes = MutableDictionaryArray::<i32, MutableUtf8Array<i32>>::new();
-    let mut labels = MutableUtf8Array::<i32>::new();
-    let mut value_float = MutablePrimitiveArray::<f64>::new();
-    let mut value_int = MutablePrimitiveArray::<i64>::new();
-    let mut value_complex = MutableUtf8Array::<i32>::new();
+/// Converts a list of [Metric]s into a single Arrow [RecordBatch].
+pub fn metrics_to_chunk(metrics: &[Metric]) -> Result<RecordBatch> {
+    let mut timestamp_ns = TimestampNanosecondBuilder::new();
+
+    // Dictionary columns - use DictionaryBuilder
+    let mut metric_name = StringDictionaryBuilder::<Int32Type>::new();
+    let mut metric_kind = StringBuilder::new();
+    let mut service_name = StringDictionaryBuilder::<Int32Type>::new();
+    let mut service_version = StringDictionaryBuilder::<Int32Type>::new();
+    let mut k8s_namespace = StringDictionaryBuilder::<Int32Type>::new();
+    let mut k8s_pod_name = StringDictionaryBuilder::<Int32Type>::new();
+    let mut k8s_pod_uid = StringDictionaryBuilder::<Int32Type>::new();
+    let mut k8s_container_name = StringDictionaryBuilder::<Int32Type>::new();
+    let mut k8s_node_name = StringDictionaryBuilder::<Int32Type>::new();
+    let mut resource_attributes = StringDictionaryBuilder::<Int32Type>::new();
+
+    // Non-dictionary columns
+    let mut labels = StringBuilder::new();
+    let mut value_float = Float64Builder::new();
+    let mut value_int = Int64Builder::new();
+    let mut value_complex = StringBuilder::new();
 
     for metric in metrics {
         let (resource_labels, correlation) =
@@ -35,187 +43,192 @@ pub fn metrics_to_chunk(metrics: &[Metric]) -> Result<Chunk<Arc<dyn Array>>> {
         let kind_str = format!("{:?}", metric.kind);
 
         for dp in &metric.data_points {
-            timestamp_ns.push(Some(dp.timestamp_ns));
-            metric_name
-                .try_push(Some(&metric.name))
-                .map_err(|e| Error::Arrow(e.to_string()))?;
-            metric_kind.push(Some(&kind_str));
-            service_name
-                .try_push(correlation.service_name.as_deref())
-                .map_err(|e| Error::Arrow(e.to_string()))?;
-            service_version
-                .try_push(correlation.service_version.as_deref())
-                .map_err(|e| Error::Arrow(e.to_string()))?;
-            k8s_namespace
-                .try_push(correlation.k8s_namespace.as_deref())
-                .map_err(|e| Error::Arrow(e.to_string()))?;
-            k8s_pod_name
-                .try_push(correlation.k8s_pod_name.as_deref())
-                .map_err(|e| Error::Arrow(e.to_string()))?;
-            k8s_pod_uid
-                .try_push(correlation.k8s_pod_uid.as_deref())
-                .map_err(|e| Error::Arrow(e.to_string()))?;
-            k8s_container_name
-                .try_push(correlation.k8s_container_name.as_deref())
-                .map_err(|e| Error::Arrow(e.to_string()))?;
-            k8s_node_name
-                .try_push(correlation.k8s_node_name.as_deref())
-                .map_err(|e| Error::Arrow(e.to_string()))?;
-            resource_attributes
-                .try_push(Some(&resource_attr_json))
-                .map_err(|e| Error::Arrow(e.to_string()))?;
-            labels.push(Some(&dp.labels.to_json()?));
+            timestamp_ns.append_value(dp.timestamp_ns);
+            metric_name.append_value(&metric.name);
+            metric_kind.append_value(&kind_str);
+            service_name.append_option(correlation.service_name.as_deref());
+            service_version.append_option(correlation.service_version.as_deref());
+            k8s_namespace.append_option(correlation.k8s_namespace.as_deref());
+            k8s_pod_name.append_option(correlation.k8s_pod_name.as_deref());
+            k8s_pod_uid.append_option(correlation.k8s_pod_uid.as_deref());
+            k8s_container_name.append_option(correlation.k8s_container_name.as_deref());
+            k8s_node_name.append_option(correlation.k8s_node_name.as_deref());
+            resource_attributes.append_value(&resource_attr_json);
+            labels.append_value(&dp.labels.to_json()?);
 
             match &dp.value {
                 MetricValue::Double(v) => {
-                    value_float.push(Some(*v));
-                    value_int.push(None);
-                    value_complex.push(None::<&str>);
+                    value_float.append_value(*v);
+                    value_int.append_null();
+                    value_complex.append_null();
                 }
                 MetricValue::Int(v) => {
-                    value_float.push(None);
-                    value_int.push(Some(*v));
-                    value_complex.push(None::<&str>);
+                    value_float.append_null();
+                    value_int.append_value(*v);
+                    value_complex.append_null();
                 }
                 complex => {
-                    value_float.push(None);
-                    value_int.push(None);
+                    value_float.append_null();
+                    value_int.append_null();
                     value_complex
-                        .push(Some(&serde_json::to_string(complex).map_err(Error::Serde)?));
+                        .append_value(&serde_json::to_string(complex).map_err(Error::Serde)?);
                 }
             }
         }
     }
 
-    Ok(Chunk::new(vec![
-        Arc::new(Into::<PrimitiveArray<i64>>::into(timestamp_ns)),
-        Arc::new(Into::<DictionaryArray<i32>>::into(metric_name)),
-        Arc::new(Into::<Utf8Array<i32>>::into(metric_kind)),
-        Arc::new(Into::<DictionaryArray<i32>>::into(service_name)),
-        Arc::new(Into::<DictionaryArray<i32>>::into(service_version)),
-        Arc::new(Into::<DictionaryArray<i32>>::into(k8s_namespace)),
-        Arc::new(Into::<DictionaryArray<i32>>::into(k8s_pod_name)),
-        Arc::new(Into::<DictionaryArray<i32>>::into(k8s_pod_uid)),
-        Arc::new(Into::<DictionaryArray<i32>>::into(k8s_container_name)),
-        Arc::new(Into::<DictionaryArray<i32>>::into(k8s_node_name)),
-        Arc::new(Into::<DictionaryArray<i32>>::into(resource_attributes)),
-        Arc::new(Into::<Utf8Array<i32>>::into(labels)),
-        Arc::new(Into::<PrimitiveArray<f64>>::into(value_float)),
-        Arc::new(Into::<PrimitiveArray<i64>>::into(value_int)),
-        Arc::new(Into::<Utf8Array<i32>>::into(value_complex)),
-    ]))
+    let schema = metrics_schema();
+    let record_batch = RecordBatch::try_new(
+        schema.into(),
+        vec![
+            Arc::new(timestamp_ns.finish()),
+            Arc::new(metric_name.finish()),
+            Arc::new(metric_kind.finish()),
+            Arc::new(service_name.finish()),
+            Arc::new(service_version.finish()),
+            Arc::new(k8s_namespace.finish()),
+            Arc::new(k8s_pod_name.finish()),
+            Arc::new(k8s_pod_uid.finish()),
+            Arc::new(k8s_container_name.finish()),
+            Arc::new(k8s_node_name.finish()),
+            Arc::new(resource_attributes.finish()),
+            Arc::new(labels.finish()),
+            Arc::new(value_float.finish()),
+            Arc::new(value_int.finish()),
+            Arc::new(value_complex.finish()),
+        ],
+    )
+    .map_err(|e| Error::Arrow(e.to_string()))?;
+
+    Ok(record_batch)
 }
 
-/// Converts a list of [LogRecord]s into a single Arrow [Chunk].
-pub fn logs_to_chunk(logs: &[LogRecord]) -> Result<Chunk<Arc<dyn Array>>> {
-    let mut timestamp_ns = MutablePrimitiveArray::<i64>::new();
-    let mut observed_timestamp_ns = MutablePrimitiveArray::<i64>::new();
-    let mut severity_number = MutablePrimitiveArray::<i32>::new();
-    let mut severity_text = MutableDictionaryArray::<i32, MutableUtf8Array<i32>>::new();
-    let mut body = MutableUtf8Array::<i32>::new();
-    let mut service_name = MutableDictionaryArray::<i32, MutableUtf8Array<i32>>::new();
-    let mut service_version = MutableDictionaryArray::<i32, MutableUtf8Array<i32>>::new();
-    let mut k8s_namespace = MutableDictionaryArray::<i32, MutableUtf8Array<i32>>::new();
-    let mut k8s_pod_name = MutableDictionaryArray::<i32, MutableUtf8Array<i32>>::new();
-    let mut k8s_pod_uid = MutableDictionaryArray::<i32, MutableUtf8Array<i32>>::new();
-    let mut k8s_container_name = MutableDictionaryArray::<i32, MutableUtf8Array<i32>>::new();
-    let mut k8s_node_name = MutableDictionaryArray::<i32, MutableUtf8Array<i32>>::new();
-    let mut trace_id = MutableBinaryArray::<i32>::new();
-    let mut span_id = MutableBinaryArray::<i32>::new();
-    let mut flags = MutablePrimitiveArray::<u32>::new();
-    let mut scope_name = MutableUtf8Array::<i32>::new();
-    let mut scope_version = MutableUtf8Array::<i32>::new();
-    let mut attributes = MutableUtf8Array::<i32>::new();
-    let mut resource_attributes = MutableUtf8Array::<i32>::new();
+/// Converts a list of [LogRecord]s into a single Arrow [RecordBatch].
+pub fn logs_to_chunk(logs: &[LogRecord]) -> Result<RecordBatch> {
+    let mut timestamp_ns = TimestampNanosecondBuilder::new();
+    let mut observed_timestamp_ns = TimestampNanosecondBuilder::new();
+    let mut severity_number = Int32Builder::new();
+
+    // Dictionary columns
+    let mut severity_text = StringDictionaryBuilder::<Int32Type>::new();
+    let mut body = StringBuilder::new();
+    let mut service_name = StringDictionaryBuilder::<Int32Type>::new();
+    let mut service_version = StringDictionaryBuilder::<Int32Type>::new();
+    let mut k8s_namespace = StringDictionaryBuilder::<Int32Type>::new();
+    let mut k8s_pod_name = StringDictionaryBuilder::<Int32Type>::new();
+    let mut k8s_pod_uid = StringDictionaryBuilder::<Int32Type>::new();
+    let mut k8s_container_name = StringDictionaryBuilder::<Int32Type>::new();
+    let mut k8s_node_name = StringDictionaryBuilder::<Int32Type>::new();
+
+    // FixedSizeBinary columns
+    let mut trace_id = FixedSizeBinaryBuilder::with_capacity(logs.len(), 16);
+    let mut span_id = FixedSizeBinaryBuilder::with_capacity(logs.len(), 8);
+    let mut flags = UInt32Builder::new();
+    let mut scope_name = StringBuilder::new();
+    let mut scope_version = StringBuilder::new();
+    let mut attributes = StringBuilder::new();
+    let mut resource_attributes = StringBuilder::new();
 
     for log in logs {
         let (res_labels, correlation) = extract_correlation_labels(&log.resource_attributes);
-        timestamp_ns.push(Some(log.timestamp_ns));
-        observed_timestamp_ns.push(Some(log.observed_timestamp_ns));
-        severity_number.push(Some(log.severity_number));
-        severity_text
-            .try_push(Some(&log.severity_text))
-            .map_err(|e| Error::Arrow(e.to_string()))?;
-        body.push(Some(&log.body));
-        service_name
-            .try_push(correlation.service_name.as_deref())
-            .map_err(|e| Error::Arrow(e.to_string()))?;
-        service_version
-            .try_push(correlation.service_version.as_deref())
-            .map_err(|e| Error::Arrow(e.to_string()))?;
-        k8s_namespace
-            .try_push(correlation.k8s_namespace.as_deref())
-            .map_err(|e| Error::Arrow(e.to_string()))?;
-        k8s_pod_name
-            .try_push(correlation.k8s_pod_name.as_deref())
-            .map_err(|e| Error::Arrow(e.to_string()))?;
-        k8s_pod_uid
-            .try_push(correlation.k8s_pod_uid.as_deref())
-            .map_err(|e| Error::Arrow(e.to_string()))?;
-        k8s_container_name
-            .try_push(correlation.k8s_container_name.as_deref())
-            .map_err(|e| Error::Arrow(e.to_string()))?;
-        k8s_node_name
-            .try_push(correlation.k8s_node_name.as_deref())
-            .map_err(|e| Error::Arrow(e.to_string()))?;
-        trace_id.push(Some(&log.trace_id));
-        span_id.push(Some(&log.span_id));
-        flags.push(Some(log.flags));
-        scope_name.push(Some(&log.scope_name));
-        scope_version.push(Some(&log.scope_version));
-        attributes.push(Some(&log.attributes.to_json()?));
-        resource_attributes.push(Some(&res_labels.to_json()?));
+        timestamp_ns.append_value(log.timestamp_ns);
+        observed_timestamp_ns.append_value(log.observed_timestamp_ns);
+        severity_number.append_value(log.severity_number);
+        severity_text.append_value(&log.severity_text);
+        body.append_value(&log.body);
+        service_name.append_option(correlation.service_name.as_deref().map(|s| s.to_string()));
+        service_version.append_option(
+            correlation
+                .service_version
+                .as_deref()
+                .map(|s| s.to_string()),
+        );
+        k8s_namespace.append_option(correlation.k8s_namespace.as_deref().map(|s| s.to_string()));
+        k8s_pod_name.append_option(correlation.k8s_pod_name.as_deref().map(|s| s.to_string()));
+        k8s_pod_uid.append_option(correlation.k8s_pod_uid.as_deref().map(|s| s.to_string()));
+        k8s_container_name.append_option(
+            correlation
+                .k8s_container_name
+                .as_deref()
+                .map(|s| s.to_string()),
+        );
+        k8s_node_name.append_option(correlation.k8s_node_name.as_deref().map(|s| s.to_string()));
+
+        // FixedSizeBinary: trace_id is 16 bytes, span_id is 8 bytes
+        let _ = trace_id.append_value(log.trace_id);
+        let _ = span_id.append_value(log.span_id);
+
+        flags.append_value(log.flags);
+        scope_name.append_value(&log.scope_name);
+        scope_version.append_value(&log.scope_version);
+        attributes.append_value(&log.attributes.to_json()?);
+        resource_attributes.append_value(&res_labels.to_json()?);
     }
 
-    Ok(Chunk::new(vec![
-        Arc::new(Into::<PrimitiveArray<i64>>::into(timestamp_ns)),
-        Arc::new(Into::<PrimitiveArray<i64>>::into(observed_timestamp_ns)),
-        Arc::new(Into::<PrimitiveArray<i32>>::into(severity_number)),
-        Arc::new(Into::<DictionaryArray<i32>>::into(severity_text)),
-        Arc::new(Into::<Utf8Array<i32>>::into(body)),
-        Arc::new(Into::<DictionaryArray<i32>>::into(service_name)),
-        Arc::new(Into::<DictionaryArray<i32>>::into(service_version)),
-        Arc::new(Into::<DictionaryArray<i32>>::into(k8s_namespace)),
-        Arc::new(Into::<DictionaryArray<i32>>::into(k8s_pod_name)),
-        Arc::new(Into::<DictionaryArray<i32>>::into(k8s_pod_uid)),
-        Arc::new(Into::<DictionaryArray<i32>>::into(k8s_container_name)),
-        Arc::new(Into::<DictionaryArray<i32>>::into(k8s_node_name)),
-        Arc::new(Into::<BinaryArray<i32>>::into(trace_id)),
-        Arc::new(Into::<BinaryArray<i32>>::into(span_id)),
-        Arc::new(Into::<PrimitiveArray<u32>>::into(flags)),
-        Arc::new(Into::<Utf8Array<i32>>::into(scope_name)),
-        Arc::new(Into::<Utf8Array<i32>>::into(scope_version)),
-        Arc::new(Into::<Utf8Array<i32>>::into(attributes)),
-        Arc::new(Into::<Utf8Array<i32>>::into(resource_attributes)),
-    ]))
+    let schema = logs_schema();
+    let record_batch = RecordBatch::try_new(
+        schema.into(),
+        vec![
+            Arc::new(timestamp_ns.finish()),
+            Arc::new(observed_timestamp_ns.finish()),
+            Arc::new(severity_number.finish()),
+            Arc::new(severity_text.finish()),
+            Arc::new(body.finish()),
+            Arc::new(service_name.finish()),
+            Arc::new(service_version.finish()),
+            Arc::new(k8s_namespace.finish()),
+            Arc::new(k8s_pod_name.finish()),
+            Arc::new(k8s_pod_uid.finish()),
+            Arc::new(k8s_container_name.finish()),
+            Arc::new(k8s_node_name.finish()),
+            Arc::new(trace_id.finish()),
+            Arc::new(span_id.finish()),
+            Arc::new(flags.finish()),
+            Arc::new(scope_name.finish()),
+            Arc::new(scope_version.finish()),
+            Arc::new(attributes.finish()),
+            Arc::new(resource_attributes.finish()),
+        ],
+    )
+    .map_err(|e| Error::Arrow(e.to_string()))?;
+
+    Ok(record_batch)
 }
 
-/// Converts a list of [Span]s into a single Arrow [Chunk].
-pub fn traces_to_chunk(spans: &[Span]) -> Result<Chunk<Arc<dyn Array>>> {
-    let mut timestamp_ns = MutablePrimitiveArray::<i64>::new();
-    let mut span_id_col = MutableBinaryArray::<i32>::new();
-    let mut span_name = MutableDictionaryArray::<i32, MutableUtf8Array<i32>>::new();
-    let mut span_kind = MutableUtf8Array::<i32>::new();
-    let mut start_time_ns = MutablePrimitiveArray::<i64>::new();
-    let mut end_time_ns = MutablePrimitiveArray::<i64>::new();
-    let mut duration_ns = MutablePrimitiveArray::<i64>::new();
-    let mut status_code = MutableUtf8Array::<i32>::new();
-    let mut status_message = MutableUtf8Array::<i32>::new();
-    let mut service_name = MutableDictionaryArray::<i32, MutableUtf8Array<i32>>::new();
-    let mut service_version = MutableDictionaryArray::<i32, MutableUtf8Array<i32>>::new();
-    let mut k8s_namespace = MutableDictionaryArray::<i32, MutableUtf8Array<i32>>::new();
-    let mut k8s_pod_name = MutableDictionaryArray::<i32, MutableUtf8Array<i32>>::new();
-    let mut k8s_pod_uid = MutableDictionaryArray::<i32, MutableUtf8Array<i32>>::new();
-    let mut k8s_container_name = MutableDictionaryArray::<i32, MutableUtf8Array<i32>>::new();
-    let mut k8s_node_name = MutableDictionaryArray::<i32, MutableUtf8Array<i32>>::new();
-    let mut trace_id = MutableBinaryArray::<i32>::new();
-    let mut parent_span_id = MutableBinaryArray::<i32>::new();
-    let mut flags = MutablePrimitiveArray::<u32>::new();
-    let mut trace_state = MutableUtf8Array::<i32>::new();
-    let mut attributes = MutableUtf8Array::<i32>::new();
-    let mut resource_attributes = MutableUtf8Array::<i32>::new();
-    let mut events = MutableUtf8Array::<i32>::new();
-    let mut links = MutableUtf8Array::<i32>::new();
+/// Converts a list of [Span]s into a single Arrow [RecordBatch].
+pub fn traces_to_chunk(spans: &[Span]) -> Result<RecordBatch> {
+    let mut timestamp_ns = TimestampNanosecondBuilder::new();
+
+    // FixedSizeBinary columns
+    let mut span_id_col = FixedSizeBinaryBuilder::with_capacity(spans.len(), 8);
+    let mut trace_id = FixedSizeBinaryBuilder::with_capacity(spans.len(), 16);
+    let mut parent_span_id = FixedSizeBinaryBuilder::with_capacity(spans.len(), 8);
+
+    // Dictionary columns
+    let mut span_name = StringDictionaryBuilder::<Int32Type>::new();
+    let mut span_kind = StringBuilder::new();
+    let mut status_code = StringBuilder::new();
+    let mut status_message = StringBuilder::new();
+    let mut service_name = StringDictionaryBuilder::<Int32Type>::new();
+    let mut service_version = StringDictionaryBuilder::<Int32Type>::new();
+    let mut k8s_namespace = StringDictionaryBuilder::<Int32Type>::new();
+    let mut k8s_pod_name = StringDictionaryBuilder::<Int32Type>::new();
+    let mut k8s_pod_uid = StringDictionaryBuilder::<Int32Type>::new();
+    let mut k8s_container_name = StringDictionaryBuilder::<Int32Type>::new();
+    let mut k8s_node_name = StringDictionaryBuilder::<Int32Type>::new();
+
+    // Timestamp columns
+    let mut start_time_ns = TimestampNanosecondBuilder::new();
+    let mut end_time_ns = TimestampNanosecondBuilder::new();
+    let mut duration_ns = Int64Builder::new();
+    let mut trace_state = StringBuilder::new();
+    let mut flags = UInt32Builder::new();
+
+    // Regular string columns
+    let mut attributes = StringBuilder::new();
+    let mut resource_attributes = StringBuilder::new();
+    let mut events = StringBuilder::new();
+    let mut links = StringBuilder::new();
 
     for span in spans {
         let (resource_labels, correlation) = extract_correlation_labels(&span.attributes);
@@ -233,76 +246,73 @@ pub fn traces_to_chunk(spans: &[Span]) -> Result<Chunk<Arc<dyn Array>>> {
             _ => "STATUS_CODE_UNSET",
         };
 
-        timestamp_ns.push(Some(span.start_time_ns));
-        span_id_col.push(Some(&span.span_id));
-        span_name
-            .try_push(Some(&span.name))
-            .map_err(|e| Error::Arrow(e.to_string()))?;
-        span_kind.push(Some(kind_str));
-        start_time_ns.push(Some(span.start_time_ns));
-        end_time_ns.push(Some(span.end_time_ns));
-        duration_ns.push(Some(span.duration_ns()));
-        status_code.push(Some(status_str));
-        status_message.push(Some(&span.status.message));
-        service_name
-            .try_push(correlation.service_name.as_deref())
-            .map_err(|e| Error::Arrow(e.to_string()))?;
-        service_version
-            .try_push(correlation.service_version.as_deref())
-            .map_err(|e| Error::Arrow(e.to_string()))?;
-        k8s_namespace
-            .try_push(correlation.k8s_namespace.as_deref())
-            .map_err(|e| Error::Arrow(e.to_string()))?;
-        k8s_pod_name
-            .try_push(correlation.k8s_pod_name.as_deref())
-            .map_err(|e| Error::Arrow(e.to_string()))?;
-        k8s_pod_uid
-            .try_push(correlation.k8s_pod_uid.as_deref())
-            .map_err(|e| Error::Arrow(e.to_string()))?;
-        k8s_container_name
-            .try_push(correlation.k8s_container_name.as_deref())
-            .map_err(|e| Error::Arrow(e.to_string()))?;
-        k8s_node_name
-            .try_push(correlation.k8s_node_name.as_deref())
-            .map_err(|e| Error::Arrow(e.to_string()))?;
-        trace_id.push(Some(&span.trace_id));
-        parent_span_id.push(Some(&span.parent_span_id));
-        flags.push(Some(span.flags));
-        trace_state.push(Some(&span.trace_state));
-        attributes.push(Some(&span.attributes.to_json()?));
-        resource_attributes.push(Some(&resource_labels.to_json()?));
-        events.push(Some(
-            &serde_json::to_string(&span.events).map_err(Error::Serde)?,
-        ));
-        links.push(Some(
-            &serde_json::to_string(&span.links).map_err(Error::Serde)?,
-        ));
+        timestamp_ns.append_value(span.start_time_ns);
+        let _ = span_id_col.append_value(span.span_id);
+        span_name.append_value(&span.name);
+        span_kind.append_value(kind_str);
+        start_time_ns.append_value(span.start_time_ns);
+        end_time_ns.append_value(span.end_time_ns);
+        duration_ns.append_value(span.duration_ns());
+        status_code.append_value(status_str);
+        status_message.append_value(&span.status.message);
+        service_name.append_option(correlation.service_name.as_deref().map(|s| s.to_string()));
+        service_version.append_option(
+            correlation
+                .service_version
+                .as_deref()
+                .map(|s| s.to_string()),
+        );
+        k8s_namespace.append_option(correlation.k8s_namespace.as_deref().map(|s| s.to_string()));
+        k8s_pod_name.append_option(correlation.k8s_pod_name.as_deref().map(|s| s.to_string()));
+        k8s_pod_uid.append_option(correlation.k8s_pod_uid.as_deref().map(|s| s.to_string()));
+        k8s_container_name.append_option(
+            correlation
+                .k8s_container_name
+                .as_deref()
+                .map(|s| s.to_string()),
+        );
+        k8s_node_name.append_option(correlation.k8s_node_name.as_deref().map(|s| s.to_string()));
+        let _ = trace_id.append_value(span.trace_id);
+        let _ = parent_span_id.append_value(span.parent_span_id);
+        flags.append_value(span.flags);
+        trace_state.append_value(&span.trace_state);
+        attributes.append_value(&span.attributes.to_json()?);
+        resource_attributes.append_value(&resource_labels.to_json()?);
+        events.append_value(&serde_json::to_string(&span.events).map_err(Error::Serde)?);
+        links.append_value(&serde_json::to_string(&span.links).map_err(Error::Serde)?);
     }
 
-    Ok(Chunk::new(vec![
-        Arc::new(Into::<PrimitiveArray<i64>>::into(timestamp_ns)),
-        Arc::new(Into::<BinaryArray<i32>>::into(span_id_col)),
-        Arc::new(Into::<DictionaryArray<i32>>::into(span_name)),
-        Arc::new(Into::<Utf8Array<i32>>::into(span_kind)),
-        Arc::new(Into::<PrimitiveArray<i64>>::into(start_time_ns)),
-        Arc::new(Into::<PrimitiveArray<i64>>::into(end_time_ns)),
-        Arc::new(Into::<PrimitiveArray<i64>>::into(duration_ns)),
-        Arc::new(Into::<Utf8Array<i32>>::into(status_code)),
-        Arc::new(Into::<Utf8Array<i32>>::into(status_message)),
-        Arc::new(Into::<DictionaryArray<i32>>::into(service_name)),
-        Arc::new(Into::<DictionaryArray<i32>>::into(service_version)),
-        Arc::new(Into::<DictionaryArray<i32>>::into(k8s_namespace)),
-        Arc::new(Into::<DictionaryArray<i32>>::into(k8s_pod_name)),
-        Arc::new(Into::<DictionaryArray<i32>>::into(k8s_pod_uid)),
-        Arc::new(Into::<DictionaryArray<i32>>::into(k8s_container_name)),
-        Arc::new(Into::<DictionaryArray<i32>>::into(k8s_node_name)),
-        Arc::new(Into::<BinaryArray<i32>>::into(trace_id)),
-        Arc::new(Into::<BinaryArray<i32>>::into(parent_span_id)),
-        Arc::new(Into::<PrimitiveArray<u32>>::into(flags)),
-        Arc::new(Into::<Utf8Array<i32>>::into(trace_state)),
-        Arc::new(Into::<Utf8Array<i32>>::into(attributes)),
-        Arc::new(Into::<Utf8Array<i32>>::into(resource_attributes)),
-        Arc::new(Into::<Utf8Array<i32>>::into(events)),
-        Arc::new(Into::<Utf8Array<i32>>::into(links)),
-    ]))
+    let schema = traces_schema();
+    let record_batch = RecordBatch::try_new(
+        schema.into(),
+        vec![
+            Arc::new(timestamp_ns.finish()),
+            Arc::new(span_id_col.finish()),
+            Arc::new(span_name.finish()),
+            Arc::new(span_kind.finish()),
+            Arc::new(start_time_ns.finish()),
+            Arc::new(end_time_ns.finish()),
+            Arc::new(duration_ns.finish()),
+            Arc::new(status_code.finish()),
+            Arc::new(status_message.finish()),
+            Arc::new(service_name.finish()),
+            Arc::new(service_version.finish()),
+            Arc::new(k8s_namespace.finish()),
+            Arc::new(k8s_pod_name.finish()),
+            Arc::new(k8s_pod_uid.finish()),
+            Arc::new(k8s_container_name.finish()),
+            Arc::new(k8s_node_name.finish()),
+            Arc::new(trace_id.finish()),
+            Arc::new(parent_span_id.finish()),
+            Arc::new(flags.finish()),
+            Arc::new(trace_state.finish()),
+            Arc::new(attributes.finish()),
+            Arc::new(resource_attributes.finish()),
+            Arc::new(events.finish()),
+            Arc::new(links.finish()),
+        ],
+    )
+    .map_err(|e| Error::Arrow(e.to_string()))?;
+
+    Ok(record_batch)
 }
