@@ -87,7 +87,7 @@ impl Scanner {
             let record_batch = record_batch.map_err(|e| Error::Parquet(e.to_string()))?;
 
             // Cache keys borrow from this chunk — recreate per chunk.
-            let mut labels_cache: HashMap<&str, crate::LabelSet> = HashMap::new();
+            let mut labels_cache: HashMap<(&str, &str), crate::LabelSet> = HashMap::new();
             let ts_arr = record_batch
                 .column(0)
                 .as_any()
@@ -108,6 +108,16 @@ impl Scanner {
                 .as_any()
                 .downcast_ref::<arrow_array::StringArray>()
                 .ok_or_else(|| Error::Arrow("Invalid labels column".into()))?;
+            let svc_arr = record_batch
+                .column(3)
+                .as_any()
+                .downcast_ref::<arrow_array::DictionaryArray<arrow_array::types::Int32Type>>()
+                .ok_or_else(|| Error::Arrow("Invalid service_name column".into()))?;
+            let svc_values = svc_arr
+                .values()
+                .as_any()
+                .downcast_ref::<arrow_array::StringArray>()
+                .ok_or_else(|| Error::Arrow("Invalid service_name values".into()))?;
             let vf_arr = record_batch
                 .column(12)
                 .as_any()
@@ -137,14 +147,30 @@ impl Scanner {
                 }
 
                 let labels_json = labels_col.value(row);
-                let labels = match labels_cache.get(labels_json) {
+                let svc_json = if svc_arr.is_null(row) {
+                    ""
+                } else {
+                    svc_values.value(svc_arr.keys().value(row) as usize)
+                };
+                let labels = match labels_cache.get(&(labels_json, svc_json)) {
                     Some(l) => l.clone(),
                     None => {
                         if labels_cache.len() >= LABEL_CACHE_MAX {
                             labels_cache.clear();
                         }
-                        let l = crate::LabelSet::from_json(labels_json)?;
-                        labels_cache.insert(labels_json, l.clone());
+                        // Merge the dedicated service_name column back as the
+                        // `service.name` label so label matchers can select on it
+                        // (mirrors StorageModel::row_to_metric's inject_correlation).
+                        let mut l = crate::LabelSet::from_json(labels_json)?;
+                        if !svc_json.is_empty() {
+                            if let Ok(svc) = crate::LabelSet::try_from_iter(vec![(
+                                "service.name",
+                                svc_json.to_string(),
+                            )]) {
+                                l = l.merge(&svc);
+                            }
+                        }
+                        labels_cache.insert((labels_json, svc_json), l.clone());
                         l
                     }
                 };
