@@ -107,6 +107,20 @@ header{height:48px;flex-shrink:0;background:var(--bg-void);border-bottom:1px sol
 .sd-status.ok{color:#10b981;background:rgba(16,185,129,.1);border:1px solid rgba(16,185,129,.3);}
 .sd-status.error{color:var(--err);background:rgba(248,113,113,.1);border:1px solid rgba(248,113,113,.3);}
 .sd-status.unset{color:var(--text-muted);background:var(--bg-raised);border:1px solid var(--border-default);}
+/* OVERVIEW */
+.ovw-wrap{max-width:860px;margin:0 auto;padding:24px 20px;overflow-y:auto;height:100%;}
+.ovw-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin-bottom:20px;}
+.ovw-card{display:flex;align-items:center;gap:12px;background:var(--bg-surface);border:1px solid var(--border-subtle);border-radius:var(--radius-md);padding:14px 16px;cursor:pointer;transition:border-color .12s;}
+.ovw-card:hover{border-color:var(--accent);}
+.ovw-ic{width:34px;height:34px;border-radius:var(--radius-sm);background:rgba(0,245,212,.08);display:flex;align-items:center;justify-content:center;color:var(--accent);flex-shrink:0;}
+.ovw-ic .tab-ic{width:18px;height:18px;}
+.ovw-val{font-family:var(--mono);font-size:22px;font-weight:700;color:var(--text-primary);}
+.ovw-lbl{font-size:11px;color:var(--text-muted);}
+.ovw-sec-title{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--text-muted);margin:16px 0 8px;}
+#ovw-spark{width:100%;height:80px;display:block;}
+.ovw-links{display:flex;gap:8px;flex-wrap:wrap;}
+.ovw-link{background:var(--bg-raised);border:1px solid var(--border-default);color:var(--text-secondary);border-radius:var(--radius-sm);padding:6px 14px;font-size:11px;cursor:pointer;font-family:var(--sans);}
+.ovw-link:hover{color:var(--accent);border-color:var(--accent);}
 /* RESPONSIVE */
 @media(max-width:1024px){#metrics-inspector{width:280px;}#alert-detail{width:45%;}.slide-over{width:100%;max-width:400px;}}
 @media(max-width:768px){header{padding:0 8px;gap:6px;}#search-wrap{max-width:200px;}.nav-tab{padding:3px 6px;font-size:10px;}#toolbar{flex-wrap:wrap;height:auto;padding:6px 8px;}#quick-ranges{flex-wrap:wrap;}#alert-detail{position:absolute;inset:0;width:100%;z-index:30;}.slide-over{width:100%;}#metrics-inspector{width:100%;position:absolute;inset:0;z-index:30;}}
@@ -380,7 +394,8 @@ header{height:48px;flex-shrink:0;background:var(--bg-void);border-bottom:1px sol
     <div id="ac-drop"></div>
   </div>
   <nav class="nav-tabs" id="signal-tabs" role="tablist" aria-label="Signal type">
-    <button class="nav-tab active" data-sig="metrics" role="tab" aria-selected="true" aria-controls="view-metrics"><svg class="tab-ic"><use href="#i-activity"/></svg> Metrics</button>
+    <button class="nav-tab active" data-sig="overview" role="tab" aria-selected="true" aria-controls="view-overview"><svg class="tab-ic"><use href="#i-zoom-out"/></svg> Overview</button>
+    <button class="nav-tab" data-sig="metrics" role="tab" aria-selected="false" aria-controls="view-metrics"><svg class="tab-ic"><use href="#i-activity"/></svg> Metrics</button>
     <button class="nav-tab" data-sig="logs" role="tab" aria-selected="false" aria-controls="view-logs"><svg class="tab-ic"><use href="#i-logs"/></svg> Logs</button>
     <button class="nav-tab" data-sig="traces" role="tab" aria-selected="false" aria-controls="view-traces"><svg class="tab-ic"><use href="#i-traces"/></svg> Traces</button>
     <button class="nav-tab" data-sig="alerts" role="tab" aria-selected="false" aria-controls="view-alerts"><svg class="tab-ic"><use href="#i-bell"/></svg> Alerts<span class="nav-badge crit" id="alert-badge" style="display:none" aria-live="polite">0</span></button>
@@ -423,6 +438,25 @@ header{height:48px;flex-shrink:0;background:var(--bg-void);border-bottom:1px sol
   <div id="volume-histogram" aria-label="Volume histogram - drag to zoom"><svg id="hist-svg"></svg><div id="hist-tooltip"></div><div id="hist-drag"></div><span id="hist-span"></span></div>
   <div id="correlation-bar"><span class="corr-breadcrumb" id="corr-breadcrumb"></span><span class="corr-window" id="corr-window"></span><div style="flex:1"></div><button class="corr-btn" id="corr-widen">Widen ±5s</button><button class="corr-btn" id="corr-exit">✕ Exit correlation</button></div>
   <div id="viewer-container">
+    <div id="view-overview" class="viewer-pane" role="tabpanel">
+      <div class="ovw-wrap">
+        <div class="ovw-grid">
+          <div class="ovw-card" id="ovw-metrics" data-sig="metrics"><div class="ovw-ic"><svg class="tab-ic"><use href="#i-activity"/></svg></div><div class="ovw-body"><div class="ovw-val" id="ovw-metrics-val">—</div><div class="ovw-lbl">Metric series indexed</div></div></div>
+          <div class="ovw-card" id="ovw-logs" data-sig="logs"><div class="ovw-ic"><svg class="tab-ic"><use href="#i-logs"/></svg></div><div class="ovw-body"><div class="ovw-val" id="ovw-logs-val">—</div><div class="ovw-lbl">Log records (6h)</div></div></div>
+          <div class="ovw-card" id="ovw-traces" data-sig="traces"><div class="ovw-ic"><svg class="tab-ic"><use href="#i-traces"/></svg></div><div class="ovw-body"><div class="ovw-val" id="ovw-traces-val">—</div><div class="ovw-lbl">Trace spans (6h)</div></div></div>
+          <div class="ovw-card" id="ovw-alerts" data-sig="alerts"><div class="ovw-ic"><svg class="tab-ic"><use href="#i-bell"/></svg></div><div class="ovw-body"><div class="ovw-val" id="ovw-alerts-val">—</div><div class="ovw-lbl">Alerts firing</div></div></div>
+        </div>
+        <div class="ovw-sec-title">Ingest volume — last 6h</div>
+        <canvas id="ovw-spark"></canvas>
+        <div class="ovw-sec-title">Quick links</div>
+        <div class="ovw-links">
+          <button class="ovw-link" data-goto="metrics">Explore metrics</button>
+          <button class="ovw-link" data-goto="logs">Search logs</button>
+          <button class="ovw-link" data-goto="traces">Browse traces</button>
+          <button class="ovw-link" data-goto="alerts">Review alerts</button>
+        </div>
+      </div>
+    </div>
     <div id="view-metrics" class="viewer-pane active">
       <div id="metrics-chart-area"><div id="chart-tooltip"></div><div id="chart-crosshair"></div></div>
       <div id="custom-legend"></div>
@@ -465,6 +499,8 @@ header{height:48px;flex-shrink:0;background:var(--bg-void);border-bottom:1px sol
         <button class="atool-link active" id="atool-stream">Stream</button>
         <button class="atool-link" id="atool-rules">Rules</button>
         <button class="atool-link" id="atool-proposals">Proposals<span class="nav-badge ok" id="proposals-badge" style="display:none;margin-left:4px;">0</span></button>
+        <button class="atool-link" id="atool-recording">Recording Rules</button>
+        <button class="atool-link" id="atool-pipelines">Pipelines</button>
         <div style="flex:1"></div>
       </div>
       <div id="alert-stream-view" style="display:flex;flex-direction:column;flex:1;min-height:0;">
@@ -491,6 +527,8 @@ header{height:48px;flex-shrink:0;background:var(--bg-void);border-bottom:1px sol
       </div>
       <div id="alert-rules-view" style="display:none;flex:1;overflow-y:auto;padding:12px;"></div>
       <div id="alert-proposals-view" style="display:none;flex:1;overflow-y:auto;padding:12px;"></div>
+      <div id="recording-rules-view" style="display:none;flex:1;overflow-y:auto;padding:12px;"></div>
+      <div id="pipelines-view" style="display:none;flex:1;overflow-y:auto;padding:12px;"></div>
     </div>
   </div>
 </main>
@@ -506,7 +544,7 @@ header{height:48px;flex-shrink:0;background:var(--bg-void);border-bottom:1px sol
 (function(){
 "use strict";
 /* STATE */
-const ST={sig:'metrics',range:{startNs:0,endNs:0,presetMin:360},metrics:{result:[],total:0,volSummary:null,selIdx:-1,hidden:new Set()},logs:{result:[],openIdx:-1,heights:{},sevOn:new Set(['TRACE','DEBUG','INFO','WARN','ERROR','FATAL']),bodyQ:''},alerts:{list:[],selIdx:-1,detailTab:'overview',sevOn:new Set(['PAGE','CRITICAL','WARNING','INFO']),statusOn:new Set(['FIRING','PENDING','ACKNOWLEDGED','RESOLVED','SUPPRESSED']),searchQ:'',subView:'stream'},server:{ok:false,names:[],labels:[]},correlation:{active:false},refreshTmr:null,stepSecs:60};
+const ST={sig:'overview',range:{startNs:0,endNs:0,presetMin:360},metrics:{result:[],total:0,volSummary:null,selIdx:-1,hidden:new Set()},logs:{result:[],openIdx:-1,heights:{},sevOn:new Set(['TRACE','DEBUG','INFO','WARN','ERROR','FATAL']),bodyQ:''},alerts:{list:[],selIdx:-1,detailTab:'overview',sevOn:new Set(['PAGE','CRITICAL','WARNING','INFO']),statusOn:new Set(['FIRING','PENDING','ACKNOWLEDGED','RESOLVED','SUPPRESSED']),searchQ:'',subView:'stream'},server:{ok:false,names:[],labels:[]},correlation:{active:false},refreshTmr:null,stepSecs:60};
 const COLORS=['#00F5D4','#4488ff','#ffcc00','#ff6688','#88ffcc','#ff8844','#cc88ff','#44ccff'];
 const SEV=['TRACE','DEBUG','INFO','WARN','ERROR','FATAL'];
 const $=id=>document.getElementById(id);
@@ -547,8 +585,32 @@ async function apiPost(url,body){const r=await fetch(url,{method:'POST',headers:
 function computeStep(){const rS=(ST.range.endNs-ST.range.startNs)/1e9;if(E.selStep.value==='auto'){const s=Math.max(1,Math.ceil(rS/300));ST.stepSecs=s;const lbl=s<60?`${s}s`:s<3600?`${Math.round(s/60)}m`:`${Math.round(s/3600)}h`;tx(E.stepLbl,`(≈${lbl})`);return s;}ST.stepSecs=parseInt(E.selStep.value);tx(E.stepLbl,'');return ST.stepSecs;}
 
 /* TIME RANGE */
-function setRange(min,query=true){ST.range.presetMin=min;const now=new Date(),from=new Date(now.getTime()-min*60000);E.tTo.value=toISO(now);E.tFrom.value=toISO(from);ST.range.endNs=now.getTime()*1e6;ST.range.startNs=from.getTime()*1e6;document.querySelectorAll('#quick-ranges .preset-btn').forEach(b=>b.classList.toggle('active',parseInt(b.dataset.min)===min));if(query)runQuery();}
+function setRange(min,query=true){ST.range.presetMin=min;const now=new Date(),from=new Date(now.getTime()-min*60000);E.tTo.value=toISO(now);E.tFrom.value=toISO(from);ST.range.endNs=now.getTime()*1e6;ST.range.startNs=from.getTime()*1e6;document.querySelectorAll('#quick-ranges .preset-btn').forEach(b=>b.classList.toggle('active',parseInt(b.dataset.min)===min));if(query)runQuery();updateUrl();}
 function clearPreset(){document.querySelectorAll('#quick-ranges .preset-btn').forEach(b=>b.classList.remove('active'));ST.range.presetMin=0;}
+
+/* URL ROUTER — deep-linkable state via location.hash (no server involvement) */
+function urlState(){
+  const p=new URLSearchParams(location.hash.slice(1)||'');
+  return{sig:p.get('sig')||'',q:p.get('q')||'',start:p.get('start')?+p.get('start'):0,end:p.get('end')?+p.get('end'):0,preset:p.get('preset')?+p.get('preset'):0,sub:p.get('sub')||''};
+}
+function updateUrl(){
+  const p=new URLSearchParams();
+  p.set('sig',ST.sig);
+  const q=(E.qIn.value||'').trim();if(q)p.set('q',q);
+  if(ST.range.presetMin)p.set('preset',ST.range.presetMin);
+  else{if(ST.range.startNs)p.set('start',Math.round(ST.range.startNs/1e9));if(ST.range.endNs)p.set('end',Math.round(ST.range.endNs/1e9));}
+  if(ST.sig==='alerts'&&ST.alerts.subView)p.set('sub',ST.alerts.subView);
+  history.replaceState(null,'','#'+p.toString());
+}
+window.addEventListener('hashchange',()=>{const u=urlState();if(u.sig&&u.sig!==ST.sig){switchSig(u.sig,true);}});
+function applyUrlState(){
+  const u=urlState();
+  if(u.sig&&['overview','metrics','logs','traces','alerts'].includes(u.sig))ST.sig=u.sig;
+  if(u.q){E.qIn.value=u.q;updateSearchClear();}
+  if(u.preset){ST.range.presetMin=u.preset;const now=new Date(),from=new Date(now.getTime()-u.preset*60000);E.tTo.value=toISO(now);E.tFrom.value=toISO(from);ST.range.endNs=now.getTime()*1e6;ST.range.startNs=from.getTime()*1e6;document.querySelectorAll('#quick-ranges .preset-btn').forEach(b=>b.classList.toggle('active',parseInt(b.dataset.min)===u.preset));}
+  else if(u.start&&u.end){ST.range.presetMin=0;ST.range.startNs=u.start*1e6;ST.range.endNs=u.end*1e6;E.tFrom.value=toISO(new Date(u.start*1000));E.tTo.value=toISO(new Date(u.end*1000));document.querySelectorAll('#quick-ranges .preset-btn').forEach(b=>b.classList.remove('active'));}
+  if(u.sub&&ST.sig==='alerts')ST.alerts.subView=u.sub;
+}
 
 /* STATUS */
 function setStatus(ok){ST.server.ok=ok;E.dot.className='sdot'+(ok?' ok':'');E.dot.title=ok?`Connected · ${ST.server.names.length} metrics indexed`:'Server unreachable';tx($('srv-status'),ok?'Connected':'Unreachable');}
@@ -556,7 +618,7 @@ function showWarn(msg){tx(E.bannerTxt,msg);E.banner.classList.add('visible');E.b
 function showError(msg){tx(E.bannerTxt,msg);E.banner.classList.add('visible');E.banner.style.cssText='display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid rgba(244,63,94,.3);background:rgba(244,63,94,.07);padding:5px 16px;font-size:11px;font-family:var(--mono);color:var(--err);';setStatus(false);}
 
 /* QUERY */
-async function runQuery(){if(ST.sig==='alerts')return;E.lb.classList.add('on');closeBanner();showSkeleton(ST.sig);if(E.tFrom.value&&E.tTo.value){ST.range.startNs=new Date(E.tFrom.value).getTime()*1e6;ST.range.endNs=new Date(E.tTo.value).getTime()*1e6;}const step=computeStep();const raw=(E.qIn.value||'').trim();try{if(ST.sig==='metrics')await queryMetrics(raw,step);else if(ST.sig==='logs')await queryLogs(raw);else if(ST.sig==='traces')await queryTraces(raw);renderHistogram();}catch(e){if(e.name==='AbortError')return;if(!raw){setStatus(true);renderMetrics();return;}showError(e.message);}finally{E.lb.classList.remove('on');}}
+async function runQuery(){if(ST.sig==='alerts'||ST.sig==='overview')return;E.lb.classList.add('on');closeBanner();showSkeleton(ST.sig);updateUrl();if(E.tFrom.value&&E.tTo.value){ST.range.startNs=new Date(E.tFrom.value).getTime()*1e6;ST.range.endNs=new Date(E.tTo.value).getTime()*1e6;}const step=computeStep();const raw=(E.qIn.value||'').trim();try{if(ST.sig==='metrics')await queryMetrics(raw,step);else if(ST.sig==='logs')await queryLogs(raw);else if(ST.sig==='traces')await queryTraces(raw);renderHistogram();}catch(e){if(e.name==='AbortError')return;if(!raw){setStatus(true);renderMetrics();return;}showError(e.message);}finally{E.lb.classList.remove('on');}}
 function showSkeleton(sig){if(sig==='metrics'){E.chartArea.innerHTML='<div class="skel skel-chart"></div>';E.legend.innerHTML='';E.tblCanvas.innerHTML='';}else if(sig==='logs'){E.logsScroll.innerHTML='<div style="padding:12px"><div class="skel skel-row"></div><div class="skel skel-row" style="width:92%"></div><div class="skel skel-row" style="width:97%"></div><div class="skel skel-row" style="width:88%"></div><div class="skel skel-row" style="width:95%"></div><div class="skel skel-row" style="width:90%"></div><div class="skel skel-row" style="width:93%"></div></div>';}else if(sig==='traces'){$('trace-chart').innerHTML='<div style="padding:12px"><div class="skel skel-row"></div><div class="skel skel-row" style="width:85%"></div><div class="skel skel-row" style="width:95%"></div><div class="skel skel-row" style="width:80%"></div><div class="skel skel-row" style="width:90%"></div></div>';}}
 async function queryMetrics(raw,step){const start=ST.range.startNs/1e9,end=ST.range.endNs/1e9;let q=raw;if(q&&!q.includes('{')&&!q.includes('(')&&q!=='{}')q=q+'{}';if(!q||q==='{}'){if(ST.server.names.length>0){q=ST.server.names[0];if(!raw)E.qIn.value=q;}else{await prefetch();if(ST.server.names.length>0){q=ST.server.names[0];if(!raw)E.qIn.value=q;}else{ST.metrics.result=[];renderMetrics();return;}}}const url=`/api/v1/query_range?query=${encodeURIComponent(q)}&start=${start}&end=${end}&step=${Math.max(1,Math.floor(step))}s`;const res=await apiFetch(url);if(res.status!=='success'){throw new Error(res.error||'Query failed');}const data=res.data||{};ST.metrics.result=data.result||[];ST.metrics.total=data.totalSeriesCount||ST.metrics.result.length;ST.metrics.volSummary=data.volumeSummary||null;setStatus(true);renderMetrics();}
 async function queryLogs(raw){const start=ST.range.startNs/1e9,end=ST.range.endNs/1e9;const q=raw||'{}';const url=`/api/v1/logs?query=${encodeURIComponent(q)}&start=${start}&end=${end}&limit=2000&order=desc`;try{const r=await apiFetch(url);const d=r.data||r;ST.logs.result=d.logs||d||[];}catch(e){ST.logs.result=[];if(e.name!=='AbortError')showWarn('Logs: '+e.message);}setStatus(true);renderLogs();}
@@ -719,7 +781,7 @@ function injectFilter(token){let cur=(E.qIn.value||'').trim();if(ST.sig==='metri
 
 /* AUTOCOMPLETE */
 let acIdx=-1,acList=[];
-async function prefetch(){try{const r=await fetch('/api/v1/label/__name__/values');if(r.ok){const j=await r.json();ST.server.names=(j.data||[]).sort();tx($('srv-count'),ST.server.names.length);}}catch{}try{const r=await fetch('/api/v1/labels');if(r.ok){const j=await r.json();ST.server.labels=(j.data||[]).filter(l=>l!=='__name__');}}catch{}}
+async function prefetch(){try{const r=await fetch('/api/v1/label/__name__/values');if(r.ok){const j=await r.json();ST.server.names=(j.data||[]).sort();tx($('srv-count'),ST.server.names.length);if(ST.sig==='overview')tx($('ovw-metrics-val'),ST.server.names.length.toLocaleString());}}catch{}try{const r=await fetch('/api/v1/labels');if(r.ok){const j=await r.json();ST.server.labels=(j.data||[]).filter(l=>l!=='__name__');}}catch{}}
 function showAC(){const raw=E.qIn.value,dd=E.acDrop;dd.innerHTML='';acList=[];acIdx=-1;if(ST.sig==='traces'){const traceHints=['(paste a trace_id to search)','(leave empty for recent traces)'];if(!raw){const sec=document.createElement('div');const hdr=document.createElement('div');hdr.className='ac-hdr';hdr.textContent='Traces';sec.appendChild(hdr);traceHints.forEach(h=>{const it=document.createElement('div');it.className='ac-item';it.style.color='var(--text-muted)';it.textContent=h;sec.appendChild(it);});dd.appendChild(sec);dd.classList.add('open');}else{dd.classList.remove('open');}return;}const inBrace=raw.includes('{');const partial=(inBrace?raw.split(/[{,]/).pop().trim().split('=')[0]:raw).toLowerCase();let src,hdrText,typText;if(ST.sig==='logs'){src=['service_name','k8s_namespace','k8s_pod_name','severity_text','body','trace_id'];hdrText='Log Fields';typText='field';}else{src=!inBrace?ST.server.names:ST.server.labels;hdrText=!inBrace?'Metrics':'Labels';typText=!inBrace?'metric':'key';}const matches=src.filter(n=>!partial||n.toLowerCase().includes(partial)).slice(0,12);if(!matches.length){dd.classList.remove('open');return;}const sec=document.createElement('div');const hdr=document.createElement('div');hdr.className='ac-hdr';hdr.textContent=hdrText;sec.appendChild(hdr);matches.forEach(m=>{acList.push(m);const it=document.createElement('div');it.className='ac-item';it.dataset.aci=acList.length-1;const txt=document.createElement('span');txt.textContent=m;const typ=document.createElement('span');typ.className='ac-type';typ.textContent=typText;it.append(txt,typ);sec.appendChild(it);});dd.appendChild(sec);dd.classList.add('open');}
 function closeAC(){E.acDrop.classList.remove('open');acIdx=-1;}
 function selAC(item){const raw=E.qIn.value,inBrace=raw.includes('{');if(inBrace){const p=Math.max(raw.lastIndexOf('{'),raw.lastIndexOf(','));E.qIn.value=raw.slice(0,p+1)+item+'=';}else{E.qIn.value=item;}closeAC();E.qIn.focus();}
@@ -817,7 +879,7 @@ function renderOverview(a,body){
   // RCA section
   if(a.rca){renderRCA(a.rca,body);}
   else if(a.state==='Firing'||a.state==='firing'){
-    const ai=document.createElement('div');ai.className='rca-box';ai.innerHTML='<div class="rca-header"><span style="font-size:12px;display:flex;align-items:center;gap:6px;"><svg class="tab-ic"><use href="#i-bot"/></svg> Root Cause Analysis</span><span class="rca-model">Analysing…</span></div>'<div class="rca-conf"><div class="rca-conf-fill" style="width:0%;animation:sweep 2s infinite;"></div></div><p style="font-size:11px;color:var(--text-muted);">AI is investigating this alert…</p>';
+    const ai=document.createElement('div');ai.className='rca-box';ai.innerHTML='<div class="rca-header"><span style="font-size:12px;display:flex;align-items:center;gap:6px;"><svg class="tab-ic"><use href="#i-bot"/></svg> Root Cause Analysis</span><span class="rca-model">Analysing…</span></div><div class="rca-conf"><div class="rca-conf-fill" style="width:0%;animation:sweep 2s infinite;"></div></div><p style="font-size:11px;color:var(--text-muted);">AI is investigating this alert…</p>';
     body.appendChild(ai);
   }
 }
@@ -909,6 +971,61 @@ async function renderProposalsView(){
   }catch(e){container.innerHTML=`<p style="color:var(--err);">${e.message}</p>`;}
 }
 
+/* RECORDING RULES VIEW */
+async function renderRecordingRules(){
+  const container=$('recording-rules-view');
+  container.innerHTML='<div style="padding:12px"><div class="skel skel-row"></div><div class="skel skel-row" style="width:90%"></div><div class="skel skel-row" style="width:85%"></div></div>';
+  try{
+    const r=await fetch('/api/v1/recording_rules');const j=await r.json();const groups=j.data||[];
+    if(!groups.length){container.innerHTML='<div class="empty-c"><p>No recording rule groups</p><p style="font-size:11px;color:var(--text-muted);">Recording rules pre-compute frequent PromQL expressions into new stored series. Define them via the API.</p><code style="font-size:10px;">POST /api/v1/recording_rules</code></div>';return;}
+    container.innerHTML='';
+    groups.forEach(g=>{
+      const box=document.createElement('div');box.className='rca-box';
+      const hdr=document.createElement('div');hdr.className='rca-header';
+      hdr.innerHTML=`<span style="font-size:12px;font-weight:700;">${esc(g.name)}</span><span class="rca-model">interval: ${esc(g.interval||'1m')}</span>`;
+      box.appendChild(hdr);
+      (g.rules||[]).forEach(rule=>{
+        const row=document.createElement('div');
+        row.style.cssText='padding:8px;background:var(--bg-raised);border-radius:4px;margin-bottom:6px;font-family:var(--mono);font-size:11px;';
+        const desc=rule.description?`<div style="color:var(--text-muted);font-size:10px;margin-bottom:4px;">${esc(rule.description)}</div>`:'';
+        row.innerHTML=`${desc}<div><span style="color:var(--accent);">${esc(rule.record)}</span> <span style="color:var(--text-muted);">=</span> <span style="color:var(--info);">${esc(rule.expr)}</span></div>`;
+        box.appendChild(row);
+      });
+      container.appendChild(box);
+    });
+  }catch(e){container.innerHTML=`<p style="color:var(--err);font-size:11px;">${e.message}</p>`;}
+}
+
+/* PIPELINES VIEW */
+async function renderPipelines(){
+  const container=$('pipelines-view');
+  container.innerHTML='<div style="padding:12px"><div class="skel skel-row"></div><div class="skel skel-row" style="width:90%"></div><div class="skel skel-row" style="width:85%"></div></div>';
+  try{
+    const r=await fetch('/api/v1/pipelines');const j=await r.json();const pipes=j.data||[];
+    if(!pipes.length){container.innerHTML='<div class="empty-c"><p>No pipelines configured</p><p style="font-size:11px;color:var(--text-muted);">Pipelines transform telemetry at ingest time (parse, drop, route). Define them via the API.</p><code style="font-size:10px;">POST /api/v1/pipelines</code></div>';return;}
+    container.innerHTML='';
+    pipes.forEach(p=>{
+      const box=document.createElement('div');box.className='rca-box';
+      const hdr=document.createElement('div');hdr.className='rca-header';
+      const sig=(p.match&&p.match.signal)?esc(p.match.signal):'any';
+      hdr.innerHTML=`<span style="font-size:12px;font-weight:700;">${esc(p.name)}</span><span class="rca-model">signal: ${sig}</span>`;
+      box.appendChild(hdr);
+      if(p.description){const d=document.createElement('p');d.style.cssText='font-size:11px;color:var(--text-secondary);margin-bottom:8px;';d.textContent=p.description;box.appendChild(d);}
+      (p.stages||[]).forEach(st=>{
+        const row=document.createElement('div');
+        row.style.cssText='padding:6px 10px;background:var(--bg-raised);border-radius:4px;margin-bottom:4px;font-family:var(--mono);font-size:11px;';
+        row.innerHTML=`<span style="color:var(--warn);">${esc(st.type||st.stage_type||'stage')}</span> <span style="color:var(--text-primary);">${esc(st.name)}</span>${st.processor?` <span style="color:var(--text-muted);">· ${esc(st.processor)}</span>`:''}`;
+        box.appendChild(row);
+      });
+      const del=document.createElement('button');del.className='rca-btn';del.textContent='Delete';
+      del.onclick=()=>{if(confirm(`Delete pipeline "${p.name}"?`))fetch(`/api/v1/pipelines/${encodeURIComponent(p.name)}`,{method:'DELETE'}).then(()=>{toast('Pipeline deleted');renderPipelines();});};
+      const acts=document.createElement('div');acts.className='rca-actions';acts.appendChild(del);
+      box.appendChild(acts);
+      container.appendChild(box);
+    });
+  }catch(e){container.innerHTML=`<p style="color:var(--err);font-size:11px;">${e.message}</p>`;}
+}
+
 /* POSTMORTEM VIEWER */
 function openPostmortem(alertId){
   const panel=$('postmortem-panel');const body=$('postmortem-body');
@@ -944,8 +1061,46 @@ function renderMarkdown(md){
   html=html.replace(/<\/(h[123]|ul|ol|pre|li)><\/p>/g,'</$1>');
   return html;
 }
+/* ═══ OVERVIEW ═══ */
+async function loadOverview(){
+  const now=Math.floor(Date.now()/1000),s=now-21600;
+  // Metrics count (already prefetched)
+  tx($('ovw-metrics-val'),ST.server.names.length?ST.server.names.length.toLocaleString():'—');
+  // Fire parallel loads
+  const logsP=fetch(`/api/v1/logs?query=${encodeURIComponent('{}')}&start=${s}&end=${now}&limit=2000&order=desc`).then(r=>r.ok?r.json():null).catch(()=>null);
+  const tracesP=fetch(`/v1/traces/search?start=${s}&end=${now}`).then(r=>r.ok?r.json():null).catch(()=>null);
+  const alertsP=fetch('/api/v1/alerts').then(r=>r.ok?r.json():null).catch(()=>null);
+  const [logsJ,tracesJ,alertsJ]=await Promise.all([logsP,tracesP,alertsP]);
+  if(logsJ){const d=logsJ.data||{};const rows=Array.isArray(d)?d:(d.logs||[]);tx($('ovw-logs-val'),rows.length?rows.length.toLocaleString():'0');}
+  if(tracesJ){const spans=(tracesJ.data||{}).spans||[];tx($('ovw-traces-val'),spans.length?spans.length.toLocaleString():'0');}
+  if(alertsJ){const list=alertsJ.data||[];const firing=list.filter(a=>['Firing','firing','FIRING'].includes(a.state)).length;tx($('ovw-alerts-val'),String(firing));}
+  drawSpark(logsJ);
+}
+function drawSpark(logsJ){
+  const cv=$('ovw-spark');const dpr=window.devicePixelRatio||1;
+  const W=cv.clientWidth||800,H=80;cv.width=W*dpr;cv.height=H*dpr;
+  const ctx=cv.getContext('2d');ctx.scale(dpr,dpr);ctx.clearRect(0,0,W,H);
+  const rows=logsJ?(Array.isArray(logsJ.data)?logsJ.data:(logsJ.data||{}).logs||[]):[];
+  if(!rows.length){ctx.fillStyle='var(--text-muted)';ctx.font='11px monospace';ctx.fillStyle='#74889f';ctx.fillText('No log volume in range',10,H/2);return;}
+  const now=Math.floor(Date.now()/1000),s=now-21600;
+  const N=48,buckets=new Array(N).fill(0);
+  rows.forEach(r=>{const idx=Math.min(N-1,Math.floor(((r.timestamp_ns/1e9)-s)/21600*N));if(idx>=0)buckets[idx]++;});
+  const max=Math.max(...buckets,1);
+  ctx.beginPath();
+  buckets.forEach((v,i)=>{const x=i/(N-1)*(W-12)+6,y=H-8-(v/max)*(H-20);if(i===0)ctx.moveTo(x,y);else ctx.lineTo(x,y);});
+  ctx.strokeStyle='#00F5D4';ctx.lineWidth=1.5;ctx.stroke();
+  ctx.lineTo(W-6,H-8);ctx.lineTo(6,H-8);ctx.closePath();
+  ctx.fillStyle='rgba(0,245,212,.08)';ctx.fill();
+}
+document.addEventListener('click',e=>{
+  const card=e.target.closest('.ovw-card');
+  if(card&&card.dataset.sig){switchSig(card.dataset.sig);return;}
+  const link=e.target.closest('.ovw-link');
+  if(link&&link.dataset.goto){switchSig(link.dataset.goto);}
+});
+
 /* SIGNAL SWITCH */
-function switchSig(sig){
+function switchSig(sig,fromUrl=false){
   ST.sig=sig;
   closeBanner();
   document.querySelectorAll('.nav-tab').forEach(t=>{t.classList.toggle('active',t.dataset.sig===sig);t.setAttribute('aria-selected',t.dataset.sig===sig?'true':'false');});
@@ -953,34 +1108,44 @@ function switchSig(sig){
   E.sevBar.classList.toggle('visible',sig==='logs');
   E.mCtrls.style.display=sig==='metrics'?'flex':'none';
   E.kbHints.classList.toggle('visible',sig==='alerts');
-  $('toolbar').style.display=sig==='alerts'?'none':'flex';
-  $('volume-histogram').style.display=sig==='alerts'||sig==='traces'?'none':'block';
+  $('toolbar').style.display=sig==='alerts'||sig==='overview'?'none':'flex';
+  $('volume-histogram').style.display=sig==='alerts'||sig==='traces'||sig==='overview'?'none':'block';
   // Context-aware search: clear value, update placeholder + signal badge
-  E.qIn.value='';updateSearchClear();
-  const ph={metrics:'metric_name{} or service="name"',logs:'service="name" or severity="ERROR"',traces:'trace_id or leave empty for recent',alerts:''};
+  if(!fromUrl){E.qIn.value='';updateSearchClear();}
+  const ph={overview:'Type to search — or pick a view',metrics:'metric_name{} or service="name"',logs:'service="name" or severity="ERROR"',traces:'trace_id or leave empty for recent',alerts:''};
   E.qIn.setAttribute('placeholder',ph[sig]||'');
   const sigBadge=$('search-sig');sigBadge.className=sig;
-  const sigTxt={metrics:'MTR',logs:'LOG',traces:'TRC',alerts:'ALT'};sigBadge.textContent=sigTxt[sig]||'';
+  const sigTxt={overview:'OVR',metrics:'MTR',logs:'LOG',traces:'TRC',alerts:'ALT'};sigBadge.textContent=sigTxt[sig]||'';
   if(sig==='alerts'){pollAlerts();setupAlertPolling();}
+  if(!fromUrl)updateUrl();
+  if(sig==='alerts')switchAlertView(ST.alerts.subView,true);
+  if(sig==='overview')loadOverview();
   if(sig==='metrics'||sig==='logs'||sig==='traces')runQuery();
 }
 $('signal-tabs').addEventListener('click',e=>{const t=e.target.closest('[data-sig]');if(t)switchSig(t.dataset.sig);});
 
 /* ALERT SUB-VIEWS */
-function switchAlertView(view){
+function switchAlertView(view,fromUrl=false){
   ST.alerts.subView=view;
   document.querySelectorAll('.atool-link').forEach(l=>l.classList.toggle('active',l.id===`atool-${view}`));
   $('alert-stream-view').style.display=view==='stream'?'flex':'none';
   $('alert-stream-view').style.flexDirection='column';$('alert-stream-view').style.flex='1';$('alert-stream-view').style.minHeight='0';
   $('alert-rules-view').style.display=view==='rules'?'block':'none';
   $('alert-proposals-view').style.display=view==='proposals'?'block':'none';
+  $('recording-rules-view').style.display=view==='recording'?'block':'none';
+  $('pipelines-view').style.display=view==='pipelines'?'block':'none';
   if(view==='rules')renderRulesView();
   if(view==='proposals')renderProposalsView();
+  if(view==='recording')renderRecordingRules();
+  if(view==='pipelines')renderPipelines();
   if(view==='stream')renderAlertList();
+  if(!fromUrl&&ST.sig==='alerts')updateUrl();
 }
 $('atool-stream').onclick=()=>switchAlertView('stream');
 $('atool-rules').onclick=()=>switchAlertView('rules');
 $('atool-proposals').onclick=()=>switchAlertView('proposals');
+$('atool-recording').onclick=()=>switchAlertView('recording');
+$('atool-pipelines').onclick=()=>switchAlertView('pipelines');
 
 /* ALERT DETAIL TABS */
 document.querySelector('.adet-tabs').addEventListener('click',e=>{
@@ -1037,7 +1202,8 @@ function init(){
   prefetch().then(()=>setStatus(true)).catch(()=>setStatus(false));
   setInterval(()=>{if(!document.hidden)prefetch().then(()=>setStatus(true)).catch(()=>setStatus(false));},30000);
   setupRefresh();
-  setRange(360);
+  applyUrlState();
+  switchSig(ST.sig,true);
   pollAlerts();
   setupAlertPolling();
 }
