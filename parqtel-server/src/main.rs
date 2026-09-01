@@ -392,15 +392,18 @@ async fn run_export(
     output: PathBuf,
 ) -> anyhow::Result<()> {
     // Prevent path traversal: ensure output is within data directory
-    let data_dir = config.storage.data_dir.canonicalize()
+    let data_dir = config
+        .storage
+        .data_dir
+        .canonicalize()
         .unwrap_or_else(|_| config.storage.data_dir.clone());
-    
+
     // For output path, canonicalize the parent directory since file may not exist yet
-    let output_parent = output.parent()
-        .unwrap_or(&output);
-    let output_path = output_parent.canonicalize()
+    let output_parent = output.parent().unwrap_or(&output);
+    let output_path = output_parent
+        .canonicalize()
         .unwrap_or_else(|_| output_parent.to_path_buf());
-    
+
     if !output_path.starts_with(&data_dir) {
         return Err(anyhow::anyhow!(
             "Output path must be within data directory: {}",

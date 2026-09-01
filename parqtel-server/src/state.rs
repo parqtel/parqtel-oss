@@ -91,7 +91,11 @@ impl AppState {
             IngestionService::new(config.storage.clone(), tx),
             LogIngestionService::new(config.logs.clone(), ltx),
             TraceIngestionService::new(config.storage.clone(), ttx),
-            QueryExecutor::new(index.clone(), log_index, config.storage.data_dir.join("traces")),
+            QueryExecutor::new(
+                index.clone(),
+                log_index,
+                config.storage.data_dir.join("traces"),
+            ),
             index,
             config,
             vec![],
