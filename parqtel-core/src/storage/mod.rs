@@ -24,80 +24,41 @@ mod tests {
     use super::*;
     use crate::models::storage::{BlockMetadata, SignalType, StorageModel};
     use crate::models::{DataPoint, LabelSet, LogRecord, Metric, MetricKind, MetricValue};
+    use parquet::arrow::ArrowWriter;
+    use parquet::basic::{Compression, Encoding};
+    use parquet::file::properties::{WriterProperties, WriterVersion};
     use std::collections::HashSet;
     use std::fs;
     use tempfile::tempdir;
 
-    /// Helper: write a real parquet metrics file.
+    /// Helper: write a real parquet metrics file using new parquet/arrow APIs.
     fn write_metrics_parquet(path: &std::path::Path, metrics: &[Metric]) {
-        use arrow2::io::parquet::write::{
-            self, CompressionOptions, Encoding, Version, WriteOptions,
-        };
         let chunk = StorageModel::metrics_to_chunk(metrics).unwrap();
-        let schema = StorageModel::metrics_schema();
-        let options = WriteOptions {
-            write_statistics: true,
-            compression: CompressionOptions::Uncompressed,
-            version: Version::V2,
-            data_pagesize_limit: None,
-        };
-        let encodings: Vec<Vec<Encoding>> = schema
-            .fields
-            .iter()
-            .map(|f| match f.data_type() {
-                arrow2::datatypes::DataType::Dictionary(_, _, _) => vec![Encoding::RleDictionary],
-                _ => vec![Encoding::Plain],
-            })
-            .collect();
-        let row_groups = write::RowGroupIterator::try_new(
-            std::iter::once(Ok(chunk)),
-            &schema,
-            options,
-            encodings,
-        )
-        .unwrap();
-        let file = std::fs::File::create(path).unwrap();
-        let mut writer = write::FileWriter::try_new(file, schema, options).unwrap();
-        for group in row_groups {
-            writer.write(group.unwrap()).unwrap();
-        }
-        writer.end(None).unwrap();
+        let file = fs::File::create(path).unwrap();
+
+        let writer_props = WriterProperties::builder()
+            .set_compression(Compression::UNCOMPRESSED)
+            .set_writer_version(WriterVersion::PARQUET_2_0)
+            .build();
+
+        let mut writer = ArrowWriter::try_new(file, chunk.schema(), Some(writer_props)).unwrap();
+        writer.write(&chunk).unwrap();
+        writer.close().unwrap();
     }
 
     /// Helper: write a real parquet logs file.
     fn write_logs_parquet(path: &std::path::Path, logs: &[LogRecord]) {
-        use arrow2::io::parquet::write::{
-            self, CompressionOptions, Encoding, Version, WriteOptions,
-        };
         let chunk = StorageModel::logs_to_chunk(logs).unwrap();
-        let schema = StorageModel::logs_schema();
-        let options = WriteOptions {
-            write_statistics: true,
-            compression: CompressionOptions::Uncompressed,
-            version: Version::V2,
-            data_pagesize_limit: None,
-        };
-        let encodings: Vec<Vec<Encoding>> = schema
-            .fields
-            .iter()
-            .map(|f| match f.data_type() {
-                arrow2::datatypes::DataType::Dictionary(_, _, _) => vec![Encoding::RleDictionary],
-                _ => vec![Encoding::Plain],
-            })
-            .collect();
-        let row_groups = write::RowGroupIterator::try_new(
-            std::iter::once(Ok(chunk)),
-            &schema,
-            options,
-            encodings,
-        )
-        .unwrap();
-        let file = std::fs::File::create(path).unwrap();
-        let mut writer = write::FileWriter::try_new(file, schema, options).unwrap();
-        for group in row_groups {
-            writer.write(group.unwrap()).unwrap();
-        }
-        writer.end(None).unwrap();
+        let file = fs::File::create(path).unwrap();
+
+        let writer_props = WriterProperties::builder()
+            .set_compression(Compression::UNCOMPRESSED)
+            .set_writer_version(WriterVersion::PARQUET_2_0)
+            .build();
+
+        let mut writer = ArrowWriter::try_new(file, chunk.schema(), Some(writer_props)).unwrap();
+        writer.write(&chunk).unwrap();
+        writer.close().unwrap();
     }
 
     #[tokio::test]
