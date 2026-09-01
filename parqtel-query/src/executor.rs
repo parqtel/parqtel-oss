@@ -20,24 +20,31 @@ pub struct QueryExecutor {
     log_index: Arc<RwLock<BlockIndex>>,
     trace_index: Arc<RwLock<BlockIndex>>,
     buffer: MemoryBuffer,
+    #[allow(dead_code)]
+    trace_data_dir: std::path::PathBuf,
 }
 
 impl QueryExecutor {
     /// Creates a new [QueryExecutor] with shared block indexes.
-    pub fn new(index: Arc<RwLock<BlockIndex>>, log_index: Arc<RwLock<BlockIndex>>) -> Self {
+    pub fn new(
+        index: Arc<RwLock<BlockIndex>>,
+        log_index: Arc<RwLock<BlockIndex>>,
+        trace_data_dir: std::path::PathBuf,
+    ) -> Self {
         let config = parqtel_core::BlockConfig::default();
         let storage: Arc<dyn StorageEngine> = Arc::new(
             parqtel_core::engine::parquet::ParquetStorageEngine::new(config),
         );
-        let trace_index = Arc::new(RwLock::new(BlockIndex::new(std::path::Path::new(
-            "/tmp/parqtel-traces",
-        ))));
+        let mut trace_index = BlockIndex::new(&trace_data_dir);
+        trace_index.load().ok();
+        let trace_index = Arc::new(RwLock::new(trace_index));
         Self {
             storage,
             index,
             log_index,
             trace_index,
             buffer: MemoryBuffer::new(),
+            trace_data_dir,
         }
     }
 
@@ -46,20 +53,22 @@ impl QueryExecutor {
         index: Arc<RwLock<BlockIndex>>,
         log_index: Arc<RwLock<BlockIndex>>,
         buffer: MemoryBuffer,
+        trace_data_dir: std::path::PathBuf,
     ) -> Self {
         let config = parqtel_core::BlockConfig::default();
         let storage: Arc<dyn StorageEngine> = Arc::new(
             parqtel_core::engine::parquet::ParquetStorageEngine::new(config),
         );
-        let trace_index = Arc::new(RwLock::new(BlockIndex::new(std::path::Path::new(
-            "/tmp/parqtel-traces",
-        ))));
+        let mut trace_index = BlockIndex::new(&trace_data_dir);
+        trace_index.load().ok();
+        let trace_index = Arc::new(RwLock::new(trace_index));
         Self {
             storage,
             index,
             log_index,
             trace_index,
             buffer,
+            trace_data_dir,
         }
     }
 
@@ -69,6 +78,7 @@ impl QueryExecutor {
         log_index: Arc<RwLock<BlockIndex>>,
         trace_index: Arc<RwLock<BlockIndex>>,
         buffer: MemoryBuffer,
+        trace_data_dir: std::path::PathBuf,
     ) -> Self {
         let config = parqtel_core::BlockConfig::default();
         let storage: Arc<dyn StorageEngine> = Arc::new(
@@ -80,6 +90,7 @@ impl QueryExecutor {
             log_index,
             trace_index,
             buffer,
+            trace_data_dir,
         }
     }
 
@@ -88,16 +99,18 @@ impl QueryExecutor {
         storage: Arc<dyn StorageEngine>,
         index: Arc<RwLock<BlockIndex>>,
         log_index: Arc<RwLock<BlockIndex>>,
+        trace_data_dir: std::path::PathBuf,
     ) -> Self {
-        let trace_index = Arc::new(RwLock::new(BlockIndex::new(std::path::Path::new(
-            "/tmp/parqtel-traces",
-        ))));
+        let mut trace_index = BlockIndex::new(&trace_data_dir);
+        trace_index.load().ok();
+        let trace_index = Arc::new(RwLock::new(trace_index));
         Self {
             storage,
             index,
             log_index,
             trace_index,
             buffer: MemoryBuffer::new(),
+            trace_data_dir,
         }
     }
 
@@ -821,7 +834,7 @@ mod tests {
     use super::*;
     use parqtel_core::engine::parquet::ParquetStorageEngine;
     use parqtel_core::BlockConfig;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use tempfile::tempdir;
 
     /// Helper: create a ParquetStorageEngine-backed executor with real parquet files.
@@ -902,7 +915,9 @@ mod tests {
 
         let index = Arc::new(RwLock::new(index));
         let log_index = Arc::new(RwLock::new(log_index));
-        let exec = QueryExecutor::with_engine(storage, index, log_index);
+        let trace_data_dir = dir.path().join("traces");
+        std::fs::create_dir_all(&trace_data_dir).ok();
+        let exec = QueryExecutor::with_engine(storage, index, log_index, trace_data_dir);
         (exec, dir)
     }
 
@@ -910,7 +925,9 @@ mod tests {
     async fn test_query_executor_empty() {
         let index = Arc::new(RwLock::new(BlockIndex::new(Path::new("/tmp/ne"))));
         let log_index = Arc::new(RwLock::new(BlockIndex::new(Path::new("/tmp/ne"))));
-        let exec = QueryExecutor::new(index, log_index);
+        let trace_data_dir = PathBuf::from("/tmp/ne/traces");
+        std::fs::create_dir_all(&trace_data_dir).ok();
+        let exec = QueryExecutor::new(index, log_index, trace_data_dir);
         let plan = QueryPlan::new("cpu".into(), vec![], 0, 100, None, 10, 100, None, None).unwrap();
         let res = exec.execute(plan).await.unwrap();
         assert_eq!(res.series.len(), 0);
@@ -973,7 +990,9 @@ mod tests {
     async fn test_query_logs_empty() {
         let index = Arc::new(RwLock::new(BlockIndex::new(Path::new("/tmp/ne"))));
         let log_index = Arc::new(RwLock::new(BlockIndex::new(Path::new("/tmp/ne"))));
-        let exec = QueryExecutor::new(index, log_index);
+        let trace_data_dir = PathBuf::from("/tmp/ne/traces");
+        std::fs::create_dir_all(&trace_data_dir).ok();
+        let exec = QueryExecutor::new(index, log_index, trace_data_dir);
         let res = exec
             .query_logs(0, 100, vec![], 10, false, None, None)
             .await

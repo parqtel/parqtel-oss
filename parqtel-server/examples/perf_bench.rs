@@ -10,7 +10,7 @@
 
 #![allow(clippy::unwrap_used)]
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -101,8 +101,10 @@ async fn main() {
     let log_index = Arc::new(RwLock::new(BlockIndex::new(Path::new("/tmp/bench-logs"))));
     let trace_index = Arc::new(RwLock::new(BlockIndex::new(Path::new("/tmp/bench-traces"))));
     let buffer = MemoryBuffer::new();
+    let trace_data_dir = PathBuf::from("/tmp/bench-traces");
+    std::fs::create_dir_all(&trace_data_dir).ok();
     let executor =
-        QueryExecutor::with_trace_index(index.clone(), log_index, trace_index, buffer.clone());
+        QueryExecutor::with_trace_index(index.clone(), log_index, trace_index, buffer.clone(), trace_data_dir);
     let flush_dir = dir.path().join("flush");
     let mut writer = BlockWriter::new(bench_config(&flush_dir));
 
