@@ -1,7 +1,7 @@
 use parqtel_alert::evaluator::engine::{EvalConfig, EvaluationEngine};
 use parqtel_alert::AlertRuleRegistry;
 use parqtel_alert::AlertStore;
-use parqtel_core::{BlockIndex, Config, MemoryBuffer, StorageEngine};
+use parqtel_core::{BlockIndex, Config};
 use parqtel_ingest::{IngestionService, LogIngestionService, TraceIngestionService};
 use parqtel_pipeline::rule::registry::RuleRegistry as PipelineRegistry;
 use parqtel_query::QueryExecutor;
@@ -15,13 +15,11 @@ pub struct AppState {
 }
 
 pub struct AppStateInner {
-    pub storage_engine: Arc<dyn StorageEngine>,
     pub ingestion_service: IngestionService,
     pub log_ingestion_service: LogIngestionService,
     pub trace_ingestion_service: TraceIngestionService,
     pub query_executor: QueryExecutor,
     pub index: Arc<RwLock<BlockIndex>>,
-    pub memory_buffer: MemoryBuffer,
     pub config: Config,
     pub ui_content: Vec<u8>,
     pub ui_etag: String,
@@ -33,14 +31,13 @@ pub struct AppStateInner {
 }
 
 impl AppState {
+    #[allow(clippy::too_many_arguments)]
     pub async fn new(
-        storage_engine: Arc<dyn StorageEngine>,
         ingestion_service: IngestionService,
         log_ingestion_service: LogIngestionService,
         trace_ingestion_service: TraceIngestionService,
         query_executor: QueryExecutor,
         index: Arc<RwLock<BlockIndex>>,
-        memory_buffer: MemoryBuffer,
         config: Config,
         ui_content: Vec<u8>,
         ui_etag: String,
@@ -61,13 +58,11 @@ impl AppState {
 
         Self {
             inner: Arc::new(AppStateInner {
-                storage_engine,
                 ingestion_service,
                 log_ingestion_service,
                 trace_ingestion_service,
                 query_executor,
                 index,
-                memory_buffer,
                 config,
                 ui_content,
                 ui_etag,
@@ -92,18 +87,12 @@ impl AppState {
         let index = Arc::new(RwLock::new(BlockIndex::new(dir.path())));
         let log_index = Arc::new(RwLock::new(BlockIndex::new(&dir.path().join("logs"))));
 
-        let storage_engine: Arc<dyn StorageEngine> = Arc::new(
-            parqtel_core::engine::parquet::ParquetStorageEngine::new(config.storage.clone()),
-        );
-
         Self::new(
-            storage_engine,
             IngestionService::new(config.storage.clone(), tx),
             LogIngestionService::new(config.logs.clone(), ltx),
             TraceIngestionService::new(config.storage.clone(), ttx),
-            QueryExecutor::new(index.clone(), log_index),
+            QueryExecutor::new(index.clone(), log_index, config.storage.data_dir.join("traces")),
             index,
-            MemoryBuffer::new(),
             config,
             vec![],
             "".into(),

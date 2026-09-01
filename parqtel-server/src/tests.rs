@@ -8,7 +8,7 @@ use axum::{
 };
 use flate2::write::GzEncoder;
 use flate2::Compression;
-use parqtel_core::{BlockIndex, Config, StorageEngine};
+use parqtel_core::{BlockIndex, Config};
 use parqtel_ingest::otel::collector::metrics::v1::ExportMetricsServiceRequest;
 use parqtel_ingest::{IngestionService, LogIngestionService, TraceIngestionService};
 use parqtel_query::QueryExecutor;
@@ -32,10 +32,6 @@ async fn setup_test_app() -> axum::Router {
         &dir.path().join("logs"),
     )));
 
-    let storage_engine: Arc<dyn StorageEngine> = Arc::new(
-        parqtel_core::engine::parquet::ParquetStorageEngine::new(config.storage.clone()),
-    );
-
     let ui_html = "<html><body>Test</body></html>";
     let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
     encoder.write_all(ui_html.as_bytes()).unwrap();
@@ -45,15 +41,12 @@ async fn setup_test_app() -> axum::Router {
     hasher.update(ui_html.as_bytes());
     let ui_etag = format!("\"{}\"", hex::encode(hasher.finalize()));
 
-    let memory_buffer = parqtel_core::MemoryBuffer::new();
     let state = AppState::new(
-        storage_engine,
         IngestionService::new(config.storage.clone(), tx),
         LogIngestionService::new(config.logs.clone(), ltx),
         TraceIngestionService::new(config.storage.clone(), ttx),
-        QueryExecutor::new(index.clone(), log_index),
+        QueryExecutor::new(index.clone(), log_index, config.storage.data_dir.join("traces")),
         index,
-        memory_buffer,
         config,
         ui_content,
         ui_etag,
@@ -424,24 +417,26 @@ async fn test_ingest_metrics_proto() {
 }
 
 #[tokio::test]
-async fn test_export_logic() {
-    let dir = tempfile::tempdir().unwrap();
-    let index = Arc::new(tokio::sync::RwLock::new(BlockIndex::new(dir.path())));
-    let output = dir.path().join("export.csv");
+    async fn test_export_logic() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.storage.data_dir = dir.path().to_path_buf();
+        let index = Arc::new(tokio::sync::RwLock::new(BlockIndex::new(dir.path())));
+        let output = dir.path().join("export.csv");
 
-    super::run_export(
-        Config::default(),
-        index,
-        "cpu".into(),
-        "2023-01-01T00:00:00Z".into(),
-        "2023-01-01T01:00:00Z".into(),
-        output.clone(),
-    )
-    .await
-    .unwrap();
+        super::run_export(
+            config,
+            index,
+            "cpu".into(),
+            "2023-01-01T00:00:00Z".into(),
+            "2023-01-01T01:00:00Z".into(),
+            output.clone(),
+        )
+        .await
+        .unwrap();
 
-    assert!(output.exists());
-}
+        assert!(output.exists());
+    }
 
 #[tokio::test]
 async fn test_simplejson_handlers() {

@@ -13,13 +13,6 @@ use tower_http::{
     trace::TraceLayer,
 };
 
-/// Extension trait for plugging additional routes and middleware into the server.
-/// Enterprise features implement this to register auth, cluster, AI endpoints, etc.
-pub trait ServerExtension: Send + Sync {
-    /// Return additional routes to merge into the router.
-    fn routes(&self, state: AppState) -> Router<AppState>;
-}
-
 /// Builds the axum [Router] with all routes and middleware.
 pub fn build_router(state: AppState) -> Router {
     let cors = CorsLayer::new()
