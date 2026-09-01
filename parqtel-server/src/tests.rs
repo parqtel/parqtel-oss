@@ -45,7 +45,11 @@ async fn setup_test_app() -> axum::Router {
         IngestionService::new(config.storage.clone(), tx),
         LogIngestionService::new(config.logs.clone(), ltx),
         TraceIngestionService::new(config.storage.clone(), ttx),
-        QueryExecutor::new(index.clone(), log_index, config.storage.data_dir.join("traces")),
+        QueryExecutor::new(
+            index.clone(),
+            log_index,
+            config.storage.data_dir.join("traces"),
+        ),
         index,
         config,
         ui_content,
@@ -417,26 +421,26 @@ async fn test_ingest_metrics_proto() {
 }
 
 #[tokio::test]
-    async fn test_export_logic() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut config = Config::default();
-        config.storage.data_dir = dir.path().to_path_buf();
-        let index = Arc::new(tokio::sync::RwLock::new(BlockIndex::new(dir.path())));
-        let output = dir.path().join("export.csv");
+async fn test_export_logic() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = Config::default();
+    config.storage.data_dir = dir.path().to_path_buf();
+    let index = Arc::new(tokio::sync::RwLock::new(BlockIndex::new(dir.path())));
+    let output = dir.path().join("export.csv");
 
-        super::run_export(
-            config,
-            index,
-            "cpu".into(),
-            "2023-01-01T00:00:00Z".into(),
-            "2023-01-01T01:00:00Z".into(),
-            output.clone(),
-        )
-        .await
-        .unwrap();
+    super::run_export(
+        config,
+        index,
+        "cpu".into(),
+        "2023-01-01T00:00:00Z".into(),
+        "2023-01-01T01:00:00Z".into(),
+        output.clone(),
+    )
+    .await
+    .unwrap();
 
-        assert!(output.exists());
-    }
+    assert!(output.exists());
+}
 
 #[tokio::test]
 async fn test_simplejson_handlers() {
