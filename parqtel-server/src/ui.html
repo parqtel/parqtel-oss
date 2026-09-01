@@ -5,6 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>parqtel | console</title>
 <style>
+.onboard-snippet{font-family:var(--mono);font-size:10px;color:var(--text-secondary);background:var(--bg-raised);padding:10px 14px;border-radius:var(--radius-sm);border:1px solid var(--border-subtle);max-width:520px;overflow-x:auto;text-align:left;white-space:pre;}
+.skip-link{position:absolute;left:-9999px;top:0;background:var(--accent);color:#030712;padding:8px 16px;font-weight:700;z-index:10000;border-radius:0 0 4px 0;}
+.skip-link:focus{left:0;}
 :root{--bg-void:#070a0e;--bg-surface:#0f141c;--bg-raised:#161d28;--bg-overlay:#1e293b;--border-subtle:#1e293b;--border-default:#2d3f55;--border-focus:#00F5D4;--text-primary:#e2e8f0;--text-secondary:#8fa3ba;--text-muted:#74889f;--accent:#00F5D4;--accent-dim:#00b89e;--err:#f87171;--warn:#fbbf24;--info:#00F5D4;--debug:#8b9bb4;--fatal:#ff1a40;--radius-sm:4px;--radius-md:6px;--mono:ui-monospace,'SF Mono',Menlo,Consolas,'Liberation Mono',monospace;--sans:ui-sans-serif,-apple-system,'Segoe UI',Roboto,sans-serif;--c0:#00F5D4;--c1:#4488ff;--c2:#ffcc00;--c3:#ff6688;--c4:#88ffcc;--c5:#ff8844;--c6:#cc88ff;--c7:#44ccff;--space-1:4px;--space-2:8px;--space-3:12px;--space-4:16px;--space-5:20px;--space-6:24px;--space-7:28px;--space-8:32px;}
 *{box-sizing:border-box;margin:0;padding:0;}
 body{background:var(--bg-void);color:var(--text-primary);font-family:var(--sans);font-size:13px;line-height:1.5;height:100vh;overflow:hidden;display:flex;flex-direction:column;color-scheme:dark;}
@@ -162,7 +165,7 @@ header{height:48px;flex-shrink:0;background:var(--bg-void);border-bottom:1px sol
 .ovw-link:hover{color:var(--accent);border-color:var(--accent);}
 /* RESPONSIVE */
 @media(max-width:1024px){#metrics-inspector{width:280px;}#alert-detail{width:45%;}.slide-over{width:100%;max-width:400px;}}
-@media(max-width:768px){header{padding:0 8px;gap:6px;}#search-wrap{max-width:200px;}.nav-tab{padding:3px 6px;font-size:10px;}#toolbar{flex-wrap:wrap;height:auto;padding:6px 8px;}#quick-ranges{flex-wrap:wrap;}#alert-detail{position:absolute;inset:0;width:100%;z-index:30;}.slide-over{width:100%;}#metrics-inspector{width:100%;position:absolute;inset:0;z-index:30;}}
+@media(max-width:768px){header{padding:0 8px;gap:6px;}#kb-hints{display:none!important;}#facets-panel{position:absolute;inset:0;width:100%;z-index:30;}.nav-tab{padding:3px 6px;font-size:9px;}#builder-bar{flex-wrap:wrap;}#alert-detail{width:100%;}#search-wrap{max-width:200px;}.nav-tab{padding:3px 6px;font-size:10px;}#toolbar{flex-wrap:wrap;height:auto;padding:6px 8px;}#quick-ranges{flex-wrap:wrap;}#alert-detail{position:absolute;inset:0;width:100%;z-index:30;}.slide-over{width:100%;}#metrics-inspector{width:100%;position:absolute;inset:0;z-index:30;}}
 /* FOCUS VISIBLE */
 :focus-visible{outline:2px solid var(--border-focus);outline-offset:2px;}
 [role="tab"][aria-selected="true"]{color:var(--accent);}
@@ -398,6 +401,7 @@ header{height:48px;flex-shrink:0;background:var(--bg-void);border-bottom:1px sol
 </style>
 </head>
 <body>
+<a href="#workspace" class="skip-link">Skip to content</a>
 <svg style="display:none" aria-hidden="true"><defs>
 <symbol id="i-activity" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></symbol>
 <symbol id="i-logs" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M16 13H8M16 17H8M10 9H8"/></symbol>
@@ -441,7 +445,7 @@ header{height:48px;flex-shrink:0;background:var(--bg-void);border-bottom:1px sol
   </nav>
   <div class="sdot" id="sdot" title="Connecting…"></div>
   <div style="flex:1"></div>
-  <button id="btn-star" style="background:none;border:none;cursor:pointer;color:var(--text-secondary);padding:4px;" title="Star current view (save query + range)">
+  <button id="btn-star" aria-label="Star current view" style="background:none;border:none;cursor:pointer;color:var(--text-secondary);padding:4px;" title="Star current view (save query + range)">
     <svg width="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m12 2 3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01z"/></svg>
   </button>
   <button id="btn-settings" style="background:none;border:none;cursor:pointer;color:var(--text-secondary);padding:4px;" title="Settings">
@@ -450,7 +454,7 @@ header{height:48px;flex-shrink:0;background:var(--bg-void);border-bottom:1px sol
 </header>
 <div id="toolbar">
   <div id="quick-ranges" style="display:flex;gap:4px;">
-    <button class="preset-btn" id="btn-zoom-out" title="Zoom out 2×">«</button>
+    <button class="preset-btn" id="btn-zoom-out" aria-label="Zoom out time range" title="Zoom out 2×">«</button>
     <button class="preset-btn" data-min="1">1m</button><button class="preset-btn" data-min="5">5m</button><button class="preset-btn" data-min="15">15m</button><button class="preset-btn" data-min="60">1h</button><button class="preset-btn" data-min="360">6h</button><button class="preset-btn" data-min="1440">1d</button><button class="preset-btn" data-min="10080">7d</button>
   </div>
   <div class="tsep"></div>
@@ -468,7 +472,7 @@ header{height:48px;flex-shrink:0;background:var(--bg-void);border-bottom:1px sol
     <select id="sel-refresh" class="toolbar-select"><option value="0">Off</option><option value="10000" selected>10s</option><option value="30000">30s</option><option value="60000">1m</option><option value="300000">5m</option></select>
   </div>
   <div style="flex:1"></div>
-  <button id="btn-build" class="preset-btn" title="Toggle guided builder (metrics only)" style="display:none;">Builder</button>
+  <button id="btn-build" class="preset-btn" aria-pressed="false" title="Toggle guided builder (metrics only)" style="display:none;">Builder</button>
   <button id="btn-run">RUN_QUERY</button>
 </div>
 <div id="builder-bar" aria-label="Guided query builder">
@@ -488,7 +492,7 @@ header{height:48px;flex-shrink:0;background:var(--bg-void);border-bottom:1px sol
   <span style="font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.05em;margin-right:4px;">Level</span>
   <button class="sev-chip" data-s="TRACE">TRACE</button><button class="sev-chip" data-s="DEBUG">DEBUG</button><button class="sev-chip" data-s="INFO">INFO</button><button class="sev-chip" data-s="WARN">WARN</button><button class="sev-chip" data-s="ERROR">ERROR</button><button class="sev-chip" data-s="FATAL">FATAL</button>
   <span id="sev-counts" style="font-size:10px;font-family:var(--mono);color:var(--text-muted);margin-left:6px;"></span>
-  <input type="text" id="body-search" placeholder="Search in body…">
+  <input type="text" id="body-search" placeholder="Search in body…" aria-label="Search log bodies">
 </div>
 <div id="error-banner"><span id="error-text"></span><button onclick="closeBanner()" style="background:none;border:none;cursor:pointer;font-size:14px;">✕</button></div>
 <main id="workspace">
@@ -514,13 +518,13 @@ header{height:48px;flex-shrink:0;background:var(--bg-void);border-bottom:1px sol
         </div>
       </div>
     </div>
-    <div id="view-metrics" class="viewer-pane active">
+    <div id="view-metrics" class="viewer-pane active" role="tabpanel" aria-label="Metrics">
       <div id="metrics-chart-area"><div id="chart-tooltip"></div><div id="chart-crosshair"></div></div>
       <div id="custom-legend"></div>
       <div id="metrics-table-container"><div id="metrics-canvas"></div></div>
       <div id="metrics-inspector"><div class="insp-header"><span class="insp-title" id="insp-title">Series Detail</span><button class="insp-close" id="insp-close">✕</button></div><div class="insp-body" id="insp-body"></div></div>
     </div>
-    <div id="view-logs" class="viewer-pane"><div id="facets-panel"><div class="facets-hdr"><span>Fields</span><button id="facets-close" title="Hide facets">✕</button></div><div id="facets-body" class="facets-body"></div></div><div id="logs-viewport"><div id="logs-scroller"></div></div><div id="logs-facets-toggle" title="Toggle field facets">Fields</div></div>
+    <div id="view-logs" class="viewer-pane" role="tabpanel" aria-label="Logs"><div id="facets-panel"><div class="facets-hdr"><span>Fields</span><button id="facets-close" aria-label="Hide facets" title="Hide facets">✕</button></div><div id="facets-body" class="facets-body"></div></div><div id="logs-viewport"><div id="logs-scroller"></div></div><div id="logs-facets-toggle" title="Toggle field facets">Fields</div></div>
     <div id="view-traces" class="viewer-pane" role="tabpanel" aria-labelledby="tab-traces">
       <div id="trace-waterfall" style="display:none;">
         <div id="trace-header">
@@ -528,7 +532,7 @@ header{height:48px;flex-shrink:0;background:var(--bg-void);border-bottom:1px sol
           <span class="th-stat">Spans: <span class="th-val" id="th-spans">—</span></span>
           <span class="th-stat">Services: <span class="th-val" id="th-services">—</span></span>
           <span class="th-stat">Errors: <span class="th-val th-err" id="th-errors">0</span></span>
-          <input type="text" id="trace-filter" placeholder="Filter spans…">
+          <input type="text" id="trace-filter" placeholder="Filter spans…" aria-label="Filter spans">
         </div>
         <div id="trace-body">
           <div id="trace-spans"></div>
@@ -548,11 +552,11 @@ header{height:48px;flex-shrink:0;background:var(--bg-void);border-bottom:1px sol
           <div class="sd-body" id="sd-body"></div>
         </div>
       </div>
-      <div class="empty-c" id="traces-empty"><svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="1" opacity=".4"><path d="M3 12h4l3-9 4 18 3-9h4"/></svg><p style="font-size:14px;color:var(--text-primary);">Trace Visualization</p><p style="font-size:12px;">Distributed trace waterfalls with span-level detail.</p><p class="te-hint" style="font-size:11px;color:var(--text-muted);">Enter a trace_id or leave empty to list recent traces.</p></div>
+      <div class="empty-c" id="traces-empty"><svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="1" opacity=".4"><path d="M3 12h4l3-9 4 18 3-9h4"/></svg><p style="font-size:14px;color:var(--text-primary);">Trace Visualization</p><p style="font-size:12px;">Distributed trace waterfalls with span-level detail.</p><p class="te-hint" style="font-size:11px;color:var(--text-muted);">Enter a trace_id or leave empty to list recent traces.</p><p style="font-size:10px;color:var(--text-muted);">Send OTLP spans to <code style="font-size:10px;">POST /v1/traces/json</code> to populate traces.</p></div>
       <div class="span-bar-tooltip" id="span-tooltip"></div>
     </div>
-    <div id="view-alerts" class="viewer-pane">
-      <div id="alert-toolbar">
+    <div id="view-alerts" class="viewer-pane" role="tabpanel" aria-label="Alerts">
+      <div id="alert-toolbar" role="tablist" aria-label="Alert views">
         <button class="atool-link active" id="atool-stream">Stream</button>
         <button class="atool-link" id="atool-rules">Rules</button>
         <button class="atool-link" id="atool-proposals">Proposals<span class="nav-badge ok" id="proposals-badge" style="display:none;margin-left:4px;">0</span></button>
@@ -567,7 +571,7 @@ header{height:48px;flex-shrink:0;background:var(--bg-void);border-bottom:1px sol
           <div class="tsep"></div>
           <span style="font-size:10px;color:var(--text-muted);margin-right:4px;">STATUS</span>
           <button class="af-chip" data-st="FIRING">FIRING</button><button class="af-chip" data-st="PENDING">PENDING</button><button class="af-chip" data-st="ACKNOWLEDGED">ACK</button><button class="af-chip" data-st="RESOLVED">RESOLVED</button><button class="af-chip" data-st="SUPPRESSED">SUPPRESSED</button>
-          <input type="text" id="alert-search" placeholder="Search alerts…">
+          <input type="text" id="alert-search" placeholder="Search alerts…" aria-label="Search alerts">
         </div>
         <div id="alert-list-wrap">
           <div id="alert-list"></div>
@@ -687,7 +691,7 @@ function bldSync(){
   const bar=$('builder-bar'),btn=$('btn-build');
   bar.classList.toggle('visible',bldVisible());
   btn.style.display=ST.sig==='metrics'?'':'none';
-  btn.classList.toggle('active',!!ST.metrics.builder);
+  btn.classList.toggle('active',!!ST.metrics.builder);btn.setAttribute('aria-pressed',String(!!ST.metrics.builder));
   if(!bldVisible())return;
   // metric options
   const sel=$('bld-metric');const cur=sel.value;
@@ -787,7 +791,15 @@ E.histSvg.addEventListener('mousemove',e=>{const t=e.target;if(t.tagName!=='rect
 E.histSvg.addEventListener('mouseleave',()=>{E.histTip.style.display='none';});
 
 /* METRICS RENDERER */
-function renderMetrics(){const res=ST.metrics.result;E.chartArea.innerHTML='<div id="chart-tooltip"></div><div id="chart-crosshair"></div>';E.legend.innerHTML='';_chartMeta=null;if(!res||!res.length){E.tblCanvas.innerHTML='';E.tblCanvas.style.height='0';E.chartArea.innerHTML='<div id="chart-tooltip"></div><div id="chart-crosshair"></div><div class="empty-c" style="height:100%"><svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="1" opacity=".3"><path d="M3 3v18h18"/><path d="M7 16l4-8 4 4 4-6"/></svg><p>No metrics yet</p><p style="font-size:11px;color:var(--text-muted);">Select a metric and run your first query</p><code>http_requests_total{service="api"}</code></div>';return;}const total=ST.metrics.total||res.length;if(total>res.length)showWarn(`Showing ${res.length.toLocaleString()} of ${total.toLocaleString()} series`);const shown=res.slice(0,1000);const tsSet=new Set();shown.forEach(s=>(s.values||[]).forEach(([t])=>tsSet.add(t)));const xs=Array.from(tsSet).sort((a,b)=>a-b);if(xs.length<=1){renderSnapshot(shown);}else{const plotSeries=shown.slice(0,50);const W=E.chartArea.clientWidth||800;const H=E.chartArea.clientHeight||260;const pad={t:16,r:12,b:32,l:50};const cW=W-pad.l-pad.r,cH=H-pad.t-pad.b;const canvas=document.createElement('canvas');canvas.width=W*2;canvas.height=H*2;canvas.style.cssText=`width:${W}px;height:${H}px;display:block;`;const ctx=canvas.getContext('2d');ctx.scale(2,2);const xMin=xs[0],xMax=xs[xs.length-1],xRange=xMax-xMin||1;let yMin=Infinity,yMax=-Infinity;plotSeries.forEach(s=>(s.values||[]).forEach(([,v])=>{const n=parseFloat(v);if(isFinite(n)){yMin=Math.min(yMin,n);yMax=Math.max(yMax,n);}}));if(!isFinite(yMin)){yMin=0;yMax=1;}const yPad=(yMax-yMin)*0.1||1;yMin-=yPad;yMax+=yPad;const yRange=yMax-yMin||1;function toX(t){return pad.l+(t-xMin)/xRange*cW;}function toY(v){return pad.t+(1-(v-yMin)/yRange)*cH;}ctx.strokeStyle='rgba(255,255,255,.06)';ctx.lineWidth=0.5;for(let i=0;i<=5;i++){const y=pad.t+cH*i/5;ctx.beginPath();ctx.moveTo(pad.l,y);ctx.lineTo(pad.l+cW,y);ctx.stroke();const val=(yMax-(yMax-yMin)*i/5).toFixed(1);ctx.fillStyle='#94a3b8';ctx.font='10px monospace';ctx.textAlign='right';ctx.fillText(val,pad.l-6,y+3);}const ticks=Math.min(xs.length,8);const step=Math.max(1,Math.floor(xs.length/ticks));for(let i=0;i<xs.length;i+=step){const x=toX(xs[i]);ctx.beginPath();ctx.moveTo(x,pad.t);ctx.lineTo(x,pad.t+cH);ctx.stroke();const d=new Date(xs[i]*1000);ctx.fillStyle='#94a3b8';ctx.font='10px monospace';ctx.textAlign='center';ctx.fillText(d.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}),x,H-6);}plotSeries.forEach((s,i)=>{if(ST.metrics.hidden.has(i))return;const color=COLORS[i%COLORS.length];const pts=[];(s.values||[]).forEach(([t,v])=>{const n=parseFloat(v);if(isFinite(n))pts.push([toX(t),toY(n)]);});if(!pts.length)return;ctx.strokeStyle=color;ctx.lineWidth=2;ctx.lineJoin='round';ctx.beginPath();pts.forEach(([x,y],j)=>{if(j===0)ctx.moveTo(x,y);else ctx.lineTo(x,y);});ctx.stroke();ctx.fillStyle=color;pts.forEach(([x,y])=>{ctx.beginPath();ctx.arc(x,y,3,0,Math.PI*2);ctx.fill();});});E.chartArea.appendChild(canvas);_chartMeta={pad,xMin,xRange,yMin,yRange,cW,cH,series:plotSeries,xs};}shown.slice(0,50).forEach((s,i)=>{const color=COLORS[i%COLORS.length];const lv=s.values&&s.values.length?parseFloat(s.values[s.values.length-1][1]):null;const it=document.createElement('div');it.className='legend-item'+(ST.metrics.hidden.has(i)?' dimmed':'');it.dataset.i=i;const sw=document.createElement('span');sw.className='legend-swatch';sw.style.background=color;const lb=document.createElement('span');lb.textContent=fmtSeries(s.metric);it.appendChild(sw);it.appendChild(lb);if(lv!==null){const v=document.createElement('span');v.className='legend-val';v.textContent=lv.toPrecision(4);it.appendChild(v);}it.addEventListener('click',()=>{if(ST.metrics.hidden.has(i)){ST.metrics.hidden.delete(i);it.classList.remove('dimmed');}else{ST.metrics.hidden.add(i);it.classList.add('dimmed');}renderMetrics();});E.legend.appendChild(it);});renderMetricsTable(shown);}
+function metricsEmptyHtml(){
+  const q=String.fromCharCode(39);
+  const curl=['curl -X POST http://'+location.host+'/v1/metrics/json \\',
+    '  -H '+q+'Content-Type: application/json'+q+' \\',
+    '  -d '+q+'{"resourceMetrics":[{"resource":{"attributes":[{"key":"service.name","value":{"stringValue":"my-app"}}]},"scopeMetrics":[{"metrics":[{"name":"requests_total","gauge":{"dataPoints":[{"timeUnixNano":"1788300000000000000","asDouble":1}]}}]}]}]}}'+q].join('\n');
+  return '<svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="1" opacity=".3"><path d="M3 3v18h18"/><path d="M7 16l4-8 4 4 4-6"/></svg><p>No metrics in range</p><p style="font-size:11px;color:var(--text-muted);">Send OTLP metrics to this server, then query them here</p><pre class="onboard-snippet"></pre><code>http_requests_total{service="my-app"}</code>';
+}
+function renderMetrics(){const res=ST.metrics.result;E.chartArea.innerHTML='<div id="chart-tooltip"></div><div id="chart-crosshair"></div>';E.legend.innerHTML='';_chartMeta=null;if(!res||!res.length){E.tblCanvas.innerHTML='';E.tblCanvas.style.height='0';E.chartArea.innerHTML='<div id="chart-tooltip"></div><div id="chart-crosshair"></div><div class="empty-c" style="height:100%">' + metricsEmptyHtml() + '</div>';
+{const pre=E.chartArea.querySelector('.onboard-snippet');if(pre)pre.textContent=['curl -X POST '+location.origin+'/v1/metrics/json \\','  -H Content-Type: application/json \\','  -d (OTLP JSON body — see docs/GETTING_STARTED.md)'].join('\n');}return;}const total=ST.metrics.total||res.length;if(total>res.length)showWarn(`Showing ${res.length.toLocaleString()} of ${total.toLocaleString()} series`);const shown=res.slice(0,1000);const tsSet=new Set();shown.forEach(s=>(s.values||[]).forEach(([t])=>tsSet.add(t)));const xs=Array.from(tsSet).sort((a,b)=>a-b);if(xs.length<=1){renderSnapshot(shown);}else{const plotSeries=shown.slice(0,50);const W=E.chartArea.clientWidth||800;const H=E.chartArea.clientHeight||260;const pad={t:16,r:12,b:32,l:50};const cW=W-pad.l-pad.r,cH=H-pad.t-pad.b;const canvas=document.createElement('canvas');canvas.width=W*2;canvas.height=H*2;canvas.style.cssText=`width:${W}px;height:${H}px;display:block;`;const ctx=canvas.getContext('2d');ctx.scale(2,2);const xMin=xs[0],xMax=xs[xs.length-1],xRange=xMax-xMin||1;let yMin=Infinity,yMax=-Infinity;plotSeries.forEach(s=>(s.values||[]).forEach(([,v])=>{const n=parseFloat(v);if(isFinite(n)){yMin=Math.min(yMin,n);yMax=Math.max(yMax,n);}}));if(!isFinite(yMin)){yMin=0;yMax=1;}const yPad=(yMax-yMin)*0.1||1;yMin-=yPad;yMax+=yPad;const yRange=yMax-yMin||1;function toX(t){return pad.l+(t-xMin)/xRange*cW;}function toY(v){return pad.t+(1-(v-yMin)/yRange)*cH;}ctx.strokeStyle='rgba(255,255,255,.06)';ctx.lineWidth=0.5;for(let i=0;i<=5;i++){const y=pad.t+cH*i/5;ctx.beginPath();ctx.moveTo(pad.l,y);ctx.lineTo(pad.l+cW,y);ctx.stroke();const val=(yMax-(yMax-yMin)*i/5).toFixed(1);ctx.fillStyle='#94a3b8';ctx.font='10px monospace';ctx.textAlign='right';ctx.fillText(val,pad.l-6,y+3);}const ticks=Math.min(xs.length,8);const step=Math.max(1,Math.floor(xs.length/ticks));for(let i=0;i<xs.length;i+=step){const x=toX(xs[i]);ctx.beginPath();ctx.moveTo(x,pad.t);ctx.lineTo(x,pad.t+cH);ctx.stroke();const d=new Date(xs[i]*1000);ctx.fillStyle='#94a3b8';ctx.font='10px monospace';ctx.textAlign='center';ctx.fillText(d.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}),x,H-6);}plotSeries.forEach((s,i)=>{if(ST.metrics.hidden.has(i))return;const color=COLORS[i%COLORS.length];const pts=[];(s.values||[]).forEach(([t,v])=>{const n=parseFloat(v);if(isFinite(n))pts.push([toX(t),toY(n)]);});if(!pts.length)return;ctx.strokeStyle=color;ctx.lineWidth=2;ctx.lineJoin='round';ctx.beginPath();pts.forEach(([x,y],j)=>{if(j===0)ctx.moveTo(x,y);else ctx.lineTo(x,y);});ctx.stroke();ctx.fillStyle=color;pts.forEach(([x,y])=>{ctx.beginPath();ctx.arc(x,y,3,0,Math.PI*2);ctx.fill();});});E.chartArea.appendChild(canvas);_chartMeta={pad,xMin,xRange,yMin,yRange,cW,cH,series:plotSeries,xs};}shown.slice(0,50).forEach((s,i)=>{const color=COLORS[i%COLORS.length];const lv=s.values&&s.values.length?parseFloat(s.values[s.values.length-1][1]):null;const it=document.createElement('div');it.className='legend-item'+(ST.metrics.hidden.has(i)?' dimmed':'');it.dataset.i=i;const sw=document.createElement('span');sw.className='legend-swatch';sw.style.background=color;const lb=document.createElement('span');lb.textContent=fmtSeries(s.metric);it.appendChild(sw);it.appendChild(lb);if(lv!==null){const v=document.createElement('span');v.className='legend-val';v.textContent=lv.toPrecision(4);it.appendChild(v);}it.addEventListener('click',()=>{if(ST.metrics.hidden.has(i)){ST.metrics.hidden.delete(i);it.classList.remove('dimmed');}else{ST.metrics.hidden.add(i);it.classList.add('dimmed');}renderMetrics();});E.legend.appendChild(it);});renderMetricsTable(shown);}
 function renderSnapshot(series){const area=E.chartArea;const W=area.clientWidth||800;const H=area.clientHeight||260;const vis=series.slice(0,Math.min(30,Math.floor((H-32)/18)));const vals=vis.map(s=>parseFloat((s.values||[[0,'0']])[0][1])||0);const maxV=Math.max(...vals,1);const barH=Math.max(6,Math.min(18,Math.floor((H-32)/Math.max(vis.length,1))-3));const lblW=220,barAreaW=Math.max(100,W-lblW-70);const svg=document.createElementNS('http://www.w3.org/2000/svg','svg');svg.setAttribute('width',W);svg.setAttribute('height',H);svg.style.cssText='display:block;font-family:var(--mono);';vis.forEach((s,i)=>{const y=12+i*(barH+4),v=vals[i];const bW=Math.max(2,Math.floor((v/maxV)*barAreaW));const color=COLORS[i%COLORS.length];const bar=document.createElementNS('http://www.w3.org/2000/svg','rect');bar.setAttribute('x',lblW);bar.setAttribute('y',y);bar.setAttribute('width',bW);bar.setAttribute('height',barH);bar.setAttribute('fill',color);bar.setAttribute('opacity','0.75');bar.setAttribute('rx','2');const lbl=document.createElementNS('http://www.w3.org/2000/svg','text');lbl.setAttribute('x',lblW-6);lbl.setAttribute('y',y+barH-2);lbl.setAttribute('text-anchor','end');lbl.setAttribute('fill','#94a3b8');lbl.setAttribute('font-size','10');const lt=fmtSeries(s.metric);lbl.textContent=lt.length>32?lt.slice(0,30)+'\u2026':lt;const vt=document.createElementNS('http://www.w3.org/2000/svg','text');vt.setAttribute('x',lblW+bW+5);vt.setAttribute('y',y+barH-2);vt.setAttribute('fill',color);vt.setAttribute('font-size','10');vt.textContent=v;svg.appendChild(bar);svg.appendChild(lbl);svg.appendChild(vt);});area.appendChild(svg);}
 /* METRICS TABLE */
 const ROW_H=30;
@@ -1369,6 +1381,30 @@ function renderMarkdown(md){
   html=html.replace(/<\/(h[123]|ul|ol|pre|li)><\/p>/g,'</$1>');
   return html;
 }
+/* FOCUS MANAGEMENT — trap focus in slide-over panels, restore on close */
+const FOCUSABLE='a[href],button:not([disabled]),input:not([disabled]),select,textarea,[tabindex]:not([tabindex="-1"])';
+let _lastFocus=null;
+function trapFocus(container){
+  _lastFocus=document.activeElement;
+  const focusables=()=>Array.from(container.querySelectorAll(FOCUSABLE)).filter(el=>el.offsetParent!==null);
+  const handler=e=>{
+    if(e.key!=='Tab')return;
+    const f=focusables();if(!f.length){e.preventDefault();return;}
+    const first=f[0],last=f[f.length-1];
+    if(e.shiftKey&&document.activeElement===first){e.preventDefault();last.focus();}
+    else if(!e.shiftKey&&document.activeElement===last){e.preventDefault();first.focus();}
+  };
+  container.addEventListener('keydown',handler);
+  container._focusTrap=handler;
+  const f=focusables();if(f.length)f[0].focus();
+}
+function releaseFocus(container){
+  if(container._focusTrap){container.removeEventListener('keydown',container._focusTrap);delete container._focusTrap;}
+  if(_lastFocus&&_lastFocus.focus)_lastFocus.focus();
+}
+const _origSettings=$('btn-settings').onclick;
+$('btn-settings').onclick=()=>{const p=$('settings-panel');const wasOpen=p.classList.contains('open');_origSettings();if(!wasOpen&&p.classList.contains('open'))trapFocus(p);else releaseFocus(p);};
+
 /* ═══ OVERVIEW ═══ */
 async function loadOverview(){
   const now=Math.floor(Date.now()/1000),s=now-21600;
@@ -1432,6 +1468,13 @@ function switchSig(sig,fromUrl=false){
   if(sig==='metrics'||sig==='logs'||sig==='traces')runQuery();
 }
 $('signal-tabs').addEventListener('click',e=>{const t=e.target.closest('[data-sig]');if(t)switchSig(t.dataset.sig);});
+$('signal-tabs').addEventListener('keydown',e=>{
+  if(e.key!=='ArrowRight'&&e.key!=='ArrowLeft')return;
+  const tabs=Array.from(document.querySelectorAll('#signal-tabs [data-sig]'));
+  const cur=tabs.findIndex(t=>t.dataset.sig===ST.sig);
+  const next=e.key==='ArrowRight'?(cur+1)%tabs.length:(cur-1+tabs.length)%tabs.length;
+  tabs[next].focus();switchSig(tabs[next].dataset.sig);e.preventDefault();
+});
 
 /* ALERT SUB-VIEWS */
 function switchAlertView(view,fromUrl=false){
