@@ -10,8 +10,10 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
-arrow2 = { workspace = true }
-parquet2 = { workspace = true }
+arrow = { workspace = true }
+parquet = { workspace = true }
+arrow_array = { workspace = true }
+arrow_schema = { workspace = true }
 chrono = "0.4"
 tracing = { workspace = true }
 tokio = { workspace = true }
