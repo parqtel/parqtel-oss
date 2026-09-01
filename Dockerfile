@@ -20,7 +20,7 @@
 #   • COPY --link for faster, cache-friendly layer population (BuildKit)
 # ─────────────────────────────────────────────────────────────────────────────
 
-ARG RUST_VERSION=1.86
+ARG RUST_VERSION=1.87
 ARG CHEF_VERSION=0.1.71
 
 # ── Stage 1: Chef planner ────────────────────────────────────────────────────

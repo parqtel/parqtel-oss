@@ -10,10 +10,8 @@ use crate::models::labels::LabelSet;
 use crate::models::logs::LogRecord;
 use crate::models::metrics::{DataPoint, Metric, MetricKind};
 use crate::models::traces::Span;
-use arrow2::array::Array;
-use arrow2::chunk::Chunk;
-use arrow2::datatypes::Schema;
-use std::sync::Arc;
+use arrow::record_batch::RecordBatch;
+use arrow_schema::Schema;
 
 /// Facade that delegates to schema/writer/reader submodules.
 pub struct StorageModel;
@@ -32,32 +30,32 @@ impl StorageModel {
         schema::metrics_schema()
     }
 
-    pub fn metrics_to_chunk(metrics: &[Metric]) -> Result<Chunk<Arc<dyn Array>>> {
+    pub fn metrics_to_chunk(metrics: &[Metric]) -> Result<RecordBatch> {
         writer::metrics_to_chunk(metrics)
     }
-    pub fn logs_to_chunk(logs: &[LogRecord]) -> Result<Chunk<Arc<dyn Array>>> {
+    pub fn logs_to_chunk(logs: &[LogRecord]) -> Result<RecordBatch> {
         writer::logs_to_chunk(logs)
     }
-    pub fn traces_to_chunk(spans: &[Span]) -> Result<Chunk<Arc<dyn Array>>> {
+    pub fn traces_to_chunk(spans: &[Span]) -> Result<RecordBatch> {
         writer::traces_to_chunk(spans)
     }
 
-    pub fn row_to_point<A: AsRef<dyn Array>>(
-        chunk: &Chunk<A>,
+    pub fn row_to_point(
+        batch: &RecordBatch,
         row: usize,
     ) -> Result<(String, MetricKind, LabelSet, DataPoint)> {
-        reader::row_to_point(chunk, row)
+        reader::row_to_point(batch, row)
     }
-    pub fn row_to_log<'a, A: AsRef<dyn Array>>(
-        chunk: &'a Chunk<A>,
+    pub fn row_to_log<'a>(
+        batch: &'a RecordBatch,
         row: usize,
         attr_cache: &mut std::collections::HashMap<&'a str, crate::LabelSet>,
         res_cache: &mut std::collections::HashMap<&'a str, crate::LabelSet>,
     ) -> Result<LogRecord> {
-        reader::row_to_log(chunk, row, attr_cache, res_cache)
+        reader::row_to_log(batch, row, attr_cache, res_cache)
     }
-    pub fn row_to_span<A: AsRef<dyn Array>>(chunk: &Chunk<A>, row: usize) -> Result<Span> {
-        reader::row_to_span(chunk, row)
+    pub fn row_to_span(batch: &RecordBatch, row: usize) -> Result<Span> {
+        reader::row_to_span(batch, row)
     }
 }
 
@@ -101,8 +99,8 @@ mod tests {
             .unwrap()],
             ..Default::default()
         };
-        let chunk = StorageModel::metrics_to_chunk(&[metric]).unwrap();
-        let (name, kind, res, dp) = StorageModel::row_to_point(&chunk, 0).unwrap();
+        let batch = StorageModel::metrics_to_chunk(&[metric]).unwrap();
+        let (name, kind, res, dp) = StorageModel::row_to_point(&batch, 0).unwrap();
         assert_eq!(name, "test_metric");
         assert_eq!(kind, MetricKind::Gauge);
         assert_eq!(res.get("service.name"), Some("test-svc"));
@@ -129,8 +127,8 @@ mod tests {
             [0; 8],
             0,
         );
-        let chunk = StorageModel::traces_to_chunk(&[span]).unwrap();
-        assert_eq!(chunk.len(), 1);
+        let batch = StorageModel::traces_to_chunk(&[span]).unwrap();
+        assert_eq!(batch.num_rows(), 1);
     }
 
     #[test]
@@ -153,8 +151,8 @@ mod tests {
             [3; 8],
             5,
         );
-        let chunk = StorageModel::traces_to_chunk(&[span.clone()]).unwrap();
-        let decoded = StorageModel::row_to_span(&chunk, 0).unwrap();
+        let batch = StorageModel::traces_to_chunk(&[span.clone()]).unwrap();
+        let decoded = StorageModel::row_to_span(&batch, 0).unwrap();
         assert_eq!(decoded.trace_id, [1; 16]);
         assert_eq!(decoded.span_id, [2; 8]);
         assert_eq!(decoded.parent_span_id, [3; 8]);
@@ -185,10 +183,10 @@ mod tests {
             "scope".into(),
             "1.0".into(),
         );
-        let chunk = StorageModel::logs_to_chunk(&[log]).unwrap();
-        assert_eq!(chunk.len(), 1);
+        let batch = StorageModel::logs_to_chunk(&[log]).unwrap();
+        assert_eq!(batch.num_rows(), 1);
         assert_eq!(
-            chunk.arrays().len(),
+            batch.columns().len(),
             StorageModel::logs_schema().fields.len()
         );
     }

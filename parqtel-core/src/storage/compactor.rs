@@ -5,8 +5,10 @@ use crate::models::labels::LabelSet;
 use crate::models::logs::LogRecord;
 use crate::models::metrics::{DataPoint, Metric, MetricKind};
 use crate::models::storage::{BlockMetadata, SignalType, StorageModel};
-use arrow2::io::parquet::read;
-use arrow2::io::parquet::write::{self, CompressionOptions, Encoding, Version, WriteOptions};
+use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+use parquet::arrow::arrow_writer::ArrowWriter;
+use parquet::basic::Compression;
+use parquet::file::properties::{WriterProperties, WriterVersion};
 use std::collections::{BTreeMap, HashSet};
 use std::fs::{self, File};
 use std::sync::Arc;
@@ -188,7 +190,7 @@ impl Compactor {
         let mut all_logs = Vec::new();
 
         for meta in blocks {
-            let mut file = match File::open(&meta.path) {
+            let file = match File::open(&meta.path) {
                 Ok(f) => f,
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                     tracing::warn!("Compaction source block not found: {:?}", meta.path);
@@ -196,26 +198,26 @@ impl Compactor {
                 }
                 Err(e) => return Err(Error::Io(e)),
             };
-            let metadata =
-                read::read_metadata(&mut file).map_err(|e| Error::Parquet(e.to_string()))?;
-            let schema = if signal_type == SignalType::Metrics {
-                StorageModel::metrics_schema()
-            } else {
-                StorageModel::logs_schema()
-            };
-            let reader = read::FileReader::new(file, metadata.row_groups, schema, None, None, None);
 
-            for chunk in reader {
-                let chunk = chunk.map_err(|e| Error::Parquet(e.to_string()))?;
+            let reader_builder = ParquetRecordBatchReaderBuilder::try_new(file)
+                .map_err(|e| Error::Parquet(e.to_string()))?;
+
+            let reader = reader_builder
+                .build()
+                .map_err(|e| Error::Parquet(e.to_string()))?;
+
+            for record_batch in reader {
+                let record_batch = record_batch.map_err(|e| Error::Parquet(e.to_string()))?;
+
                 // Cache keys borrow from this chunk — recreate per chunk.
                 let mut attr_cache = std::collections::HashMap::new();
                 let mut res_cache = std::collections::HashMap::new();
-                for row in 0..chunk.len() {
+                for row in 0..record_batch.num_rows() {
                     if signal_type == SignalType::Metrics {
-                        all_points.push(StorageModel::row_to_point(&chunk, row)?);
+                        all_points.push(StorageModel::row_to_point(&record_batch, row)?);
                     } else {
                         all_logs.push(StorageModel::row_to_log(
-                            &chunk,
+                            &record_batch,
                             row,
                             &mut attr_cache,
                             &mut res_cache,
@@ -233,7 +235,7 @@ impl Compactor {
         mut all_points: Vec<(String, MetricKind, LabelSet, DataPoint)>,
         mut all_logs: Vec<LogRecord>,
     ) -> Result<BlockMetadata> {
-        let (chunk, start_ts, end_ts, row_count, metric_names, label_names) =
+        let (record_batch, start_ts, end_ts, row_count, metric_names, label_names) =
             if signal_type == SignalType::Metrics {
                 all_points.sort_by_key(|(_, _, _, dp)| dp.timestamp_ns);
                 let start = all_points[0].3.timestamp_ns;
@@ -314,50 +316,27 @@ impl Compactor {
 
         fs::create_dir_all(&config.data_dir)?;
 
-        let file = File::create(&tmp_path)?;
-        let schema = if signal_type == SignalType::Metrics {
-            StorageModel::metrics_schema()
-        } else {
-            StorageModel::logs_schema()
-        };
-        let options = WriteOptions {
-            write_statistics: true,
-            compression: match config.compression.as_str() {
-                "zstd" => CompressionOptions::Zstd(None),
-                "snappy" => CompressionOptions::Snappy,
-                "lz4" => CompressionOptions::Lz4Raw,
-                _ => CompressionOptions::Uncompressed,
-            },
-            version: Version::V2,
-            data_pagesize_limit: None,
-        };
-        let encodings: Vec<Vec<Encoding>> = schema
-            .fields
-            .iter()
-            .map(|f| match f.data_type() {
-                arrow2::datatypes::DataType::Dictionary(_, _, _) => vec![Encoding::RleDictionary],
-                _ => vec![Encoding::Plain],
+        let writer_props = WriterProperties::builder()
+            .set_compression(match config.compression.as_str() {
+                "zstd" => Compression::ZSTD(Default::default()),
+                "snappy" => Compression::SNAPPY,
+                "lz4" => Compression::LZ4_RAW,
+                _ => Compression::UNCOMPRESSED,
             })
-            .collect();
+            .set_writer_version(WriterVersion::PARQUET_2_0)
+            .build();
 
-        let row_groups = write::RowGroupIterator::try_new(
-            std::iter::once(Ok(chunk)),
-            &schema,
-            options,
-            encodings,
+        let mut writer = ArrowWriter::try_new(
+            File::create(&tmp_path)?,
+            record_batch.schema(),
+            Some(writer_props),
         )
         .map_err(|e| Error::Parquet(e.to_string()))?;
 
-        let mut writer = write::FileWriter::try_new(file, schema, options)
-            .map_err(|e| Error::Parquet(e.to_string()))?;
-        for group in row_groups {
-            writer
-                .write(group.map_err(|e| Error::Parquet(e.to_string()))?)
-                .map_err(|e| Error::Parquet(e.to_string()))?;
-        }
         writer
-            .end(None)
+            .write(&record_batch)
             .map_err(|e| Error::Parquet(e.to_string()))?;
+        writer.close().map_err(|e| Error::Parquet(e.to_string()))?;
 
         fs::rename(&tmp_path, &final_path)?;
         let size_bytes = fs::metadata(&final_path)?.len();
