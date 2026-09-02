@@ -82,6 +82,18 @@ impl SearchQuery {
 /// structurally impossible input (unbalanced quotes), where a best-effort
 /// fallback returns the raw string as body terms.
 pub fn parse_search(query: &str) -> SearchQuery {
+    // `{}` / `{ ... }` / empty = no constraint (legacy empty-selector shape).
+    let trimmed = query.trim();
+    if trimmed.is_empty() || trimmed == "{}" {
+        return SearchQuery::default();
+    }
+    if trimmed.starts_with('{') && trimmed.ends_with('}') {
+        // Legacy selector-shaped input on the ParqtelQL path: parse the
+        // inner matchers as field=value clauses.
+        if let Ok(q) = parse_legacy_selector(trimmed) {
+            return q;
+        }
+    }
     match parse_search_inner(query) {
         Ok(q) => q,
         Err(_) => {
@@ -595,6 +607,46 @@ fn numeric_field(
     }
 }
 
+/// Converts a legacy `{a="x",b=~"y"}` selector into ParqtelQL clauses.
+fn parse_legacy_selector(selector: &str) -> Result<SearchQuery> {
+    let inner = selector
+        .trim()
+        .trim_start_matches('{')
+        .trim_end_matches('}');
+    let mut q = SearchQuery::default();
+    if inner.trim().is_empty() {
+        return Ok(q);
+    }
+    for pair in inner.split(',') {
+        let pair = pair.trim();
+        let Some((k, v)) = pair.split_once('=') else {
+            continue;
+        };
+        let k = k.trim();
+        let v = v.trim().trim_matches('"');
+        if k == "__name__" {
+            continue;
+        }
+        if let Some(re) = k.strip_suffix('~') {
+            q.clauses.push(Clause::Re {
+                field: re.trim().to_string(),
+                regex: format!("^{}$", v),
+            });
+        } else if k.starts_with('!') {
+            q.clauses.push(Clause::Ne {
+                field: k.trim_start_matches('!').trim().to_string(),
+                value: v.to_string(),
+            });
+        } else {
+            q.clauses.push(Clause::Eq {
+                field: k.to_string(),
+                value: v.to_string(),
+            });
+        }
+    }
+    Ok(q)
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -713,6 +765,15 @@ mod tests {
         let q = parse_search("service=api-*");
         let l = log("x", "INFO", 9, "api-gateway");
         assert!(log_matches(&q, &l, &HashMap::new()));
+    }
+
+    #[test]
+    fn legacy_selector_shape_converts() {
+        let q = parse_search("{service=\"api\",severity>=WARN}");
+        // mixed: service clause + severity clause
+        assert!(!q.clauses.is_empty());
+        let q2 = parse_search("{}");
+        assert!(q2.is_empty());
     }
 
     #[test]
