@@ -94,13 +94,25 @@ impl AppState {
         use tokio::sync::mpsc;
         let dir = tempfile::tempdir().unwrap();
         let config = Config::default();
-        let (tx, _) = mpsc::unbounded_channel();
+        let (tx, mut metadata_rx) = mpsc::unbounded_channel();
         let (ltx, _) = mpsc::unbounded_channel();
         let (ttx, _) = mpsc::unbounded_channel();
         let index = Arc::new(RwLock::new(BlockIndex::new(dir.path())));
         let log_index = Arc::new(RwLock::new(BlockIndex::new(&dir.path().join("logs"))));
         let trace_dir = config.storage.data_dir.join("traces");
         let trace_index = Arc::new(RwLock::new(BlockIndex::new(&trace_dir)));
+        // Index-update task (mirrors main.rs wiring): flushed-block metadata
+        // flows into the shared BlockIndex so block-backed queries work in
+        // tests exactly as in production.
+        {
+            let idx = index.clone();
+            tokio::spawn(async move {
+                while let Some(meta) = metadata_rx.recv().await {
+                    let mut guard = idx.write().await;
+                    let _ = guard.add(meta);
+                }
+            });
+        }
         let executor = QueryExecutor::with_trace_index(
             index.clone(),
             log_index.clone(),
