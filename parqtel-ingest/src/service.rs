@@ -167,6 +167,13 @@ impl IngestionService {
         self.process_metrics(metrics).await
     }
 
+    /// Ingest already-decoded metrics directly (used by the span-metrics
+    /// RED bridge, which derives metrics from trace spans).
+    pub async fn ingest_metrics(&self, metrics: Vec<Metric>) -> Result<u64> {
+        self.stats.total_batches.fetch_add(1, Ordering::Relaxed);
+        self.process_metrics(metrics).await
+    }
+
     pub async fn ingest_json(&self, body: Bytes) -> Result<u64> {
         self.stats.total_batches.fetch_add(1, Ordering::Relaxed);
         let json: serde_json::Value = serde_json::from_slice(&body)
@@ -423,6 +430,9 @@ pub struct TraceIngestionService {
     rotator: Arc<Mutex<TraceRotator>>,
     stats: Arc<IngestionStats>,
     memory_buffer: Option<MemoryBuffer>,
+    /// When set, span-metrics RED derivation sends metric batches here
+    /// (consumed by a task that feeds the metrics ingestion service).
+    span_metrics_tx: Option<mpsc::UnboundedSender<Vec<Metric>>>,
 }
 
 impl TraceIngestionService {
@@ -431,12 +441,21 @@ impl TraceIngestionService {
             rotator: Arc::new(Mutex::new(TraceRotator::new(config, metadata_tx))),
             stats: Arc::new(IngestionStats::default()),
             memory_buffer: None,
+            span_metrics_tx: None,
         }
     }
 
     /// Set the shared memory buffer for stream-queryable spans.
     pub fn with_memory_buffer(mut self, buffer: MemoryBuffer) -> Self {
         self.memory_buffer = Some(buffer);
+        self
+    }
+
+    /// Enable the span-metrics RED bridge: derived metrics
+    /// (`traces_service_{requests,errors,duration_ms}_total`) are sent to
+    /// this channel for ingestion as normal metrics.
+    pub fn with_span_metrics(mut self, tx: mpsc::UnboundedSender<Vec<Metric>>) -> Self {
+        self.span_metrics_tx = Some(tx);
         self
     }
 
@@ -463,6 +482,14 @@ impl TraceIngestionService {
     async fn process_traces(&self, spans: Vec<Span>) -> Result<u64> {
         let count = spans.len() as u64;
         let mut flushed = false;
+        // Span-metrics RED bridge: derive metrics BEFORE the rotator takes
+        // ownership of the spans.
+        if let Some(ref tx) = self.span_metrics_tx {
+            let derived = crate::span_metrics::derive_span_metrics(&spans);
+            if !derived.is_empty() {
+                let _ = tx.send(derived);
+            }
+        }
         // Write to in-memory buffer first so spans are queryable immediately.
         if let Some(ref buf) = self.memory_buffer {
             buf.push_spans(&spans).await;

@@ -4,6 +4,7 @@
 
 pub mod decode;
 pub mod service;
+pub mod span_metrics;
 pub mod writer;
 
 // Generated proto modules
