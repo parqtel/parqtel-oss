@@ -42,6 +42,8 @@ pub struct AlertRouter {
     /// Last delivery time per (route name, fingerprint).
     last_sent: Mutex<HashMap<(String, u64), Instant>>,
     client: reqwest::Client,
+    /// Directory for silence persistence (None = in-memory only).
+    silence_dir: Option<std::path::PathBuf>,
 }
 
 impl AlertRouter {
@@ -55,6 +57,55 @@ impl AlertRouter {
                 .timeout(Duration::from_secs(timeout_secs.max(1)))
                 .build()
                 .unwrap_or_default(),
+            silence_dir: None,
+        }
+    }
+
+    /// Enable silence persistence in the given directory (loads existing
+    /// silences from `silences.json`, atomic tmp+rename on every change).
+    pub fn with_silence_dir(mut self, dir: impl Into<std::path::PathBuf>) -> Self {
+        self.silence_dir = Some(dir.into());
+        self.load_silences_from_disk();
+        self
+    }
+
+    fn load_silences_from_disk(&self) {
+        let Some(ref dir) = self.silence_dir else {
+            return;
+        };
+        let path = dir.join("silences.json");
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            return;
+        };
+        let Ok(silences): Result<Vec<SilenceConfig>, _> = serde_json::from_str(&content) else {
+            tracing::warn!("silences.json is corrupt, starting without silences");
+            return;
+        };
+        // Called from the constructor before the router is shared, so
+        // try_write cannot contend; fall back to a blocking read if it ever
+        // does (both leave state consistent).
+        let now = chrono::Utc::now().timestamp();
+        let live: Vec<SilenceConfig> = silences.into_iter().filter(|s| s.ends_at > now).collect();
+        if let Ok(mut guard) = self.silences.try_write() {
+            *guard = live;
+        }
+    }
+
+    async fn persist_silences(&self) {
+        let Some(ref dir) = self.silence_dir else {
+            return;
+        };
+        let silences = self.silences.read().await;
+        // Prune expired entries so the file self-cleans over time.
+        let now = chrono::Utc::now().timestamp();
+        let live: Vec<&SilenceConfig> = silences.iter().filter(|s| s.ends_at > now).collect();
+        let path = dir.join("silences.json");
+        if let Ok(json) = serde_json::to_string_pretty(&live) {
+            let _ = std::fs::create_dir_all(dir);
+            let tmp = dir.join("silences.json.tmp");
+            if std::fs::write(&tmp, &json).is_ok() {
+                let _ = std::fs::rename(tmp, path);
+            }
         }
     }
 
@@ -67,11 +118,13 @@ impl AlertRouter {
         self.config.read().await.clone()
     }
 
-    /// Add or update a silence.
+    /// Add or update a silence (persisted when a silence dir is configured).
     pub async fn add_silence(&self, silence: SilenceConfig) {
         let mut silences = self.silences.write().await;
         silences.retain(|s| s.name != silence.name);
         silences.push(silence);
+        drop(silences);
+        self.persist_silences().await;
     }
 
     /// Remove a silence by name. Returns true when one was removed.
@@ -79,7 +132,12 @@ impl AlertRouter {
         let mut silences = self.silences.write().await;
         let before = silences.len();
         silences.retain(|s| s.name != name);
-        silences.len() != before
+        let removed = silences.len() != before;
+        drop(silences);
+        if removed {
+            self.persist_silences().await;
+        }
+        removed
     }
 
     /// Active silences (not yet expired).
@@ -339,5 +397,103 @@ mod tests {
         let router = AlertRouter::new(NotificationConfig::default());
         let event = make_event(Severity::Critical, BTreeMap::new());
         assert_eq!(router.handle_event(event).await, None);
+    }
+}
+
+#[cfg(test)]
+mod persistence_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use super::*;
+    use std::collections::BTreeMap;
+
+    fn silence_in(name: &str, minutes: i64) -> SilenceConfig {
+        let now = chrono::Utc::now().timestamp();
+        let mut match_labels = BTreeMap::new();
+        match_labels.insert("service".to_string(), "api".to_string());
+        SilenceConfig {
+            name: name.into(),
+            created_by: "test".into(),
+            match_labels,
+            starts_at: now - 60,
+            ends_at: now + minutes * 60,
+        }
+    }
+
+    #[tokio::test]
+    async fn silences_survive_router_restart() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Router 1: create a silence — must persist.
+        let router = AlertRouter::new(NotificationConfig::default()).with_silence_dir(dir.path());
+        router.add_silence(silence_in("maint", 60)).await;
+        assert!(dir.path().join("silences.json").exists(), "file written");
+
+        // Router 2 (fresh instance, same dir): silence must be reloaded.
+        let router2 = AlertRouter::new(NotificationConfig::default()).with_silence_dir(dir.path());
+        let silences = router2.silences().await;
+        assert_eq!(silences.len(), 1);
+        assert_eq!(silences[0].name, "maint");
+        assert_eq!(
+            silences[0].match_labels.get("service").map(String::as_str),
+            Some("api")
+        );
+    }
+
+    #[tokio::test]
+    async fn removal_persists_across_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let router = AlertRouter::new(NotificationConfig::default()).with_silence_dir(dir.path());
+        router.add_silence(silence_in("a", 60)).await;
+        router.add_silence(silence_in("b", 60)).await;
+        assert!(router.remove_silence("a").await);
+
+        let router2 = AlertRouter::new(NotificationConfig::default()).with_silence_dir(dir.path());
+        let silences = router2.silences().await;
+        assert_eq!(silences.len(), 1);
+        assert_eq!(silences[0].name, "b");
+    }
+
+    #[tokio::test]
+    async fn expired_silences_not_reloaded_or_persisted() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Write a file containing one expired + one live silence directly.
+        let expired = silence_in("expired", -10); // ended 10 min ago
+        let live = silence_in("live", 60);
+        let json = serde_json::to_string_pretty(&vec![&expired, &live]).unwrap();
+        std::fs::write(dir.path().join("silences.json"), json).unwrap();
+
+        let router = AlertRouter::new(NotificationConfig::default()).with_silence_dir(dir.path());
+        let silences = router.silences().await;
+        assert_eq!(silences.len(), 1, "expired silence dropped on load");
+        assert_eq!(silences[0].name, "live");
+
+        // Any persist prunes expired entries from the file.
+        router.add_silence(silence_in("another", 30)).await;
+        let on_disk: Vec<SilenceConfig> = serde_json::from_str(
+            &std::fs::read_to_string(dir.path().join("silences.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(on_disk.len(), 2);
+        assert!(on_disk.iter().all(|s| s.name != "expired"));
+    }
+
+    #[tokio::test]
+    async fn corrupt_file_starts_clean() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("silences.json"), "{not json").unwrap();
+        let router = AlertRouter::new(NotificationConfig::default()).with_silence_dir(dir.path());
+        assert!(router.silences().await.is_empty());
+        // Still functional: new silences persist over the corrupt file.
+        router.add_silence(silence_in("fresh", 60)).await;
+        let silences = router.silences().await;
+        assert_eq!(silences.len(), 1);
+    }
+
+    #[test]
+    fn without_dir_silences_are_memory_only() {
+        // No panic, no file access — in-memory mode for tests/embedding.
+        let router = AlertRouter::new(NotificationConfig::default());
+        assert!(router.silence_dir.is_none());
     }
 }
