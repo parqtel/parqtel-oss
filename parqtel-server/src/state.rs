@@ -61,9 +61,11 @@ impl AppState {
             alert_store.clone(),
             alert_tx,
         ));
-        let alert_router = Arc::new(AlertRouter::new(
-            config.alerts.notifications.clone().unwrap_or_default(),
-        ));
+        let alert_router = Arc::new(
+            AlertRouter::new(config.alerts.notifications.clone().unwrap_or_default())
+                // Persist silences alongside alerts.json (same data dir).
+                .with_silence_dir(config.storage.data_dir.clone()),
+        );
 
         Self {
             inner: Arc::new(AppStateInner {
