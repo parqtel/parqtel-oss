@@ -16,6 +16,16 @@ grpc_bind_address = "0.0.0.0:4317"   # OTLP gRPC; "" disables
 max_connections = 1024
 shutdown_timeout_secs = 30
 
+[ingest.tail_sampling]
+keep_errors = true                   # always keep traces with ERROR spans
+# slow_trace_ms = 1000               # keep traces slower than this (ms)
+sampling_ratio = 1.0                 # fraction of remaining traces kept
+
+# Per-service overrides fully replace the global policy for that service:
+# [ingest.tail_sampling.per_service.noisy-service]
+# keep_errors = false
+# sampling_ratio = 0.05
+
 [storage]
 backend = "parquet"
 data_dir = "data"

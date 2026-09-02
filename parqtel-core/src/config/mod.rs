@@ -6,7 +6,7 @@ mod storage;
 mod telemetry;
 
 pub use alert::{AlertConfig, NotificationConfig, PostmortemConfig};
-pub use ingest::IngestConfig;
+pub use ingest::{IngestConfig, TailSamplingConfig};
 pub use query::{QueryConfig, UIConfig};
 pub use server::ServerConfig;
 pub use storage::{BlockConfig, LogBlockConfig, RetentionConfig};
@@ -63,11 +63,35 @@ impl Config {
             errors.push("telemetry.log_format must be 'text' or 'json'".to_string());
         }
 
+        validate_tail_sampling(
+            &self.ingest.tail_sampling,
+            "ingest.tail_sampling",
+            &mut errors,
+        );
+
         if errors.is_empty() {
             Ok(())
         } else {
             Err(Error::Validation(errors.join("; ")))
         }
+    }
+}
+
+/// Validates a tail-sampling policy (and its per-service overrides):
+/// ratios must be within 0.0–1.0.
+fn validate_tail_sampling(policy: &TailSamplingConfig, path: &str, errors: &mut Vec<String>) {
+    let check = |p: &TailSamplingConfig, label: &str, errors: &mut Vec<String>| {
+        if !(0.0..=1.0).contains(&p.sampling_ratio) {
+            errors.push(format!("{label}.sampling_ratio must be within [0.0, 1.0]"));
+        }
+    };
+    check(policy, path, errors);
+    for (service, override_policy) in &policy.per_service {
+        check(
+            override_policy,
+            &format!("{path}.per_service.{service}"),
+            errors,
+        );
     }
 }
 
