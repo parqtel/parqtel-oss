@@ -590,6 +590,7 @@ pub async fn search_traces(
                     json!({ "trace_id": hex::encode(l.trace_id), "span_id": hex::encode(l.span_id), "attributes": l.attributes })
                 }).collect();
                 let mut obj = json!({
+                    "trace_id": hex::encode(s.trace_id),
                     "span_id": hex::encode(s.span_id),
                     "operation_name": s.name,
                     "service_name": svc,
