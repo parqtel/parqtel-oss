@@ -12,6 +12,7 @@ Parqtel uses [Figment](https://github.com/SergioBenitez/Figment) for layered con
 ```toml
 [server]
 bind_address = "0.0.0.0:8080"
+grpc_bind_address = "0.0.0.0:4317"   # OTLP gRPC; "" disables
 max_connections = 1024
 shutdown_timeout_secs = 30
 

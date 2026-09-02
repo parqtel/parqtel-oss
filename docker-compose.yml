@@ -21,6 +21,7 @@ services:
     container_name: parqtel
     ports:
       - "${PARQTEL_PORT:-9090}:9090"
+      - "${PARQTEL_GRPC_PORT:-4317}:4317"
     volumes:
       - parqtel_data:/var/lib/parqtel
       - ./compose/parqtel/config/dev.toml:/etc/parqtel/config.toml:ro

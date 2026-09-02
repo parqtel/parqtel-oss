@@ -36,7 +36,7 @@ pub(crate) fn decode_traces_json(json: serde_json::Value) -> Result<Vec<Span>> {
         .ok_or_else(|| Error::Validation("Missing resource_spans".into()))?;
 
     for rs in resource_spans {
-        let _resource_labels = rs
+        let resource_labels = rs
             .get("resource")
             .and_then(|r| r.get("attributes"))
             .and_then(|a| a.as_array())
@@ -52,7 +52,14 @@ pub(crate) fn decode_traces_json(json: serde_json::Value) -> Result<Vec<Span>> {
             for ss in sss {
                 if let Some(sps) = ss.get("spans").and_then(|v| v.as_array()) {
                     for sp in sps {
-                        spans.push(json_to_span(sp)?);
+                        // Resource attributes apply to every span; span-level
+                        // attributes win on key conflict.
+                        let span = json_to_span(sp)?;
+                        let merged = resource_labels.merge(&span.attributes);
+                        spans.push(Span {
+                            attributes: merged,
+                            ..span
+                        });
                     }
                 }
             }
@@ -61,7 +68,7 @@ pub(crate) fn decode_traces_json(json: serde_json::Value) -> Result<Vec<Span>> {
     Ok(spans)
 }
 
-fn convert_span(proto: ProtoSpan, _resource_attributes: LabelSet) -> Result<Span> {
+fn convert_span(proto: ProtoSpan, resource_attributes: LabelSet) -> Result<Span> {
     let mut trace_id = [0u8; 16];
     if proto.trace_id.len() == 16 {
         trace_id.copy_from_slice(&proto.trace_id);
@@ -81,6 +88,10 @@ fn convert_span(proto: ProtoSpan, _resource_attributes: LabelSet) -> Result<Span
             attr.value.map(any_value_to_string).unwrap_or_default(),
         )
     }))?;
+
+    // Resource attributes (service.name, k8s.*) belong on every span of the
+    // resource; span-level attributes win on key conflict.
+    let attributes = resource_attributes.merge(&attributes);
 
     let events = proto
         .events

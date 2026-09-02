@@ -664,7 +664,7 @@ mod tests {
         assert_eq!(name, "cpu");
         assert_eq!(agg, Some(crate::plan::AggregationOp::Abs));
 
-        let (name, _, agg, ..) = parse_query("ceil(cpu)").unwrap();
+        let (_name, _, agg, ..) = parse_query("ceil(cpu)").unwrap();
         assert_eq!(agg, Some(crate::plan::AggregationOp::Ceil));
         let (name2, _, agg2, ..) = parse_query("floor(cpu)").unwrap();
         assert_eq!(name2, "cpu");
