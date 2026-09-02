@@ -91,6 +91,14 @@ def run_suite():
         ("ast_avg_over_time", "/api/v1/query_range", {"query": "avg_over_time(cpu_usage[5m])", "start": start, "end": now, "step": "120s"}),
         ("ast_binary_scalar", "/api/v1/query_range", {"query": "avg(cpu_usage) * 100 > 40", "start": start, "end": now, "step": "120s"}),
         ("ast_topk_rate", "/api/v1/query_range", {"query": "topk(5, rate(http_requests_total[5m]))", "start": start, "end": now, "step": "120s"}),
+        # Phase 1B ParqtelQL
+        ("pql_terms", "/api/v1/logs", {"query": "timeout", "start": start, "end": now, "limit": 500}),
+        ("pql_exclude", "/api/v1/logs", {"query": "timeout -refused", "start": start, "end": now, "limit": 500}),
+        ("pql_field", "/api/v1/logs", {"query": "service=api-gateway", "start": start, "end": now, "limit": 500}),
+        ("pql_severity", "/api/v1/logs", {"query": "severity>=ERROR", "start": start, "end": now, "limit": 500}),
+        ("pql_combined", "/api/v1/logs", {"query": "service=api-gateway severity>=ERROR timeout", "start": start, "end": now, "limit": 500}),
+        ("pql_trace_q", "/v1/traces/search", {"start": start, "end": now, "q": "status=ERROR"}),
+        ("pql_trace_dur", "/v1/traces/search", {"start": start, "end": now, "q": "duration>100"}),
     ]
 
     results = {}
