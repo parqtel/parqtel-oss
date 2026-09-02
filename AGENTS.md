@@ -41,6 +41,7 @@ make docker        # Build Docker image
 - **In-memory buffer**: metrics, logs, and traces are all queryable immediately after ingest via `MemoryBuffer`; the buffer is drained on every flush so buffered + flushed data never double-counts.
 - **service.name label**: the scanner and ingest buffer both inject the dedicated `service_name` Parquet column back as the `service.name` label, so PromQL matchers like `http_requests_total{service.name="api"}` work for both buffered and flushed data. Trace decode merges resource attributes into span attributes (span attrs win).
 - **OTLP gRPC**: `:4317` by default (`ServerConfig.grpc_bind_address`; empty string disables). tonic server implements all three collector services and routes through the same `ingest_proto` path as HTTP protobuf.
+- **Tail sampling**: `ingest.tail_sampling` policy (keep_errors, slow_trace_ms, sampling_ratio, per-service overrides) runs AFTER RED derivation — RED metrics see all spans; storage/buffer sees only sampled traces. Decisions are trace-coherent (deterministic trace_id hash); default keeps everything.
 - **Span-metrics RED bridge**: server-kind spans automatically derive `traces_service_{requests,errors,duration_ms}_total` metrics (labels: `service`, `operation`, `service.name`) through the normal metrics path — wired in `main.rs` via `with_span_metrics` channel.
 
 ## Code Conventions

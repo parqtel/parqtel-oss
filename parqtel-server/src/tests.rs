@@ -732,3 +732,196 @@ async fn test_span_metrics_red_bridge_end_to_end() {
         .expect("service.name label");
     assert_eq!(svc_label, "api");
 }
+
+#[tokio::test]
+async fn test_tail_sampling_keeps_red_full_fidelity() {
+    use parqtel_core::config::TailSamplingConfig;
+    use parqtel_ingest::otel::collector::trace::v1::ExportTraceServiceRequest;
+    use parqtel_ingest::otel::trace::v1::{ResourceSpans, ScopeSpans, Span as OtelSpan, Status};
+    use tokio::sync::mpsc;
+
+    // Drop ALL traces (ratio 0, keep_errors off) — the RED bridge must
+    // still emit metrics from the full span set.
+    let policy = TailSamplingConfig {
+        keep_errors: false,
+        slow_trace_ms: None,
+        sampling_ratio: 0.0,
+        per_service: std::collections::HashMap::new(),
+    };
+    let (span_metrics_tx, mut rx) = mpsc::unbounded_channel();
+    let (ttx, _trx) = mpsc::unbounded_channel();
+    let config = parqtel_core::Config::default();
+    let trace_service = TraceIngestionService::new(config.storage.clone(), ttx)
+        .with_span_metrics(span_metrics_tx)
+        .with_tail_sampling(policy);
+
+    let mk = |id: u8, status: i32| OtelSpan {
+        trace_id: vec![id; 16],
+        span_id: vec![id; 8],
+        name: format!("GET /{id}"),
+        kind: 2,
+        start_time_unix_nano: 1_000,
+        end_time_unix_nano: 2_000,
+        status: Some(Status {
+            code: status,
+            message: String::new(),
+        }),
+        ..Default::default()
+    };
+    let request = ExportTraceServiceRequest {
+        resource_spans: vec![ResourceSpans {
+            resource: Some(parqtel_ingest::otel::resource::v1::Resource {
+                attributes: vec![parqtel_ingest::otel::common::v1::KeyValue {
+                    key: "service.name".into(),
+                    value: Some(parqtel_ingest::otel::common::v1::AnyValue {
+                        value: Some(
+                            parqtel_ingest::otel::common::v1::any_value::Value::StringValue(
+                                "sampled-svc".into(),
+                            ),
+                        ),
+                    }),
+                }],
+                ..Default::default()
+            }),
+            scope_spans: vec![ScopeSpans {
+                spans: vec![mk(1, 0), mk(2, 2)],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+    };
+    let body = prost::Message::encode_to_vec(&request);
+    trace_service
+        .ingest_proto(bytes::Bytes::from(body))
+        .await
+        .expect("ingest");
+
+    // RED metrics MUST be emitted despite 100% trace dropping.
+    let derived = rx.recv().await.expect("RED metrics from full span set");
+    let reqs = derived
+        .iter()
+        .find(|m| m.name == "traces_service_requests_total")
+        .expect("requests metric");
+    assert_eq!(reqs.data_points.len(), 2, "RED sees ALL spans, unsampled");
+}
+
+#[tokio::test]
+async fn test_tail_sampling_drops_from_storage() {
+    use parqtel_core::config::TailSamplingConfig;
+    use parqtel_core::MemoryBuffer;
+    use parqtel_ingest::otel::collector::trace::v1::ExportTraceServiceRequest;
+    use parqtel_ingest::otel::trace::v1::{ResourceSpans, ScopeSpans, Span as OtelSpan, Status};
+
+    // 100% drop policy.
+    let policy = TailSamplingConfig {
+        keep_errors: false,
+        slow_trace_ms: None,
+        sampling_ratio: 0.0,
+        per_service: std::collections::HashMap::new(),
+    };
+    let (ttx, _trx) = mpsc::unbounded_channel();
+    let config = parqtel_core::Config::default();
+    let buffer = MemoryBuffer::new();
+    let svc = TraceIngestionService::new(config.storage.clone(), ttx)
+        .with_memory_buffer(buffer.clone())
+        .with_tail_sampling(policy);
+
+    let request = ExportTraceServiceRequest {
+        resource_spans: vec![ResourceSpans {
+            resource: Some(parqtel_ingest::otel::resource::v1::Resource {
+                attributes: vec![parqtel_ingest::otel::common::v1::KeyValue {
+                    key: "service.name".into(),
+                    value: Some(parqtel_ingest::otel::common::v1::AnyValue {
+                        value: Some(
+                            parqtel_ingest::otel::common::v1::any_value::Value::StringValue(
+                                "dropped-svc".into(),
+                            ),
+                        ),
+                    }),
+                }],
+                ..Default::default()
+            }),
+            scope_spans: vec![ScopeSpans {
+                spans: vec![OtelSpan {
+                    trace_id: vec![5; 16],
+                    span_id: vec![5; 8],
+                    name: "GET /x".into(),
+                    kind: 2,
+                    start_time_unix_nano: 1_000,
+                    end_time_unix_nano: 2_000,
+                    status: Some(Status {
+                        code: 0,
+                        message: String::new(),
+                    }),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+    };
+    let body = prost::Message::encode_to_vec(&request);
+    let count = svc
+        .ingest_proto(bytes::Bytes::from(body))
+        .await
+        .expect("ingest");
+    assert_eq!(count, 1, "ingest count reflects received spans");
+
+    // Buffer must be EMPTY — all spans dropped by sampling.
+    let spans = buffer.scan_spans(0, i64::MAX).await;
+    assert!(
+        spans.is_empty(),
+        "sampled-out spans must not be stored/buffered"
+    );
+
+    // Error trace survives even under ratio 0 when keep_errors is on.
+    let (ttx2, _trx2) = mpsc::unbounded_channel();
+    let keep_errors_policy = TailSamplingConfig {
+        keep_errors: true,
+        ..Default::default()
+    };
+    let buffer2 = MemoryBuffer::new();
+    let svc2 = TraceIngestionService::new(config.storage.clone(), ttx2)
+        .with_memory_buffer(buffer2.clone())
+        .with_tail_sampling(keep_errors_policy);
+    let err_request = ExportTraceServiceRequest {
+        resource_spans: vec![ResourceSpans {
+            resource: Some(parqtel_ingest::otel::resource::v1::Resource {
+                attributes: vec![parqtel_ingest::otel::common::v1::KeyValue {
+                    key: "service.name".into(),
+                    value: Some(parqtel_ingest::otel::common::v1::AnyValue {
+                        value: Some(
+                            parqtel_ingest::otel::common::v1::any_value::Value::StringValue(
+                                "err-svc".into(),
+                            ),
+                        ),
+                    }),
+                }],
+                ..Default::default()
+            }),
+            scope_spans: vec![ScopeSpans {
+                spans: vec![OtelSpan {
+                    trace_id: vec![6; 16],
+                    span_id: vec![6; 8],
+                    name: "GET /err".into(),
+                    kind: 2,
+                    start_time_unix_nano: 1_000,
+                    end_time_unix_nano: 2_000,
+                    status: Some(Status {
+                        code: 2,
+                        message: "boom".into(),
+                    }),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+    };
+    let body2 = prost::Message::encode_to_vec(&err_request);
+    svc2.ingest_proto(bytes::Bytes::from(body2))
+        .await
+        .expect("ingest");
+    let kept = buffer2.scan_spans(0, i64::MAX).await;
+    assert_eq!(kept.len(), 1, "error traces survive sampling");
+}

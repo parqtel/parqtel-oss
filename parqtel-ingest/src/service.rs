@@ -7,6 +7,7 @@ use bytes::Bytes;
 use parqtel_core::MemoryBuffer;
 use parqtel_core::{
     BlockConfig, DataPoint, Error, LogBlockConfig, LogRecord, Metric, Result, Span,
+    TailSamplingConfig,
 };
 use prost::Message;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -133,6 +134,8 @@ pub struct IngestionStats {
     pub total_batches: AtomicU64,
     pub failed_batches: AtomicU64,
     pub ingested_points: AtomicU64,
+    /// Spans dropped by tail sampling (traces only).
+    pub dropped_spans: AtomicU64,
 }
 
 /// Public service for ingesting OTLP metrics.
@@ -433,6 +436,8 @@ pub struct TraceIngestionService {
     /// When set, span-metrics RED derivation sends metric batches here
     /// (consumed by a task that feeds the metrics ingestion service).
     span_metrics_tx: Option<mpsc::UnboundedSender<Vec<Metric>>>,
+    /// Tail-sampling policy; default (keep-all) short-circuits to zero cost.
+    tail_sampling: TailSamplingConfig,
 }
 
 impl TraceIngestionService {
@@ -442,6 +447,7 @@ impl TraceIngestionService {
             stats: Arc::new(IngestionStats::default()),
             memory_buffer: None,
             span_metrics_tx: None,
+            tail_sampling: TailSamplingConfig::default(),
         }
     }
 
@@ -456,6 +462,12 @@ impl TraceIngestionService {
     /// this channel for ingestion as normal metrics.
     pub fn with_span_metrics(mut self, tx: mpsc::UnboundedSender<Vec<Metric>>) -> Self {
         self.span_metrics_tx = Some(tx);
+        self
+    }
+
+    /// Set the tail-sampling policy for traces.
+    pub fn with_tail_sampling(mut self, policy: TailSamplingConfig) -> Self {
+        self.tail_sampling = policy;
         self
     }
 
@@ -482,13 +494,21 @@ impl TraceIngestionService {
     async fn process_traces(&self, spans: Vec<Span>) -> Result<u64> {
         let count = spans.len() as u64;
         let mut flushed = false;
-        // Span-metrics RED bridge: derive metrics BEFORE the rotator takes
-        // ownership of the spans.
+        // Span-metrics RED bridge: derive metrics from the FULL span set
+        // (BEFORE tail sampling) so RED rates stay accurate while trace
+        // storage is sampled.
         if let Some(ref tx) = self.span_metrics_tx {
             let derived = crate::span_metrics::derive_span_metrics(&spans);
             if !derived.is_empty() {
                 let _ = tx.send(derived);
             }
+        }
+        // Tail sampling: decide which traces to persist.
+        let (spans, dropped) = crate::tail_sampling::sample_spans(&self.tail_sampling, spans);
+        if dropped > 0 {
+            self.stats
+                .dropped_spans
+                .fetch_add(dropped, Ordering::Relaxed);
         }
         // Write to in-memory buffer first so spans are queryable immediately.
         if let Some(ref buf) = self.memory_buffer {

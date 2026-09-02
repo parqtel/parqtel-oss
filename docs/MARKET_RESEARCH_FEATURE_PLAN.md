@@ -120,7 +120,7 @@ Priorities: **P0** = adoption-blocking / positioning-critical · **P1** = compet
 | **F6. Saved dashboards (Perses-inspired schema)** | `page → sections → panels → queries → variables` JSON schema; store as Parquet-row or JSON sidecar; UI CRUD + import/export. | Users need to save what they build (G4); agents need a schema to operate on (agent-native trend); adopting Perses-shape keeps door open for Grafana interop. | M-L |
 | **F7. Auth & API keys in OSS** | Bearer API keys (ingest/write/read-only scopes) + optional static-user login for UI; config-file or simple store. Reverse proxy stays for SSO/RBAC. | Trust + procurement reality (G6). Scope honestly: keys, not enterprise RBAC. | M |
 | **F8. GenAI span support (LLM observability)** | Ingest/store `gen_ai.*` semconv attrs (they already flow as span attributes); UI: LLM-span filter, token/cost columns, model facet; alert rules on tokens/cost. | The fastest-moving market requirement (G5). Parqtel's Parquet schema needs no migration — attrs ride along. Surface + rules only. | M |
-| **F9. Tail sampling controls** | Configurable tail-sampling in ingest (by error/latency/probability/rate), pre-rotator. | Span-volume economics (G7); prerequisite for AI-scale telemetry claims. | M |
+| **F9. Tail sampling controls** | Configurable tail-sampling in ingest (by error/latency/probability/rate), pre-rotator. | Span-volume economics (G7); prerequisite for AI-scale telemetry claims. | M | ✅ shipped |
 | **F10. Alert routing (Alertmanager-lite)** | Routes (severity→webhook/MCP), silences/mute windows, inhibition rules; reuse MCP servers as sinks. | Familiar mental model; MCP sinks make it *more* capable than vanilla Alertmanager (G14). | M |
 
 ### P2 — Differentiation (choose deliberately)

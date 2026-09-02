@@ -196,7 +196,8 @@ async fn run_server(
         mpsc::unbounded_channel::<Vec<parqtel_core::Metric>>();
     let trace_ingestion_service = TraceIngestionService::new(config.storage.clone(), trace_tx)
         .with_memory_buffer(memory_buffer.clone())
-        .with_span_metrics(span_metrics_tx);
+        .with_span_metrics(span_metrics_tx)
+        .with_tail_sampling(config.ingest.tail_sampling.clone());
 
     // Trace index - uses same data_dir as metrics but separate index file
     let trace_data_dir = config.storage.data_dir.join("traces");
