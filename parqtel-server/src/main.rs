@@ -16,6 +16,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
+mod grpc;
 mod handlers;
 mod metrics;
 mod router;
@@ -188,7 +189,14 @@ async fn run_server(
     let log_ingestion_service = LogIngestionService::new(config.logs.clone(), log_tx)
         .with_memory_buffer(memory_buffer.clone());
     let (trace_tx, mut trace_rx) = mpsc::unbounded_channel();
-    let trace_ingestion_service = TraceIngestionService::new(config.storage.clone(), trace_tx);
+    // Span-metrics RED bridge: trace ingestion derives
+    // traces_service_{requests,errors,duration_ms} metrics and feeds them
+    // back through the normal metrics path.
+    let (span_metrics_tx, mut span_metrics_rx) =
+        mpsc::unbounded_channel::<Vec<parqtel_core::Metric>>();
+    let trace_ingestion_service = TraceIngestionService::new(config.storage.clone(), trace_tx)
+        .with_memory_buffer(memory_buffer.clone())
+        .with_span_metrics(span_metrics_tx);
 
     // Trace index - uses same data_dir as metrics but separate index file
     let trace_data_dir = config.storage.data_dir.join("traces");
@@ -229,6 +237,22 @@ async fn run_server(
         ui_etag,
     )
     .await;
+
+    // Span-metrics RED consumer: derived metrics flow into the metrics
+    // ingestion path as normal OTLP metrics would.
+    let span_metrics_state = state.clone();
+    let span_metrics_task = tokio::spawn(async move {
+        while let Some(metrics) = span_metrics_rx.recv().await {
+            if let Err(e) = span_metrics_state
+                .inner
+                .ingestion_service
+                .ingest_metrics(metrics)
+                .await
+            {
+                tracing::warn!("span-metrics ingestion failed: {e}");
+            }
+        }
+    });
 
     // Background flush task
     let state_clone = state.clone();
@@ -322,6 +346,17 @@ async fn run_server(
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     tracing::info!("parqtel server listening on {}", addr);
 
+    // OTLP gRPC ingestion (default :4317; disabled when address is empty).
+    let grpc_addr = config.server.grpc_bind_address.clone();
+    let grpc_state = state.clone();
+    let grpc_task = tokio::spawn(async move {
+        if let Err(e) = grpc::serve_grpc(grpc_state, &grpc_addr).await {
+            if !grpc_addr.is_empty() {
+                tracing::error!("OTLP gRPC server failed: {e}");
+            }
+        }
+    });
+
     let shutdown = async {
         tokio::signal::ctrl_c().await.unwrap_or_default();
     };
@@ -333,6 +368,8 @@ async fn run_server(
     tracing::info!("Shutting down gracefully...");
     flush_task.abort();
     alert_eval_task.abort();
+    grpc_task.abort();
+    span_metrics_task.abort();
 
     state.inner.ingestion_service.shutdown().await?;
     state.inner.log_ingestion_service.shutdown().await?;

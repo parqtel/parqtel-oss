@@ -20,8 +20,7 @@ PARQTEL__TELEMETRY__LOG_LEVEL=debug parqtel serve
 
 ### Time Range and Flush Behaviour
 - **Instant queries** (`/api/v1/query`) look back only **1 minute**. Older buffered data won't appear there — query it via `/api/v1/query_range` instead.
-- **Metrics and logs** are queryable immediately after ingest via the in-memory buffer.
-- **Traces have no memory buffer** — spans become queryable only after the flush task writes a Parquet block (default block duration 2h, checked every 5s). For demos, set `block_duration_secs` low in your config.
+- **Metrics, logs, and traces** are all queryable immediately after ingest via the in-memory buffer (buffer drains on flush — no double-counting).
 - If the `timeUnixNano` in your OTLP payload is outside the query range (or in the distant past/future), the data will be ignored.
 - **Tip:** Ensure your system clocks are synchronized via NTP.
 

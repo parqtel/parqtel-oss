@@ -493,3 +493,242 @@ async fn test_simplejson_handlers() {
     let res = app.clone().oneshot(req).await.unwrap();
     assert_eq!(res.status(), StatusCode::OK);
 }
+
+#[tokio::test]
+async fn test_grpc_trace_export_and_immediate_query() {
+    use parqtel_ingest::otel::collector::trace::v1::trace_service_client::TraceServiceClient;
+    use parqtel_ingest::otel::collector::trace::v1::ExportTraceServiceRequest;
+    use parqtel_ingest::otel::trace::v1::Span as OtelSpan;
+
+    let state = AppState::default_for_tests().await;
+
+    // Bind gRPC on an ephemeral port
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    drop(listener);
+
+    let grpc_state = state.clone();
+    tokio::spawn(async move {
+        let _ = crate::grpc::OtlpGrpcService::serve(grpc_state, addr).await;
+    });
+    // Give the server a moment to bind
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    let mut client = TraceServiceClient::connect(format!("http://{addr}"))
+        .await
+        .expect("gRPC connect");
+
+    let span = OtelSpan {
+        trace_id: vec![0x42; 16],
+        span_id: vec![0x24; 8],
+        name: "grpc-test-op".into(),
+        kind: 2,
+        start_time_unix_nano: 5_000,
+        end_time_unix_nano: 6_000,
+        ..Default::default()
+    };
+    let request = ExportTraceServiceRequest {
+        resource_spans: vec![parqtel_ingest::otel::trace::v1::ResourceSpans {
+            scope_spans: vec![parqtel_ingest::otel::trace::v1::ScopeSpans {
+                spans: vec![span],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+    };
+
+    client.export(request).await.expect("gRPC export ok");
+
+    // Spans must be queryable IMMEDIATELY via the memory buffer (F2),
+    // long before any Parquet block flush.
+    let spans = state
+        .inner
+        .query_executor
+        .query_traces(0, i64::MAX, None, 10)
+        .await
+        .expect("query traces");
+    assert_eq!(spans.len(), 1, "span should be queryable from buffer");
+    assert_eq!(spans[0].name, "grpc-test-op");
+}
+
+#[tokio::test]
+async fn test_grpc_metrics_and_logs_export() {
+    use parqtel_ingest::otel::collector::logs::v1::logs_service_client::LogsServiceClient;
+    use parqtel_ingest::otel::collector::logs::v1::ExportLogsServiceRequest;
+    use parqtel_ingest::otel::collector::metrics::v1::metrics_service_client::MetricsServiceClient;
+    use parqtel_ingest::otel::collector::metrics::v1::ExportMetricsServiceRequest;
+    use parqtel_ingest::otel::logs::v1::LogRecord;
+    use parqtel_ingest::otel::metrics::v1::{Gauge, Metric, NumberDataPoint};
+    use parqtel_ingest::otel::trace::v1::ScopeSpans;
+
+    let state = AppState::default_for_tests().await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    drop(listener);
+
+    let grpc_state = state.clone();
+    tokio::spawn(async move {
+        let _ = crate::grpc::OtlpGrpcService::serve(grpc_state, addr).await;
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    // Metrics
+    let mut mclient = MetricsServiceClient::connect(format!("http://{addr}"))
+        .await
+        .expect("metrics connect");
+    let metric = Metric {
+        name: "grpc_requests".into(),
+        data: Some(parqtel_ingest::otel::metrics::v1::metric::Data::Gauge(
+            Gauge {
+                data_points: vec![NumberDataPoint {
+                    time_unix_nano: 42,
+                    value: Some(
+                        parqtel_ingest::otel::metrics::v1::number_data_point::Value::AsDouble(7.0),
+                    ),
+                    ..Default::default()
+                }],
+            },
+        )),
+        ..Default::default()
+    };
+    mclient
+        .export(ExportMetricsServiceRequest {
+            resource_metrics: vec![parqtel_ingest::otel::metrics::v1::ResourceMetrics {
+                scope_metrics: vec![parqtel_ingest::otel::metrics::v1::ScopeMetrics {
+                    metrics: vec![metric],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+        })
+        .await
+        .expect("metrics export");
+
+    // Logs — reusing ScopeSpans import path shape
+    let mut lclient = LogsServiceClient::connect(format!("http://{addr}"))
+        .await
+        .expect("logs connect");
+    let record = LogRecord {
+        time_unix_nano: 42,
+        body: Some(parqtel_ingest::otel::common::v1::AnyValue {
+            value: Some(
+                parqtel_ingest::otel::common::v1::any_value::Value::StringValue("grpc log".into()),
+            ),
+        }),
+        ..Default::default()
+    };
+    let _ = ScopeSpans::default(); // import sanity
+    lclient
+        .export(ExportLogsServiceRequest {
+            resource_logs: vec![parqtel_ingest::otel::logs::v1::ResourceLogs {
+                scope_logs: vec![parqtel_ingest::otel::logs::v1::ScopeLogs {
+                    log_records: vec![record],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+        })
+        .await
+        .expect("logs export");
+
+    // Buffered metrics should be queryable immediately
+    let points = state
+        .inner
+        .query_executor
+        .memory_buffer()
+        .scan_metrics("grpc_requests", 0, i64::MAX)
+        .await;
+    assert_eq!(points.len(), 1);
+}
+
+#[tokio::test]
+async fn test_span_metrics_red_bridge_end_to_end() {
+    use parqtel_ingest::otel::collector::trace::v1::ExportTraceServiceRequest;
+    use parqtel_ingest::otel::trace::v1::Span as OtelSpan;
+    use tokio::sync::mpsc;
+
+    let state = AppState::default_for_tests().await;
+
+    // The test-state trace service has no span-metrics sink wired (it's built
+    // by main.rs in production), so drive the bridge directly through the
+    // public channel surface the same way main.rs does.
+    let (span_metrics_tx, mut rx) = mpsc::unbounded_channel();
+    // Rebuild a trace service with the sink to exercise process_traces.
+    let (ttx, _trx) = mpsc::unbounded_channel();
+    let config = parqtel_core::Config::default();
+    let buffer = state.inner.query_executor.memory_buffer();
+    let trace_service = TraceIngestionService::new(config.storage.clone(), ttx)
+        .with_memory_buffer(buffer)
+        .with_span_metrics(span_metrics_tx);
+
+    // One successful + one failed server span across two services.
+    let mk_span = |name: &str, status: i32| OtelSpan {
+        trace_id: vec![0x99; 16],
+        span_id: vec![0x11; 8],
+        name: name.into(),
+        kind: 2, // SERVER
+        start_time_unix_nano: 10_000,
+        end_time_unix_nano: 20_000,
+        status: Some(parqtel_ingest::otel::trace::v1::Status {
+            code: status,
+            message: String::new(),
+        }),
+        ..Default::default()
+    };
+    let request = ExportTraceServiceRequest {
+        resource_spans: vec![parqtel_ingest::otel::trace::v1::ResourceSpans {
+            resource: Some(parqtel_ingest::otel::resource::v1::Resource {
+                attributes: vec![parqtel_ingest::otel::common::v1::KeyValue {
+                    key: "service.name".into(),
+                    value: Some(parqtel_ingest::otel::common::v1::AnyValue {
+                        value: Some(
+                            parqtel_ingest::otel::common::v1::any_value::Value::StringValue(
+                                "api".into(),
+                            ),
+                        ),
+                    }),
+                }],
+                ..Default::default()
+            }),
+            scope_spans: vec![parqtel_ingest::otel::trace::v1::ScopeSpans {
+                spans: vec![mk_span("GET /ok", 0), mk_span("GET /fail", 2)],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+    };
+
+    // Encode + decode through the proto path (mirrors gRPC handling).
+    let body = prost::Message::encode_to_vec(&request);
+    trace_service
+        .ingest_proto(bytes::Bytes::from(body))
+        .await
+        .expect("trace ingest");
+
+    // The RED bridge must have emitted metrics on the channel.
+    let derived = rx.recv().await.expect("span metrics emitted");
+    let names: Vec<&str> = derived.iter().map(|m| m.name.as_str()).collect();
+    assert!(names.contains(&"traces_service_requests_total"));
+    assert!(names.contains(&"traces_service_errors_total"));
+    assert!(names.contains(&"traces_service_duration_ms"));
+
+    // Ingest them and verify queryability via the buffer.
+    state
+        .inner
+        .ingestion_service
+        .ingest_metrics(derived)
+        .await
+        .expect("metric ingest");
+    let pts = state
+        .inner
+        .query_executor
+        .memory_buffer()
+        .scan_metrics("traces_service_errors_total", 0, i64::MAX)
+        .await;
+    assert_eq!(pts.len(), 2);
+    let svc_label = pts[0]
+        .labels
+        .get("service.name")
+        .expect("service.name label");
+    assert_eq!(svc_label, "api");
+}

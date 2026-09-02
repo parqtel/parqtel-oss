@@ -38,8 +38,10 @@ make docker        # Build Docker image
 - **Binary name**: `parqtel` (not `parqtel-server`) — the crate is `parqtel-server` but `[[bin]] name = "parqtel"`.
 - **Block index**: persisted as `index.json` (JSON sidecar, atomic tmp+rename), not bincode/`index.bin`.
 - **Instant queries** (`/api/v1/query`) use a **1-minute lookback window** — data older than ~60s won't appear until flushed to a block and queried via `query_range`.
-- **In-memory buffer**: metrics and logs are queryable immediately after ingest via `MemoryBuffer`; **traces have no memory buffer** — spans are only queryable after the 5s flush task writes a block (default block duration 2h, but `check_and_flush` runs every 5s with the *first* unflushed span's age checked against `block_duration_secs`).
-- **service.name label**: the scanner and ingest buffer both inject the dedicated `service_name` Parquet column back as the `service.name` label, so PromQL matchers like `http_requests_total{service.name="api"}` work for both buffered and flushed data.
+- **In-memory buffer**: metrics, logs, and traces are all queryable immediately after ingest via `MemoryBuffer`; the buffer is drained on every flush so buffered + flushed data never double-counts.
+- **service.name label**: the scanner and ingest buffer both inject the dedicated `service_name` Parquet column back as the `service.name` label, so PromQL matchers like `http_requests_total{service.name="api"}` work for both buffered and flushed data. Trace decode merges resource attributes into span attributes (span attrs win).
+- **OTLP gRPC**: `:4317` by default (`ServerConfig.grpc_bind_address`; empty string disables). tonic server implements all three collector services and routes through the same `ingest_proto` path as HTTP protobuf.
+- **Span-metrics RED bridge**: server-kind spans automatically derive `traces_service_{requests,errors,duration_ms}_total` metrics (labels: `service`, `operation`, `service.name`) through the normal metrics path — wired in `main.rs` via `with_span_metrics` channel.
 
 ## Code Conventions
 
@@ -75,7 +77,7 @@ Layered via Figment (priority: CLI > env > TOML > defaults):
 
 ## API Endpoints
 
-- **Ingestion**: `/v1/metrics`, `/v1/logs`, `/v1/traces` (content negotiation: protobuf + JSON) + `/json` variants
+- **Ingestion**: gRPC `:4317` (OTLP default; all three collector services) + HTTP `/v1/metrics`, `/v1/logs`, `/v1/traces` (content negotiation: protobuf + JSON) + `/json` variants
 - **Query**: `/api/v1/query`, `/api/v1/query_range`, `/api/v1/labels`, `/api/v1/label/:name/values`
 - **Logs**: `/api/v1/logs`, `/v1/logs/count`, `/v1/logs/fields`, `/v1/logs/field_values`
 - **Traces**: `/v1/traces/search` (per-span `trace_id` included for client-side grouping)

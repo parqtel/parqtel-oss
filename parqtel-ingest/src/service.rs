@@ -167,6 +167,13 @@ impl IngestionService {
         self.process_metrics(metrics).await
     }
 
+    /// Ingest already-decoded metrics directly (used by the span-metrics
+    /// RED bridge, which derives metrics from trace spans).
+    pub async fn ingest_metrics(&self, metrics: Vec<Metric>) -> Result<u64> {
+        self.stats.total_batches.fetch_add(1, Ordering::Relaxed);
+        self.process_metrics(metrics).await
+    }
+
     pub async fn ingest_json(&self, body: Bytes) -> Result<u64> {
         self.stats.total_batches.fetch_add(1, Ordering::Relaxed);
         let json: serde_json::Value = serde_json::from_slice(&body)
@@ -236,14 +243,24 @@ impl IngestionService {
         Ok(count)
     }
 
-    pub async fn check_and_flush(&self) -> Result<()> {
-        self.rotator.lock().await.check_and_flush().await?;
-        Ok(())
+    /// Checks for duration-based flush; returns `true` when a flush happened
+    /// (the shared memory buffer is drained so flushed rows aren't double-read).
+    pub async fn check_and_flush(&self) -> Result<bool> {
+        let flushed = self.rotator.lock().await.check_and_flush().await?;
+        if flushed {
+            if let Some(ref buf) = self.memory_buffer {
+                buf.drain_metrics().await;
+            }
+        }
+        Ok(flushed)
     }
 
     pub async fn shutdown(&self) -> Result<()> {
         let mut rotator = self.rotator.lock().await;
         let _ = rotator.flush().await;
+        if let Some(ref buf) = self.memory_buffer {
+            buf.drain_metrics().await;
+        }
         Ok(())
     }
 
@@ -326,14 +343,24 @@ impl LogIngestionService {
         Ok(count)
     }
 
-    pub async fn check_and_flush(&self) -> Result<()> {
-        self.rotator.lock().await.check_and_flush().await?;
-        Ok(())
+    /// Checks for duration-based flush; returns `true` when a flush happened
+    /// (the shared memory buffer is drained so flushed rows aren't double-read).
+    pub async fn check_and_flush(&self) -> Result<bool> {
+        let flushed = self.rotator.lock().await.check_and_flush().await?;
+        if flushed {
+            if let Some(ref buf) = self.memory_buffer {
+                buf.drain_logs().await;
+            }
+        }
+        Ok(flushed)
     }
 
     pub async fn shutdown(&self) -> Result<()> {
         let mut rotator = self.rotator.lock().await;
         let _ = rotator.flush().await;
+        if let Some(ref buf) = self.memory_buffer {
+            buf.drain_logs().await;
+        }
         Ok(())
     }
 
@@ -375,11 +402,12 @@ impl TraceRotator {
         self.writer.push(span).map(|_| false)
     }
 
-    pub async fn check_and_flush(&mut self) -> Result<()> {
+    pub async fn check_and_flush(&mut self) -> Result<bool> {
         if Instant::now().duration_since(self.last_flush) >= self.max_duration {
             self.flush().await?;
+            return Ok(true);
         }
-        Ok(())
+        Ok(false)
     }
 
     /// See [BlockRotator::flush] for the blocking-pool rationale.
@@ -401,6 +429,10 @@ impl TraceRotator {
 pub struct TraceIngestionService {
     rotator: Arc<Mutex<TraceRotator>>,
     stats: Arc<IngestionStats>,
+    memory_buffer: Option<MemoryBuffer>,
+    /// When set, span-metrics RED derivation sends metric batches here
+    /// (consumed by a task that feeds the metrics ingestion service).
+    span_metrics_tx: Option<mpsc::UnboundedSender<Vec<Metric>>>,
 }
 
 impl TraceIngestionService {
@@ -408,7 +440,23 @@ impl TraceIngestionService {
         Self {
             rotator: Arc::new(Mutex::new(TraceRotator::new(config, metadata_tx))),
             stats: Arc::new(IngestionStats::default()),
+            memory_buffer: None,
+            span_metrics_tx: None,
         }
+    }
+
+    /// Set the shared memory buffer for stream-queryable spans.
+    pub fn with_memory_buffer(mut self, buffer: MemoryBuffer) -> Self {
+        self.memory_buffer = Some(buffer);
+        self
+    }
+
+    /// Enable the span-metrics RED bridge: derived metrics
+    /// (`traces_service_{requests,errors,duration_ms}_total`) are sent to
+    /// this channel for ingestion as normal metrics.
+    pub fn with_span_metrics(mut self, tx: mpsc::UnboundedSender<Vec<Metric>>) -> Self {
+        self.span_metrics_tx = Some(tx);
+        self
     }
 
     pub async fn ingest_proto(&self, body: Bytes) -> Result<u64> {
@@ -433,26 +481,56 @@ impl TraceIngestionService {
 
     async fn process_traces(&self, spans: Vec<Span>) -> Result<u64> {
         let count = spans.len() as u64;
-        // Traces have no memory buffer, so the flush signal is not needed.
+        let mut flushed = false;
+        // Span-metrics RED bridge: derive metrics BEFORE the rotator takes
+        // ownership of the spans.
+        if let Some(ref tx) = self.span_metrics_tx {
+            let derived = crate::span_metrics::derive_span_metrics(&spans);
+            if !derived.is_empty() {
+                let _ = tx.send(derived);
+            }
+        }
+        // Write to in-memory buffer first so spans are queryable immediately.
+        if let Some(ref buf) = self.memory_buffer {
+            buf.push_spans(&spans).await;
+        }
         let mut rotator = self.rotator.lock().await;
         for s in spans {
-            let _flushed = rotator.push(s).await?;
+            if rotator.push(s).await? {
+                flushed = true;
+            }
         }
         rotator.check_and_flush().await?;
+        drop(rotator);
+        if flushed {
+            if let Some(ref buf) = self.memory_buffer {
+                buf.drain_spans().await;
+            }
+        }
         self.stats
             .ingested_points
             .fetch_add(count, Ordering::Relaxed);
         Ok(count)
     }
 
-    pub async fn check_and_flush(&self) -> Result<()> {
-        self.rotator.lock().await.check_and_flush().await?;
-        Ok(())
+    /// Checks for duration-based flush; returns `true` when a flush happened
+    /// (the shared memory buffer is drained so flushed spans aren't double-read).
+    pub async fn check_and_flush(&self) -> Result<bool> {
+        let flushed = self.rotator.lock().await.check_and_flush().await?;
+        if flushed {
+            if let Some(ref buf) = self.memory_buffer {
+                buf.drain_spans().await;
+            }
+        }
+        Ok(flushed)
     }
 
     pub async fn shutdown(&self) -> Result<()> {
         let mut rotator = self.rotator.lock().await;
         let _ = rotator.flush().await;
+        if let Some(ref buf) = self.memory_buffer {
+            buf.drain_spans().await;
+        }
         Ok(())
     }
 

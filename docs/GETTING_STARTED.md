@@ -21,7 +21,7 @@ curl http://localhost:8080/health
 
 ## 2. Your First Metric
 
-Parqtel uses the OpenTelemetry (OTLP) protocol. You can send data using `curl` to test the ingestion.
+Parqtel speaks the OpenTelemetry (OTLP) protocol over both **gRPC** (`:4317` — the OTel SDK default, no collector needed) and **HTTP** (protobuf or JSON). The examples below use `curl` against the HTTP JSON endpoints for quick testing; point your OTel SDK exporter at `http://localhost:8080` (gRPC) or `http://localhost:8080/v1/{metrics,logs,traces}` to send production traffic.
 
 > **Note on OTLP JSON format**: `attributes` must be arrays of `{key, value}` objects (as shown below), not plain objects. This follows the OTLP JSON protobuf mapping.
 

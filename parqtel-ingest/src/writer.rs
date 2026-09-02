@@ -343,7 +343,7 @@ fn write_parquet_file(
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
-    use parqtel_core::{DataPoint, LabelSet, LogRecord, Metric, MetricValue};
+    use parqtel_core::{DataPoint, LabelSet, Metric, MetricValue};
     use tempfile::tempdir;
 
     #[test]

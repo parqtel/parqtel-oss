@@ -64,11 +64,12 @@ Parqtel is a single-binary observability backend written in Rust that ingests Op
 
 | Category | Capabilities |
 |----------|-------------|
-| **Ingestion** | OTLP/Proto & JSON for metrics, logs, and traces |
+| **Ingestion** | OTLP gRPC (`:4317`, the OTel SDK default) + HTTP protobuf & JSON for metrics, logs, and traces |
 | **Storage** | Block-based Parquet with Zstd/Snappy/LZ4, automatic compaction, configurable retention |
 | **Query** | PromQL-compatible instant & range queries, label matching, aggregations (sum, avg, rate, histogram_quantile, etc.) |
 | **Alerting** | YAML-defined rules, threshold & anomaly detection, state machine (Inactive→Pending→Firing→Resolved), background evaluation loop (15s), noise scoring |
 | **Pipeline** | Recording rules, stream processing pipelines, metric extraction from logs |
+| **Span-metrics (RED)** | Auto-derived `traces_service_{requests,errors,duration_ms}_total` per service/operation from server spans — zero-config RED dashboards in Grafana |
 | **Visualization** | Built-in web UI, Grafana SimpleJSON datasource, Prometheus-compatible `/api/v1/*` |
 | **MCP** | 7 AI tool servers (Slack, PagerDuty, Jira, Notion, Discord, Google Docs, Parqtel) |
 | **Operations** | Health checks, `/metrics` endpoint, graceful shutdown, CLI subcommands |
@@ -224,6 +225,8 @@ Instant queries look back 1 minute; older points become queryable via `/api/v1/q
 
 ### Ingestion (OTLP)
 
+OTel SDKs can export directly via **gRPC** at `:4317` (all three collector services, no collector sidecar needed), or via HTTP:
+
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/v1/metrics` | POST | Ingest metrics (protobuf) |
@@ -310,6 +313,7 @@ parqtel export             # Export metric data to CSV
 |----------|-------------|---------|
 | `PARQTEL_CONFIG` | Path to TOML config file | `config/default.toml` |
 | `PARQTEL_BIND` | TCP bind address | `0.0.0.0:8080` |
+| `PARQTEL__SERVER__GRPC_BIND_ADDRESS` | OTLP gRPC bind address (`""` disables) | `0.0.0.0:4317` |
 | `PARQTEL_DATA_DIR` | Data directory | `data` |
 | `RUST_LOG` | Log level | `info` |
 | `PARQTEL__STORAGE__COMPRESSION` | Compression codec | `zstd` |

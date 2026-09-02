@@ -86,16 +86,25 @@ impl AppState {
         let (ttx, _) = mpsc::unbounded_channel();
         let index = Arc::new(RwLock::new(BlockIndex::new(dir.path())));
         let log_index = Arc::new(RwLock::new(BlockIndex::new(&dir.path().join("logs"))));
+        let trace_dir = config.storage.data_dir.join("traces");
+        let trace_index = Arc::new(RwLock::new(BlockIndex::new(&trace_dir)));
+        let executor = QueryExecutor::with_trace_index(
+            index.clone(),
+            log_index.clone(),
+            trace_index,
+            parqtel_core::MemoryBuffer::new(),
+            config.storage.data_dir.join("traces"),
+        );
+        let memory_buffer = executor.memory_buffer();
 
         Self::new(
-            IngestionService::new(config.storage.clone(), tx),
-            LogIngestionService::new(config.logs.clone(), ltx),
-            TraceIngestionService::new(config.storage.clone(), ttx),
-            QueryExecutor::new(
-                index.clone(),
-                log_index,
-                config.storage.data_dir.join("traces"),
-            ),
+            IngestionService::new(config.storage.clone(), tx)
+                .with_memory_buffer(memory_buffer.clone()),
+            LogIngestionService::new(config.logs.clone(), ltx)
+                .with_memory_buffer(memory_buffer.clone()),
+            TraceIngestionService::new(config.storage.clone(), ttx)
+                .with_memory_buffer(memory_buffer),
+            executor,
             index,
             config,
             vec![],

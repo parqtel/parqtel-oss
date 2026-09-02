@@ -93,10 +93,11 @@ parqtel-mcp-{slack,pagerduty,jira,notion,discord,gdocs,parqtel}
 
 ### Ingestion Path
 
-1. **HTTP Request** → Axum handler receives OTLP protobuf or JSON body (content negotiation via `Content-Type`); `/v1/{metrics,logs,traces}` dispatch to proto handlers for `application/x-protobuf`, JSON otherwise
+1. **Transport** → OTLP payloads arrive via HTTP (`/v1/{metrics,logs,traces}` — content negotiation via `Content-Type` between protobuf and JSON) or via the dedicated **OTLP gRPC server on `:4317`** (tonic; implements all three collector services and routes through the identical `ingest_proto` decode path). gRPC is the OTel SDK default transport.
 2. **Decode** → `parqtel-ingest::decode` converts OTLP payloads to internal `Metric`/`LogRecord`/`Span` models. JSON `attributes` must be OTLP arrays of `{key, value}` objects
-3. **Buffer** → metrics and logs are immediately queryable via `MemoryBuffer` (indexed by metric name / linear scan for logs); the buffer injects `service.name` from resource attributes into point labels so label matchers behave identically before and after flush
-4. **Rotate** → `IngestionService` accumulates data points in memory via `BlockRotator`; traces have no memory buffer and are queryable only after block flush
+3. **Buffer** → metrics, logs, and traces are all immediately queryable via `MemoryBuffer` (metrics indexed by name; spans matched by interval overlap); the buffer injects `service.name` from resource attributes into point labels so label matchers behave identically before and after flush, and drains on every flush so buffered + flushed rows never double-count
+4. **Rotate** → `IngestionService` accumulates data points in memory via `BlockRotator`
+4a. **Span-metrics RED bridge** → trace ingestion derives `traces_service_{requests,errors,duration_ms}_total` metrics from `SPAN_KIND_SERVER` spans (grouped by service/operation) and feeds them back through the metrics path — services get out-of-the-box RED metrics without hand-written rules. Trace decode merges resource attributes (service.name, k8s.*) into span attributes, span attrs winning on conflict.
 5. **Flush** → When block duration expires or row limit is reached, `BlockWriter` serializes to Parquet with configured compression. Blocking work (encode/compress/IO) runs on `spawn_blocking`; the rotator swaps out its writer so ingest continues during flushes
 6. **Index** → `BlockMetadata` is sent via `mpsc::unbounded_channel` to the index task, which updates the in-memory `BlockIndex`
 7. **Background** → A periodic flush task (5s interval) calls `check_and_flush()` on all three services

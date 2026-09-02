@@ -135,8 +135,10 @@ mod tests {
     #[tokio::test]
     async fn test_parquet_engine_implements_trait() {
         let dir = tempdir().unwrap();
-        let mut config = BlockConfig::default();
-        config.data_dir = dir.path().to_path_buf();
+        let config = BlockConfig {
+            data_dir: dir.path().to_path_buf(),
+            ..Default::default()
+        };
 
         let engine = ParquetStorageEngine::new(config);
         let engine: Arc<dyn StorageEngine> = Arc::new(engine);
@@ -174,8 +176,10 @@ mod tests {
     #[tokio::test]
     async fn test_health_check_returns_ok() {
         let dir = tempdir().unwrap();
-        let mut config = BlockConfig::default();
-        config.data_dir = dir.path().to_path_buf();
+        let config = BlockConfig {
+            data_dir: dir.path().to_path_buf(),
+            ..Default::default()
+        };
 
         let engine = ParquetStorageEngine::new(config);
         let health = engine.health_check().await.unwrap();
@@ -185,8 +189,10 @@ mod tests {
     #[tokio::test]
     async fn test_registry_resolves_parquet() {
         let dir = tempdir().unwrap();
-        let mut config = BlockConfig::default();
-        config.data_dir = dir.path().to_path_buf();
+        let config = BlockConfig {
+            data_dir: dir.path().to_path_buf(),
+            ..Default::default()
+        };
 
         let mut registry = StorageEngineRegistry::new();
         registry.register_parquet();
@@ -208,8 +214,10 @@ mod tests {
     #[tokio::test]
     async fn test_index_snapshot_reflects_written_data() {
         let dir = tempdir().unwrap();
-        let mut config = BlockConfig::default();
-        config.data_dir = dir.path().to_path_buf();
+        let config = BlockConfig {
+            data_dir: dir.path().to_path_buf(),
+            ..Default::default()
+        };
 
         let engine = ParquetStorageEngine::new(config);
 

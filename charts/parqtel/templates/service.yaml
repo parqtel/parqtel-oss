@@ -18,5 +18,11 @@ spec:
       {{- if and (eq .Values.service.type "NodePort") .Values.service.nodePort }}
       nodePort: {{ .Values.service.nodePort }}
       {{- end }}
+    {{- if .Values.ingestion.grpc.enabled }}
+    - port: {{ .Values.ingestion.grpc.port }}
+      targetPort: grpc
+      protocol: TCP
+      name: grpc
+    {{- end }}
   selector:
     {{- include "parqtel.selectorLabels" . | nindent 4 }}

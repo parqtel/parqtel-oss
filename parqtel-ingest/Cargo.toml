@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 parqtel-core = { workspace = true }
 prost = { workspace = true }
+tonic = { workspace = true }
 prost-types = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -24,6 +25,7 @@ hex = { workspace = true }
 
 [build-dependencies]
 prost-build = "0.12"
+tonic-build = "0.11"
 
 [lints]
 workspace = true
