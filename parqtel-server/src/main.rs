@@ -326,6 +326,7 @@ async fn run_server(
                     label_replace,
                     scalar_param,
                     clamp,
+                    range_ns,
                 ) = match parsed {
                     Ok(p) => p,
                     Err(_) => continue,
@@ -348,6 +349,7 @@ async fn run_server(
                     label_replace,
                     scalar_param,
                     clamp,
+                    range_ns,
                 );
                 let plan = match plan {
                     Ok(p) => p,

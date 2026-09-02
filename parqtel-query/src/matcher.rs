@@ -164,11 +164,15 @@ pub type ParsedQuery = (
     Option<(String, String, String, String)>, // label_replace params
     Option<f64>,                              // scalar_param (round to_nearest)
     Option<(Option<f64>, Option<f64>)>,       // clamp (min, max)
+    Option<i64>,                              // range_ns from [Xm] selector
 );
 
 /// Parses a PromQL-style query including all supported aggregation functions.
 pub fn parse_query(query: &str) -> Result<ParsedQuery> {
     let query = query.trim();
+    // Range-selector duration ([5m]) — only meaningful for the counter
+    // family today; other ops ignore it (None) until the AST engine lands.
+    let mut range_ns: Option<i64> = None;
 
     // ── histogram_quantile(φ, selector) ────────────────────────────────────
     if let Some(inner) = strip_fn("histogram_quantile", query) {
@@ -189,6 +193,7 @@ pub fn parse_query(query: &str) -> Result<ParsedQuery> {
             None,
             None,
             None,
+            range_ns,
         ));
     }
 
@@ -216,6 +221,7 @@ pub fn parse_query(query: &str) -> Result<ParsedQuery> {
                 None,
                 None,
                 None,
+                range_ns,
             ));
         }
     }
@@ -244,6 +250,7 @@ pub fn parse_query(query: &str) -> Result<ParsedQuery> {
             Some((dst, repl, src, regex)),
             None,
             None,
+            range_ns,
         ));
     }
 
@@ -266,6 +273,7 @@ pub fn parse_query(query: &str) -> Result<ParsedQuery> {
             None,
             None,
             Some((Some(min), None)),
+            range_ns,
         ));
     }
     if let Some(inner) = strip_fn("clamp_max", query) {
@@ -286,6 +294,7 @@ pub fn parse_query(query: &str) -> Result<ParsedQuery> {
             None,
             None,
             Some((None, Some(max))),
+            range_ns,
         ));
     }
 
@@ -314,6 +323,7 @@ pub fn parse_query(query: &str) -> Result<ParsedQuery> {
             None,
             scalar,
             None,
+            range_ns,
         ));
     }
 
@@ -336,6 +346,7 @@ pub fn parse_query(query: &str) -> Result<ParsedQuery> {
                 None,
                 None,
                 None,
+                range_ns,
             ));
         }
     }
@@ -348,8 +359,10 @@ pub fn parse_query(query: &str) -> Result<ParsedQuery> {
         ("rate", crate::plan::AggregationOp::Rate),
     ] {
         if let Some(inner) = strip_fn(fname, query) {
-            // Strip optional range selector [Xm]
-            let sel = strip_range(inner);
+            // Parse the range selector ([5m]) instead of discarding it —
+            // the window is now honored by the executor (per-step lookback).
+            let (sel, parsed_range) = split_range(inner)?;
+            range_ns = parsed_range;
             let (name, matchers) = parse_selector(sel)?;
             return Ok((
                 name.unwrap_or_default(),
@@ -362,6 +375,7 @@ pub fn parse_query(query: &str) -> Result<ParsedQuery> {
                 None,
                 None,
                 None,
+                range_ns,
             ));
         }
     }
@@ -390,6 +404,7 @@ pub fn parse_query(query: &str) -> Result<ParsedQuery> {
                 None,
                 None,
                 None,
+                range_ns,
             ));
         }
         // Also handle `sum by (label) (selector)` form
@@ -419,6 +434,7 @@ pub fn parse_query(query: &str) -> Result<ParsedQuery> {
                 None,
                 None,
                 None,
+                range_ns,
             ));
         }
     }
@@ -436,6 +452,7 @@ pub fn parse_query(query: &str) -> Result<ParsedQuery> {
         None,
         None,
         None,
+        range_ns,
     ))
 }
 
@@ -451,12 +468,107 @@ fn strip_fn<'a>(fname: &str, query: &'a str) -> Option<&'a str> {
     }
 }
 
-/// Strips trailing `[Xm]` or `[Xs]` range selector.
-fn strip_range(s: &str) -> &str {
-    if let Some(idx) = s.rfind('[') {
-        s[..idx].trim()
-    } else {
-        s.trim()
+/// Splits a trailing range selector (`[5m]`, `[1h30m]`, `[90s]`, `[3600]`)
+/// into (inner, Some(range_ns)). Returns (trimmed input, None) when no
+/// selector is present. Invalid durations are a validation error — a query
+/// like rate(x[abc]) must not silently fall back to whole-range windowing.
+fn split_range(s: &str) -> Result<(&str, Option<i64>)> {
+    match s.rfind('[') {
+        None => Ok((s.trim(), None)),
+        Some(idx) => {
+            let inner = s[..idx].trim();
+            let dur = s[idx + 1..].strip_suffix(']').ok_or_else(|| {
+                Error::Validation(format!("unterminated range selector in {s:?}"))
+            })?;
+            let ns = parse_duration_ns(dur)?;
+            Ok((inner, Some(ns)))
+        }
+    }
+}
+
+/// Parses PromQL duration strings: `5m`, `1h30m`, `2d`, `1w`, `90s`, `250ms`,
+/// or a bare number (seconds). Returns nanoseconds.
+fn parse_duration_ns(s: &str) -> Result<i64> {
+    const UNITS: &[(&str, i64)] = &[
+        ("ms", 1_000_000i64),
+        ("s", 1_000_000_000),
+        ("m", 60_000_000_000),
+        ("h", 3_600_000_000_000),
+        ("d", 86_400_000_000_000),
+        ("w", 604_800_000_000_000),
+    ];
+    if s.is_empty() {
+        return Err(Error::Validation("empty range selector".into()));
+    }
+    // Bare seconds: `[300]`
+    if let Ok(secs) = s.parse::<i64>() {
+        return Ok(secs * 1_000_000_000);
+    }
+    let mut total: i64 = 0;
+    let mut rest = s;
+    let mut matched = false;
+    while !rest.is_empty() {
+        // longest-unit-first match
+        let mut unit_found = false;
+        for (suffix, mult) in UNITS {
+            if let Some(num_end) = rest.find(|ch: char| !ch.is_ascii_digit()) {
+                let (num_str, maybe_unit) = rest.split_at(num_end);
+                if maybe_unit.starts_with(suffix) {
+                    let n: i64 = num_str
+                        .parse()
+                        .map_err(|_| Error::Validation(format!("invalid duration {s:?}")))?;
+                    total = total
+                        .checked_add(n.checked_mul(*mult).ok_or_else(|| {
+                            Error::Validation(format!("duration {s:?} overflows"))
+                        })?)
+                        .ok_or_else(|| Error::Validation(format!("duration {s:?} overflows")))?;
+                    rest = maybe_unit.strip_prefix(*suffix).unwrap_or(maybe_unit);
+                    unit_found = true;
+                    matched = true;
+                    break;
+                }
+            }
+        }
+        if !unit_found {
+            return Err(Error::Validation(format!(
+                "invalid duration {s:?} (use e.g. 5m, 1h30m, 90s)"
+            )));
+        }
+    }
+    if !matched {
+        return Err(Error::Validation(format!("invalid duration {s:?}")));
+    }
+    Ok(total)
+}
+
+#[cfg(test)]
+mod duration_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use super::parse_duration_ns;
+
+    #[test]
+    fn parses_units() {
+        assert_eq!(parse_duration_ns("5m").unwrap(), 300 * 1_000_000_000);
+        assert_eq!(parse_duration_ns("90s").unwrap(), 90 * 1_000_000_000);
+        assert_eq!(parse_duration_ns("1h").unwrap(), 3_600 * 1_000_000_000);
+        assert_eq!(parse_duration_ns("250ms").unwrap(), 250_000_000);
+        assert_eq!(parse_duration_ns("2d").unwrap(), 2 * 86_400 * 1_000_000_000);
+    }
+
+    #[test]
+    fn parses_compound_and_bare_seconds() {
+        assert_eq!(
+            parse_duration_ns("1h30m").unwrap(),
+            (3_600 + 1_800) * 1_000_000_000
+        );
+        assert_eq!(parse_duration_ns("300").unwrap(), 300 * 1_000_000_000);
+    }
+
+    #[test]
+    fn rejects_garbage() {
+        assert!(parse_duration_ns("abc").is_err());
+        assert!(parse_duration_ns("").is_err());
+        assert!(parse_duration_ns("5x").is_err());
     }
 }
 
@@ -611,7 +723,7 @@ mod tests {
 
     #[test]
     fn test_parse_query() {
-        let (name, _, agg, q, topk, by, without, lr, scalar, clamp) =
+        let (name, _, agg, q, topk, by, without, lr, scalar, clamp, _range) =
             parse_query("avg(cpu_usage{host=\"h1\"})").unwrap();
         assert_eq!(name, "cpu_usage");
         assert_eq!(agg, Some(crate::plan::AggregationOp::Avg));
@@ -671,16 +783,16 @@ mod tests {
         assert_eq!(agg2, Some(crate::plan::AggregationOp::Floor));
 
         // round with optional to_nearest
-        let (_, _, agg, _, _, _, _, _, scalar, _) = parse_query("round(cpu, 0.5)").unwrap();
+        let (_, _, agg, _, _, _, _, _, scalar, _, _) = parse_query("round(cpu, 0.5)").unwrap();
         assert_eq!(agg, Some(crate::plan::AggregationOp::Round));
         assert_eq!(scalar, Some(0.5));
 
         // clamp_min / clamp_max
-        let (_, _, agg, _, _, _, _, _, _, clamp) = parse_query("clamp_min(cpu, 0.0)").unwrap();
+        let (_, _, agg, _, _, _, _, _, _, clamp, _) = parse_query("clamp_min(cpu, 0.0)").unwrap();
         assert_eq!(agg, Some(crate::plan::AggregationOp::ClampMin));
         assert_eq!(clamp, Some((Some(0.0), None)));
 
-        let (_, _, agg, _, _, _, _, _, _, clamp) = parse_query("clamp_max(cpu, 100.0)").unwrap();
+        let (_, _, agg, _, _, _, _, _, _, clamp, _) = parse_query("clamp_max(cpu, 100.0)").unwrap();
         assert_eq!(agg, Some(crate::plan::AggregationOp::ClampMax));
         assert_eq!(clamp, Some((None, Some(100.0))));
 

@@ -25,6 +25,11 @@ pub struct QueryPlan {
     pub scalar_param: Option<f64>,
     /// Clamp bounds: (min, max).
     pub clamp: Option<(Option<f64>, Option<f64>)>,
+    /// Range-selector duration from `[5m]` (nanoseconds). Windowed
+    /// functions (rate/increase/delta/irate) evaluate per-step windows of
+    /// this length; None falls back to the query range (legacy behaviour
+    /// for callers that never parsed a selector).
+    pub range_ns: Option<i64>,
 }
 
 /// All supported aggregation / transform operations.
@@ -88,6 +93,7 @@ impl QueryPlan {
             None,
             None,
             None,
+            None,
         )
     }
 
@@ -108,6 +114,7 @@ impl QueryPlan {
         label_replace: Option<(String, String, String, String)>,
         scalar_param: Option<f64>,
         clamp: Option<(Option<f64>, Option<f64>)>,
+        range_ns: Option<i64>,
     ) -> Result<Self> {
         if metric_name.is_empty() {
             return Err(Error::Validation("Metric name cannot be empty".into()));
@@ -153,6 +160,7 @@ impl QueryPlan {
             label_replace,
             scalar_param,
             clamp,
+            range_ns,
         })
     }
 }
