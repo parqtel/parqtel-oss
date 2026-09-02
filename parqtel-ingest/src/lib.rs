@@ -5,6 +5,7 @@
 pub mod decode;
 pub mod service;
 pub mod span_metrics;
+pub mod tail_sampling;
 pub mod writer;
 
 // Generated proto modules

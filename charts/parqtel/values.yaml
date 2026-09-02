@@ -79,6 +79,18 @@ ingestion:
     # -- Set empty to read from config file / defaults (0.0.0.0:4317).
     # Set "" via --set to disable gRPC ingestion.
     bindAddress: ""
+  tailSampling:
+    # -- Keep every trace containing an ERROR-status span.
+    keepErrors: true
+    # -- Keep traces whose server spans exceed this duration (ms). Empty disables.
+    slowTraceMs: null
+    # -- Fraction of remaining traces to keep (0.0–1.0). 1.0 keeps all.
+    samplingRatio: 1.0
+    # -- Per-service overrides; each entry fully replaces the global policy.
+    perService: {}
+    #   noisy-service:
+    #     keepErrors: false
+    #     samplingRatio: 0.05
 
 # ── Deployment Strategy ──────────────────────────────────────────────────────
 # -- Recreate recommended for single-replica with RWO PVC.

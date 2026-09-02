@@ -23,6 +23,24 @@ data:
     compression = {{ .Values.parqtel.storage.compression | quote }}
     retention_days = {{ .Values.parqtel.storage.retentionDays | int }}
     compaction_interval_secs = {{ .Values.parqtel.storage.compactionIntervalSecs | int }}
+
+    [ingest.tail_sampling]
+    keep_errors = {{ .Values.ingestion.tailSampling.keepErrors }}
+    {{- if .Values.ingestion.tailSampling.slowTraceMs }}
+    slow_trace_ms = {{ .Values.ingestion.tailSampling.slowTraceMs | int }}
+    {{- end }}
+    sampling_ratio = {{ .Values.ingestion.tailSampling.samplingRatio }}
+    {{- with .Values.ingestion.tailSampling.perService }}
+    [ingest.tail_sampling.per_service]
+    {{- range $svc, $policy := . }}
+    [ingest.tail_sampling.per_service.{{ $svc }}]
+    keep_errors = {{ $policy.keepErrors }}
+    {{- if $policy.slowTraceMs }}
+    slow_trace_ms = {{ $policy.slowTraceMs | int }}
+    {{- end }}
+    sampling_ratio = {{ $policy.samplingRatio }}
+    {{- end }}
+    {{- end }}
     row_group_size = {{ .Values.parqtel.storage.rowGroupSize | int }}
 
     [ingest]

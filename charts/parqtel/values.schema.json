@@ -861,6 +861,34 @@
             "port",
             "bindAddress"
           ]
+        },
+        "tailSampling": {
+          "type": "object",
+          "description": "Trace tail-sampling policy",
+          "properties": {
+            "keepErrors": {
+              "type": "boolean"
+            },
+            "slowTraceMs": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "samplingRatio": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "perService": {
+              "type": "object"
+            }
+          },
+          "required": [
+            "keepErrors",
+            "samplingRatio",
+            "perService"
+          ]
         }
       },
       "required": [
