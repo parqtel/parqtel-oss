@@ -58,3 +58,61 @@ the obvious next lever and is scheduled with the AST phase work.
 - Instant-query rows are 0 for aged datasets (expected; see limitation 4) — the suite keeps them to catch lookback regressions.
 - Dataset is single-block per signal; multi-block scan fan-out (and the 64-block cap) isn't exercised yet. Phase 1 benchmark should seed across ≥3 flush windows.
 - Ingestion throughput measured at seed time (metrics 272K samples/s via gRPC JSON-encode path is the generator bottleneck, not the server; server-side counters are the source of truth: 1.43M points/9.8s wall including logs+traces).
+
+---
+
+## Phase 1A — Composable AST engine (baseline: phase1a.json)
+
+### Shipped
+
+- Pratt parser (lexer with duration tokens, precedence table, vector
+  matching, by/without prefix+postfix, subquery `[r:step]`, offset, bool)
+- Per-step AST evaluator: binary ops (scalar/scalar, scalar/vector,
+  vector/vector with on/ignoring + group_left/right), and/or/unless,
+  range family (rate/increase/irate/delta + 12 `_over_time` fns,
+  changes, resets, deriv), instant fns (math, round/clamp,
+  label_replace/label_join, absent, sort, histogram_quantile, scalar/
+  vector/time), aggregations with by/without, topk/bottomk/quantile
+- Handler dispatch: composed/AST-only queries → execute_ast; legacy
+  shapes unchanged (zero regression for existing dashboards)
+
+### Correctness findings (fixed this phase)
+
+| # | Finding | Fix |
+|---|---|---|
+| P1A-F1 | `needs_ast` classified `avg_over_time(x[5m])` as legacy-compatible (Range-of-Selector arg shape), sending an AST-only function to the legacy parser — silent 0-row results instead of either executing it or erroring | dispatch now checks `is_legacy_function` first; regression-tested |
+| P1A-F2 | AST instant queries evaluated at `end-60s` instead of AT `time` — aged-data instants returned stale-window rows | instant path evaluates at `end_ns` with lookback |
+| P1A-F3 | Test harness (`default_for_tests`) dropped the block-metadata receiver — flushed blocks were invisible to block-backed queries in tests (mirrors the F10 alert-channel bug class) | index-update task spawned in test state, mirroring main.rs |
+
+### Known limitations carried forward
+
+1. **Single binary-expression evaluation per step** — the evaluator re-walks
+   the tree per step; range windows are re-partitioned per step per series.
+   Fine at benchmark scale (AST queries ≈ legacy cost); revisit with
+   result caching if step counts grow (subquery matrices).
+2. **Subquery inner evaluation is uncached** — `x[1h:30s]` re-evaluates the
+   inner expression per sub-step per outer step. Prometheus caches per
+   (expr, range). Left until a consumer needs it.
+3. **`@` modifier rejected** (clear error) — parsed, not evaluated.
+4. **`count_values`, `timestamp`, `absent_over_time`, `predict_linear`,
+   `double_exponential_smoothing`, date fns** — not yet in the evaluator
+   (parser accepts the shapes; eval errors clearly). Next tranche.
+5. **Vector matching `result_labels` simplification**: result takes LHS
+   labels minus `__name__`; Prometheus keeps only on()-labels for on()
+   matches. Verified per-op semantics still need conformance-corpus runs.
+6. **histogram_quantile** operates on pre-evaluated instant vectors
+   (le-label buckets); native histograms unsupported (unchanged non-goal).
+7. **Legacy dispatch retained intentionally** — two engines in flight;
+   the conformance corpus (planned) will gate a future legacy removal.
+8. **Instant-selector lookback is 60s (AST) vs Prometheus 5m** —
+   unchanged from Phase 0's documented deviation.
+
+### Performance (phase1a.json vs phase0.json, same dataset, block-backed)
+
+- All legacy queries within noise of baseline (139–160ms p50; slightly
+  faster than phase0's 210–250ms — block-cache warmth, not code).
+- AST composed queries: sum(rate) 172ms, ratio 136ms, topk(rate) 172ms,
+  avg_over_time 85ms — no measurable AST overhead vs legacy equivalents
+  at this scale (single scan dominates).
+- `label_values` remains the flagged hot spot (p95 ~1.3s) — unchanged;
+  label-value index still scheduled.

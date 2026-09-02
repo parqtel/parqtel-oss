@@ -474,9 +474,14 @@ fn ast_is_complex(expr: &crate::ast::Expr) -> bool {
         Expr::Binary(_) => true,
         Expr::Paren(e) => ast_is_complex(e),
         Expr::Call(c) => {
-            // A call whose arg is a Selector/Range-of-Selector is the
-            // legacy shape; anything nested (aggregation, call, binary)
-            // needs the AST path.
+            // The legacy engine supports a fixed function set; anything
+            // else (e.g. avg_over_time) must take the AST path even when
+            // the argument shape looks legacy-compatible.
+            if !is_legacy_function(&c.name) {
+                return true;
+            }
+            // For legacy-known functions, a Selector or Range-of-Selector
+            // arg is the legacy shape; nested expressions need the AST.
             c.args.iter().any(|a| match a {
                 Expr::Selector(_) => false,
                 Expr::Range(r) => !matches!(&*r.expr, Expr::Selector(_)),
@@ -490,6 +495,21 @@ fn ast_is_complex(expr: &crate::ast::Expr) -> bool {
         Expr::Range(r) => ast_is_complex(&r.expr),
         Expr::Selector(_) | Expr::Number(_) => false,
     }
+}
+
+/// Functions the legacy single-dispatch engine understands. Everything
+/// else — the _over_time family, label helpers, scalar/vector/time —
+/// is AST-only.
+fn is_legacy_function(name: &str) -> bool {
+    matches!(
+        name,
+        "rate" | "irate" | "increase" | "delta"
+            | "sum" | "avg" | "min" | "max" | "count" | "stddev" | "stdvar"
+            | "topk" | "bottomk"
+            | "abs" | "ceil" | "floor" | "round"
+            | "clamp_min" | "clamp_max"
+            | "histogram_quantile" | "label_replace"
+    )
 }
 
 // ── helpers ─────────────────────────────────────────────────────────────────
@@ -575,6 +595,27 @@ pub fn parse_duration_str(s: &str) -> Result<i64> {
         return Err(Error::Validation(format!("invalid duration {s:?}")));
     }
     Ok(total)
+}
+
+#[cfg(test)]
+mod needs_ast_tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+
+    #[test]
+    fn avg_over_time_is_ast() {
+        assert!(needs_ast("avg_over_time(cpu_usage[5m])"));
+    }
+
+    #[test]
+    fn simple_rate_is_legacy() {
+        assert!(!needs_ast("rate(http_requests_total[5m])"));
+    }
+
+    #[test]
+    fn sum_rate_is_ast() {
+        assert!(needs_ast("sum(rate(http_requests_total[5m]))"));
+    }
 }
 
 #[cfg(test)]

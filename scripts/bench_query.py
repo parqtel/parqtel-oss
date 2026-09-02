@@ -84,6 +84,13 @@ def run_suite():
         ("logs_sev", "/api/v1/logs", {"query": "{}", "start": start, "end": now, "limit": 500, "severity_min": 13}),
         ("logs_search", "/api/v1/logs", {"query": "{}", "start": start, "end": now, "limit": 500, "search": "timeout"}),
         ("traces_search", "/v1/traces/search", {"start": start, "end": now}),
+        # Phase 1A composed queries
+        ("ast_sum_rate", "/api/v1/query_range", {"query": "sum(rate(http_requests_total[5m]))", "start": start, "end": now, "step": "120s"}),
+        ("ast_sum_rate_by_svc", "/api/v1/query_range", {"query": "sum by (service.name) (rate(http_requests_total[5m]))", "start": start, "end": now, "step": "120s"}),
+        ("ast_ratio", "/api/v1/query_range", {"query": "sum(rate(traces_service_errors_total[5m])) / sum(rate(traces_service_requests_total[5m]))", "start": start, "end": now, "step": "120s"}),
+        ("ast_avg_over_time", "/api/v1/query_range", {"query": "avg_over_time(cpu_usage[5m])", "start": start, "end": now, "step": "120s"}),
+        ("ast_binary_scalar", "/api/v1/query_range", {"query": "avg(cpu_usage) * 100 > 40", "start": start, "end": now, "step": "120s"}),
+        ("ast_topk_rate", "/api/v1/query_range", {"query": "topk(5, rate(http_requests_total[5m]))", "start": start, "end": now, "step": "120s"}),
     ]
 
     results = {}
