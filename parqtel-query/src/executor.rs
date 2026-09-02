@@ -520,6 +520,72 @@ impl QueryExecutor {
 
     /// Executes a trace query and returns matching spans.
     /// At petabyte scale, caps the number of blocks scanned and pushes limit down.
+    /// ParqtelQL search over logs: reuses the scan/windowing of query_logs
+    /// and applies the parsed SearchQuery clauses + terms post-scan.
+    pub async fn search_logs(
+        &self,
+        start_ns: i64,
+        end_ns: i64,
+        search: &crate::logql::SearchQuery,
+        limit: usize,
+        order_desc: bool,
+    ) -> Result<LogQueryResult> {
+        let start_time = Instant::now();
+        let blocks = {
+            let idx = self.log_index.read().await;
+            idx.query(start_ns, end_ns, None)
+        };
+        let buffered_logs = self.buffer.scan_logs(start_ns, end_ns).await;
+        if blocks.is_empty() && buffered_logs.is_empty() {
+            return Ok(LogQueryResult {
+                logs: Vec::new(),
+                execution_time: start_time.elapsed(),
+                total_logs_count: 0,
+                volume_summary: vec![0; 60],
+            });
+        }
+
+        let raw_logs = if blocks.is_empty() {
+            buffered_logs
+        } else {
+            let disk = Scanner::scan_logs(blocks, start_ns, end_ns).await?;
+            let mut all = disk;
+            all.extend(buffered_logs);
+            all
+        };
+
+        let window_ns = (end_ns - start_ns) / 60;
+        let mut filtered = Vec::new();
+        let mut total_logs_count = 0usize;
+        let mut volume_summary = vec![0u64; 60];
+        let extra = std::collections::HashMap::new();
+        for log in raw_logs {
+            if crate::logql::log_matches(search, &log, &extra) {
+                total_logs_count += 1;
+                if window_ns > 0 {
+                    let bucket = ((log.timestamp_ns - start_ns) / window_ns).clamp(0, 59) as usize;
+                    volume_summary[bucket] += 1;
+                }
+                if filtered.len() < limit {
+                    filtered.push(log);
+                }
+            }
+        }
+
+        if order_desc {
+            filtered.sort_by_key(|b| std::cmp::Reverse(b.timestamp_ns));
+        } else {
+            filtered.sort_by_key(|a| a.timestamp_ns);
+        }
+
+        Ok(LogQueryResult {
+            logs: filtered,
+            execution_time: start_time.elapsed(),
+            total_logs_count,
+            volume_summary,
+        })
+    }
+
     pub async fn query_traces(
         &self,
         start_ns: i64,

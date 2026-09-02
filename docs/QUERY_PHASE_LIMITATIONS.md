@@ -116,3 +116,53 @@ the obvious next lever and is scheduled with the AST phase work.
   at this scale (single scan dominates).
 - `label_values` remains the flagged hot spot (p95 ~1.3s) — unchanged;
   label-value index still scheduled.
+
+---
+
+## Phase 1B — ParqtelQL log/trace search + saved searches (baseline: phase1b.json)
+
+### Shipped
+
+- Lenient search grammar (terms/phrases/wildcards/exclusion, field ops,
+  ranges, exists, regex, severity thresholds) shared by logs and traces
+- /api/v1/logs ParqtelQL dispatch (selector shapes stay legacy); the
+  `severity_min`/`search` HTTP params fold into clauses — with a
+  legacy-`{}`-selector adapter so combined forms keep working
+- /v1/traces/search?q= span predicates (service/status/kind/duration/
+  operation/attr.*) applied post-scan
+- Server-side saved searches (API + data-dir persistence)
+
+### Correctness findings (fixed)
+
+| # | Finding | Fix |
+|---|---|---|
+| P1B-F1 | `{}` + severity_min param took the ParqtelQL path where `{}` parsed as a body term "{}" — 0 rows for the most common param combo | empty/`{}` parses as no-constraint; `{a="b"}` selectors convert to clauses |
+| P1B-F2 | `severity>=WARN` in comparison position tried numeric parse first — word severities errored into the lenient fallback | severity-word check precedes numeric parse for comparison ops |
+
+### Known limitations carried forward
+
+1. **AND-only semantics**: `OR`/parenthesized grouping tokenize but every
+   clause remains conjunctive (documented inline); a boolean expression
+   tree is the Phase-2 pipeline's first item.
+2. **Bare-word dispatch**: a single identifier like `error` is ParqtelQL
+   (body search) — intentional ClickStack parity, but means a metric-name
+   log-matcher query must be written `{...}` or `key="value"` (no spaces).
+   The space-free heuristic (`contains("=\"")`) guides dispatch.
+3. **Trace predicates are post-scan**: 200-span cap applies BEFORE
+   filtering, so `q` can filter to zero even when more matches exist in
+   older blocks. Push-down into query_traces is the fix (scheduled with
+   the trace search limit raise).
+4. **`field:value` with `:` inside values** (URLs) needs quoting.
+5. **Negation on non-Eq clauses** downgrades to positive matching
+   (lenient); only `!=`/`-term` negate cleanly.
+6. **Saved searches store, no share/namespace model** (single tenant,
+   OSS scope).
+
+### Performance (phase1b.json)
+
+- ParqtelQL log queries: 156-158ms p50 — indistinguishable from the
+  plain path (post-scan predicate cost is noise vs block decode).
+- Combined clause+term query: 158ms, 449/500 precise rows.
+- Trace predicates: 8-9ms (2× over the unfiltered 4-8ms; post-scan on
+  200 spans).
+- Legacy paths unchanged (no regression vs phase1a).

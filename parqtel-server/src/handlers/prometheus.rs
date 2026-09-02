@@ -465,15 +465,64 @@ pub async fn query_logs(
         }
     };
 
-    let (_, matchers) = match parqtel_query::parse_selector(&params.query) {
-        Ok(res) => res,
-        Err(e) => return map_error(e),
-    };
-
     let start_ns = (params.start * 1_000_000_000.0) as i64;
     let end_ns = (params.end * 1_000_000_000.0) as i64;
     let limit = params.limit.unwrap_or(1000).min(10000);
     let order_desc = params.order.as_deref() != Some("asc");
+
+    // ParqtelQL dispatch: an explicit selector shape (`{...}` or
+    // `key="value"` with quoted values) uses the legacy matcher path;
+    // everything else — bare terms, field:value, severity>=, ranges —
+    // parses leniently as a ParqtelQL search (bare words search bodies,
+    // matching the ClickStack-style search-box contract).
+    let q_trim = params.query.trim();
+    let selector_shape = q_trim.starts_with('{')
+        || (q_trim.contains("=\"") && !q_trim.contains(' '))
+        || q_trim.is_empty();
+    if !selector_shape || params.severity_min.is_some() || params.search.is_some() {
+        // ParqtelQL path (severity_min/search params fold into clauses).
+        let mut q = parqtel_query::logql::parse_search(&params.query);
+        if let Some(min) = &params.severity_min {
+            q.clauses.push(parqtel_query::logql::Clause::SeverityMin(
+                severity_word(*min).to_string(),
+            ));
+        }
+        if let Some(text) = &params.search {
+            q.terms.push(parqtel_query::logql::SearchTerm {
+                text: text.to_lowercase(),
+                negate: false,
+                phrase: false,
+                wildcard: false,
+            });
+        }
+        let result = state
+            .inner
+            .query_executor
+            .search_logs(start_ns, end_ns, &q, limit, order_desc)
+            .await;
+        return match result {
+            Ok(result) => (
+                StatusCode::OK,
+                Json(json!({
+                    "status": "success",
+                    "data": {
+                        "logs": result.logs,
+                        "total_matched": result.total_logs_count,
+                        "truncated": result.total_logs_count > limit,
+                        "volume_summary": result.volume_summary,
+                        "language": "parqtelql",
+                    }
+                })),
+            )
+                .into_response(),
+            Err(e) => map_error(e),
+        };
+    }
+
+    let (_, matchers) = match parqtel_query::parse_selector(&params.query) {
+        Ok(res) => res,
+        Err(e) => return map_error(e),
+    };
 
     match state
         .inner
@@ -503,6 +552,122 @@ pub async fn query_logs(
         )
             .into_response(),
         Err(e) => map_error(e),
+    }
+}
+
+/// Maps a numeric severity_min (OTel number) back to a rank word for
+/// ParqtelQL SeverityMin clauses.
+fn severity_word(min: i32) -> &'static str {
+    match min {
+        i if i >= 17 => "ERROR",
+        i if i >= 13 => "WARN",
+        i if i >= 9 => "INFO",
+        i if i >= 5 => "DEBUG",
+        _ => "TRACE",
+    }
+}
+
+/// Applies a ParqtelQL SearchQuery to a span (service/status/duration/
+/// kind/name/attr.* predicates).
+fn span_matches(sq: &parqtel_query::logql::SearchQuery, s: &parqtel_core::Span) -> bool {
+    use parqtel_query::logql::Clause;
+
+    for clause in &sq.clauses {
+        let ok = match clause {
+            Clause::Eq { field, value } => span_field(s, field)
+                .map(|v| v.eq_ignore_ascii_case(value))
+                .unwrap_or(false),
+            Clause::Ne { field, value } => span_field(s, field)
+                .map(|v| !v.eq_ignore_ascii_case(value))
+                .unwrap_or(true),
+            Clause::Re { field, regex } => {
+                let re = regex::Regex::new(regex).ok();
+                match (span_field(s, field), re) {
+                    (Some(v), Some(re)) => re.is_match(&v),
+                    _ => false,
+                }
+            }
+            Clause::Cmp { field, op, value } => {
+                // duration in ms; other numeric fields via attributes.
+                let n = if field == "duration" || field == "duration_ms" {
+                    Some(s.duration_ns() as f64 / 1_000_000.0)
+                } else {
+                    span_field(s, field).and_then(|v| v.parse::<f64>().ok())
+                };
+                match n {
+                    Some(n) => match op {
+                        parqtel_query::logql::CmpOp::Gt => n > *value,
+                        parqtel_query::logql::CmpOp::Ge => n >= *value,
+                        parqtel_query::logql::CmpOp::Lt => n < *value,
+                        parqtel_query::logql::CmpOp::Le => n <= *value,
+                    },
+                    None => false,
+                }
+            }
+            Clause::Range { field, min, max } => {
+                if field == "duration" || field == "duration_ms" {
+                    let d = s.duration_ns() as f64 / 1_000_000.0;
+                    d >= *min && d <= *max
+                } else {
+                    false
+                }
+            }
+            Clause::Exists { field } => span_field(s, field).is_some(),
+            Clause::SeverityMin(_) => true, // n/a for spans
+        };
+        if !ok {
+            return false;
+        }
+    }
+    for term in &sq.terms {
+        let name = s.name.to_lowercase();
+        let matched = name.contains(&term.text)
+            || s.attributes
+                .iter()
+                .any(|(_, v)| v.to_lowercase().contains(&term.text));
+        if term.negate {
+            if matched {
+                return false;
+            }
+        } else if !matched {
+            return false;
+        }
+    }
+    true
+}
+
+/// Resolves a ParqtelQL field to a span value.
+fn span_field(s: &parqtel_core::Span, field: &str) -> Option<String> {
+    match field {
+        "service" | "service.name" => s.attributes.get("service.name").map(|v| v.to_string()),
+        "name" | "operation" | "operation_name" => Some(s.name.clone()),
+        "status" => Some(
+            match s.status.code {
+                2 => "ERROR",
+                1 => "OK",
+                _ => "UNSET",
+            }
+            .to_string(),
+        ),
+        "kind" => Some(
+            match s.kind {
+                1 => "internal",
+                2 => "server",
+                3 => "client",
+                4 => "producer",
+                5 => "consumer",
+                _ => "unspecified",
+            }
+            .to_string(),
+        ),
+        "trace_id" => Some(hex::encode(s.trace_id)),
+        _ => {
+            if let Some(key) = field.strip_prefix("attr.") {
+                s.attributes.get(key).map(|v| v.to_string())
+            } else {
+                s.attributes.get(field).map(|v| v.to_string())
+            }
+        }
     }
 }
 
@@ -732,6 +897,13 @@ pub async fn search_traces(
     } else {
         Some(trace_id)
     };
+    // ParqtelQL span predicates (Phase 1B): service=, status=ERROR,
+    // duration>500, kind=server, attr.* — applied post-scan.
+    let search = params
+        .get("q")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(parqtel_query::logql::parse_search);
 
     match state
         .inner
@@ -740,6 +912,11 @@ pub async fn search_traces(
         .await
     {
         Ok(spans) => {
+            // Apply ParqtelQL span predicates when a `q` was provided.
+            let spans: Vec<_> = match &search {
+                Some(sq) => spans.into_iter().filter(|s| span_matches(sq, s)).collect(),
+                None => spans,
+            };
             let tid = if let Some(first) = spans.first() {
                 hex::encode(first.trace_id)
             } else {
@@ -820,4 +997,52 @@ fn parse_duration(s: &str) -> Result<i64, ()> {
         _ => return Err(()),
     };
     Ok((val * multiplier as f64) as i64)
+}
+
+// ═══ Saved searches (Phase 1B) ═══
+
+pub async fn list_saved_searches(State(state): State<AppState>) -> Response {
+    let searches = state.inner.saved_searches.list().await;
+    (
+        StatusCode::OK,
+        Json(json!({ "status": "success", "data": searches })),
+    )
+        .into_response()
+}
+
+pub async fn create_saved_search(
+    State(state): State<AppState>,
+    axum::Json(search): axum::Json<serde_json::Value>,
+) -> Response {
+    let parsed: Result<crate::saved_searches::SavedSearch, _> = serde_json::from_value(search);
+    match parsed {
+        Ok(s) => match state.inner.saved_searches.create(s).await {
+            Ok(created) => (
+                StatusCode::OK,
+                Json(json!({ "status": "success", "data": created })),
+            )
+                .into_response(),
+            Err(e) => map_error(e),
+        },
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "status": "error", "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+pub async fn delete_saved_search(
+    State(state): State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Response {
+    if state.inner.saved_searches.delete(&id).await {
+        (StatusCode::OK, Json(json!({ "status": "success" }))).into_response()
+    } else {
+        (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "status": "error", "error": "saved search not found" })),
+        )
+            .into_response()
+    }
 }

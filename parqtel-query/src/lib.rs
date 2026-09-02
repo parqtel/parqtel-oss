@@ -2,6 +2,7 @@ pub mod aggregation;
 pub mod ast;
 pub mod eval;
 pub mod executor;
+pub mod logql;
 pub mod matcher;
 pub mod models;
 pub mod parser;
