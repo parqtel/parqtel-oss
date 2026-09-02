@@ -1,6 +1,7 @@
 //! Alert engine for parqtel: rules, state machine, evaluation, and storage.
 
 pub mod evaluator;
+pub mod router;
 pub mod rule;
 pub mod state;
 pub mod store;
