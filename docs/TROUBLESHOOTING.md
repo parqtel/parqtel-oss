@@ -8,7 +8,8 @@ If you send data but queries return empty results, check the following:
 
 ### Check Ingestion Metrics
 Visit `http://localhost:8080/metrics` and look for:
-- `parqtel_ingest_total`: Is the count increasing?
+- `parqtel_batches_received_total`: Is the count increasing?
+- `parqtel_ingested_points_total`: Are data points being counted?
 - `parqtel_ingest_errors_total`: Are there any ingestion errors?
 
 ### Log Level
@@ -17,8 +18,11 @@ Set `RUST_LOG=debug` to see detailed ingestion logs.
 PARQTEL__TELEMETRY__LOG_LEVEL=debug parqtel serve
 ```
 
-### Time Range
-Parquet blocks are time-bounded. If the `timeUnixNano` in your OTLP payload is outside the query range (or in the distant past/future), the data will be ignored or not appear in recent queries.
+### Time Range and Flush Behaviour
+- **Instant queries** (`/api/v1/query`) look back only **1 minute**. Older buffered data won't appear there — query it via `/api/v1/query_range` instead.
+- **Metrics and logs** are queryable immediately after ingest via the in-memory buffer.
+- **Traces have no memory buffer** — spans become queryable only after the flush task writes a Parquet block (default block duration 2h, checked every 5s). For demos, set `block_duration_secs` low in your config.
+- If the `timeUnixNano` in your OTLP payload is outside the query range (or in the distant past/future), the data will be ignored.
 - **Tip:** Ensure your system clocks are synchronized via NTP.
 
 ### WAL Recovery
@@ -49,8 +53,14 @@ Parqtel will fail to rotate blocks if the disk is full.
 
 ### Slow Compaction
 If the compactor cannot keep up with the ingestion rate, you will have many small Parquet files, slowing down queries.
-- **Diagnostic:** Check `parqtel_compaction_duration_seconds`.
-- **Solution:** Increase `PARQTEL__STORAGE__COMPACTION_INTERVAL_SECS` or provide more CPU/IOPS.
+- **Diagnostic:** Check `parqtel_storage_blocks` / `parqtel_storage_bytes` / `parqtel_storage_rows` on `/metrics` for block accumulation, and watch server logs for `Compaction failed` errors.
+- **Solution:** Decrease `PARQTEL__STORAGE__COMPACTION_INTERVAL_SECS` (more frequent passes) or provide more CPU/IOPS.
+
+### "Invalid timestamp column" / arrow2-era blocks
+After the arrow2 → arrow 59 migration, Parquet blocks written by older builds are unreadable: compaction and scans log `Arrow error: Invalid timestamp column`. **Wipe the data directory** (`data/`, `data/logs/`, `data/traces/`) when upgrading across that boundary — old blocks cannot be converted in place.
+
+### Stale Docker image
+If the compose stack behaves oddly after a source change (panics referencing `arrow2`, missing endpoints), the image is stale. Run `make local-rebuild` — `make local-up` alone reuses the previously built image.
 
 ## 4. MCP Connectivity
 
