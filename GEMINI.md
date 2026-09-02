@@ -45,8 +45,10 @@ Parqtel is an ultra-lightweight SRE observability engine designed to ingest Open
 - **Performance Audit:** `scripts/run_perf_audit.sh` for comprehensive benchmarking.
 - **Resiliency:** E2E test `06_resilience_test.go` covers basic failure scenarios.
 
-## Storage Notes
-- Metrics/logs are queryable immediately via the in-memory buffer; traces only after block flush (no trace buffer).
+## Storage & Ingestion Notes
+- OTLP ingestion over gRPC (:4317, OTel SDK default) and HTTP (protobuf/JSON).
+- All three signals (metrics/logs/traces) are queryable immediately via the in-memory buffer; drained on flush so buffered + flushed data never double-counts.
+- Span-metrics RED bridge: server-kind spans auto-derive `traces_service_{requests,errors,duration_ms}_total` metrics per service/operation.
 - Instant queries (`/api/v1/query`) use a 1-minute lookback window.
 - The `service.name` label is injected from a dedicated Parquet column, so `{service.name="x"}` matchers work on buffered and flushed data alike.
 - Blocks written by arrow2-era builds are unreadable after the arrow 59 migration — wipe the data dir when upgrading across that boundary.

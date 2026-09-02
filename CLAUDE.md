@@ -154,9 +154,11 @@ Key env vars: `PARQTEL_BIND`, `PARQTEL_DATA_DIR`, `PARQTEL__STORAGE__COMPRESSION
 - Block index: persisted as `index.json` (JSON sidecar, atomic tmp+rename) per signal directory
 - Automatic compaction (hourly), configurable retention (default: 7d metrics, 3d logs)
 - Each block is a self-contained Parquet file (arrow/parquet 59; arrow2-era blocks unreadable — wipe data dir across that upgrade)
-- **In-memory buffer**: metrics and logs are immediately queryable via `MemoryBuffer` (HashMap indexed by metric name) before Parquet flush; **traces have no buffer** — queryable only after block flush
+- **In-memory buffer**: metrics, logs, AND traces are immediately queryable via `MemoryBuffer` (metrics HashMap-indexed by name); buffer drains on every flush — no double-counting
 - **Instant queries** (`/api/v1/query`) use a 1-minute lookback window
 - **service.name**: scanner + ingest buffer inject the dedicated `service_name` column back as the `service.name` label, so `{service.name="x"}` matchers work on both buffered and flushed data
+- **OTLP gRPC**: tonic server on `:4317` (`server.grpc_bind_address`, "" disables) — all three collector services via the same `ingest_proto` path
+- **Span-metrics RED**: server spans auto-derive `traces_service_{requests,errors,duration_ms}_total` (labels service/operation/service.name) fed through the normal metrics path
 
 ## Performance Optimizations
 
