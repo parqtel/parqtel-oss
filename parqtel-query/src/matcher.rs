@@ -503,12 +503,27 @@ fn ast_is_complex(expr: &crate::ast::Expr) -> bool {
 fn is_legacy_function(name: &str) -> bool {
     matches!(
         name,
-        "rate" | "irate" | "increase" | "delta"
-            | "sum" | "avg" | "min" | "max" | "count" | "stddev" | "stdvar"
-            | "topk" | "bottomk"
-            | "abs" | "ceil" | "floor" | "round"
-            | "clamp_min" | "clamp_max"
-            | "histogram_quantile" | "label_replace"
+        "rate"
+            | "irate"
+            | "increase"
+            | "delta"
+            | "sum"
+            | "avg"
+            | "min"
+            | "max"
+            | "count"
+            | "stddev"
+            | "stdvar"
+            | "topk"
+            | "bottomk"
+            | "abs"
+            | "ceil"
+            | "floor"
+            | "round"
+            | "clamp_min"
+            | "clamp_max"
+            | "histogram_quantile"
+            | "label_replace"
     )
 }
 
