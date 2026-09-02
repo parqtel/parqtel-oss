@@ -191,3 +191,69 @@ pub async fn delete_rule(
             .into_response()
     }
 }
+
+// ═══ Alert routing (F10) ═══
+
+/// List configured notification routes.
+pub async fn list_routes(State(state): State<AppState>) -> impl IntoResponse {
+    let config = state.inner.alert_router.config().await;
+    axum::Json(serde_json::json!({ "status": "success", "data": config.routes }))
+}
+
+/// Replace the full routing table (routes are config-driven; this updates
+/// the running router atomically).
+pub async fn set_routes(
+    State(state): State<AppState>,
+    axum::Json(routes): axum::Json<Vec<parqtel_core::config::RouteConfig>>,
+) -> impl IntoResponse {
+    let mut config = state.inner.alert_router.config().await;
+    config.routes = routes;
+    state.inner.alert_router.set_config(config).await;
+    axum::Json(serde_json::json!({ "status": "success" }))
+}
+
+/// List active (unexpired) silences.
+pub async fn list_silences(State(state): State<AppState>) -> impl IntoResponse {
+    let silences = state.inner.alert_router.silences().await;
+    axum::Json(serde_json::json!({ "status": "success", "data": silences }))
+}
+
+/// Create or replace a silence by name.
+pub async fn create_silence(
+    State(state): State<AppState>,
+    axum::Json(silence): axum::Json<parqtel_core::config::SilenceConfig>,
+) -> axum::response::Response {
+    if silence.name.trim().is_empty() {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            axum::Json(serde_json::json!({ "status": "error", "error": "name is required" })),
+        )
+            .into_response();
+    }
+    if silence.ends_at <= silence.starts_at {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            axum::Json(serde_json::json!({ "status": "error", "error": "ends_at must be after starts_at" })),
+        )
+            .into_response();
+    }
+    state.inner.alert_router.add_silence(silence).await;
+    axum::Json(serde_json::json!({ "status": "success" })).into_response()
+}
+
+/// Delete a silence by name.
+pub async fn delete_silence(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> axum::response::Response {
+    let removed = state.inner.alert_router.remove_silence(&name).await;
+    if removed {
+        axum::Json(serde_json::json!({ "status": "success" })).into_response()
+    } else {
+        (
+            axum::http::StatusCode::NOT_FOUND,
+            axum::Json(serde_json::json!({ "status": "error", "error": "silence not found" })),
+        )
+            .into_response()
+    }
+}
