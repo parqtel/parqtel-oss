@@ -1059,11 +1059,20 @@ async fn test_ast_avg_over_time_range_bug() {
             data_points: vec![parqtel_core::DataPoint {
                 timestamp_ns: base + i * 10_000_000_000,
                 value: parqtel_core::MetricValue::Double(i as f64),
-                labels: parqtel_core::LabelSet::try_from_iter(vec![("service".to_string(), "s1".to_string())]).unwrap(),
+                labels: parqtel_core::LabelSet::try_from_iter(vec![(
+                    "service".to_string(),
+                    "s1".to_string(),
+                )])
+                .unwrap(),
             }],
         });
     }
-    state.inner.ingestion_service.ingest_metrics(metrics).await.unwrap();
+    state
+        .inner
+        .ingestion_service
+        .ingest_metrics(metrics)
+        .await
+        .unwrap();
 
     let expr = parqtel_query::parser::parse_expr("avg_over_time(gauge_x[1m])").unwrap();
     let end = base + 100_000_000_000;
@@ -1096,11 +1105,20 @@ async fn test_ast_avg_over_time_block_backed() {
             data_points: vec![parqtel_core::DataPoint {
                 timestamp_ns: base + i * 10_000_000_000,
                 value: parqtel_core::MetricValue::Double(i as f64),
-                labels: parqtel_core::LabelSet::try_from_iter(vec![("service".to_string(), "s1".to_string())]).unwrap(),
+                labels: parqtel_core::LabelSet::try_from_iter(vec![(
+                    "service".to_string(),
+                    "s1".to_string(),
+                )])
+                .unwrap(),
             }],
         });
     }
-    state.inner.ingestion_service.ingest_metrics(metrics).await.unwrap();
+    state
+        .inner
+        .ingestion_service
+        .ingest_metrics(metrics)
+        .await
+        .unwrap();
     // Force a block flush so the data lives on disk, not the buffer.
     state.inner.ingestion_service.shutdown().await.unwrap();
     // Give the async index-update task a beat to register the new block.
@@ -1119,4 +1137,110 @@ async fn test_ast_avg_over_time_block_backed() {
         "block-backed avg_over_time must return series; got {}",
         r.series.len()
     );
+}
+
+#[tokio::test]
+async fn test_parqtelql_log_search_end_to_end() {
+    let state = AppState::default_for_tests().await;
+    let base = 1_788_500_000_000_000_000i64;
+
+    // Ingest through the JSON path (production entry point).
+    let payload = serde_json::json!({
+        "resourceLogs": [{
+            "resource": {"attributes": [
+                {"key": "service.name", "value": {"stringValue": "api"}}
+            ]},
+            "scopeLogs": [{
+                "logRecords": [
+                    {"timeUnixNano": (base + 1_000_000_000).to_string(), "severityText": "ERROR",
+                     "severityNumber": 17,
+                     "body": {"stringValue": "upstream connection timeout after 5000ms"},
+                     "attributes": [{"key": "http.status_code", "value": {"stringValue": "500"}}]},
+                    {"timeUnixNano": (base + 2_000_000_000).to_string(), "severityText": "INFO",
+                     "severityNumber": 9,
+                     "body": {"stringValue": "request completed status=200"},
+                     "attributes": [{"key": "http.status_code", "value": {"stringValue": "500"}}]}
+                ]
+            }]
+        }, {
+            "resource": {"attributes": [
+                {"key": "service.name", "value": {"stringValue": "web"}}
+            ]},
+            "scopeLogs": [{
+                "logRecords": [
+                    {"timeUnixNano": (base + 3_000_000_000).to_string(), "severityText": "WARN",
+                     "severityNumber": 13,
+                     "body": {"stringValue": "slow query detected duration_ms=850"},
+                     "attributes": [{"key": "http.status_code", "value": {"stringValue": "500"}}]},
+                    {"timeUnixNano": (base + 4_000_000_000).to_string(), "severityText": "ERROR",
+                     "severityNumber": 17,
+                     "body": {"stringValue": "database connection refused"},
+                     "attributes": [{"key": "http.status_code", "value": {"stringValue": "500"}}]}
+                ]
+            }]
+        }]
+    });
+    state
+        .inner
+        .log_ingestion_service
+        .ingest_json(bytes::Bytes::from(payload.to_string()))
+        .await
+        .unwrap();
+
+    let search = |q: &str| {
+        let q = parqtel_query::logql::parse_search(q);
+        let executor = &state.inner.query_executor;
+        async move {
+            executor
+                .search_logs(base, base + 10_000_000_000, &q, 100, true)
+                .await
+                .unwrap()
+        }
+    };
+
+    // Terms + exclude
+    let r = search("connection -refused").await;
+    assert_eq!(r.total_logs_count, 1, "connection but not refused");
+
+    // Field equality + body term (term matches the BODY, not severity).
+    let r = search("service=api timeout").await;
+    assert_eq!(r.total_logs_count, 1, "api + body term 'timeout'");
+    let r = search("service=api").await;
+    assert_eq!(r.total_logs_count, 2, "both api logs");
+
+    // severity threshold
+    let r = search("severity>=WARN").await;
+    assert_eq!(r.total_logs_count, 3, "WARN and above");
+
+    // attr comparison
+    let r = search("attr.http.status_code >= 400").await;
+    assert_eq!(r.total_logs_count, 4, "all have 500");
+
+    // phrase
+    let r = search("\"connection refused\"").await;
+    assert_eq!(r.total_logs_count, 1);
+}
+
+#[tokio::test]
+async fn test_saved_searches_end_to_end() {
+    let state = AppState::default_for_tests().await;
+    // (store is bound to the test tempdir through default_for_tests config)
+    let s = state
+        .inner
+        .saved_searches
+        .create(crate::saved_searches::SavedSearch {
+            id: String::new(),
+            name: "api errors".into(),
+            signal: "logs".into(),
+            query: "service=api severity>=ERROR".into(),
+            range_minutes: 60,
+            created_at: 0,
+        })
+        .await
+        .unwrap();
+    let all = state.inner.saved_searches.list().await;
+    assert_eq!(all.len(), 1);
+    assert_eq!(all[0].query, "service=api severity>=ERROR");
+    assert!(state.inner.saved_searches.delete(&s.id).await);
+    assert!(state.inner.saved_searches.list().await.is_empty());
 }

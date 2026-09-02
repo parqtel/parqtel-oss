@@ -20,6 +20,7 @@ mod grpc;
 mod handlers;
 mod metrics;
 mod router;
+mod saved_searches;
 mod state;
 mod telemetry;
 #[cfg(test)]

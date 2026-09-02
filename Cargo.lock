@@ -2186,6 +2186,7 @@ dependencies = [
  "parqtel-pipeline",
  "parqtel-query",
  "prost",
+ "regex",
  "serde",
  "serde_json",
  "sha2",
