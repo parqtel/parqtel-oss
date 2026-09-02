@@ -151,7 +151,7 @@ mod tests {
             [3; 8],
             5,
         );
-        let batch = StorageModel::traces_to_chunk(&[span.clone()]).unwrap();
+        let batch = StorageModel::traces_to_chunk(std::slice::from_ref(&span)).unwrap();
         let decoded = StorageModel::row_to_span(&batch, 0).unwrap();
         assert_eq!(decoded.trace_id, [1; 16]);
         assert_eq!(decoded.span_id, [2; 8]);

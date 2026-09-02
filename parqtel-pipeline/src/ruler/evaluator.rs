@@ -130,8 +130,10 @@ mod tests {
     #[tokio::test]
     async fn test_recording_rule_writes_new_series() {
         let dir = tempdir().unwrap();
-        let mut config = BlockConfig::default();
-        config.data_dir = dir.path().to_path_buf();
+        let config = BlockConfig {
+            data_dir: dir.path().to_path_buf(),
+            ..Default::default()
+        };
         let storage = Arc::new(ParquetStorageEngine::new(config));
 
         let labels = LabelSet::try_from_iter(vec![("service", "api")]).unwrap();
@@ -172,8 +174,10 @@ mod tests {
     #[tokio::test]
     async fn test_recording_rule_idempotent_evaluation() {
         let dir = tempdir().unwrap();
-        let mut config = BlockConfig::default();
-        config.data_dir = dir.path().to_path_buf();
+        let config = BlockConfig {
+            data_dir: dir.path().to_path_buf(),
+            ..Default::default()
+        };
         let storage = Arc::new(ParquetStorageEngine::new(config));
 
         let labels = LabelSet::try_from_iter(vec![("svc", "web")]).unwrap();
@@ -220,8 +224,10 @@ mod tests {
     #[tokio::test]
     async fn test_ruler_expression_error_does_not_crash() {
         let dir = tempdir().unwrap();
-        let mut config = BlockConfig::default();
-        config.data_dir = dir.path().to_path_buf();
+        let config = BlockConfig {
+            data_dir: dir.path().to_path_buf(),
+            ..Default::default()
+        };
         let storage = Arc::new(ParquetStorageEngine::new(config));
 
         let executor = Arc::new(MockQueryExecutor { results: vec![] });

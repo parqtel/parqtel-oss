@@ -105,8 +105,10 @@ mod tests {
     #[tokio::test]
     async fn test_backfill_catches_up_missed_intervals() {
         let dir = tempdir().unwrap();
-        let mut config = BlockConfig::default();
-        config.data_dir = dir.path().to_path_buf();
+        let config = BlockConfig {
+            data_dir: dir.path().to_path_buf(),
+            ..Default::default()
+        };
         let storage = Arc::new(ParquetStorageEngine::new(config));
 
         let call_count = Arc::new(std::sync::atomic::AtomicU64::new(0));
