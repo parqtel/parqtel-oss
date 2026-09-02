@@ -31,3 +31,5 @@ __pycache__/
 
 # Local data and logs
 *.log
+scripts/bench_stubs/
+scripts/bench_results/

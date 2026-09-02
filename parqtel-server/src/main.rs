@@ -326,6 +326,7 @@ async fn run_server(
                     label_replace,
                     scalar_param,
                     clamp,
+                    range_ns,
                 ) = match parsed {
                     Ok(p) => p,
                     Err(_) => continue,
@@ -348,6 +349,7 @@ async fn run_server(
                     label_replace,
                     scalar_param,
                     clamp,
+                    range_ns,
                 );
                 let plan = match plan {
                     Ok(p) => p,
@@ -390,7 +392,28 @@ async fn run_server(
     });
 
     let shutdown = async {
-        tokio::signal::ctrl_c().await.unwrap_or_default();
+        // Graceful shutdown on SIGINT (ctrl-c) OR SIGTERM (docker stop,
+        // k8s pod termination, process managers) — either signal must
+        // reach the flush-before-exit path or all buffered telemetry is lost.
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{signal, SignalKind};
+            match signal(SignalKind::terminate()) {
+                Ok(mut term) => {
+                    tokio::select! {
+                        _ = tokio::signal::ctrl_c() => {},
+                        _ = term.recv() => {},
+                    }
+                }
+                Err(_) => {
+                    tokio::signal::ctrl_c().await.unwrap_or_default();
+                }
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            tokio::signal::ctrl_c().await.unwrap_or_default();
+        }
     };
 
     axum::serve(listener, router)

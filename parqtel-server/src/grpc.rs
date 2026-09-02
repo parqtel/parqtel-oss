@@ -66,9 +66,22 @@ impl MetricsService for OtlpGrpcService {
             .ingest_proto(bytes::Bytes::from(body))
             .await
         {
-            Ok(_count) => Ok(Response::new(ExportMetricsServiceResponse {
-                partial_success: None,
-            })),
+            Ok(count) => {
+                use std::sync::atomic::Ordering;
+                self.state
+                    .inner
+                    .metrics
+                    .batches_received
+                    .fetch_add(1, Ordering::Relaxed);
+                self.state
+                    .inner
+                    .metrics
+                    .ingested_points
+                    .fetch_add(count, Ordering::Relaxed);
+                Ok(Response::new(ExportMetricsServiceResponse {
+                    partial_success: None,
+                }))
+            }
             Err(e) => {
                 warn!("gRPC metrics export rejected: {e}");
                 Err(Status::invalid_argument(e.to_string()))
@@ -91,9 +104,22 @@ impl LogsService for OtlpGrpcService {
             .ingest_proto(bytes::Bytes::from(body))
             .await
         {
-            Ok(_count) => Ok(Response::new(ExportLogsServiceResponse {
-                partial_success: None,
-            })),
+            Ok(count) => {
+                use std::sync::atomic::Ordering;
+                self.state
+                    .inner
+                    .metrics
+                    .batches_received
+                    .fetch_add(1, Ordering::Relaxed);
+                self.state
+                    .inner
+                    .metrics
+                    .ingested_points
+                    .fetch_add(count, Ordering::Relaxed);
+                Ok(Response::new(ExportLogsServiceResponse {
+                    partial_success: None,
+                }))
+            }
             Err(e) => {
                 warn!("gRPC logs export rejected: {e}");
                 Err(Status::invalid_argument(e.to_string()))
@@ -116,9 +142,22 @@ impl TraceService for OtlpGrpcService {
             .ingest_proto(bytes::Bytes::from(body))
             .await
         {
-            Ok(_count) => Ok(Response::new(ExportTraceServiceResponse {
-                partial_success: None,
-            })),
+            Ok(count) => {
+                use std::sync::atomic::Ordering;
+                self.state
+                    .inner
+                    .metrics
+                    .batches_received
+                    .fetch_add(1, Ordering::Relaxed);
+                self.state
+                    .inner
+                    .metrics
+                    .ingested_points
+                    .fetch_add(count, Ordering::Relaxed);
+                Ok(Response::new(ExportTraceServiceResponse {
+                    partial_success: None,
+                }))
+            }
             Err(e) => {
                 warn!("gRPC trace export rejected: {e}");
                 Err(Status::invalid_argument(e.to_string()))

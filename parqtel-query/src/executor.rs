@@ -180,11 +180,12 @@ impl QueryExecutor {
                 )])?);
                 let samples = if let Some(step) = plan.step_ns {
                     if let Some(op) = plan.aggregation {
-                        crate::aggregation::downsample(
+                        crate::aggregation::downsample_plan(
                             points,
                             plan.start_ns,
                             plan.end_ns,
                             step,
+                            plan.range_ns,
                             op,
                             plan.quantile,
                             plan.scalar_param,
@@ -276,11 +277,12 @@ impl QueryExecutor {
 
             let samples = if let Some(step) = plan.step_ns {
                 if let Some(op) = plan.aggregation {
-                    crate::aggregation::downsample(
+                    crate::aggregation::downsample_plan(
                         points,
                         plan.start_ns,
                         plan.end_ns,
                         step,
+                        plan.range_ns,
                         op,
                         plan.quantile,
                         plan.scalar_param,

@@ -46,6 +46,22 @@ impl Histogram {
         }
     }
 
+    /// Records one observation into the histogram.
+    pub fn record(&mut self, value: f64) {
+        self.sum += value;
+        self.count += 1;
+        for (i, &bound) in self.buckets.iter().enumerate() {
+            if value <= bound {
+                self.counts[i] += 1;
+                return;
+            }
+        }
+        // Above every bucket bound -> the +Inf overflow slot.
+        if let Some(last) = self.counts.last_mut() {
+            *last += 1;
+        }
+    }
+
     pub fn render(&self, name: &str) -> String {
         let mut out = String::new();
         let mut cumulative = 0;
