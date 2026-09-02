@@ -17,6 +17,10 @@ Supported in every selector inside `{}`.
 
 Special label `__name__` matches the metric name: `{__name__="cpu_usage"}`.
 
+**Resource-attribute labels**: `service.name`, `service.version`, and `k8s.*` resource attributes are stored in dedicated Parquet columns and injected back as labels, so matchers like `http_requests_total{service.name="api"}` work on both freshly-buffered and flushed data.
+
+**Instant-query lookback**: `/api/v1/query` evaluates a 1-minute window ending at `time`. Use `/api/v1/query_range` for older data.
+
 ---
 
 ## Range Aggregations

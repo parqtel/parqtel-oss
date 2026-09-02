@@ -11,7 +11,7 @@ docker run -d \
   --name parqtel \
   -p 8080:8080 \
   -v parqtel_data:/var/lib/parqtel \
-  parqtel/parqtel:latest
+  ghcr.io/parqtel/parqtel-oss:latest
 ```
 
 Verify it's running:
@@ -23,10 +23,14 @@ curl http://localhost:8080/health
 
 Parqtel uses the OpenTelemetry (OTLP) protocol. You can send data using `curl` to test the ingestion.
 
+> **Note on OTLP JSON format**: `attributes` must be arrays of `{key, value}` objects (as shown below), not plain objects. This follows the OTLP JSON protobuf mapping.
+
 ### Send a Counter Metric
 Let's simulate a web server receiving requests.
 
 ```bash
+TS=$(date +%s)000000000
+
 curl -X POST http://localhost:8080/v1/metrics/json \
   -H "Content-Type: application/json" \
   -d '{
@@ -40,8 +44,8 @@ curl -X POST http://localhost:8080/v1/metrics/json \
           "sum": {
             "dataPoints": [{
               "asDouble": 1,
-              "timeUnixNano": "'$(date +%s%N)'",
-              "attributes": [{"key": "method", "value": {"stringValue": "GET"}}, {"key": "status", "value": {"stringValue": "200"}}]
+              "timeUnixNano": "'$TS'",
+              "attributes": [{"key": "method", "value": {"stringValue": "GET"}}]
             }]
           }
         }]
@@ -57,12 +61,16 @@ Now, let's query it back using the Prometheus-compatible API.
 curl "http://localhost:8080/api/v1/query?query=http_requests_total"
 ```
 
+> Instant queries look back **1 minute**. Points older than that become visible via `/api/v1/query_range` once flushed to a Parquet block (default block duration: 2h, checked every 5s).
+
 ## 3. Your First Log
 
 Parqtel also stores logs in Parquet for efficient searching.
 
 ### Send a Log Entry
 ```bash
+TS=$(date +%s)000000000
+
 curl -X POST http://localhost:8080/v1/logs/json \
   -H "Content-Type: application/json" \
   -d '{
@@ -72,7 +80,7 @@ curl -X POST http://localhost:8080/v1/logs/json \
       },
       "scopeLogs": [{
         "logRecords": [{
-          "timeUnixNano": "'$(date +%s%N)'",
+          "timeUnixNano": "'$TS'",
           "severityText": "INFO",
           "body": {"stringValue": "User logged in successfully"},
           "attributes": [{"key": "user_id", "value": {"stringValue": "user_123"}}]
@@ -83,16 +91,33 @@ curl -X POST http://localhost:8080/v1/logs/json \
 ```
 
 ### Query Logs
+Log queries use a Prometheus-style selector plus a time range:
+
 ```bash
-curl "http://localhost:8080/api/v1/logs?filter=severityText='INFO'"
+NOW=$(date +%s)
+curl "http://localhost:8080/api/v1/logs?query=%7B%7D&start=$((NOW-3600))&end=$NOW&limit=50"
+```
+
+Filter by service:
+```bash
+curl "http://localhost:8080/api/v1/logs?query=service%3D%22my-web-app%22&start=$((NOW-3600))&end=$NOW&limit=50"
 ```
 
 ## 4. Visualization
 
-Parqtel ships with a built-in UI for quick exploration.
+Parqtel ships with a built-in zero-dependency web console for quick exploration.
 
 1. Open your browser and go to `http://localhost:8080/ui`.
-2. You should see your `http_requests_total` metric and recent logs.
+2. The **Overview** pane shows stat cards for each signal plus a 6-hour log-volume sparkline.
+3. Click a card (Metrics / Logs / Traces / Alerts) to explore that signal.
+
+The console includes:
+- **Deep-linkable URLs** — the query, time range, and view are encoded in the page URL; share it to restore the exact state
+- **Metrics Builder** — toggle between guided query building (metric + label filters with live PromQL preview) and raw Code mode
+- **Log facets** — click "Fields" in the Logs view to browse field values and inject filters
+- **Trace browse list** — grouped by trace with root service, duration, and error counts; click a trace for the waterfall
+- **Alerts** — stream with severity/status filters, Evidence tab (metric chart + correlated logs), and an inline rule editor
+- **Keyboard shortcuts** — press `?` in the console for the full reference
 
 ### Using Grafana
 For production dashboards, we recommend Grafana.

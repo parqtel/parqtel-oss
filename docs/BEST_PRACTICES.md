@@ -46,7 +46,9 @@ Don't let your monitoring tool go unmonitored!
 - Use the `/metrics` endpoint to scrape Parqtel with another instance or a separate Prometheus.
 - **Alert on:**
     - `parqtel_ingest_errors_total > 0`
-    - `parqtel_compaction_duration_seconds` (sudden spikes)
+    - `parqtel_query_errors_total > 0`
+    - `parqtel_storage_blocks` / `parqtel_storage_bytes` (unbounded growth means compaction is lagging)
+    - `parqtel_process_rss_bytes` (memory creep)
     - Disk usage > 85%
 
 ## 5. High Availability (HA)

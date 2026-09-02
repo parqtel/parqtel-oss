@@ -86,7 +86,7 @@ If you have 100,000 users and want to track latency per user:
 3. In Parqtel, this is just another column in a Parquet file.
 4. Querying a specific user is extremely fast:
    ```bash
-   curl "http://localhost:8080/api/v1/query?query=http_request_duration_seconds{user_id='user_999'}"
+   curl "http://localhost:8080/api/v1/query" --get --data-urlencode 'query=http_request_duration_seconds{user_id="user_999"}' 
    ```
 
 ---

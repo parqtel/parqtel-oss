@@ -16,16 +16,38 @@ Parqtel is a Rust workspace composed of several specialized crates. This modular
 
 Parqtel uses a registry pattern for storage backends. If you want to add a new backend (e.g., S3 or a different file format):
 
-1. **Implement the Trait**: Define your backend by implementing the `StorageEngine` trait found in `parqtel-core/src/storage/mod.rs`.
+1. **Implement the Trait**: Define your backend by implementing the `StorageEngine` trait found in `parqtel-core/src/engine/mod.rs`.
    ```rust
+   #[async_trait]
    pub trait StorageEngine: Send + Sync {
-       fn write_block(&self, block: &Block) -> Result<BlockMetadata>;
-       fn read_block(&self, meta: &BlockMetadata) -> Result<Vec<DataPoint>>;
+       async fn write_metrics_batch(&self, metrics: Vec<Metric>) -> Result<WrittenBlockMeta>;
+       async fn write_logs_batch(&self, logs: Vec<LogRecord>) -> Result<WrittenBlockMeta>;
+       async fn scan_metrics(&self, request: MetricScanRequest) -> Result<Vec<DataPoint>>;
+       async fn scan_logs(&self, request: LogScanRequest) -> Result<Vec<LogRecord>>;
+       async fn compact_metrics(&self) -> Result<CompactionStats>;
+       async fn compact_logs(&self) -> Result<CompactionStats>;
+       // ... expiry and stats methods
    }
    ```
 2. **Register the Backend**: Add your implementation to the `StorageEngineRegistry`.
 
-## 3. Adding a New MCP Tool
+## 3. Working on the Embedded UI
+
+The web console (`parqtel-server/src/ui.html`) is a single-file vanilla-JS app with strict constraints:
+
+- **Zero external requests** — no CDNs, no web fonts, no frameworks, no icon packs. Use system font stacks and inline SVG.
+- **Size budget: ≤42 KB gzipped** — check with `gzip -c parqtel-server/src/ui.html | wc -c`.
+- **No build step** — the file is embedded via `include_str!` and served pre-gzipped with an ETag.
+- **Validating changes**: Node may be unavailable locally; verify JS with headless Chrome instead:
+  ```bash
+  "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
+    --headless=new --disable-gpu --enable-logging=stderr \
+    --virtual-time-budget=15000 http://localhost:8080/ui
+  ```
+  Any `Uncaught SyntaxError`/`ReferenceError` lines in stderr indicate a regression.
+- **Design system**: semantic CSS tokens, inline SVG icon sprite, WCAG AA contrast, `prefers-reduced-motion` support. See [UI_UX_IMPROVEMENT_PLAN.md](UI_UX_IMPROVEMENT_PLAN.md) for the conventions.
+
+## 4. Adding a New MCP Tool
 
 Parqtel's AI-native capabilities come from its MCP servers. To add a new tool (e.g., a "GitHub" tool):
 
@@ -41,31 +63,33 @@ Parqtel's AI-native capabilities come from its MCP servers. To add a new tool (e
    ```
 3. **Add to Registry**: Register the tool in the relevant MCP server binary.
 
-## 4. Development Workflow
+## 5. Development Workflow
 
 ### Prerequisites
-- Rust 1.85+
+- Rust 1.87+ (MSRV; CI also checks 1.86)
 - `protoc` (for OTLP protobuf compilation)
 
 ### Build Commands
 - `cargo build`: Standard debug build.
 - `cargo test --workspace`: Run the entire test suite.
-- `cargo clippy --workspace`: Ensure code follows project standards (no panics, no unsafe).
+- `cargo clippy --workspace -- -D warnings`: Ensure code follows project standards (no panics, no unsafe).
+- `make local-rebuild`: Rebuild the Docker compose stack after source changes (required — a stale image silently runs old code).
 
-## 5. Coding Standards
+## 6. Coding Standards
 
 - **Error Handling**: Always use `Result` and the `thiserror` crate for library errors. Avoid `unwrap()` at all costs.
-- **Concurrency**: Use `tokio` primitives. Prefer `mpsc` channels for communication between services.
+- **Concurrency**: Use `tokio` primitives. Prefer `mpsc` channels for communication between services. Run blocking I/O (Parquet encode, file scans) on `spawn_blocking` with a pre-acquired semaphore.
 - **Documentation**: All public functions must have doc comments (`///`).
 
-## 6. Testing Strategy
+## 7. Testing Strategy
 
 - **Unit Tests**: Found in `src/` of each crate.
 - **Integration Tests**: Found in the `tests/` directory of each crate.
-- **E2E Tests**: Found in the root `e2e/` directory. These require a running Docker environment.
+- **E2E Tests**: Found in the root `e2e/` directory. These require a running Kubernetes environment (Go + client-go).
 
-## 7. Performance Profiling
+## 8. Performance Profiling
 
 We use `criterion` for micro-benchmarking and `run_perf_audit.sh` for system-level audits.
 - To run benchmarks: `cargo bench`
 - To run system audit: `./scripts/run_perf_audit.sh`
+- Hot-path micro-benchmarks: `cargo run --release -p parqtel-server --example perf_bench`
