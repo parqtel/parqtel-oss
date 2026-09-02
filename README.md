@@ -70,6 +70,7 @@ Parqtel is a single-binary observability backend written in Rust that ingests Op
 | **Alerting** | YAML-defined rules, threshold & anomaly detection, state machine (Inactive→Pending→Firing→Resolved), background evaluation loop (15s), noise scoring |
 | **Pipeline** | Recording rules, stream processing pipelines, metric extraction from logs |
 | **Span-metrics (RED)** | Auto-derived `traces_service_{requests,errors,duration_ms}_total` per service/operation from server spans — zero-config RED dashboards in Grafana |
+| **Tail sampling** | Trace-coherent sampling (errors/slow traces always kept, deterministic ratio per service) — controls trace storage volume while RED metrics stay unsampled |
 | **Visualization** | Built-in web UI, Grafana SimpleJSON datasource, Prometheus-compatible `/api/v1/*` |
 | **MCP** | 7 AI tool servers (Slack, PagerDuty, Jira, Notion, Discord, Google Docs, Parqtel) |
 | **Operations** | Health checks, `/metrics` endpoint, graceful shutdown, CLI subcommands |
@@ -314,6 +315,8 @@ parqtel export             # Export metric data to CSV
 | `PARQTEL_CONFIG` | Path to TOML config file | `config/default.toml` |
 | `PARQTEL_BIND` | TCP bind address | `0.0.0.0:8080` |
 | `PARQTEL__SERVER__GRPC_BIND_ADDRESS` | OTLP gRPC bind address (`""` disables) | `0.0.0.0:4317` |
+| `PARQTEL__INGEST__TAIL_SAMPLING__SAMPLING_RATIO` | Fraction of traces kept after error/slow rules | `1.0` |
+| `PARQTEL__INGEST__TAIL_SAMPLING__KEEP_ERRORS` | Keep traces containing ERROR spans | `true` |
 | `PARQTEL_DATA_DIR` | Data directory | `data` |
 | `RUST_LOG` | Log level | `info` |
 | `PARQTEL__STORAGE__COMPRESSION` | Compression codec | `zstd` |

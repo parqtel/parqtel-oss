@@ -159,6 +159,7 @@ Key env vars: `PARQTEL_BIND`, `PARQTEL_DATA_DIR`, `PARQTEL__STORAGE__COMPRESSION
 - **service.name**: scanner + ingest buffer inject the dedicated `service_name` column back as the `service.name` label, so `{service.name="x"}` matchers work on both buffered and flushed data
 - **OTLP gRPC**: tonic server on `:4317` (`server.grpc_bind_address`, "" disables) — all three collector services via the same `ingest_proto` path
 - **Span-metrics RED**: server spans auto-derive `traces_service_{requests,errors,duration_ms}_total` (labels service/operation/service.name) fed through the normal metrics path
+- **Tail sampling**: `ingest.tail_sampling` (keep_errors, slow_trace_ms, sampling_ratio, per_service) — runs after RED derivation (metrics unsampled, trace storage sampled); trace-coherent via trace_id hash; default keep-all
 
 ## Performance Optimizations
 
