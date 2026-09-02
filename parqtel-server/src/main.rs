@@ -189,8 +189,14 @@ async fn run_server(
     let log_ingestion_service = LogIngestionService::new(config.logs.clone(), log_tx)
         .with_memory_buffer(memory_buffer.clone());
     let (trace_tx, mut trace_rx) = mpsc::unbounded_channel();
+    // Span-metrics RED bridge: trace ingestion derives
+    // traces_service_{requests,errors,duration_ms} metrics and feeds them
+    // back through the normal metrics path.
+    let (span_metrics_tx, mut span_metrics_rx) =
+        mpsc::unbounded_channel::<Vec<parqtel_core::Metric>>();
     let trace_ingestion_service = TraceIngestionService::new(config.storage.clone(), trace_tx)
-        .with_memory_buffer(memory_buffer.clone());
+        .with_memory_buffer(memory_buffer.clone())
+        .with_span_metrics(span_metrics_tx);
 
     // Trace index - uses same data_dir as metrics but separate index file
     let trace_data_dir = config.storage.data_dir.join("traces");
@@ -231,6 +237,22 @@ async fn run_server(
         ui_etag,
     )
     .await;
+
+    // Span-metrics RED consumer: derived metrics flow into the metrics
+    // ingestion path as normal OTLP metrics would.
+    let span_metrics_state = state.clone();
+    let span_metrics_task = tokio::spawn(async move {
+        while let Some(metrics) = span_metrics_rx.recv().await {
+            if let Err(e) = span_metrics_state
+                .inner
+                .ingestion_service
+                .ingest_metrics(metrics)
+                .await
+            {
+                tracing::warn!("span-metrics ingestion failed: {e}");
+            }
+        }
+    });
 
     // Background flush task
     let state_clone = state.clone();
@@ -347,6 +369,7 @@ async fn run_server(
     flush_task.abort();
     alert_eval_task.abort();
     grpc_task.abort();
+    span_metrics_task.abort();
 
     state.inner.ingestion_service.shutdown().await?;
     state.inner.log_ingestion_service.shutdown().await?;
