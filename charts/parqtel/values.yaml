@@ -69,6 +69,17 @@ service:
   # -- NodePort number (only when type=NodePort).
   nodePort: null
 
+# ── Ingestion ────────────────────────────────────────────────────────────────
+ingestion:
+  grpc:
+    # -- Serve OTLP over gRPC (the default OTel SDK transport).
+    enabled: true
+    # -- Container/service port for OTLP gRPC (4317 is the OTel default).
+    port: 4317
+    # -- Set empty to read from config file / defaults (0.0.0.0:4317).
+    # Set "" via --set to disable gRPC ingestion.
+    bindAddress: ""
+
 # ── Deployment Strategy ──────────────────────────────────────────────────────
 # -- Recreate recommended for single-replica with RWO PVC.
 strategy:

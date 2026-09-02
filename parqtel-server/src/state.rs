@@ -86,9 +86,8 @@ impl AppState {
         let (ttx, _) = mpsc::unbounded_channel();
         let index = Arc::new(RwLock::new(BlockIndex::new(dir.path())));
         let log_index = Arc::new(RwLock::new(BlockIndex::new(&dir.path().join("logs"))));
-        let trace_index = Arc::new(RwLock::new(BlockIndex::new(
-            config.storage.data_dir.join("traces"),
-        )));
+        let trace_dir = config.storage.data_dir.join("traces");
+        let trace_index = Arc::new(RwLock::new(BlockIndex::new(&trace_dir)));
         let executor = QueryExecutor::with_trace_index(
             index.clone(),
             log_index.clone(),

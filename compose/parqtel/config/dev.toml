@@ -3,6 +3,7 @@
 
 [server]
 bind_address = "0.0.0.0:9090"
+grpc_bind_address = "0.0.0.0:4317"
 max_connections = 128
 shutdown_timeout_secs = 5
 
