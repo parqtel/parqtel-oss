@@ -5,7 +5,9 @@ use crate::otel::collector::trace::v1::ExportTraceServiceRequest;
 use crate::writer::{BlockMetadata, BlockWriter, LogWriter, TraceWriter};
 use bytes::Bytes;
 use parqtel_core::MemoryBuffer;
-use parqtel_core::{BlockConfig, Error, LogBlockConfig, LogRecord, Metric, Result, Span};
+use parqtel_core::{
+    BlockConfig, DataPoint, Error, LogBlockConfig, LogRecord, Metric, Result, Span,
+};
 use prost::Message;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -178,10 +180,38 @@ impl IngestionService {
     async fn process_metrics(&self, metrics: Vec<Metric>) -> Result<u64> {
         let mut count = 0;
         let mut flushed = false;
-        // Write to in-memory buffer first (before rotator takes ownership)
+        // Write to in-memory buffer first (before rotator takes ownership).
+        // Inject `service.name` from resource attributes into point labels so
+        // buffered queries match the on-disk scanner behaviour (label matchers
+        // can select on service.name either way).
         if let Some(ref buf) = self.memory_buffer {
             for m in &metrics {
-                buf.push_metrics(&m.name, &m.data_points).await;
+                let svc = m.resource_attributes.get("service.name");
+                let points: Vec<_> = match svc {
+                    Some(svc) => m
+                        .data_points
+                        .iter()
+                        .map(|dp| {
+                            let mut labels = dp.labels.clone();
+                            if labels.get("service.name").is_none() {
+                                labels = labels.merge(
+                                    &parqtel_core::LabelSet::try_from_iter(vec![(
+                                        "service.name",
+                                        svc.to_string(),
+                                    )])
+                                    .unwrap_or_default(),
+                                );
+                            }
+                            DataPoint {
+                                timestamp_ns: dp.timestamp_ns,
+                                value: dp.value.clone(),
+                                labels,
+                            }
+                        })
+                        .collect(),
+                    None => m.data_points.clone(),
+                };
+                buf.push_metrics(&m.name, &points).await;
             }
         }
         let mut rotator = self.rotator.lock().await;
