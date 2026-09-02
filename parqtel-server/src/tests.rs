@@ -498,7 +498,7 @@ async fn test_simplejson_handlers() {
 async fn test_grpc_trace_export_and_immediate_query() {
     use parqtel_ingest::otel::collector::trace::v1::trace_service_client::TraceServiceClient;
     use parqtel_ingest::otel::collector::trace::v1::ExportTraceServiceRequest;
-    use parqtel_ingest::otel::trace::v1::{Span as OtelSpan, TracesData};
+    use parqtel_ingest::otel::trace::v1::Span as OtelSpan;
 
     let state = AppState::default_for_tests().await;
 
@@ -643,9 +643,8 @@ async fn test_grpc_metrics_and_logs_export() {
 
 #[tokio::test]
 async fn test_span_metrics_red_bridge_end_to_end() {
-    use parqtel_ingest::otel::collector::trace::v1::trace_service_client::TraceServiceClient;
     use parqtel_ingest::otel::collector::trace::v1::ExportTraceServiceRequest;
-    use parqtel_ingest::otel::trace::v1::{Span as OtelSpan, TracesData};
+    use parqtel_ingest::otel::trace::v1::Span as OtelSpan;
     use tokio::sync::mpsc;
 
     let state = AppState::default_for_tests().await;
@@ -676,7 +675,6 @@ async fn test_span_metrics_red_bridge_end_to_end() {
         }),
         ..Default::default()
     };
-    let _ = TracesData::default(); // module sanity
     let request = ExportTraceServiceRequest {
         resource_spans: vec![parqtel_ingest::otel::trace::v1::ResourceSpans {
             resource: Some(parqtel_ingest::otel::resource::v1::Resource {

@@ -25,7 +25,7 @@ mod tests {
     use crate::models::storage::{BlockMetadata, SignalType, StorageModel};
     use crate::models::{DataPoint, LabelSet, LogRecord, Metric, MetricKind, MetricValue};
     use parquet::arrow::ArrowWriter;
-    use parquet::basic::{Compression, Encoding};
+    use parquet::basic::Compression;
     use parquet::file::properties::{WriterProperties, WriterVersion};
     use std::collections::HashSet;
     use std::fs;
