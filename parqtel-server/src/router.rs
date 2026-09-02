@@ -92,6 +92,18 @@ pub fn build_router(state: AppState) -> Router {
             post(handlers::alerts::acknowledge_alert),
         )
         .route(
+            "/api/v1/alerts/routes",
+            get(handlers::alerts::list_routes).post(handlers::alerts::set_routes),
+        )
+        .route(
+            "/api/v1/alerts/silences",
+            get(handlers::alerts::list_silences).post(handlers::alerts::create_silence),
+        )
+        .route(
+            "/api/v1/alerts/silences/:name",
+            delete(handlers::alerts::delete_silence),
+        )
+        .route(
             "/api/v1/alerts/:id/resolve",
             post(handlers::alerts::resolve_alert),
         )

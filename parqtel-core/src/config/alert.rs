@@ -43,6 +43,70 @@ pub struct NotificationConfig {
     pub send_timeout_secs: u64,
     #[serde(default = "default_failure_threshold")]
     pub self_monitoring_failure_threshold: f64,
+    /// Alert routing table: which firing alerts go to which webhook sinks.
+    /// Routes are evaluated in order; first match wins.
+    #[serde(default)]
+    pub routes: Vec<RouteConfig>,
+}
+
+/// One alert routing rule: match firing alerts and deliver to a webhook.
+///
+/// Webhooks cover every major sink (Slack incoming-webhooks, PagerDuty
+/// Events API v2, Discord, generic receivers) so the OSS router stays
+/// dependency-free — MCP servers remain available for AI-driven flows.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RouteConfig {
+    /// Route name (shown in UI + logs).
+    pub name: String,
+    /// Match alerts by minimum severity: critical | page | warning | info.
+    /// An alert matches when its severity is at or above this level.
+    #[serde(default = "default_match_severity")]
+    pub match_severity: String,
+    /// Match alerts whose labels contain all of these exact key=value pairs.
+    #[serde(default)]
+    pub match_labels: std::collections::BTreeMap<String, String>,
+    /// Webhook URL that receives a POST with the alert JSON payload.
+    pub webhook_url: String,
+    /// Minutes to wait before re-sending an unresolved alert (0 = no repeat).
+    #[serde(default = "default_repeat_minutes")]
+    pub repeat_minutes: u64,
+}
+
+impl Default for RouteConfig {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            match_severity: default_match_severity(),
+            match_labels: std::collections::BTreeMap::new(),
+            webhook_url: String::new(),
+            repeat_minutes: default_repeat_minutes(),
+        }
+    }
+}
+
+fn default_match_severity() -> String {
+    "info".to_string()
+}
+
+fn default_repeat_minutes() -> u64 {
+    240
+}
+
+/// An active silence: alerts matching it are suppressed from routing
+/// (they still fire and are queryable — routing only is muted).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SilenceConfig {
+    /// Silence name (shown in UI).
+    pub name: String,
+    /// Created-by (free text, e.g. on-call handle).
+    #[serde(default)]
+    pub created_by: String,
+    /// Suppress alerts with these exact label key=value pairs.
+    pub match_labels: std::collections::BTreeMap<String, String>,
+    /// Unix seconds when the silence starts.
+    pub starts_at: i64,
+    /// Unix seconds when the silence ends (mute window).
+    pub ends_at: i64,
 }
 
 fn default_dedup_flush() -> u64 {

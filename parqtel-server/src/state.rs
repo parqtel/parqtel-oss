@@ -1,4 +1,5 @@
 use parqtel_alert::evaluator::engine::{EvalConfig, EvaluationEngine};
+use parqtel_alert::router::AlertRouter;
 use parqtel_alert::AlertRuleRegistry;
 use parqtel_alert::AlertStore;
 use parqtel_core::{BlockIndex, Config};
@@ -27,6 +28,11 @@ pub struct AppStateInner {
     pub alert_registry: AlertRuleRegistry,
     pub alert_store: AlertStore,
     pub alert_engine: Arc<EvaluationEngine>,
+    pub alert_router: Arc<AlertRouter>,
+    /// Receiver for alert firing events (consumed once by the router task).
+    pub alert_event_rx: tokio::sync::Mutex<
+        Option<tokio::sync::mpsc::UnboundedReceiver<parqtel_alert::AlertFiringEvent>>,
+    >,
     pub pipeline_registry: PipelineRegistry,
 }
 
@@ -45,7 +51,7 @@ impl AppState {
         let data_dir = config.storage.data_dir.clone();
         let alert_registry = AlertRuleRegistry::new();
         let alert_store = AlertStore::new(Some(data_dir)).await;
-        let (alert_tx, _) = tokio::sync::mpsc::unbounded_channel();
+        let (alert_tx, alert_event_rx) = tokio::sync::mpsc::unbounded_channel();
         let alert_engine = Arc::new(EvaluationEngine::new(
             EvalConfig {
                 evaluation_interval_secs: 15,
@@ -54,6 +60,9 @@ impl AppState {
             alert_registry.clone(),
             alert_store.clone(),
             alert_tx,
+        ));
+        let alert_router = Arc::new(AlertRouter::new(
+            config.alerts.notifications.clone().unwrap_or_default(),
         ));
 
         Self {
@@ -70,6 +79,8 @@ impl AppState {
                 alert_registry,
                 alert_store,
                 alert_engine,
+                alert_router,
+                alert_event_rx: tokio::sync::Mutex::new(Some(alert_event_rx)),
                 pipeline_registry: PipelineRegistry::new(),
             }),
         }
