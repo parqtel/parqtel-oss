@@ -107,10 +107,10 @@ Priorities: **P0** = adoption-blocking / positioning-critical · **P1** = compet
 
 | Feature | What | Why now | Effort |
 |---|---|---|---|
-| **F1. OTLP gRPC ingestion** (`:4317`, tonic) | gRPC server alongside HTTP routes; same decode path; health per OTLP spec. | The silent dealbreaker (G1). Every OTel SDK defaults here. Without it, "OTLP-native" marketing overpromises. | M |
-| **F2. Trace memory buffer** | Mirror metrics/logs: spans queryable immediately post-ingest. | Fixes the asymmetry on-call engineers actually feel (G11); cheap, visible. | S |
-| **F3. Span-metrics bridge (RED)** | Recording-rule engine derives `requests_total`, `errors_total`, `duration` histograms per service/operation from spans; persist as normal metrics. | Turns Parqtel from "storage backend" into "APM" in one feature (G2). Reuses: recording rules + correlation columns. | M-L |
-| **F4. Ship RED service dashboard** (minimal) | One prebuilt UI view: per-service rate/errors/p95 from F3. | F3 without a surface is invisible. Proves the loop. | S-M |
+| **F1. OTLP gRPC ingestion** (`:4317`, tonic) | gRPC server alongside HTTP routes; same decode path; health per OTLP spec. | The silent dealbreaker (G1). Every OTel SDK defaults here. Without it, "OTLP-native" marketing overpromises. | M | ✅ shipped |
+| **F2. Trace memory buffer** | Mirror metrics/logs: spans queryable immediately post-ingest. | Fixes the asymmetry on-call engineers actually feel (G11); cheap, visible. | S | ✅ shipped |
+| **F3. Span-metrics bridge (RED)** | Recording-rule engine derives `requests_total`, `errors_total`, `duration` histograms per service/operation from spans; persist as normal metrics. | Turns Parqtel from "storage backend" into "APM" in one feature (G2). Reuses: recording rules + correlation columns. | M-L | ✅ shipped (counters + ms gauge) |
+| **F4. Ship RED service dashboard** (minimal) | One prebuilt UI view: per-service rate/errors/p95 from F3. | F3 without a surface is invisible. Proves the loop. | S-M | deferred — OSS uses Grafana for dashboards; full UI ships in commercial edition |
 
 ### P1 — Competitive necessity (next 2 quarters)
 
