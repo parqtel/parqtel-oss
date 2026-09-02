@@ -92,6 +92,15 @@ pub fn build_router(state: AppState) -> Router {
             post(handlers::alerts::acknowledge_alert),
         )
         .route(
+            "/api/v1/saved_searches",
+            get(handlers::prometheus::list_saved_searches)
+                .post(handlers::prometheus::create_saved_search),
+        )
+        .route(
+            "/api/v1/saved_searches/:id",
+            delete(handlers::prometheus::delete_saved_search),
+        )
+        .route(
             "/api/v1/alerts/routes",
             get(handlers::alerts::list_routes).post(handlers::alerts::set_routes),
         )
