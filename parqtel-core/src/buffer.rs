@@ -4,6 +4,7 @@
 
 use crate::models::logs::LogRecord;
 use crate::models::metrics::DataPoint;
+use crate::models::traces::{Span, SpanStatus};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -13,6 +14,7 @@ use tokio::sync::RwLock;
 pub struct MemoryBuffer {
     metrics: Arc<RwLock<HashMap<String, Vec<DataPoint>>>>,
     logs: Arc<RwLock<Vec<LogRecord>>>,
+    spans: Arc<RwLock<Vec<Span>>>,
 }
 
 impl MemoryBuffer {
@@ -20,6 +22,7 @@ impl MemoryBuffer {
         Self {
             metrics: Arc::new(RwLock::new(HashMap::with_capacity(64))),
             logs: Arc::new(RwLock::new(Vec::with_capacity(5_000))),
+            spans: Arc::new(RwLock::new(Vec::with_capacity(5_000))),
         }
     }
 
@@ -34,6 +37,21 @@ impl MemoryBuffer {
     /// Push log records into the buffer.
     pub async fn push_logs(&self, logs: &[LogRecord]) {
         self.logs.write().await.extend_from_slice(logs);
+    }
+
+    /// Push spans into the buffer (queryable immediately, pre-flush).
+    pub async fn push_spans(&self, spans: &[Span]) {
+        self.spans.write().await.extend_from_slice(spans);
+    }
+
+    /// Query spans from the buffer matching the given time range.
+    /// A span matches if its interval [start, end] overlaps the query window.
+    pub async fn scan_spans(&self, start_ns: i64, end_ns: i64) -> Vec<Span> {
+        let buf = self.spans.read().await;
+        buf.iter()
+            .filter(|s| s.start_time_ns <= end_ns && s.end_time_ns >= start_ns)
+            .cloned()
+            .collect()
     }
 
     /// O(1) lookup by metric name + time range filter.
@@ -93,16 +111,87 @@ impl MemoryBuffer {
         std::mem::take(&mut *buf)
     }
 
-    /// Buffer stats for monitoring.
-    pub async fn stats(&self) -> (usize, usize) {
+    /// Drain all spans (called after trace flush).
+    pub async fn drain_spans(&self) -> Vec<Span> {
+        let mut buf = self.spans.write().await;
+        std::mem::take(&mut *buf)
+    }
+
+    /// Buffer stats for monitoring: (metrics, logs, spans).
+    pub async fn stats(&self) -> (usize, usize, usize) {
         let m: usize = self.metrics.read().await.values().map(|v| v.len()).sum();
         let l = self.logs.read().await.len();
-        (m, l)
+        let s = self.spans.read().await.len();
+        (m, l, s)
     }
 }
 
 impl Default for MemoryBuffer {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use super::*;
+
+    fn test_span(id: u8, start: i64, end: i64) -> Span {
+        Span {
+            trace_id: [id; 16],
+            span_id: [id; 8],
+            trace_state: String::new(),
+            parent_span_id: [0; 8],
+            name: format!("op-{id}"),
+            kind: 2,
+            start_time_ns: start,
+            end_time_ns: end,
+            attributes: Default::default(),
+            events: Vec::new(),
+            links: Vec::new(),
+            status: SpanStatus {
+                code: 0,
+                message: String::new(),
+            },
+            flags: 0,
+        }
+    }
+
+    #[tokio::test]
+    async fn spans_queryable_immediately_after_push() {
+        let buf = MemoryBuffer::new();
+        buf.push_spans(&[test_span(1, 1_000, 2_000), test_span(2, 10_000, 12_000)])
+            .await;
+        let hits = buf.scan_spans(0, 5_000).await;
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].name, "op-1");
+    }
+
+    #[tokio::test]
+    async fn span_overlap_matches_interval_not_point() {
+        // A span [100..200] overlaps a query [150..1000] even though its start
+        // precedes the window — interval overlap, not point containment.
+        let buf = MemoryBuffer::new();
+        buf.push_spans(&[test_span(1, 100, 200)]).await;
+        assert_eq!(buf.scan_spans(150, 1_000).await.len(), 1);
+        assert_eq!(buf.scan_spans(201, 1_000).await.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn drain_spans_empties_buffer() {
+        let buf = MemoryBuffer::new();
+        buf.push_spans(&[test_span(1, 1_000, 2_000)]).await;
+        let drained = buf.drain_spans().await;
+        assert_eq!(drained.len(), 1);
+        assert_eq!(buf.scan_spans(0, i64::MAX).await.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn stats_counts_all_signals() {
+        let buf = MemoryBuffer::new();
+        buf.push_spans(&[test_span(1, 1, 2)]).await;
+        let (m, l, s) = buf.stats().await;
+        assert_eq!((m, l, s), (0, 0, 1));
     }
 }

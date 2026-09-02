@@ -188,7 +188,8 @@ async fn run_server(
     let log_ingestion_service = LogIngestionService::new(config.logs.clone(), log_tx)
         .with_memory_buffer(memory_buffer.clone());
     let (trace_tx, mut trace_rx) = mpsc::unbounded_channel();
-    let trace_ingestion_service = TraceIngestionService::new(config.storage.clone(), trace_tx);
+    let trace_ingestion_service = TraceIngestionService::new(config.storage.clone(), trace_tx)
+        .with_memory_buffer(memory_buffer.clone());
 
     // Trace index - uses same data_dir as metrics but separate index file
     let trace_data_dir = config.storage.data_dir.join("traces");

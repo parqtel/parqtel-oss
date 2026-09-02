@@ -431,11 +431,19 @@ impl QueryExecutor {
             b
         };
 
-        if blocks.is_empty() {
-            return Ok(Vec::new());
-        }
+        let mut spans = if blocks.is_empty() {
+            Vec::new()
+        } else {
+            Scanner::scan_traces(blocks, start_ns, end_ns, limit).await?
+        };
 
-        let mut spans = Scanner::scan_traces(blocks, start_ns, end_ns, limit).await?;
+        // Merge in spans still buffered in memory (not yet flushed to a block).
+        // Buffered spans cannot overlap flushed blocks: the buffer is drained
+        // whenever a flush completes, so a plain extend is safe.
+        spans.extend(self.buffer.scan_spans(start_ns, end_ns).await);
+
+        // Sort newest-first for deterministic, relevance-ordered results.
+        spans.sort_unstable_by_key(|s| std::cmp::Reverse(s.start_time_ns));
 
         // Filter by trace_id if provided
         if let Some(tid) = trace_id_filter {
