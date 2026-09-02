@@ -8,6 +8,7 @@ use axum::{
 use parqtel_query::{parse_query, AggregationOp, QueryPlan};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::sync::atomic::Ordering;
 
 #[derive(Debug, Deserialize)]
 pub struct InstantQuery {
@@ -123,6 +124,7 @@ pub async fn query_instant(
         label_replace,
         scalar_param,
         clamp,
+        range_ns,
     ) = match parse_query(&params.query) {
         Ok(res) => res,
         Err(e) => return map_error(e),
@@ -144,12 +146,23 @@ pub async fn query_instant(
         label_replace,
         scalar_param,
         clamp,
+        range_ns,
     ) {
         Ok(p) => p,
         Err(e) => return map_error(e),
     };
 
-    match state.inner.query_executor.execute(plan).await {
+    let query_start = std::time::Instant::now();
+    let result = state.inner.query_executor.execute(plan).await;
+    state
+        .inner
+        .metrics
+        .queries_executed
+        .fetch_add(1, Ordering::Relaxed);
+    if let Ok(mut hist) = state.inner.metrics.query_duration_ms.lock() {
+        hist.record(query_start.elapsed().as_millis() as f64);
+    }
+    match result {
         Ok(result) => {
             let mut res = Vec::new();
             for ts in result.series {
@@ -179,7 +192,14 @@ pub async fn query_instant(
             )
                 .into_response()
         }
-        Err(e) => map_error(e),
+        Err(e) => {
+            state
+                .inner
+                .metrics
+                .query_errors
+                .fetch_add(1, Ordering::Relaxed);
+            map_error(e)
+        }
     }
 }
 
@@ -210,6 +230,7 @@ pub async fn query_range(
         label_replace,
         scalar_param,
         clamp,
+        range_ns,
     ) = match parse_query(&params.query) {
         Ok(res) => res,
         Err(e) => return map_error(e),
@@ -245,12 +266,23 @@ pub async fn query_range(
         label_replace,
         scalar_param,
         clamp,
+        range_ns,
     ) {
         Ok(p) => p,
         Err(e) => return map_error(e),
     };
 
-    match state.inner.query_executor.execute(plan).await {
+    let query_start = std::time::Instant::now();
+    let result = state.inner.query_executor.execute(plan).await;
+    state
+        .inner
+        .metrics
+        .queries_executed
+        .fetch_add(1, Ordering::Relaxed);
+    if let Ok(mut hist) = state.inner.metrics.query_duration_ms.lock() {
+        hist.record(query_start.elapsed().as_millis() as f64);
+    }
+    match result {
         Ok(result) => {
             let mut res = Vec::new();
             for ts in result.series {
@@ -280,7 +312,14 @@ pub async fn query_range(
             )
                 .into_response()
         }
-        Err(e) => map_error(e),
+        Err(e) => {
+            state
+                .inner
+                .metrics
+                .query_errors
+                .fetch_add(1, Ordering::Relaxed);
+            map_error(e)
+        }
     }
 }
 
