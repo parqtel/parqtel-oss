@@ -10,13 +10,9 @@ fn main() -> Result<()> {
         Path::new(proto_dir).join("opentelemetry/proto/resource/v1/resource.proto");
     let collector_metrics_proto =
         Path::new(proto_dir).join("opentelemetry/proto/collector/metrics/v1/metrics_service.proto");
-
-    // New log protos
     let logs_proto = Path::new(proto_dir).join("opentelemetry/proto/logs/v1/logs.proto");
     let collector_logs_proto =
         Path::new(proto_dir).join("opentelemetry/proto/collector/logs/v1/logs_service.proto");
-
-    // Trace protos
     let traces_proto = Path::new(proto_dir).join("opentelemetry/proto/trace/v1/trace.proto");
     let collector_traces_proto =
         Path::new(proto_dir).join("opentelemetry/proto/collector/trace/v1/trace_service.proto");
@@ -30,22 +26,30 @@ fn main() -> Result<()> {
         && traces_proto.exists()
         && collector_traces_proto.exists()
     {
-        let mut config = prost_build::Config::new();
-        config.disable_comments(["."]); // Prevent proto comments from becoming invalid doc-tests
+        // prost message modules + tonic gRPC stubs in one pass.
+        // disable_comments must be set on the prost Config (tonic-build's
+        // builder option only covers the service stubs it generates itself);
+        // proto comments contain strings rustdoc parses as broken code fences.
+        let mut prost_config = prost_build::Config::new();
+        prost_config.disable_comments(["."]);
 
-        config.compile_protos(
-            &[
-                metrics_proto,
-                common_proto,
-                resource_proto,
-                collector_metrics_proto,
-                logs_proto,
-                collector_logs_proto,
-                traces_proto,
-                collector_traces_proto,
-            ],
-            &[proto_dir],
-        )?;
+        tonic_build::configure()
+            .build_client(true) // used by gRPC integration tests
+            .build_server(true)
+            .compile_with_config(
+                prost_config,
+                &[
+                    metrics_proto,
+                    common_proto,
+                    resource_proto,
+                    collector_metrics_proto,
+                    logs_proto,
+                    collector_logs_proto,
+                    traces_proto,
+                    collector_traces_proto,
+                ],
+                &[proto_dir],
+            )?;
     }
 
     Ok(())

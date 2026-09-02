@@ -10,6 +10,11 @@ data:
     bind_address = "0.0.0.0:{{ .Values.service.port }}"
     max_connections = {{ .Values.parqtel.server.maxConnections | int }}
     shutdown_timeout_secs = {{ .Values.parqtel.server.shutdownTimeoutSecs | int }}
+    {{- if .Values.ingestion.grpc.enabled }}
+    grpc_bind_address = "0.0.0.0:{{ .Values.ingestion.grpc.port }}"
+    {{- else }}
+    grpc_bind_address = ""
+    {{- end }}
 
     [storage]
     data_dir = "/data"

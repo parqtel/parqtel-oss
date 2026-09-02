@@ -8,7 +8,10 @@ pub mod writer;
 
 // Generated proto modules
 pub mod otel {
-    #![allow(clippy::all)]
+    // `clippy::all` covers the default groups only — restriction lints
+    // (unwrap_used/expect_used/panic) denied workspace-wide must also be
+    // allowed for generated tonic/prost stubs we don't control.
+    #![allow(clippy::all, clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     pub mod common {
         pub mod v1 {
             include!(concat!(

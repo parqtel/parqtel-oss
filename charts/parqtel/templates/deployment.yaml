@@ -50,6 +50,11 @@ spec:
             - name: http
               containerPort: {{ .Values.service.port }}
               protocol: TCP
+            {{- if .Values.ingestion.grpc.enabled }}
+            - name: grpc
+              containerPort: {{ .Values.ingestion.grpc.port }}
+              protocol: TCP
+            {{- end }}
             {{- if .Values.provider.enabled }}
             - name: https-provider
               containerPort: {{ .Values.provider.port }}

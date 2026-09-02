@@ -4,7 +4,7 @@
 
 use crate::models::logs::LogRecord;
 use crate::models::metrics::DataPoint;
-use crate::models::traces::{Span, SpanStatus};
+use crate::models::traces::Span;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -136,6 +136,7 @@ impl Default for MemoryBuffer {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
+    use crate::models::traces::SpanStatus;
 
     fn test_span(id: u8, start: i64, end: i64) -> Span {
         Span {

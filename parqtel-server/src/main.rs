@@ -16,6 +16,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
+mod grpc;
 mod handlers;
 mod metrics;
 mod router;
@@ -323,6 +324,17 @@ async fn run_server(
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     tracing::info!("parqtel server listening on {}", addr);
 
+    // OTLP gRPC ingestion (default :4317; disabled when address is empty).
+    let grpc_addr = config.server.grpc_bind_address.clone();
+    let grpc_state = state.clone();
+    let grpc_task = tokio::spawn(async move {
+        if let Err(e) = grpc::serve_grpc(grpc_state, &grpc_addr).await {
+            if !grpc_addr.is_empty() {
+                tracing::error!("OTLP gRPC server failed: {e}");
+            }
+        }
+    });
+
     let shutdown = async {
         tokio::signal::ctrl_c().await.unwrap_or_default();
     };
@@ -334,6 +346,7 @@ async fn run_server(
     tracing::info!("Shutting down gracefully...");
     flush_task.abort();
     alert_eval_task.abort();
+    grpc_task.abort();
 
     state.inner.ingestion_service.shutdown().await?;
     state.inner.log_ingestion_service.shutdown().await?;
