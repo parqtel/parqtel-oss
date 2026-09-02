@@ -562,6 +562,7 @@ header{height:48px;flex-shrink:0;background:var(--bg-void);border-bottom:1px sol
         <button class="atool-link" id="atool-proposals">Proposals<span class="nav-badge ok" id="proposals-badge" style="display:none;margin-left:4px;">0</span></button>
         <button class="atool-link" id="atool-recording">Recording Rules</button>
         <button class="atool-link" id="atool-pipelines">Pipelines</button>
+        <button class="atool-link" id="atool-routing">Routing</button>
         <div style="flex:1"></div>
       </div>
       <div id="alert-stream-view" style="display:flex;flex-direction:column;flex:1;min-height:0;">
@@ -590,6 +591,7 @@ header{height:48px;flex-shrink:0;background:var(--bg-void);border-bottom:1px sol
       <div id="alert-proposals-view" style="display:none;flex:1;overflow-y:auto;padding:12px;"></div>
       <div id="recording-rules-view" style="display:none;flex:1;overflow-y:auto;padding:12px;"></div>
       <div id="pipelines-view" style="display:none;flex:1;overflow-y:auto;padding:12px;"></div>
+      <div id="routing-view" style="display:none;flex:1;overflow-y:auto;padding:12px;"></div>
     </div>
   </div>
 </main>
@@ -1346,6 +1348,77 @@ async function renderPipelines(){
   }catch(e){container.innerHTML=`<p style="color:var(--err);font-size:11px;">${e.message}</p>`;}
 }
 
+/* ROUTING VIEW (alert routes + silences) */
+async function renderRouting(){
+  const el=$('routing-view');
+  el.innerHTML='<div style="padding:12px"><div class="skel skel-row"></div><div class="skel skel-row" style="width:90%"></div></div>';
+  const [routesR,silencesR]=await Promise.all([
+    fetch('/api/v1/alerts/routes').then(r=>r.json()).catch(()=>null),
+    fetch('/api/v1/alerts/silences').then(r=>r.json()).catch(()=>null),
+  ]);
+  const routes=(routesR&&routesR.data)||[];
+  const silences=(silencesR&&silencesR.data)||[];
+  let html='<div class="rca-box"><div class="rca-header"><span style="font-size:12px;font-weight:700;">Routes</span><span class="rca-model">first match wins</span></div>';
+  if(!routes.length){
+    html+='<div class="empty-c"><p>No routes configured</p><p style="font-size:11px;color:var(--text-muted);">Routes deliver firing alerts to webhook sinks (Slack, PagerDuty, Discord). Configure via parqtel.toml [alerts.notifications.routes] or the API.</p></div>';
+  }else{
+    html+='<table class="rules-table"><thead><tr><th>Name</th><th>Severity ≥</th><th>Labels</th><th>Webhook</th><th>Repeat</th></tr></thead><tbody>';
+    routes.forEach(r=>{
+      const labels=r.match_labels&&Object.keys(r.match_labels).length?Object.entries(r.match_labels).map(([k,v])=>`${k}="${v}"`).join(', '):'<span style="color:var(--text-muted);">any</span>';
+      const url=(r.webhook_url||'').replace(/^https?:\/\/([^/]+).*/,'$1/…');
+      html+=`<tr><td>${esc(r.name)}</td><td><span class="sevbadge ${String(r.match_severity||'info').toUpperCase()}">${esc(r.match_severity||'info')}</span></td><td style="font-family:var(--mono);font-size:10px;">${labels}</td><td style="font-family:var(--mono);font-size:10px;color:var(--text-secondary);">${esc(url)}</td><td>${r.repeat_minutes?r.repeat_minutes+'m':'once'}</td></tr>`;
+    });
+    html+='</tbody></table>';
+  }
+  html+='</div>';
+
+  html+='<div class="rca-box" style="margin-top:12px;"><div class="rca-header"><span style="font-size:12px;font-weight:700;">Silences</span><span class="rca-model">mutes routing only</span></div>';
+  if(!silences.length){
+    html+='<div class="empty-c"><p>No active silences</p><p style="font-size:11px;color:var(--text-muted);">Silence noisy alerts during maintenance windows. Create one below.</p></div>';
+  }else{
+    html+='<table class="rules-table"><thead><tr><th>Name</th><th>Matches</th><th>By</th><th>Ends</th><th></th></tr></thead><tbody>';
+    const now=Math.floor(Date.now()/1000);
+    silences.forEach(s=>{
+      const labels=Object.entries(s.match_labels||{}).map(([k,v])=>`${k}="${v}"`).join(', ')||'any';
+      const ends=`in ${fmtDuration(s.ends_at-now)}`;
+      html+=`<tr><td>${esc(s.name)}</td><td style="font-family:var(--mono);font-size:10px;">${esc(labels)}</td><td>${esc(s.created_by||'—')}</td><td>${ends}</td><td><button class="rca-btn" data-delsil="${esc(s.name)}">Remove</button></td></tr>`;
+    });
+    html+='</tbody></table>';
+  }
+  const nowTs=Math.floor(Date.now()/1000);
+  html+=`<div style="margin-top:8px;display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
+    <input id="sil-name" class="toolbar-input" placeholder="silence name" style="width:140px;">
+    <input id="sil-label" class="toolbar-input" placeholder='service="api"' style="width:160px;font-family:var(--mono);">
+    <input id="sil-hours" class="toolbar-input" type="number" min="1" value="2" title="hours" style="width:60px;">
+    <button class="rca-btn" id="sil-add">+ Silence</button></div>`;
+  html+='</div>';
+  el.innerHTML=html;
+
+  el.querySelector('#sil-add')?.addEventListener('click',async()=>{
+    const name=el.querySelector('#sil-name').value.trim();
+    const labelStr=el.querySelector('#sil-label').value.trim();
+    const hours=parseFloat(el.querySelector('#sil-hours').value)||2;
+    if(!name){toast('Silence name is required','error');return;}
+    const labels={};
+    if(labelStr){
+      const m=labelStr.match(/^([\w.]+)\s*=\s*"([^"]*)"$/);
+      if(!m){toast('Label must be key="value"','error');return;}
+      labels[m[1]]=m[2];
+    }
+    const now=Math.floor(Date.now()/1000);
+    const res=await fetch('/api/v1/alerts/silences',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name,created_by:'parqtel-ui',match_labels:labels,starts_at:now,ends_at:now+Math.round(hours*3600)})});
+    if(res.ok){toast('Silence created');renderRouting();}else{const j=await res.json().catch(()=>({}));toast(j.error||'Failed','error');}
+  });
+  el.querySelectorAll('[data-delsil]').forEach(b=>b.addEventListener('click',async()=>{
+    const res=await fetch(`/api/v1/alerts/silences/${encodeURIComponent(b.dataset.delsil)}`,{method:'DELETE'});
+    if(res.ok){toast('Silence removed');renderRouting();}else toast('Failed to remove','error');
+  }));
+}
+function fmtDuration(s){
+  if(s<60)return s+'s';if(s<3600)return Math.round(s/60)+'m';
+  if(s<86400)return (s/3600).toFixed(1)+'h';return (s/86400).toFixed(1)+'d';
+}
+
 /* POSTMORTEM VIEWER */
 function openPostmortem(alertId){
   const panel=$('postmortem-panel');const body=$('postmortem-body');
@@ -1486,10 +1559,12 @@ function switchAlertView(view,fromUrl=false){
   $('alert-proposals-view').style.display=view==='proposals'?'block':'none';
   $('recording-rules-view').style.display=view==='recording'?'block':'none';
   $('pipelines-view').style.display=view==='pipelines'?'block':'none';
+  $('routing-view').style.display=view==='routing'?'block':'none';
   if(view==='rules')renderRulesView();
   if(view==='proposals')renderProposalsView();
   if(view==='recording')renderRecordingRules();
   if(view==='pipelines')renderPipelines();
+  if(view==='routing')renderRouting();
   if(view==='stream')renderAlertList();
   if(!fromUrl&&ST.sig==='alerts')updateUrl();
 }
@@ -1498,6 +1573,7 @@ $('atool-rules').onclick=()=>switchAlertView('rules');
 $('atool-proposals').onclick=()=>switchAlertView('proposals');
 $('atool-recording').onclick=()=>switchAlertView('recording');
 $('atool-pipelines').onclick=()=>switchAlertView('pipelines');
+$('atool-routing').onclick=()=>switchAlertView('routing');
 
 /* ALERT DETAIL TABS */
 document.querySelector('.adet-tabs').addEventListener('click',e=>{

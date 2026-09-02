@@ -5,7 +5,7 @@ mod server;
 mod storage;
 mod telemetry;
 
-pub use alert::{AlertConfig, NotificationConfig, PostmortemConfig};
+pub use alert::{AlertConfig, NotificationConfig, PostmortemConfig, RouteConfig, SilenceConfig};
 pub use ingest::{IngestConfig, TailSamplingConfig};
 pub use query::{QueryConfig, UIConfig};
 pub use server::ServerConfig;

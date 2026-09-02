@@ -255,6 +255,37 @@ async fn run_server(
         }
     });
 
+    // Load alert rules from the configured directory (evaluator + router
+    // both key off the registry; without this, rules only exist via the API).
+    {
+        let rules_dir = std::path::PathBuf::from(&state.inner.config.alerts.rules_dir);
+        match parqtel_alert::rule::yaml::load_rules_dir(&rules_dir) {
+            Ok(rules) => {
+                let count = rules.len();
+                for rule in rules {
+                    state.inner.alert_registry.insert(rule).await;
+                }
+                if count > 0 {
+                    tracing::info!(dir = %rules_dir.display(), rules = count, "alert rules loaded");
+                }
+            }
+            Err(e) => {
+                tracing::warn!(dir = %rules_dir.display(), error = %e, "failed to load alert rules")
+            }
+        }
+    }
+
+    // Alert routing: consume firing events from the eval engine and deliver
+    // to configured webhook sinks (silences + repeat windows honored).
+    let router_state = state.clone();
+    let alert_router_task = tokio::spawn(async move {
+        let rx = router_state.inner.alert_event_rx.lock().await.take();
+        if let Some(rx) = rx {
+            let router = router_state.inner.alert_router.clone();
+            let _ = parqtel_alert::router::spawn_router(router, rx).await;
+        }
+    });
+
     // Background flush task
     let state_clone = state.clone();
     let flush_task = tokio::spawn(async move {
@@ -371,6 +402,7 @@ async fn run_server(
     alert_eval_task.abort();
     grpc_task.abort();
     span_metrics_task.abort();
+    alert_router_task.abort();
 
     state.inner.ingestion_service.shutdown().await?;
     state.inner.log_ingestion_service.shutdown().await?;
