@@ -93,6 +93,64 @@ pub struct PrometheusResult {
     pub values: Vec<(f64, String)>,
 }
 
+/// Renders a QueryResult as a Prometheus instant-vector response.
+fn render_vector_result(result: parqtel_query::QueryResult) -> Response {
+    let mut res = Vec::new();
+    for ts in result.series {
+        let values = ts
+            .samples
+            .into_iter()
+            .map(|s| (s.timestamp_ns as f64 / 1_000_000_000.0, s.value.to_string()))
+            .collect();
+        res.push(PrometheusResult {
+            metric: serde_json::to_value(&ts.labels).unwrap_or_default(),
+            values,
+        });
+    }
+    (
+        StatusCode::OK,
+        Json(PrometheusResponse {
+            status: "success".into(),
+            data: PrometheusData {
+                result_type: "vector".into(),
+                result: res,
+                total_series_count: Some(result.total_series_count),
+                volume_summary: result.volume_summary,
+            },
+        }),
+    )
+        .into_response()
+}
+
+/// Renders a QueryResult as a Prometheus matrix (range) response.
+fn render_range_result(result: parqtel_query::QueryResult) -> Response {
+    let mut res = Vec::new();
+    for ts in result.series {
+        let values = ts
+            .samples
+            .into_iter()
+            .map(|s| (s.timestamp_ns as f64 / 1_000_000_000.0, s.value.to_string()))
+            .collect();
+        res.push(PrometheusResult {
+            metric: serde_json::to_value(&ts.labels).unwrap_or_default(),
+            values,
+        });
+    }
+    (
+        StatusCode::OK,
+        Json(PrometheusResponse {
+            status: "success".into(),
+            data: PrometheusData {
+                result_type: "matrix".into(),
+                result: res,
+                total_series_count: Some(result.total_series_count),
+                volume_summary: result.volume_summary,
+            },
+        }),
+    )
+        .into_response()
+}
+
 /// Handler for GET /api/v1/query (Instant).
 pub async fn query_instant(
     State(state): State<AppState>,
@@ -129,6 +187,41 @@ pub async fn query_instant(
         Ok(res) => res,
         Err(e) => return map_error(e),
     };
+
+    // Phase 1A: composed queries (nesting, binary ops, subqueries) go
+    // through the AST evaluator; simple shapes keep the legacy plan path.
+    if parqtel_query::needs_ast(&params.query) {
+        let expr = match parqtel_query::parser::parse_expr(&params.query) {
+            Ok(e) => e,
+            Err(e) => return map_error(e),
+        };
+        let end_ns = (now * 1_000_000_000.0) as i64;
+        let query_start = std::time::Instant::now();
+        let result = state
+            .inner
+            .query_executor
+            .execute_ast(&expr, end_ns - 60_000_000_000, end_ns, None)
+            .await;
+        state
+            .inner
+            .metrics
+            .queries_executed
+            .fetch_add(1, Ordering::Relaxed);
+        if let Ok(mut hist) = state.inner.metrics.query_duration_ms.lock() {
+            hist.record(query_start.elapsed().as_millis() as f64);
+        }
+        match result {
+            Ok(result) => return render_vector_result(result),
+            Err(e) => {
+                state
+                    .inner
+                    .metrics
+                    .query_errors
+                    .fetch_add(1, Ordering::Relaxed);
+                return map_error(e);
+            }
+        }
+    }
 
     let plan = match QueryPlan::new_full(
         metric_name,
@@ -249,6 +342,39 @@ pub async fn query_range(
                 .into_response()
         }
     };
+
+    // Phase 1A: composed queries via the AST evaluator.
+    if parqtel_query::needs_ast(&params.query) {
+        let expr = match parqtel_query::parser::parse_expr(&params.query) {
+            Ok(e) => e,
+            Err(e) => return map_error(e),
+        };
+        let query_start = std::time::Instant::now();
+        let result = state
+            .inner
+            .query_executor
+            .execute_ast(&expr, start_ns, end_ns, Some(step_ns))
+            .await;
+        state
+            .inner
+            .metrics
+            .queries_executed
+            .fetch_add(1, Ordering::Relaxed);
+        if let Ok(mut hist) = state.inner.metrics.query_duration_ms.lock() {
+            hist.record(query_start.elapsed().as_millis() as f64);
+        }
+        match result {
+            Ok(result) => return render_range_result(result),
+            Err(e) => {
+                state
+                    .inner
+                    .metrics
+                    .query_errors
+                    .fetch_add(1, Ordering::Relaxed);
+                return map_error(e);
+            }
+        }
+    }
 
     let plan = match QueryPlan::new_full(
         metric_name,

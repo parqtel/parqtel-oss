@@ -120,6 +120,111 @@ impl QueryExecutor {
     }
 
     /// Executes a [QueryPlan] for metrics and returns a [QueryResult].
+    /// Executes a parsed AST query (Phase 1A path). Loads every metric
+    /// referenced in the tree once, then evaluates per step.
+    pub async fn execute_ast(
+        &self,
+        expr: &crate::ast::Expr,
+        start_ns: i64,
+        end_ns: i64,
+        step_ns: Option<i64>,
+    ) -> Result<QueryResult> {
+        let start_time = Instant::now();
+
+        // Collect referenced metric names + their selectors' matchers.
+        let mut refs: Vec<(String, Vec<crate::matcher::LabelMatcher>)> = Vec::new();
+        collect_metric_refs(expr, &mut refs);
+        if refs.is_empty() {
+            return Ok(QueryResult {
+                series: Vec::new(),
+                execution_time: start_time.elapsed(),
+                points_scanned: 0,
+                total_series_count: 0,
+                volume_summary: vec![0; 60],
+            });
+        }
+
+        // Extend the scan range so range selectors reaching before `start`
+        // still see samples (window lookback).
+        let max_range = max_range_ns(expr);
+        let scan_start = start_ns.saturating_sub(max_range.max(60_000_000_000));
+
+        // Load series data for every referenced metric.
+        let mut data: crate::ast::SeriesData = Default::default();
+        let mut points_scanned: u64 = 0;
+        let mut total_series = 0usize;
+        for (name, matchers) in &refs {
+            // Blocks
+            let blocks = {
+                let idx = self.index.read().await;
+                idx.query(scan_start, end_ns, Some(name))
+            };
+            let mut raw = if blocks.is_empty() {
+                Vec::new()
+            } else {
+                Scanner::scan(blocks, name.clone(), scan_start, end_ns).await?
+            };
+            // Buffer
+            raw.extend(self.buffer.scan_metrics(name, scan_start, end_ns).await);
+            points_scanned += raw.len() as u64;
+
+            // Group by series fingerprint -> labels
+            use std::collections::BTreeMap;
+            let mut series_map: BTreeMap<u64, (parqtel_core::LabelSet, Vec<(i64, MetricValue)>)> =
+                BTreeMap::new();
+            for dp in raw {
+                if !crate::matcher::evaluate_matchers(matchers, &dp.labels, name) {
+                    continue;
+                }
+                let fp = dp.labels.fingerprint();
+                total_series += 1;
+                let entry = series_map
+                    .entry(fp)
+                    .or_insert_with(|| (dp.labels.clone(), Vec::new()));
+                entry.1.push((dp.timestamp_ns, dp.value));
+            }
+            let entry = data.entry(name.clone()).or_default();
+            for (_fp, (labels, mut pts)) in series_map {
+                pts.sort_by_key(|(t, _)| *t);
+                entry.push((
+                    labels,
+                    pts.into_iter().map(|(t, v)| (t, v_to_f64(&v))).collect(),
+                ));
+            }
+        }
+
+        // Evaluate per step.
+        let step = step_ns.unwrap_or((end_ns - start_ns).max(1));
+        let eval = crate::eval::Evaluator::new(&data);
+        let steps = eval.eval_steps(expr, start_ns, end_ns, step)?;
+
+        // Convert per-step instant vectors into TimeSeries.
+        use std::collections::BTreeMap;
+        let mut out_series: BTreeMap<u64, TimeSeries> = BTreeMap::new();
+        for (ts, iv) in &steps {
+            for (labels, value) in &iv.series {
+                let fp = labels.fingerprint();
+                let ts_entry = out_series.entry(fp).or_insert_with(|| TimeSeries {
+                    labels: strip_metric_name(labels),
+                    samples: Vec::new(),
+                });
+                ts_entry.samples.push(crate::models::Sample {
+                    timestamp_ns: *ts,
+                    value: *value,
+                });
+            }
+        }
+        let series_vec: Vec<TimeSeries> = out_series.into_values().collect();
+
+        Ok(QueryResult {
+            series: series_vec,
+            execution_time: start_time.elapsed(),
+            points_scanned,
+            total_series_count: total_series,
+            volume_summary: vec![0; 60],
+        })
+    }
+
     pub async fn execute(&self, plan: QueryPlan) -> Result<QueryResult> {
         let start_time = Instant::now();
 
@@ -836,6 +941,71 @@ fn apply_post_processing(
     }
 
     series
+}
+
+/// Collects (metric_name, matchers) for every selector in the tree.
+fn collect_metric_refs(
+    expr: &crate::ast::Expr,
+    out: &mut Vec<(String, Vec<crate::matcher::LabelMatcher>)>,
+) {
+    use crate::ast::Expr;
+    match expr {
+        Expr::Selector(s) => {
+            if let Some(name) = &s.metric_name {
+                out.push((name.clone(), s.matchers.clone()));
+            }
+        }
+        Expr::Paren(e) | Expr::Range(crate::ast::RangeExpr { expr: e, .. }) => {
+            collect_metric_refs(e, out)
+        }
+        Expr::Call(c) => {
+            for a in &c.args {
+                collect_metric_refs(a, out);
+            }
+        }
+        Expr::Aggregation(a) => {
+            if let Some(p) = &a.param {
+                collect_metric_refs(p, out);
+            }
+            collect_metric_refs(&a.expr, out);
+        }
+        Expr::Binary(b) => {
+            collect_metric_refs(&b.lhs, out);
+            collect_metric_refs(&b.rhs, out);
+        }
+        Expr::Number(_) => {}
+    }
+}
+
+/// Largest [range] duration in the tree (scan lookback padding).
+fn max_range_ns(expr: &crate::ast::Expr) -> i64 {
+    use crate::ast::Expr;
+    match expr {
+        Expr::Range(r) => r.range_ns.max(max_range_ns(&r.expr)),
+        Expr::Paren(e) => max_range_ns(e),
+        Expr::Call(c) => c.args.iter().map(max_range_ns).max().unwrap_or(0),
+        Expr::Aggregation(a) => {
+            let from_param = a.param.as_ref().map(|p| max_range_ns(p)).unwrap_or(0);
+            from_param.max(max_range_ns(&a.expr))
+        }
+        Expr::Binary(b) => max_range_ns(&b.lhs).max(max_range_ns(&b.rhs)),
+        Expr::Number(_) | Expr::Selector(_) => 0,
+    }
+}
+
+/// Drops the __name__ label (computed results are nameless, PromQL-style).
+fn strip_metric_name(labels: &parqtel_core::LabelSet) -> parqtel_core::LabelSet {
+    let mut out = parqtel_core::LabelSet::default();
+    for (k, v) in labels.iter() {
+        if k == "__name__" {
+            continue;
+        }
+        out = out.merge(
+            &parqtel_core::LabelSet::try_from_iter(vec![(k.to_string(), v.to_string())])
+                .unwrap_or_default(),
+        );
+    }
+    out
 }
 
 #[cfg(test)]

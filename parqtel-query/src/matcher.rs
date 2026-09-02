@@ -456,6 +456,42 @@ pub fn parse_query(query: &str) -> Result<ParsedQuery> {
     ))
 }
 
+/// True when the query requires the Phase-1A AST path (composition, binary
+/// ops, subqueries). Simple single-function queries keep the legacy plan
+/// path — zero behaviour change for existing dashboards.
+pub fn needs_ast(query: &str) -> bool {
+    match crate::parser::parse_expr(query) {
+        Ok(expr) => ast_is_complex(&expr),
+        // Parse failures fall back to the legacy parser for its
+        // historically-precise error messages.
+        Err(_) => false,
+    }
+}
+
+fn ast_is_complex(expr: &crate::ast::Expr) -> bool {
+    use crate::ast::Expr;
+    match expr {
+        Expr::Binary(_) => true,
+        Expr::Paren(e) => ast_is_complex(e),
+        Expr::Call(c) => {
+            // A call whose arg is a Selector/Range-of-Selector is the
+            // legacy shape; anything nested (aggregation, call, binary)
+            // needs the AST path.
+            c.args.iter().any(|a| match a {
+                Expr::Selector(_) => false,
+                Expr::Range(r) => !matches!(&*r.expr, Expr::Selector(_)),
+                _ => true,
+            })
+        }
+        Expr::Aggregation(a) => {
+            // `sum(selector)` is legacy-compatible; `sum(rate(...))` is not.
+            !matches!(&*a.expr, Expr::Selector(_) | Expr::Range(_)) || a.param.is_some()
+        }
+        Expr::Range(r) => ast_is_complex(&r.expr),
+        Expr::Selector(_) | Expr::Number(_) => false,
+    }
+}
+
 // ── helpers ─────────────────────────────────────────────────────────────────
 
 /// Strips `fn_name(` prefix and `)` suffix, returning the inner string or None.
@@ -480,7 +516,7 @@ fn split_range(s: &str) -> Result<(&str, Option<i64>)> {
             let dur = s[idx + 1..].strip_suffix(']').ok_or_else(|| {
                 Error::Validation(format!("unterminated range selector in {s:?}"))
             })?;
-            let ns = parse_duration_ns(dur)?;
+            let ns = parse_duration_str(dur)?;
             Ok((inner, Some(ns)))
         }
     }
@@ -488,7 +524,7 @@ fn split_range(s: &str) -> Result<(&str, Option<i64>)> {
 
 /// Parses PromQL duration strings: `5m`, `1h30m`, `2d`, `1w`, `90s`, `250ms`,
 /// or a bare number (seconds). Returns nanoseconds.
-fn parse_duration_ns(s: &str) -> Result<i64> {
+pub fn parse_duration_str(s: &str) -> Result<i64> {
     const UNITS: &[(&str, i64)] = &[
         ("ms", 1_000_000i64),
         ("s", 1_000_000_000),
@@ -544,31 +580,34 @@ fn parse_duration_ns(s: &str) -> Result<i64> {
 #[cfg(test)]
 mod duration_tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
-    use super::parse_duration_ns;
+    use super::parse_duration_str;
 
     #[test]
     fn parses_units() {
-        assert_eq!(parse_duration_ns("5m").unwrap(), 300 * 1_000_000_000);
-        assert_eq!(parse_duration_ns("90s").unwrap(), 90 * 1_000_000_000);
-        assert_eq!(parse_duration_ns("1h").unwrap(), 3_600 * 1_000_000_000);
-        assert_eq!(parse_duration_ns("250ms").unwrap(), 250_000_000);
-        assert_eq!(parse_duration_ns("2d").unwrap(), 2 * 86_400 * 1_000_000_000);
+        assert_eq!(parse_duration_str("5m").unwrap(), 300 * 1_000_000_000);
+        assert_eq!(parse_duration_str("90s").unwrap(), 90 * 1_000_000_000);
+        assert_eq!(parse_duration_str("1h").unwrap(), 3_600 * 1_000_000_000);
+        assert_eq!(parse_duration_str("250ms").unwrap(), 250_000_000);
+        assert_eq!(
+            parse_duration_str("2d").unwrap(),
+            2 * 86_400 * 1_000_000_000
+        );
     }
 
     #[test]
     fn parses_compound_and_bare_seconds() {
         assert_eq!(
-            parse_duration_ns("1h30m").unwrap(),
+            parse_duration_str("1h30m").unwrap(),
             (3_600 + 1_800) * 1_000_000_000
         );
-        assert_eq!(parse_duration_ns("300").unwrap(), 300 * 1_000_000_000);
+        assert_eq!(parse_duration_str("300").unwrap(), 300 * 1_000_000_000);
     }
 
     #[test]
     fn rejects_garbage() {
-        assert!(parse_duration_ns("abc").is_err());
-        assert!(parse_duration_ns("").is_err());
-        assert!(parse_duration_ns("5x").is_err());
+        assert!(parse_duration_str("abc").is_err());
+        assert!(parse_duration_str("").is_err());
+        assert!(parse_duration_str("5x").is_err());
     }
 }
 
