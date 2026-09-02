@@ -200,7 +200,7 @@ pub async fn query_instant(
         let result = state
             .inner
             .query_executor
-            .execute_ast(&expr, end_ns - 60_000_000_000, end_ns, None)
+            .execute_ast(&expr, end_ns, end_ns + 1, None)
             .await;
         state
             .inner

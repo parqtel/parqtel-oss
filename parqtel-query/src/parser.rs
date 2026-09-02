@@ -932,6 +932,19 @@ mod tests {
     }
 
     #[test]
+    fn avg_over_time_parses() {
+        let e = assert_parses("avg_over_time(cpu_usage[5m])");
+        match &e {
+            Expr::Call(c) => {
+                assert_eq!(c.name, "avg_over_time");
+                assert_eq!(c.args.len(), 1);
+                assert!(matches!(c.args[0], Expr::Range(_)));
+            }
+            other => panic!("expected call, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn selector_with_matchers() {
         assert_parses(r#"http_requests_total{service.name="api",method=~"GET|POST"}"#);
     }
