@@ -11,7 +11,7 @@ docker build -t parqtel:local .
 ```
 
 The Dockerfile uses a multi-stage build:
-- **Builder**: `rust:1.86-slim` with build dependencies
+- **Builder**: `rust:1.87-slim` with build dependencies
 - **Runtime**: `gcr.io/distroless/cc-debian12:nonroot` (~15 MB final image)
 
 ### Run
@@ -302,10 +302,10 @@ sudo journalctl -u parqtel -f
   - `parqtel_ingest_total` — ingestion throughput
   - `parqtel_query_duration_seconds` — query latency
   - `parqtel_blocks_total` — number of active blocks
-  - `parqtel_compaction_duration_seconds` — compaction performance
+  - `parqtel_storage_blocks` / `parqtel_storage_bytes` — compaction keeping up (unbounded growth = lagging compaction)
 
 ### Backup
 
 - Block files are immutable once written — safe to copy while running
-- Back up the `index.bin` file for fast recovery (otherwise it rebuilds from Parquet files)
+- Back up the `index.json` sidecars (per signal directory) for fast recovery (otherwise the index rebuilds from Parquet files)
 - Use filesystem snapshots or rsync for consistent backups

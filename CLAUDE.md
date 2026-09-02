@@ -69,6 +69,12 @@ Rust workspace with 14 crates:
 - `parqtel-ingest/proto/` — OTLP protobuf definitions (compiled via build.rs)
 - `rules/` — Example alert rules, recording rules, pipelines (YAML)
 
+## Embedded Web UI (`/ui`)
+
+Single-file vanilla-JS console at `parqtel-server/src/ui.html`, embedded via `include_str!`, pre-gzipped with ETag. **Zero external requests** (no CDNs/fonts/frameworks) — works air-gapped. Budget: ≤42 KB gzipped; keep it dependency-free.
+
+Features: Overview pane, deep-linkable hash URLs, Builder⇄Code metrics query builder, log facets, trace-grouped browse list, alert Evidence tab, rule editor (form + YAML), saved views, `?` shortcut help, WCAG AA contrast.
+
 ## Deployment Infrastructure
 
 ### Docker
@@ -144,9 +150,13 @@ Key env vars: `PARQTEL_BIND`, `PARQTEL_DATA_DIR`, `PARQTEL__STORAGE__COMPRESSION
 
 - Metrics blocks: 2h duration, up to 1M rows, Zstd compressed
 - Log blocks: 30min duration, up to 200K rows, Zstd compressed
+- Trace blocks: stored under `data/traces/` with their own `index.json`
+- Block index: persisted as `index.json` (JSON sidecar, atomic tmp+rename) per signal directory
 - Automatic compaction (hourly), configurable retention (default: 7d metrics, 3d logs)
-- Each block is a self-contained Parquet file
-- **In-memory buffer**: Data is immediately queryable via `MemoryBuffer` (HashMap indexed by metric name) before Parquet flush
+- Each block is a self-contained Parquet file (arrow/parquet 59; arrow2-era blocks unreadable — wipe data dir across that upgrade)
+- **In-memory buffer**: metrics and logs are immediately queryable via `MemoryBuffer` (HashMap indexed by metric name) before Parquet flush; **traces have no buffer** — queryable only after block flush
+- **Instant queries** (`/api/v1/query`) use a 1-minute lookback window
+- **service.name**: scanner + ingest buffer inject the dedicated `service_name` column back as the `service.name` label, so `{service.name="x"}` matchers work on both buffered and flushed data
 
 ## Performance Optimizations
 
@@ -175,4 +185,4 @@ Hot-path micro-benchmarks (ingest/flush/scan/query throughput, before/after): [d
 
 ## Dependencies (key)
 
-arrow2 0.17, parquet2 0.17, axum 0.7, tokio 1, prost 0.12, clap 4, figment 0.10, tracing 0.1, reqwest 0.12 (rustls), chrono 0.4
+arrow/parquet 59 (arrow2/parquet2 removed — RUSTSEC-2025-0038), axum 0.7, tokio 1, prost 0.12, clap 4, figment 0.10, tracing 0.1, reqwest 0.12 (rustls), chrono 0.4. MSRV: Rust 1.87 (workspace Cargo.toml; CI matrix also checks 1.86).

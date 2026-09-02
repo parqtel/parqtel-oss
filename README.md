@@ -9,7 +9,7 @@
   <a href="https://github.com/parqtel/parqtel-oss/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" alt="License"></a>
   <a href="https://ghcr.io/parqtel/parqtel-oss"><img src="https://img.shields.io/badge/docker-ghcr.io-blue?logo=docker" alt="Docker"></a>
   <a href="https://github.com/parqtel/parqtel-oss/pkgs/container/charts%2Fparqtel"><img src="https://img.shields.io/badge/helm-OCI-blue?logo=helm" alt="Helm"></a>
-  <img src="https://img.shields.io/badge/MSRV-1.86-orange?logo=rust" alt="MSRV">
+  <img src="https://img.shields.io/badge/MSRV-1.87-orange?logo=rust" alt="MSRV">
   <img src="https://img.shields.io/badge/unsafe-forbidden-success.svg" alt="Unsafe Forbidden">
   <a href="https://securityscorecards.dev/viewer/?uri=github.com/parqtel/parqtel-oss"><img src="https://api.securityscorecards.dev/projects/github.com/parqtel/parqtel-oss/badge" alt="OpenSSF Scorecard"></a>
   <a href="https://github.com/parqtel/parqtel-oss/security"><img src="https://img.shields.io/badge/trivy-scanned-blueviolet?logo=aqua" alt="Trivy Scanned"></a>
@@ -56,7 +56,7 @@ Parqtel is a single-binary observability backend written in Rust that ingests Op
 |------|--------|
 | **Onboarding** | [Getting Started](docs/GETTING_STARTED.md) • [Glossary](docs/GLOSSARY.md) • [FAQ](docs/FAQ.md) |
 | **Learning** | [Tutorials](docs/TUTORIALS.md) • [Use Cases](#common-use-cases) |
-| **Deep Dive** | [Architecture](docs/ARCHITECTURE.md) • [Configuration](docs/CONFIGURATION.md) • [Developer Guide](docs/DEVELOPER_GUIDE.md) • [MCP Integrations](docs/MCP.md) • [Query Functions](docs/QUERY_FUNCTIONS.md) • [CI/CD](docs/CI_CD.md) |
+| **Deep Dive** | [Architecture](docs/ARCHITECTURE.md) • [Configuration](docs/CONFIGURATION.md) • [Developer Guide](docs/DEVELOPER_GUIDE.md) • [MCP Integrations](docs/MCP.md) • [Query Functions](docs/QUERY_FUNCTIONS.md) • [UI/UX Plan](docs/UI_UX_IMPROVEMENT_PLAN.md) • [CI/CD](docs/CI_CD.md) |
 | **Operations** | [Deployment](docs/DEPLOYMENT.md) • [Troubleshooting](docs/TROUBLESHOOTING.md) • [Best Practices](docs/BEST_PRACTICES.md) • [Testing & Validation](docs/TESTING.md) |
 | **Community** | [Contributing](CONTRIBUTING.md) • [Code of Conduct](CODE_OF_CONDUCT.md) • [Security](SECURITY.md) |
 
@@ -75,7 +75,7 @@ Parqtel is a single-binary observability backend written in Rust that ingests Op
 
 ## Built-in Web UI
 
-Parqtel ships with a zero-dependency embedded web console at `/ui` — no separate frontend deployment needed.
+Parqtel ships with a zero-dependency embedded web console at `/ui` — no CDNs, no web fonts, no frameworks, works air-gapped. Single file, ~42 KB gzipped, served with gzip + ETag caching at zero per-request server cost.
 
 | Metrics | Logs |
 |---------|------|
@@ -85,7 +85,9 @@ Parqtel ships with a zero-dependency embedded web console at `/ui` — no separa
 |--------|--------|
 | ![Traces View](docs/screenshots/ui-traces.png) | ![Alerts View](docs/screenshots/ui-alerts.png) |
 
-**Features:** PromQL autocomplete, time range selection, drag-to-zoom histogram, severity filtering, trace waterfall, alert state machine with acknowledge/resolve actions.
+**Features:** Overview landing pane with per-signal stat cards, deep-linkable URLs (share the exact query + time range), guided metrics Builder⇄Code query toggle with live PromQL preview, log field facets, trace-grouped browse list + waterfall, alert stream with Evidence tab (incident-window metric chart + correlated logs), form-based rule editor with YAML escape hatch, saved views, keyboard shortcuts (`?` for the reference), WCAG AA contrast and reduced-motion support.
+
+The design system and phased modernization plan live in [docs/UI_UX_IMPROVEMENT_PLAN.md](docs/UI_UX_IMPROVEMENT_PLAN.md).
 
 ## Performance
 
@@ -163,7 +165,7 @@ Hot-path optimizations (non-blocking flushes, row-group pruning, label caching) 
 
 ### Prerequisites
 
-- Rust 1.86+ (for building from source)
+- Rust 1.87+ (for building from source)
 - Docker (for containerized deployment)
 
 ### Run from Source
@@ -215,6 +217,8 @@ curl -X POST http://localhost:9090/v1/metrics/json \
 # Query it back (Prometheus API)
 curl "http://localhost:9090/api/v1/query?query=http_requests_total"
 ```
+
+Instant queries look back 1 minute; older points become queryable via `/api/v1/query_range` after the block flush (default 2h blocks, checked every 5s). See [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md) for the full walkthrough.
 
 ## API Reference
 

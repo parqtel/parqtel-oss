@@ -1,6 +1,6 @@
 # Hot-Path Performance Optimizations
 
-Branch: `perf/hot-path-optimizations`
+Branch: `perf/hot-path-optimizations` (merged; optimizations are part of current `main`)
 Benchmark harness: `parqtel-server/examples/perf_bench.rs` (untracked-by-default; run with `cargo run --release -p parqtel-server --example perf_bench`)
 Raw results: `baseline_before.txt`, `results_after.txt` (3 runs each, median-of-5 per metric)
 

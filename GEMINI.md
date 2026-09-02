@@ -4,8 +4,8 @@
 Parqtel is an ultra-lightweight SRE observability engine designed to ingest OpenTelemetry (OTLP) metrics, logs, and traces and store them as compressed Apache Parquet files. It is written in Rust and focuses on minimal resource footprint, columnar storage efficiency, and PromQL compatibility.
 
 ### Key Technologies
-- **Language:** Rust (Tokio, Axum, Arrow2/Parquet2)
-- **Storage:** Apache Parquet with Zstd compression
+- **Language:** Rust 1.87+ (MSRV; CI also checks 1.86) — Tokio, Axum, arrow/parquet 59
+- **Storage:** Apache Parquet with Zstd compression (block-based, JSON index sidecars)
 - **APIs:** OTLP (Protobuf/JSON), Prometheus-compatible Query API, Grafana SimpleJSON
 - **Integrations:** Model Context Protocol (MCP) for AI-driven incident response (Slack, PagerDuty, Jira, etc.)
 
@@ -15,13 +15,13 @@ Parqtel is an ultra-lightweight SRE observability engine designed to ingest Open
 - `parqtel-query`: PromQL-compatible execution engine.
 - `parqtel-alert`: YAML-based alerting engine with state management.
 - `parqtel-pipeline`: Recording rules and stream processing.
-- `parqtel-server`: HTTP server and API handlers.
+- `parqtel-server`: HTTP server, API handlers, and embedded web UI (`src/ui.html`, zero dependencies, ≤42 KB gzipped).
 - `parqtel-mcp-*`: Specialized AI tool servers.
 
 ## Building and Running
 
 ### Prerequisites
-- Rust 1.85+
+- Rust 1.87+
 - Docker & Docker Compose
 
 ### Key Commands
@@ -31,6 +31,7 @@ Parqtel is an ultra-lightweight SRE observability engine designed to ingest Open
 - `make lint`: Run `cargo fmt` and `clippy`.
 - `make run`: Start the server locally.
 - `make dev-setup`: First-time setup (copies `.env.example` → `.env`, starts the full stack — Parqtel, Grafana, Prometheus, load-generator). MCP servers are opt-in.
+- `make local-rebuild`: Rebuild compose images from current source (required after source changes).
 
 ## Development Conventions
 - **Safety:** No `unsafe` code allowed (`#[forbid(unsafe_code)]`).
@@ -43,3 +44,9 @@ Parqtel is an ultra-lightweight SRE observability engine designed to ingest Open
 - **Load Testing:** Python scripts in `scripts/` (e.g., `load_gen.py`, `varying-load-test.py`).
 - **Performance Audit:** `scripts/run_perf_audit.sh` for comprehensive benchmarking.
 - **Resiliency:** E2E test `06_resilience_test.go` covers basic failure scenarios.
+
+## Storage Notes
+- Metrics/logs are queryable immediately via the in-memory buffer; traces only after block flush (no trace buffer).
+- Instant queries (`/api/v1/query`) use a 1-minute lookback window.
+- The `service.name` label is injected from a dedicated Parquet column, so `{service.name="x"}` matchers work on buffered and flushed data alike.
+- Blocks written by arrow2-era builds are unreadable after the arrow 59 migration — wipe the data dir when upgrading across that boundary.

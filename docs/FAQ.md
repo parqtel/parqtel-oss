@@ -14,7 +14,7 @@ Rust provides the memory safety and performance required for high-throughput ing
 ### Storage
 
 #### How do I back up my data?
-Since Parquet blocks are immutable once written, you can simply use `rsync` or cloud snapshots to back up the `data/` directory. Make sure to also include the `index.bin` file for faster startups after restoration.
+Since Parquet blocks are immutable once written, you can simply use `rsync` or cloud snapshots to back up the `data/` directory. Each signal directory also holds its `index.json` sidecar (block index) — include it for faster startups after restoration.
 
 #### Can I store data in S3/GCS?
 Currently, Parqtel stores data on the local filesystem. Support for S3-compatible object storage as a "cold tier" is on the roadmap.
@@ -23,6 +23,12 @@ Currently, Parqtel stores data on the local filesystem. Support for S3-compatibl
 
 #### Does Parqtel support scraping?
 No. Parqtel is a **push-based** backend. We recommend using the **OpenTelemetry Collector** to scrape your targets and export them to Parqtel via OTLP.
+
+#### Why doesn't my metric show up in instant queries?
+`/api/v1/query` uses a 1-minute lookback window. Send data stamped within the last 60 seconds, or use `/api/v1/query_range` with an explicit range covering your flushed blocks.
+
+#### Can I filter metrics by service?
+Yes — resource attributes like `service.name` are stored in dedicated Parquet columns and injected back as labels, so PromQL matchers like `http_requests_total{service.name="api"}` work for both freshly-buffered and flushed data.
 
 #### What happens if the server crashes?
 If WAL (Write-Ahead Log) is enabled, Parqtel will recover any data that wasn't yet written to a Parquet block upon restart.
