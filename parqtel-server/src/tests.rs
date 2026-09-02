@@ -925,3 +925,198 @@ async fn test_tail_sampling_drops_from_storage() {
     let kept = buffer2.scan_spans(0, i64::MAX).await;
     assert_eq!(kept.len(), 1, "error traces survive sampling");
 }
+
+#[tokio::test]
+async fn test_ast_composed_queries_end_to_end() {
+    let state = AppState::default_for_tests().await;
+
+    // Seed: two services, counters rising 1/sec, 10s interval, 100s.
+    let now_ns = 1_788_300_000_000_000_000i64;
+    let mut metrics = Vec::new();
+    for (svc, mult) in [("a", 1.0), ("b", 3.0)] {
+        for i in 0..11 {
+            metrics.push(parqtel_core::Metric {
+                name: "ast_requests".into(),
+                description: String::new(),
+                unit: String::new(),
+                kind: parqtel_core::MetricKind::Sum,
+                resource_attributes: parqtel_core::LabelSet::default(),
+                data_points: vec![parqtel_core::DataPoint {
+                    timestamp_ns: now_ns + i * 10_000_000_000,
+                    value: parqtel_core::MetricValue::Double(i as f64 * mult * 10.0),
+                    labels: parqtel_core::LabelSet::try_from_iter(vec![(
+                        "service".to_string(),
+                        svc.to_string(),
+                    )])
+                    .unwrap(),
+                }],
+            });
+        }
+    }
+    state
+        .inner
+        .ingestion_service
+        .ingest_metrics(metrics)
+        .await
+        .unwrap();
+
+    let t_end = now_ns + 100_000_000_000;
+
+    // 1. THE canonical RED pattern — was impossible before Phase 1A.
+    let expr = parqtel_query::parser::parse_expr("sum(rate(ast_requests[1m]))").unwrap();
+    let r = state
+        .inner
+        .query_executor
+        .execute_ast(&expr, t_end - 30_000_000_000, t_end, Some(15_000_000_000))
+        .await
+        .unwrap();
+    assert_eq!(r.series.len(), 1, "aggregated to one series");
+    let last = r.series[0].samples.last().unwrap();
+    // combined rate = 1 + 3 = 4/sec (± extrapolation slack)
+    assert!(
+        (last.value - 4.0).abs() < 0.8,
+        "sum(rate) ≈ 4.0, got {}",
+        last.value
+    );
+
+    // 2. Grouped aggregation with a nested range fn.
+    let expr =
+        parqtel_query::parser::parse_expr("sum by (service) (rate(ast_requests[1m]))").unwrap();
+    let r = state
+        .inner
+        .query_executor
+        .execute_ast(&expr, t_end - 30_000_000_000, t_end, Some(15_000_000_000))
+        .await
+        .unwrap();
+    assert_eq!(r.series.len(), 2, "one series per service");
+
+    // 3. Binary ratio.
+    let expr = parqtel_query::parser::parse_expr(
+        r#"sum(ast_requests{service="a"}) / sum(ast_requests{service="b"})"#,
+    )
+    .unwrap();
+    let r = state
+        .inner
+        .query_executor
+        .execute_ast(&expr, t_end, t_end + 1, None)
+        .await
+        .unwrap();
+    assert_eq!(r.series.len(), 1);
+    let v = r.series[0].samples[0].value;
+    assert!((v - 100.0 / 300.0).abs() < 1e-6, "a/b = 1/3, got {v}");
+
+    // 4. avg_over_time family.
+    let expr = parqtel_query::parser::parse_expr("avg_over_time(ast_requests[1m])").unwrap();
+    let r = state
+        .inner
+        .query_executor
+        .execute_ast(&expr, t_end - 1, t_end, None)
+        .await
+        .unwrap();
+    assert_eq!(r.series.len(), 2);
+
+    // 5. Comparison with bool.
+    let expr = parqtel_query::parser::parse_expr("ast_requests > bool 15").unwrap();
+    let r = state
+        .inner
+        .query_executor
+        .execute_ast(&expr, t_end, t_end + 1, None)
+        .await
+        .unwrap();
+    assert!(r
+        .series
+        .iter()
+        .all(|s| s.samples[0].value == 0.0 || s.samples[0].value == 1.0));
+
+    // 6. Vector matching with on().
+    let expr = parqtel_query::parser::parse_expr(
+        r#"sum(ast_requests{service="a"}) * on() sum(ast_requests{service="b"})"#,
+    )
+    .unwrap();
+    let r = state
+        .inner
+        .query_executor
+        .execute_ast(&expr, t_end, t_end + 1, None)
+        .await
+        .unwrap();
+    assert_eq!(r.series.len(), 1);
+    let v = r.series[0].samples[0].value;
+    assert!((v - 100.0 * 300.0).abs() < 1e-6, "product 30000, got {v}");
+}
+
+#[tokio::test]
+async fn test_ast_avg_over_time_range_bug() {
+    let state = AppState::default_for_tests().await;
+    let base = 1_788_400_000_000_000_000i64;
+    let mut metrics = Vec::new();
+    for i in 0..10 {
+        metrics.push(parqtel_core::Metric {
+            name: "gauge_x".into(),
+            description: String::new(),
+            unit: String::new(),
+            kind: parqtel_core::MetricKind::Gauge,
+            resource_attributes: parqtel_core::LabelSet::default(),
+            data_points: vec![parqtel_core::DataPoint {
+                timestamp_ns: base + i * 10_000_000_000,
+                value: parqtel_core::MetricValue::Double(i as f64),
+                labels: parqtel_core::LabelSet::try_from_iter(vec![("service".to_string(), "s1".to_string())]).unwrap(),
+            }],
+        });
+    }
+    state.inner.ingestion_service.ingest_metrics(metrics).await.unwrap();
+
+    let expr = parqtel_query::parser::parse_expr("avg_over_time(gauge_x[1m])").unwrap();
+    let end = base + 100_000_000_000;
+    let r = state
+        .inner
+        .query_executor
+        .execute_ast(&expr, end - 60_000_000_000, end, Some(30_000_000_000))
+        .await
+        .unwrap();
+    assert!(
+        !r.series.is_empty(),
+        "avg_over_time must return series; got {} (samples {:?})",
+        r.series.len(),
+        r.series.first().map(|s| &s.samples)
+    );
+}
+
+#[tokio::test]
+async fn test_ast_avg_over_time_block_backed() {
+    let state = AppState::default_for_tests().await;
+    let base = 1_788_400_000_000_000_000i64;
+    let mut metrics = Vec::new();
+    for i in 0..10 {
+        metrics.push(parqtel_core::Metric {
+            name: "gauge_y".into(),
+            description: String::new(),
+            unit: String::new(),
+            kind: parqtel_core::MetricKind::Gauge,
+            resource_attributes: parqtel_core::LabelSet::default(),
+            data_points: vec![parqtel_core::DataPoint {
+                timestamp_ns: base + i * 10_000_000_000,
+                value: parqtel_core::MetricValue::Double(i as f64),
+                labels: parqtel_core::LabelSet::try_from_iter(vec![("service".to_string(), "s1".to_string())]).unwrap(),
+            }],
+        });
+    }
+    state.inner.ingestion_service.ingest_metrics(metrics).await.unwrap();
+    // Force a block flush so the data lives on disk, not the buffer.
+    state.inner.ingestion_service.shutdown().await.unwrap();
+    // Give the async index-update task a beat to register the new block.
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let expr = parqtel_query::parser::parse_expr("avg_over_time(gauge_y[1m])").unwrap();
+    let end = base + 100_000_000_000;
+    let r = state
+        .inner
+        .query_executor
+        .execute_ast(&expr, end - 60_000_000_000, end, Some(30_000_000_000))
+        .await
+        .unwrap();
+    assert!(
+        !r.series.is_empty(),
+        "block-backed avg_over_time must return series; got {}",
+        r.series.len()
+    );
+}

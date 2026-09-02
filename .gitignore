@@ -33,3 +33,4 @@ __pycache__/
 *.log
 scripts/bench_stubs/
 scripts/bench_results/
+parqtel-server/data/
