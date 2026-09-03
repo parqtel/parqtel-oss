@@ -31,12 +31,18 @@ runs:
         targets: ${{ inputs.targets }}
 
     # prost-build shells out to protoc when compiling the OTLP protobufs;
-    # runner images no longer ship it preinstalled.
+    # runner images no longer ship it preinstalled. OS-aware install:
+    # apt on Linux runners, brew on macOS runners (the Release workflow
+    # builds darwin binaries on macOS hosts where apt-get does not exist).
     - name: Install protoc
       shell: bash
       run: |
-        sudo apt-get update -qq
-        sudo apt-get install -y -qq protobuf-compiler
+        if [[ "$RUNNER_OS" == "macOS" ]]; then
+          brew install protobuf 2>/dev/null || true
+        else
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq protobuf-compiler
+        fi
         protoc --version
 
     - uses: Swatinem/rust-cache@v2
