@@ -36,6 +36,12 @@ from opentelemetry.proto.resource.v1 import resource_pb2
 
 ADDR = sys.argv[1] if len(sys.argv) > 1 and not sys.argv[1].startswith("--") else "127.0.0.1:14317"
 QUICK = "--quick" in sys.argv
+# Multi-block seeding: --blocks N seeds N disjoint time windows (used with a
+# short block_duration server config so each pass flushes a block).
+MULTIBLOCK = 1
+for a in sys.argv:
+    if a.startswith("--blocks"):
+        MULTIBLOCK = int(a.split("=", 1)[1]) if "=" in a else 3
 
 # ── Profile knobs ────────────────────────────────────────────────────────────
 SERVICES = [
@@ -177,6 +183,7 @@ LOG_BODIES = {
 
 def gen_logs_batch(offset, count, now_ns):
     requests = []
+    batch_svcs = []
     for i in range(offset, offset + count):
         r = random.Random(i)
         svc = SERVICES[i % len(SERVICES)]
@@ -192,6 +199,7 @@ def gen_logs_batch(offset, count, now_ns):
         attrs = [kv("http.route", route), kv("http.method", METHODS[r.randrange(4)])]
         if i % 20 == 0:  # 5% trace-linked logs
             attrs.append(kv("trace_id", f"{i:032x}"))
+        batch_svcs.append(svc)
         requests.append(dict(
             time_unix_nano=now_ns - r.randrange(0, SAMPLES_PER_SERIES * INTERVAL_S) * 1_000_000_000,
             severity_text=sev,
@@ -199,11 +207,20 @@ def gen_logs_batch(offset, count, now_ns):
             body=common_pb2.AnyValue(string_value=body),
             attributes=attrs,
         ))
-    return logs_service_pb2.ExportLogsServiceRequest(
-        resource_logs=[dict(
-            resource=resource_pb2.Resource(attributes=[kv("service.name", svc)]),
-            scope_logs=[dict(scope=dict(name="bench-gen"), log_records=requests)],
-        )])
+    # One ResourceLogs PER SERVICE (OTLP semantics: resource = the emitting
+    # entity; a single resource for a 25K-record batch collapsed all
+    # records onto one service).
+    by_svc = {}
+    for rec, s in zip(requests, batch_svcs):
+        by_svc.setdefault(s, []).append(rec)
+    resource_logs = [
+        dict(
+            resource=resource_pb2.Resource(attributes=[kv("service.name", s)]),
+            scope_logs=[dict(scope=dict(name="bench-gen"), log_records=recs)],
+        )
+        for s, recs in by_svc.items()
+    ]
+    return logs_service_pb2.ExportLogsServiceRequest(resource_logs=resource_logs)
 
 
 # ── TRACES ───────────────────────────────────────────────────────────────────
@@ -264,7 +281,17 @@ def gen_trace(idx, now_ns):
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
-    now_ns = time.time_ns()
+    for pass_no in range(MULTIBLOCK):
+        # Disjoint windows: each pass shifts data back one full span so
+        # consecutive flush windows never overlap.
+        shift_ns = pass_no * (SAMPLES_PER_SERIES * INTERVAL_S + 60) * 1_000_000_000
+        seed_once(now_ns_for_pass=lambda base: base - shift_ns)
+    print(f"[gen] multiblock passes: {MULTIBLOCK}")
+
+
+def seed_once(now_ns_for_pass):
+    base_now_ns = time.time_ns()
+    now_ns = now_ns_for_pass(base_now_ns)
     ch = grpc.insecure_channel(ADDR)
     grpc.channel_ready_future(ch).result(timeout=15)
     mstub = metrics_service_pb2_grpc.MetricsServiceStub(ch)

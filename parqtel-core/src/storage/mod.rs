@@ -72,6 +72,7 @@ mod tests {
             size_bytes: 100,
             metric_names: HashSet::from(["m1".into()]),
             label_names: HashSet::from(["l1".into()]),
+            label_values: Default::default(),
             signal_type: SignalType::Metrics,
         };
         let results = Scanner::scan(vec![b1], "m1".into(), 0, 300).await.unwrap();
@@ -89,6 +90,7 @@ mod tests {
             size_bytes: 100,
             metric_names: HashSet::new(),
             label_names: HashSet::new(),
+            label_values: Default::default(),
             signal_type: SignalType::Logs,
         };
         let results = Scanner::scan_logs(vec![b1], 0, 300).await.unwrap();
@@ -108,6 +110,7 @@ mod tests {
                 size_bytes: 100,
                 metric_names: HashSet::from(["m1".into()]),
                 label_names: HashSet::from(["l1".into()]),
+                label_values: Default::default(),
                 signal_type: SignalType::Metrics,
             })
             .unwrap();
@@ -130,6 +133,7 @@ mod tests {
                 size_bytes: 100,
                 metric_names: HashSet::from(["m1".into()]),
                 label_names: HashSet::new(),
+                label_values: Default::default(),
                 signal_type: SignalType::Metrics,
             })
             .unwrap();
@@ -142,6 +146,7 @@ mod tests {
                 size_bytes: 100,
                 metric_names: HashSet::from(["m2".into()]),
                 label_names: HashSet::new(),
+                label_values: Default::default(),
                 signal_type: SignalType::Metrics,
             })
             .unwrap();
@@ -165,6 +170,7 @@ mod tests {
                 size_bytes: 100,
                 metric_names: HashSet::from(["m1".into()]),
                 label_names: HashSet::new(),
+                label_values: Default::default(),
                 signal_type: SignalType::Metrics,
             })
             .unwrap();
@@ -186,6 +192,7 @@ mod tests {
                 size_bytes: 500,
                 metric_names: HashSet::from(["m1".into(), "m2".into()]),
                 label_names: HashSet::from(["env".into()]),
+                label_values: Default::default(),
                 signal_type: SignalType::Metrics,
             })
             .unwrap();
@@ -228,6 +235,7 @@ mod tests {
             size_bytes: 100,
             metric_names: HashSet::from(["cpu".into()]),
             label_names: HashSet::from(["host".into()]),
+            label_values: Default::default(),
             signal_type: SignalType::Metrics,
         };
         let points = Scanner::scan(vec![meta], "cpu".into(), 0, 3000)
@@ -264,6 +272,7 @@ mod tests {
             size_bytes: 100,
             metric_names: HashSet::new(),
             label_names: HashSet::from(["k".into()]),
+            label_values: Default::default(),
             signal_type: SignalType::Logs,
         };
         let logs = Scanner::scan_logs(vec![meta], 0, 2000).await.unwrap();
@@ -311,6 +320,7 @@ mod tests {
                 size_bytes: fs::metadata(&p1).unwrap().len(),
                 metric_names: HashSet::from(["cpu".into()]),
                 label_names: HashSet::new(),
+                label_values: Default::default(),
                 signal_type: SignalType::Metrics,
             })
             .unwrap();
@@ -323,6 +333,7 @@ mod tests {
                 size_bytes: fs::metadata(&p2).unwrap().len(),
                 metric_names: HashSet::from(["cpu".into()]),
                 label_names: HashSet::new(),
+                label_values: Default::default(),
                 signal_type: SignalType::Metrics,
             })
             .unwrap();
@@ -358,6 +369,7 @@ mod tests {
                 size_bytes: 100,
                 metric_names: HashSet::from(["cpu".into()]),
                 label_names: HashSet::new(),
+                label_values: Default::default(),
                 signal_type: SignalType::Metrics,
             })
             .unwrap();
@@ -370,6 +382,7 @@ mod tests {
                 size_bytes: 100,
                 metric_names: HashSet::from(["cpu".into()]),
                 label_names: HashSet::new(),
+                label_values: Default::default(),
                 signal_type: SignalType::Metrics,
             })
             .unwrap();
