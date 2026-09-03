@@ -481,6 +481,40 @@ pub async fn query_logs(
         || q_trim.is_empty();
     if !selector_shape || params.severity_min.is_some() || params.search.is_some() {
         // ParqtelQL path (severity_min/search params fold into clauses).
+        // Boolean shapes (OR / NOT / grouping) take the predicate-tree path.
+        match parqtel_query::logql::parse_predicate(params.query.trim()) {
+            Ok(pred)
+                if matches!(
+                    &pred,
+                    parqtel_query::logql::Predicate::Or(_)
+                        | parqtel_query::logql::Predicate::Not(_)
+                ) =>
+            {
+                let result = state
+                    .inner
+                    .query_executor
+                    .search_logs_predicate(start_ns, end_ns, &pred, limit, order_desc)
+                    .await;
+                return match result {
+                    Ok(result) => (
+                        StatusCode::OK,
+                        Json(json!({
+                            "status": "success",
+                            "data": {
+                                "logs": result.logs,
+                                "total_matched": result.total_logs_count,
+                                "truncated": result.total_logs_count > limit,
+                                "volume_summary": result.volume_summary,
+                                "language": "parqtelql",
+                            }
+                        })),
+                    )
+                        .into_response(),
+                    Err(e) => map_error(e),
+                };
+            }
+            _ => {}
+        }
         let mut q = parqtel_query::logql::parse_search(&params.query);
         if let Some(min) = &params.severity_min {
             q.clauses.push(parqtel_query::logql::Clause::SeverityMin(
@@ -564,110 +598,6 @@ fn severity_word(min: i32) -> &'static str {
         i if i >= 9 => "INFO",
         i if i >= 5 => "DEBUG",
         _ => "TRACE",
-    }
-}
-
-/// Applies a ParqtelQL SearchQuery to a span (service/status/duration/
-/// kind/name/attr.* predicates).
-fn span_matches(sq: &parqtel_query::logql::SearchQuery, s: &parqtel_core::Span) -> bool {
-    use parqtel_query::logql::Clause;
-
-    for clause in &sq.clauses {
-        let ok = match clause {
-            Clause::Eq { field, value } => span_field(s, field)
-                .map(|v| v.eq_ignore_ascii_case(value))
-                .unwrap_or(false),
-            Clause::Ne { field, value } => span_field(s, field)
-                .map(|v| !v.eq_ignore_ascii_case(value))
-                .unwrap_or(true),
-            Clause::Re { field, regex } => {
-                let re = regex::Regex::new(regex).ok();
-                match (span_field(s, field), re) {
-                    (Some(v), Some(re)) => re.is_match(&v),
-                    _ => false,
-                }
-            }
-            Clause::Cmp { field, op, value } => {
-                // duration in ms; other numeric fields via attributes.
-                let n = if field == "duration" || field == "duration_ms" {
-                    Some(s.duration_ns() as f64 / 1_000_000.0)
-                } else {
-                    span_field(s, field).and_then(|v| v.parse::<f64>().ok())
-                };
-                match n {
-                    Some(n) => match op {
-                        parqtel_query::logql::CmpOp::Gt => n > *value,
-                        parqtel_query::logql::CmpOp::Ge => n >= *value,
-                        parqtel_query::logql::CmpOp::Lt => n < *value,
-                        parqtel_query::logql::CmpOp::Le => n <= *value,
-                    },
-                    None => false,
-                }
-            }
-            Clause::Range { field, min, max } => {
-                if field == "duration" || field == "duration_ms" {
-                    let d = s.duration_ns() as f64 / 1_000_000.0;
-                    d >= *min && d <= *max
-                } else {
-                    false
-                }
-            }
-            Clause::Exists { field } => span_field(s, field).is_some(),
-            Clause::SeverityMin(_) => true, // n/a for spans
-        };
-        if !ok {
-            return false;
-        }
-    }
-    for term in &sq.terms {
-        let name = s.name.to_lowercase();
-        let matched = name.contains(&term.text)
-            || s.attributes
-                .iter()
-                .any(|(_, v)| v.to_lowercase().contains(&term.text));
-        if term.negate {
-            if matched {
-                return false;
-            }
-        } else if !matched {
-            return false;
-        }
-    }
-    true
-}
-
-/// Resolves a ParqtelQL field to a span value.
-fn span_field(s: &parqtel_core::Span, field: &str) -> Option<String> {
-    match field {
-        "service" | "service.name" => s.attributes.get("service.name").map(|v| v.to_string()),
-        "name" | "operation" | "operation_name" => Some(s.name.clone()),
-        "status" => Some(
-            match s.status.code {
-                2 => "ERROR",
-                1 => "OK",
-                _ => "UNSET",
-            }
-            .to_string(),
-        ),
-        "kind" => Some(
-            match s.kind {
-                1 => "internal",
-                2 => "server",
-                3 => "client",
-                4 => "producer",
-                5 => "consumer",
-                _ => "unspecified",
-            }
-            .to_string(),
-        ),
-        "trace_id" => Some(hex::encode(s.trace_id)),
-        _ => {
-            if let Some(key) = field.strip_prefix("attr.") {
-                s.attributes.get(key).map(|v| v.to_string())
-            } else {
-                s.attributes.get(field).map(|v| v.to_string())
-            }
-        }
     }
 }
 
@@ -897,8 +827,8 @@ pub async fn search_traces(
     } else {
         Some(trace_id)
     };
-    // ParqtelQL span predicates (Phase 1B): service=, status=ERROR,
-    // duration>500, kind=server, attr.* — applied post-scan.
+    // ParqtelQL span predicates (Phase 2): pushed down INTO the scan
+    // pipeline (before the result cap), so q-filters don't lose matches.
     let search = params
         .get("q")
         .and_then(|v| v.as_str())
@@ -908,15 +838,11 @@ pub async fn search_traces(
     match state
         .inner
         .query_executor
-        .query_traces(start_ns, end_ns, filter, 200)
+        .query_traces_filtered(start_ns, end_ns, filter, 200, search.as_ref())
         .await
     {
         Ok(spans) => {
-            // Apply ParqtelQL span predicates when a `q` was provided.
-            let spans: Vec<_> = match &search {
-                Some(sq) => spans.into_iter().filter(|s| span_matches(sq, s)).collect(),
-                None => spans,
-            };
+            // Predicates already applied in the scan (push-down).
             let tid = if let Some(first) = spans.first() {
                 hex::encode(first.trace_id)
             } else {
@@ -1044,5 +970,89 @@ pub async fn delete_saved_search(
             Json(json!({ "status": "error", "error": "saved search not found" })),
         )
             .into_response()
+    }
+}
+
+// ═══ Unified pipeline search (Phase 2) ═══
+
+/// POST /v1/search — executes a ParqtelQL pipeline:
+/// `fetch logs | filter <pql> | parse ".." as f | stats ... | correlate ...`
+#[derive(Deserialize)]
+pub struct PipelineRequest {
+    pub query: String,
+    pub start: f64,
+    pub end: f64,
+}
+
+pub async fn run_pipeline_search(
+    State(state): State<AppState>,
+    axum::Json(req): axum::Json<PipelineRequest>,
+) -> Response {
+    let pipeline = match parqtel_query::pipeline::parse_pipeline(&req.query) {
+        Ok(p) => p,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"status": "error", "error": e.to_string()})),
+            )
+                .into_response()
+        }
+    };
+    let start_ns = (req.start * 1_000_000_000.0) as i64;
+    let end_ns = (req.end * 1_000_000_000.0) as i64;
+
+    match state
+        .inner
+        .query_executor
+        .execute_pipeline(&pipeline, start_ns, end_ns)
+        .await
+    {
+        Ok(result) => {
+            let body = match result {
+                parqtel_query::pipeline_exec::PipelineResult::Rows(rows) => json!({
+                    "type": "rows",
+                    "rows": rows
+                        .iter()
+                        .map(|r| serde_json::Value::Object(
+                            r.fields.iter()
+                                .map(|(k, v)| (k.clone(), v.clone()))
+                                .collect()
+                        ))
+                        .collect::<Vec<_>>(),
+                }),
+                parqtel_query::pipeline_exec::PipelineResult::Table {
+                    columns,
+                    rows,
+                    timeseries,
+                } => {
+                    let mut obj = json!({
+                        "type": "table",
+                        "columns": columns,
+                        "rows": rows,
+                    });
+                    if let Some(ts) = timeseries {
+                        if let Some(o) = obj.as_object_mut() {
+                            o.insert(
+                                "timeseries".into(),
+                                json!({
+                                    "timestamps": ts.timestamps,
+                                    "series": ts.series.iter().map(|(fields, values)| json!({
+                                        "fields": fields,
+                                        "values": values,
+                                    })).collect::<Vec<_>>(),
+                                }),
+                            );
+                        }
+                    }
+                    obj
+                }
+            };
+            (
+                StatusCode::OK,
+                Json(json!({ "status": "success", "data": body })),
+            )
+                .into_response()
+        }
+        Err(e) => map_error(e),
     }
 }
