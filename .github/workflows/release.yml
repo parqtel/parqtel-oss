@@ -138,6 +138,14 @@ jobs:
       security-events: write
     steps:
       - uses: actions/checkout@v4
+      # GHCR packages are private by default: the scan pulls by digest from
+      # the registry and needs credentials even inside the same workflow.
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
       - name: Run Trivy vulnerability scanner
         uses: aquasecurity/trivy-action@master
         with:
