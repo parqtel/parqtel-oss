@@ -101,6 +101,8 @@ def run_suite():
         ("pql_trace_dur", "/v1/traces/search", {"start": start, "end": now, "q": "duration>100"}),
     ]
 
+    results = {}
+
     # Pipeline queries run over POST /v1/search (different shape — runner).
     def pipeline_query(name, query):
         import urllib.request as _r
@@ -134,7 +136,6 @@ def run_suite():
     pipeline_query("pipe_filter_or_stats", "fetch logs | filter service=api-gateway OR severity>=ERROR | stats count()")
     pipeline_query("pipe_parse_p95", r'fetch logs | parse "duration_ms=(\d+)" as dur | stats p95(dur) by service')
 
-    results = {}
     for name, path, params in suite:
         lats, series, err = [], None, None
         for _ in range(RUNS_PER_QUERY):
