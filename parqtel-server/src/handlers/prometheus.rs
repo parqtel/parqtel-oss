@@ -226,7 +226,7 @@ pub async fn query_instant(
     let plan = match QueryPlan::new_full(
         metric_name,
         matchers,
-        (now * 1_000_000_000.0) as i64 - 60_000_000_000, // 1 min window
+        (now * 1_000_000_000.0) as i64 - state.inner.config.query.lookback_delta_ns,
         (now * 1_000_000_000.0) as i64,
         None,
         state.inner.config.query.max_series,
