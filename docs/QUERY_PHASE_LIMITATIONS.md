@@ -166,3 +166,50 @@ the obvious next lever and is scheduled with the AST phase work.
 - Trace predicates: 8-9ms (2× over the unfiltered 4-8ms; post-scan on
   200 spans).
 - Legacy paths unchanged (no regression vs phase1a).
+
+---
+
+## Phase 2 — Pipeline engine + boolean search + trace push-down (baseline: phase2.json)
+
+### Shipped
+
+- Pipeline: `fetch logs | filter | parse ".. as f" | stats [by] [interval=]
+  | limit | correlate traces window=` via POST /v1/search
+- Boolean predicate trees (OR/AND/NOT/parens) for search; AND-only
+  queries stay flat-shape compatible
+- Trace predicates pushed down INTO the scan (before the result cap;
+  filtered scan cap raised to 10k spans)
+
+### Correctness findings (fixed)
+
+| # | Finding | Fix |
+|---|---|---|
+| P2-F1 | Tree-parser field-clause index arithmetic consumed Term+3 (op+value+1 extra), cascading into misparse → lenient fallback for AND queries with field clauses | normalized the Term/Op/Value advance to match the flat parser |
+| P2-F2 | `by service` grouped nothing — row fields carry `service.name`, no alias | rows expose a `service` alias for grouping/filtering |
+| P2-F3 | stats-then-filter ran (stats returns early) instead of erroring | stage-order validated at parse time |
+
+### Known limitations carried forward
+
+1. **Pipeline fetch targets**: metrics/traces parse but materialize empty
+   rows — logs-first scope this phase; metrics rows need series-to-row
+   mapping and traces need span-to-row mapping (both mechanical).
+2. **Pipeline row cost**: full-scan materialization (200K logs → rows →
+   stages) runs 2× a limited log query (341-423ms p50) — push-down of
+   limit/filter into the scan (like query_traces_filtered) is the next
+   optimization.
+3. **correlate is trace_id-only** — no service+window fallback join yet;
+   window= parses but is unused in the current join.
+4. **`interval` buckets are aligned to ts/interval** — no
+   timestamp-snapped buckets; series values include Null gaps.
+5. **Pipeline filter reuses row-level predicate evaluation** — SeverityMin
+   needs a severity_number field on rows (present for logs fetch).
+6. **Saved searches are not yet pipeline-aware in the UI** — API accepts
+   any query text; UI surfacing is commercial-scope.
+
+### Performance (phase2.json)
+
+- Pipelines: 341-423ms p50 (count-by-service 362ms, filter+OR 341ms,
+  parse+p95 423ms) at 200K logs — dominated by row materialization
+- Trace predicates: 200 rows at 16ms (previously 8 rows post-scan —
+  push-down fixed both coverage AND kept latency ~2× the unfiltered scan)
+- Log/traces/metrics suites: no regression vs phase1b
