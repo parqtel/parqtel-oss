@@ -300,3 +300,20 @@ Review plan Wave 2, approved recommendations applied:
 4. **fetch targets ignore their own limit before stats** — a `limit`
    stage before `stats` truncates rows (correct), but the fetch itself
    is unbounded; a fetch-level cap belongs with the row-cost fix.
+
+---
+
+## Wave 4 — Polish + retirement-decision data (baseline: wave4.json; corpus: 98/98)
+
+| Item | Resolution |
+|---|---|
+| G13 body prefix | `body:value` / `body=value` use contains semantics (case-insensitive) — the unambiguous form of bare-term search; dispatch heuristic documented in-query via the explicit prefix |
+| G14 colon-in-values | `:` operator now scans the value term to whitespace without breaking on colons — `url:https://x:8443/path` parses as url Eq "https://x:8443/path" (verified exact); plain `field:value` unchanged |
+| G15 interval buckets | wall-clock-snapped (div_euclid) bucket timestamps; per-bucket gaps explicit |
+| G16 | scoped down per review: subquery/pipeline caching deferred until usage exists; fetch-metrics row cost carried with its optimization path |
+| Retirement analysis | docs/LEGACY_ENGINE_RETIREMENT.md: corpus routing audit (57 AST / 41 legacy, all legacy-routed cases parse clean, both engines aligned by Wave 1), recommendation = flag-gated default flip now + deletion after one release; execution checklist included |
+
+### Benchmark (wave4.json)
+All 31 queries green; every measurement within noise of wave3 (no
+regression gate tripped). Corpus 98/98; routing audit tests added as
+permanent CI guards.

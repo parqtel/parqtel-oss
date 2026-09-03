@@ -209,29 +209,28 @@ fn finish_stats(
     }
 
     if let Some(interval) = interval_ns {
-        // Time-bucketed output.
+        // G15: wall-clock-snapped buckets — timestamps aligned to interval
+        // boundaries from the epoch (0, 5m, 10m, ...), and sparse gaps
+        // between observed buckets stay explicit.
+        let interval = interval.max(1);
+        let snap = |ts: i64| ts.div_euclid(interval) * interval;
         let mut bucket_ids: BTreeMap<i64, ()> = BTreeMap::new();
         for row in groups.values().flat_map(|(_, rs)| rs.iter()) {
-            let b = row.ts_ns() / interval.max(1);
-            bucket_ids.insert(b, ());
+            bucket_ids.insert(snap(row.ts_ns()), ());
         }
-        let timestamps: Vec<i64> = bucket_ids.keys().map(|b| b * interval.max(1)).collect();
+        let timestamps: Vec<i64> = bucket_ids.keys().copied().collect();
 
         let mut series = Vec::new();
         for (key, group_rows) in groups.values() {
             // Recompute per-bucket aggregates directly.
             let mut bucket_rows: BTreeMap<i64, Vec<&Row>> = BTreeMap::new();
             for row in group_rows.iter() {
-                bucket_rows
-                    .entry(row.ts_ns() / interval.max(1))
-                    .or_default()
-                    .push(row);
+                bucket_rows.entry(snap(row.ts_ns())).or_default().push(row);
             }
             let mut values: Vec<Vec<Json>> = Vec::with_capacity(timestamps.len());
             for ts in &timestamps {
-                let b = ts / interval.max(1);
                 let empty: Vec<&Row> = vec![];
-                let bucket = bucket_rows.get(&b).unwrap_or(&empty);
+                let bucket = bucket_rows.get(ts).unwrap_or(&empty);
                 let mut vals = Vec::with_capacity(aggs.len());
                 for agg in aggs {
                     vals.push(compute_agg(agg, bucket));

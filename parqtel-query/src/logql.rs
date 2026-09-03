@@ -564,8 +564,27 @@ fn tokenize(input: &str) -> Result<Vec<Tok>> {
                 toks.push(Tok::Op(op));
             }
             ':' => {
+                // G14: `:` separates field from value. The value term may
+                // itself contain colons (URLs, times) — scan it to the
+                // next whitespace/quote without breaking on ':'.
                 toks.push(Tok::Op(FieldOp::Colon));
-                i += 1
+                i += 1;
+                while i < chars.len() && chars[i].is_whitespace() {
+                    i += 1;
+                }
+                if i < chars.len() && chars[i] != '"' {
+                    let start = i;
+                    while i < chars.len()
+                        && !chars[i].is_whitespace()
+                        && !matches!(chars[i], '(' | ')' | '"')
+                    {
+                        i += 1;
+                    }
+                    if i > start {
+                        let t: String = chars[start..i].iter().collect();
+                        push_term_like(&mut toks, t);
+                    }
+                }
             }
             _ => {
                 let start = i;
@@ -589,6 +608,16 @@ fn tokenize(input: &str) -> Result<Vec<Tok>> {
         }
     }
     Ok(toks)
+}
+
+/// Keyword-aware term push (AND/OR/NOT classification).
+fn push_term_like(toks: &mut Vec<Tok>, t: String) {
+    match t.to_ascii_uppercase().as_str() {
+        "AND" => toks.push(Tok::And),
+        "OR" => toks.push(Tok::Or),
+        "NOT" => toks.push(Tok::Not),
+        _ => toks.push(Tok::Term(t)),
+    }
 }
 
 // ── Matching ────────────────────────────────────────────────────────────────
@@ -633,6 +662,15 @@ pub fn log_matches(
                 let min = severity_rank(sev).unwrap_or(9);
                 log.severity_number >= min
             }
+            // G13: `body=` / `body:` search WITHIN the body (contains,
+            // case-insensitive) — the explicit body prefix is the
+            // unambiguous form of bare-term search.
+            Eq { field, value } if field == "body" => field_value(field, log, extra)
+                .map(|v| v.to_lowercase().contains(&value.to_lowercase()))
+                .unwrap_or(false),
+            Ne { field, value } if field == "body" => field_value(field, log, extra)
+                .map(|v| !v.to_lowercase().contains(&value.to_lowercase()))
+                .unwrap_or(true),
             Eq { field, value } => field_value(field, log, extra)
                 .map(|v| v == *value)
                 .unwrap_or(false),
@@ -952,6 +990,7 @@ mod tests {
 
     #[test]
     fn colon_syntax_equals() {
+        // (unchanged: field:value with a space after the colon)
         let q = parse_search("service:api");
         let l = log("x", "INFO", 9, "api");
         assert!(log_matches(&q, &l, &HashMap::new()));
@@ -1117,6 +1156,49 @@ mod tests {
         assert!(!q.clauses.is_empty());
         let q2 = parse_search("{}");
         assert!(q2.is_empty());
+    }
+
+    #[test]
+    fn body_prefix_is_contains() {
+        // G13: explicit body: prefix → contains semantics (not full equality).
+        let q = parse_search("body:timeout");
+        let l = log("upstream timeout after 5000ms", "ERROR", 17, "api");
+        assert!(log_matches(&q, &l, &HashMap::new()));
+        let q2 = parse_search("body=timeout");
+        assert!(log_matches(&q2, &l, &HashMap::new()));
+        let q3 = parse_search("body:nosuchword");
+        assert!(!log_matches(&q3, &l, &HashMap::new()));
+    }
+
+    #[test]
+    fn url_values_keep_colons() {
+        // G14: colons INSIDE values stay part of the value term.
+        let q = parse_search("url:https://api.example.com:8443/health");
+        assert!(
+            q.clauses.iter().any(|c| matches!(
+                c,
+                Clause::Eq { field, value }
+                    if field == "url"
+                        && value == "https://api.example.com:8443/health"
+            )),
+            "clauses={:?}",
+            q.clauses
+        );
+    }
+
+    #[test]
+    fn colon_operator_still_recognized() {
+        // `field: value` (space) and `field:value ` (end) remain operators.
+        let q = parse_search("service: api");
+        assert!(q
+            .clauses
+            .iter()
+            .any(|c| matches!(c, Clause::Eq { field, .. } if field == "service")));
+        let q2 = parse_search("service:api");
+        assert!(q2
+            .clauses
+            .iter()
+            .any(|c| matches!(c, Clause::Eq { field, .. } if field == "service")));
     }
 
     #[test]
