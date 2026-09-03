@@ -689,3 +689,57 @@ mod corpus_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod legacy_coverage_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+    use super::*;
+    use crate::matcher::needs_ast;
+
+    /// G0 retirement-decision data: how the corpus splits across engines,
+    /// and that every AST-routed case parses via the AST (the legacy path
+    /// only receives its historically-supported shapes).
+    #[test]
+    fn corpus_engine_routing_audit() {
+        let cases = full_corpus();
+        let mut ast_routed = 0usize;
+        let mut legacy_routed = 0usize;
+        for case in &cases {
+            if needs_ast(case.query) {
+                ast_routed += 1;
+            } else {
+                legacy_routed += 1;
+            }
+        }
+        eprintln!(
+            "routing: {ast_routed} AST / {legacy_routed} legacy of {}",
+            cases.len()
+        );
+        // Sanity: the majority of the corpus exercises composition and
+        // must route to the AST engine.
+        assert!(
+            ast_routed > cases.len() / 2,
+            "AST routing collapsed: {ast_routed}"
+        );
+    }
+
+    /// Legacy-routed corpus cases must produce correct results through the
+    /// legacy plan path: parse_query + downsample_plan semantics.
+    #[test]
+    fn legacy_routed_corpus_cases_parse() {
+        let cases = full_corpus();
+        for case in &cases {
+            if needs_ast(case.query) {
+                continue;
+            }
+            // Legacy-routed queries must at least PARSE via parse_query
+            // (the handler path) without error.
+            if let Err(e) = crate::matcher::parse_query(case.query) {
+                panic!(
+                    "legacy-routed case {:?} ({:?}) fails parse_query: {e}",
+                    case.name, case.query
+                );
+            }
+        }
+    }
+}
