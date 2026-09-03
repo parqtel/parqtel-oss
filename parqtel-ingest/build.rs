@@ -36,7 +36,7 @@ fn main() -> Result<()> {
         tonic_build::configure()
             .build_client(true) // used by gRPC integration tests
             .build_server(true)
-            .compile_with_config(
+            .compile_protos_with_config(
                 prost_config,
                 &[
                     metrics_proto,

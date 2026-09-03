@@ -181,7 +181,7 @@ jobs:
       - name: Login to GHCR
         run: echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ${{ env.REGISTRY }} -u ${{ github.actor }} --password-stdin
       - name: Package chart
-        run: helm package deploy/charts/parqtel --version ${{ needs.docker-publish.outputs.version }} --app-version ${{ needs.docker-publish.outputs.version }}
+        run: helm package charts/parqtel --version ${{ needs.docker-publish.outputs.version }} --app-version ${{ needs.docker-publish.outputs.version }}
       - name: Push chart
         run: helm push parqtel-*.tgz oci://${{ env.REGISTRY }}/${{ github.repository_owner }}/charts
 

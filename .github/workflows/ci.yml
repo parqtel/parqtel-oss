@@ -41,7 +41,7 @@ jobs:
         with:
           filters: |
             helm:
-              - 'deploy/charts/**'
+              - 'charts/**'
               - 'compose/**'
             docker:
               - 'Dockerfile'
@@ -167,13 +167,13 @@ jobs:
         with:
           version: v3.16.0
       - name: Lint chart (default)
-        run: helm lint deploy/charts/parqtel
+        run: helm lint charts/parqtel
       - name: Lint chart (minimal)
-        run: helm lint deploy/charts/parqtel -f deploy/charts/parqtel/ci/minimal-values.yaml
+        run: helm lint charts/parqtel -f charts/parqtel/ci/minimal-values.yaml
       - name: Lint chart (full)
-        run: helm lint deploy/charts/parqtel -f deploy/charts/parqtel/ci/full-values.yaml
+        run: helm lint charts/parqtel -f charts/parqtel/ci/full-values.yaml
       - name: Template validation
-        run: helm template test deploy/charts/parqtel --debug > /dev/null
+        run: helm template test charts/parqtel --debug > /dev/null
 
   # ── Docker Build + Smoke Test (only when image inputs change) ─────────────
   docker:
