@@ -252,12 +252,33 @@ impl<'a> Evaluator<'a> {
             "absent" => self.eval_absent(call, ctx),
             "histogram_quantile" => self.eval_histogram_quantile(call, ctx),
             "timestamp" => {
-                // last sample's timestamp per series
-                let v = self.eval_selector_like(&call.args[0], ctx)?;
-                let _ = v;
+                // Per-series timestamp of the last sample (seconds since
+                // epoch). InstantVector retains values, not sample times —
+                // tracked for the next tranche (needs per-sample time
+                // retention in the selector path).
                 Err(Error::Validation(
-                    "timestamp() not supported in this phase".into(),
+                    "timestamp() requires per-sample time retention; tracked for the next tranche"
+                        .into(),
                 ))
+            }
+            // Date helpers: operate on the evaluation timestamp.
+            "hour" | "day_of_week" | "day_of_month" | "day_of_month_iso" | "day_of_year"
+            | "days_in_month" | "month" | "year" => {
+                let secs = ctx.ts_ns as f64 / 1e9;
+                let dt = chrono::DateTime::from_timestamp(secs as i64, 0).unwrap_or_default();
+                use chrono::{Datelike, Timelike};
+                let v = match call.name.as_str() {
+                    "hour" => dt.hour() as f64,
+                    "day_of_week" => dt.weekday().num_days_from_sunday() as f64,
+                    "day_of_month" | "day_of_month_iso" => dt.day() as f64,
+                    "day_of_year" => dt.ordinal() as f64,
+                    "days_in_month" => days_in_month(dt.year(), dt.month()) as f64,
+                    "month" => dt.month() as f64,
+                    _ => dt.year() as f64,
+                };
+                Ok(InstantVector {
+                    series: vec![(LabelSet::default(), v)],
+                })
             }
             "sort" | "sort_desc" => {
                 let mut v = self.eval(&call.args[0], ctx)?;
@@ -274,10 +295,6 @@ impl<'a> Evaluator<'a> {
                 "unknown function {other:?} (Phase 1A supports the documented subset)"
             ))),
         }
-    }
-
-    fn eval_selector_like(&self, expr: &Expr, ctx: EvalContext) -> Result<InstantVector> {
-        self.eval(expr, ctx)
     }
 
     fn eval_absent(&self, call: &CallExpr, ctx: EvalContext) -> Result<InstantVector> {
@@ -419,6 +436,32 @@ impl<'a> Evaluator<'a> {
         ctx: EvalContext,
     ) -> Result<InstantVector> {
         let windows = self.eval_range_windows(range_expr, ctx)?;
+
+        // absent_over_time: emits 1 (with the selector's equality labels)
+        // when NO series had samples in the window — Prometheus semantics.
+        if name == "absent_over_time" {
+            if windows.is_empty() {
+                if let crate::ast::Expr::Selector(sel) = &*range_expr.expr {
+                    let mut labels = LabelSet::default();
+                    for m in &sel.matchers {
+                        if m.op == crate::matcher::MatchOp::Equal {
+                            labels = labels.merge(
+                                &LabelSet::try_from_iter(vec![(m.name.clone(), m.value.clone())])
+                                    .unwrap_or_default(),
+                            );
+                        }
+                    }
+                    return Ok(InstantVector {
+                        series: vec![(labels, 1.0)],
+                    });
+                }
+                return Ok(InstantVector {
+                    series: vec![(LabelSet::default(), 1.0)],
+                });
+            }
+            return Ok(InstantVector::default());
+        }
+
         let mut out = Vec::with_capacity(windows.len());
         for (labels, samples) in windows {
             let vals: Vec<(i64, f64)> = samples.iter().map(|s| (s.timestamp_ns, s.value)).collect();
@@ -559,9 +602,29 @@ impl<'a> Evaluator<'a> {
                 });
             }
             AggregationOp::CountValues => {
-                return Err(Error::Validation(
-                    "count_values() is not supported in Phase 1A".into(),
-                ));
+                // count_values("label", expr): counts series per distinct
+                // value of expr, exposing each as a series with the
+                // param-named label set to that value.
+                let label_param = agg
+                    .param
+                    .as_ref()
+                    .ok_or_else(|| Error::Validation("count_values requires a label".into()))?;
+                let label_name = self.eval_string(label_param, ctx)?;
+                let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+                for (_, v) in &v.series {
+                    *counts.entry(fmt_num(*v)).or_insert(0) += 1;
+                }
+                let out: Vec<(LabelSet, f64)> = counts
+                    .into_iter()
+                    .map(|(val, n)| {
+                        (
+                            LabelSet::try_from_iter(vec![(label_name.clone(), val)])
+                                .unwrap_or_default(),
+                            n as f64,
+                        )
+                    })
+                    .collect();
+                return Ok(InstantVector { series: out });
             }
             _ => {}
         }
@@ -959,7 +1022,6 @@ fn apply_range_fn(
             let mean = vals.iter().map(|(_, v)| *v).sum::<f64>() / n;
             vals.iter().map(|(_, v)| (*v - mean).powi(2)).sum::<f64>() / n
         }
-        "absent_over_time" => return Ok(None), // empty handled by caller
         "changes" => {
             let mut n = 0.0;
             for w in vals.windows(2) {
@@ -989,6 +1051,43 @@ fn apply_range_fn(
                 return Ok(None);
             }
             (v1 - v0) / dt
+        }
+        "predict_linear" => {
+            // Linear regression over the window extrapolated t seconds
+            // past the evaluation timestamp.
+            if vals.len() < 2 {
+                return Ok(None);
+            }
+            let (slope, intercept) = linear_regression(vals);
+            let horizon = match _call.args.get(1) {
+                Some(crate::ast::Expr::Number(n)) => *n,
+                _ => 0.0,
+            };
+            intercept + slope * horizon
+        }
+        "double_exponential_smoothing" | "holt_winters" => {
+            // Prometheus's renamed holt_winters: trend-corrected double
+            // exponential smoothing with clamped factors.
+            if vals.len() < 2 {
+                return Ok(None);
+            }
+            let sf = match _call.args.get(1) {
+                Some(crate::ast::Expr::Number(n)) => (*n).clamp(0.0, 1.0),
+                _ => 0.1,
+            };
+            let tf = match _call.args.get(2) {
+                Some(crate::ast::Expr::Number(n)) => (*n).clamp(0.0, 1.0),
+                _ => 0.3,
+            };
+            let mut s = vals[0].1;
+            let mut b = vals[1].1 - vals[0].1;
+            for w in vals.windows(2) {
+                let cur = w[1].1;
+                let prev_s = s;
+                s = sf * cur + (1.0 - sf) * (prev_s + b);
+                b = tf * (s - prev_s) + (1.0 - tf) * b;
+            }
+            s
         }
         other => {
             return Err(Error::Validation(format!(
@@ -1087,6 +1186,52 @@ fn quantile_from_buckets(q: f64, buckets: &[(f64, f64)]) -> Option<f64> {
         prev_bound = bound;
     }
     buckets.last().map(|b| b.0)
+}
+
+/// Ordinary least squares over (t_seconds, value) for predict_linear.
+fn linear_regression(vals: &[(i64, f64)]) -> (f64, f64) {
+    let n = vals.len() as f64;
+    let t0 = vals.first().map(|v| v.0).unwrap_or(0);
+    let xs: Vec<f64> = vals.iter().map(|(t, _)| (*t - t0) as f64 / 1e9).collect();
+    let ys: Vec<f64> = vals.iter().map(|(_, v)| *v).collect();
+    let sx: f64 = xs.iter().sum();
+    let sy: f64 = ys.iter().sum();
+    let sxy: f64 = xs.iter().zip(&ys).map(|(a, b)| a * b).sum();
+    let sxx: f64 = xs.iter().map(|a| a * a).sum();
+    let denom = n * sxx - sx * sx;
+    if denom.abs() < 1e-12 {
+        return (0.0, sy / n);
+    }
+    let slope = (n * sxy - sx * sy) / denom;
+    let intercept = (sy - slope * sx) / n;
+    (
+        slope,
+        intercept + slope * ((vals.last().map(|v| v.0).unwrap_or(0) - t0) as f64 / 1e9),
+    )
+}
+
+fn days_in_month(year: i32, month: u32) -> u32 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 => {
+            let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+            if leap {
+                29
+            } else {
+                28
+            }
+        }
+        _ => 30,
+    }
+}
+
+fn fmt_num(v: f64) -> String {
+    if v.fract() == 0.0 {
+        format!("{}", v as i64)
+    } else {
+        v.to_string()
+    }
 }
 
 #[cfg(test)]
