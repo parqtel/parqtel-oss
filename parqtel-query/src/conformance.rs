@@ -490,6 +490,40 @@ pub fn full_corpus() -> Vec<Case> {
             tol: 1.0,
         });
     }
+    // G10 new-function coverage.
+    push(Case {
+        name: "absent_emits_labels",
+        query: r#"absent_over_time(nonexistent{env="prod"}[5m])"#,
+        ts_ns: 2 * H,
+        expect: vec![("env=prod", 1.0)],
+        tol: 0.0,
+    });
+    push(Case {
+        name: "absent_empty_when_present",
+        query: "absent_over_time(cpu[5m])",
+        ts_ns: 2 * H,
+        expect: vec![("", 0.0)], // is_empty_case asserts no series
+        tol: 0.0,
+    });
+    for q in [
+        "predict_linear(cpu[1h], 3600)",
+        "double_exponential_smoothing(cpu[1h], 0.1, 0.3)",
+        r#"count_values("val", cpu)"#,
+        "year()",
+        "month()",
+        "hour()",
+        "day_of_week()",
+        "days_in_month()",
+    ] {
+        push(Case {
+            name: "composition_exists",
+            query: q,
+            ts_ns: 2 * H,
+            expect: vec![("", 0.0)],
+            tol: 0.0,
+        });
+    }
+
     // Nested composition depth: existence checks (>=1 series, values
     // intentionally unchecked — each shape returns different cardinality).
     for q in [
@@ -512,6 +546,11 @@ pub fn full_corpus() -> Vec<Case> {
 }
 
 /// Existence-mode check: at least one series, no value assertion.
+/// Cases whose expectation is an EMPTY result.
+fn is_empty_case(query: &str) -> bool {
+    query == "absent_over_time(cpu[5m])"
+}
+
 fn is_existence_case(name: &str) -> bool {
     matches!(
         name,
@@ -524,6 +563,22 @@ fn is_existence_case(name: &str) -> bool {
 /// values are checked within `tol`.
 pub fn check(case: &Case, result: &crate::ast::InstantVector) -> Result<Vec<String>, String> {
     let mut failures = Vec::new();
+
+    // Empty-expectation cases: absent_over_time over present data.
+    if is_empty_case(case.query) {
+        if !result.series.is_empty() {
+            failures.push(format!(
+                "{}: expected empty result, got {} series",
+                case.name,
+                result.series.len()
+            ));
+        }
+        return if failures.is_empty() {
+            Ok(Vec::new())
+        } else {
+            Err(failures.join("; "))
+        };
+    }
 
     // Existence-mode cases: require >= 1 series, no value assertions.
     if is_existence_case(case.name) {

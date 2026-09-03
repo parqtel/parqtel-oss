@@ -1368,3 +1368,180 @@ fn json_resource(svc: &str, recs: &[(i64, &str, i32, &str)], base: i64) -> serde
         "scopeLogs": [{"logRecords": logs}]
     })
 }
+
+#[tokio::test]
+async fn test_pipeline_fetch_metrics_and_traces() {
+    let state = AppState::default_for_tests().await;
+    let base = 1_788_700_000_000_000_000i64;
+
+    // Metrics: two series, 10 points each.
+    let mut metrics = Vec::new();
+    for (svc, mult) in [("api", 1.0), ("web", 5.0)] {
+        for i in 0..10 {
+            metrics.push(parqtel_core::Metric {
+                name: "pipeline_requests".into(),
+                description: String::new(),
+                unit: String::new(),
+                kind: parqtel_core::MetricKind::Sum,
+                resource_attributes: parqtel_core::LabelSet::default(),
+                data_points: vec![parqtel_core::DataPoint {
+                    timestamp_ns: base + i * 10_000_000_000,
+                    value: parqtel_core::MetricValue::Double(i as f64 * mult),
+                    labels: parqtel_core::LabelSet::try_from_iter(vec![(
+                        "service".to_string(),
+                        svc.to_string(),
+                    )])
+                    .unwrap(),
+                }],
+            });
+        }
+    }
+    state
+        .inner
+        .ingestion_service
+        .ingest_metrics(metrics)
+        .await
+        .unwrap();
+
+    // Traces: two server spans, one ERROR.
+    let (ttx, _trx) = tokio::sync::mpsc::unbounded_channel();
+    let config = parqtel_core::Config::default();
+    let buffer = state.inner.query_executor.memory_buffer();
+    let trace_svc =
+        TraceIngestionService::new(config.storage.clone(), ttx).with_memory_buffer(buffer);
+    let mk = |id: u8, name: &str, status: i32| parqtel_ingest::otel::trace::v1::Span {
+        trace_id: vec![id; 16],
+        span_id: vec![id; 8],
+        name: name.into(),
+        kind: 2,
+        start_time_unix_nano: base as u64,
+        end_time_unix_nano: (base + 100_000_000) as u64,
+        status: Some(parqtel_ingest::otel::trace::v1::Status {
+            code: status,
+            message: String::new(),
+        }),
+        attributes: vec![parqtel_ingest::otel::common::v1::KeyValue {
+            key: "service.name".into(),
+            value: Some(parqtel_ingest::otel::common::v1::AnyValue {
+                value: Some(
+                    parqtel_ingest::otel::common::v1::any_value::Value::StringValue("api".into()),
+                ),
+            }),
+        }],
+        ..Default::default()
+    };
+    let req = parqtel_ingest::otel::collector::trace::v1::ExportTraceServiceRequest {
+        resource_spans: vec![parqtel_ingest::otel::trace::v1::ResourceSpans {
+            resource: Some(parqtel_ingest::otel::resource::v1::Resource {
+                attributes: vec![parqtel_ingest::otel::common::v1::KeyValue {
+                    key: "service.name".into(),
+                    value: Some(parqtel_ingest::otel::common::v1::AnyValue {
+                        value: Some(
+                            parqtel_ingest::otel::common::v1::any_value::Value::StringValue(
+                                "api".into(),
+                            ),
+                        ),
+                    }),
+                }],
+                ..Default::default()
+            }),
+            scope_spans: vec![parqtel_ingest::otel::trace::v1::ScopeSpans {
+                spans: vec![mk(1, "GET /ok", 0), mk(2, "GET /fail", 2)],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+    };
+    let body = prost::Message::encode_to_vec(&req);
+    trace_svc
+        .ingest_proto(bytes::Bytes::from(body))
+        .await
+        .unwrap();
+
+    let end = base + 100_000_000_000;
+
+    // G9a: fetch metrics — sum(value) by service.
+    let p = parqtel_query::pipeline::parse_pipeline("fetch metrics | stats sum(value) by service")
+        .unwrap();
+    let result = state
+        .inner
+        .query_executor
+        .execute_pipeline(&p, base, end)
+        .await
+        .unwrap();
+    match result {
+        parqtel_query::pipeline_exec::PipelineResult::Table { rows, .. } => {
+            // api: 0+1+..9=45, web: 5x45=225
+            assert_eq!(rows.len(), 2, "two service groups");
+            let sum: f64 = rows
+                .iter()
+                .find(|r| r[0] == serde_json::json!("api"))
+                .and_then(|r| r.last().unwrap().as_f64())
+                .unwrap();
+            assert!((sum - 45.0).abs() < 1e-9, "api sum 45, got {sum}");
+        }
+        other => panic!("expected table, got {other:?}"),
+    }
+
+    // G9b: fetch traces — stats by status.
+    let p = parqtel_query::pipeline::parse_pipeline(
+        "fetch traces | filter status=ERROR | stats count()",
+    )
+    .unwrap();
+    let result = state
+        .inner
+        .query_executor
+        .execute_pipeline(&p, base, end)
+        .await
+        .unwrap();
+    match result {
+        parqtel_query::pipeline_exec::PipelineResult::Table { rows, .. } => {
+            let count = rows[0].last().unwrap().as_i64().unwrap();
+            assert_eq!(count, 1, "one ERROR span");
+        }
+        other => panic!("expected table, got {other:?}"),
+    }
+
+    // G9b + duration: p95 of duration_ms.
+    let p =
+        parqtel_query::pipeline::parse_pipeline("fetch traces | stats p95(duration_ms)").unwrap();
+    let result = state
+        .inner
+        .query_executor
+        .execute_pipeline(&p, base, end)
+        .await
+        .unwrap();
+    match result {
+        parqtel_query::pipeline_exec::PipelineResult::Table { rows, .. } => {
+            let p95 = rows[0].last().unwrap().as_f64().unwrap();
+            assert!(
+                (p95 - 100.0).abs() < 1e-6,
+                "both spans 100ms, p95=100, got {p95}"
+            );
+        }
+        other => panic!("expected table, got {other:?}"),
+    }
+
+    // G11: fetch metrics | correlate traces window — service+window join
+    // (metric rows have no trace_id → fallback path).
+    let p = parqtel_query::pipeline::parse_pipeline(
+        "fetch metrics | filter service=api | correlate traces window=10m | stats max(correlated.span_count)",
+    )
+    .unwrap();
+    let result = state
+        .inner
+        .query_executor
+        .execute_pipeline(&p, base, end)
+        .await
+        .unwrap();
+    match result {
+        parqtel_query::pipeline_exec::PipelineResult::Table { rows, .. } => {
+            let max_sc = rows[0].last().unwrap().as_f64().unwrap();
+            assert!(
+                max_sc >= 2.0,
+                "correlated spans joined via service+window, got {max_sc}"
+            );
+        }
+        other => panic!("expected table, got {other:?}"),
+    }
+}
