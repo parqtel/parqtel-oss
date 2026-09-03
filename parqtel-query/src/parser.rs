@@ -644,6 +644,14 @@ impl<'a> Parser<'a> {
                 self.advance()?;
                 Ok(Expr::Number(n))
             }
+            Some(Tok::Str(_)) => {
+                // String literals are only valid as function/aggregation
+                // parameters (count_values("label"), label_replace args); in
+                // expression position they evaluate like a NaN scalar
+                // (PromQL has no string vectors).
+                self.advance()?;
+                Ok(Expr::Number(f64::NAN))
+            }
             Some(Tok::LParen) => {
                 self.advance()?;
                 let e = self.parse_binary(0)?;
@@ -1045,6 +1053,22 @@ mod tests {
                 assert!(a.param.is_some());
             }
             other => panic!("expected aggregation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn absent_range_parses() {
+        let e = assert_parses(r#"absent_over_time(nonexistent{env="prod"}[5m])"#);
+        match &e {
+            Expr::Call(call) => {
+                assert_eq!(call.name, "absent_over_time");
+                assert!(
+                    matches!(call.args[0], Expr::Range(_)),
+                    "arg0 is {:?}",
+                    call.args[0]
+                );
+            }
+            other => panic!("expected call, got {other:?}"),
         }
     }
 

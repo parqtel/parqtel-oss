@@ -266,3 +266,37 @@ Review plan Wave 2, approved recommendations applied:
   label_values (currently Default::default() on compacted blocks — G2 of
   the next review) is scheduled with compaction work.
 - Trace predicate scan cap (10k spans) unchanged.
+
+---
+
+## Wave 3 — Coverage (baseline: wave3.json; corpus: 98/98)
+
+| Item | Resolution |
+|---|---|
+| G9a pipeline fetch metrics | series→rows: one row per data point (`__name__`, `value`, timestamp, labels incl. service alias); metric names from index + buffer; stats/filter/pipeline stages compose over metric rows (sum(value) by service verified e2e) |
+| G9b pipeline fetch traces | span→rows: duration_ms, status, kind, name, trace_id, attributes; p95(duration) + status filters verified e2e |
+| G10 PromQL functions | absent_over_time (with equality-label projection + empty-window semantics), predict_linear (OLS regression extrapolation), double_exponential_smoothing/holt_winters (trend-corrected), count_values (per-value series counts), date fns (hour/day_of_week/day_of_month/day_of_year/days_in_month/month/year); changes/resets/deriv were already present; timestamp() remains blocked on per-sample time retention (documented) |
+| G11 correlate fallback | trace_id join first; rows without trace_id join via service + window (±window_ns of the row timestamp); `correlate logs` onto metric/trace rows with log_count + max_severity_number enrichment |
+
+### Correctness findings (fixed)
+
+| # | Finding | Fix |
+|---|---|---|
+| W3-F1 | fetch metrics saw only INDEX metric names — buffered metrics (unflushed) were invisible in tests | names merged from index + buffer |
+| W3-F2 | `count_values("label", x)` failed to parse — string literals unsupported in expression position | parse_primary accepts string literals as NaN scalars (param-position only) |
+
+### Carried forward
+
+1. **fetch metrics row cost**: 1.2M points → 1.2M rows = 1.8s p50 for
+   `sum(value) by service`. The per-metric scan loop is the obvious
+   next optimization (parallelize + push stats into the scan); the G6
+   filter push-down applies but stats materialization dominates. Next
+   review.
+2. **correlate fallback is O(rows × spans)** linear scan per unjoined
+   row — fine at 10K spans; a service+time index would be needed at
+   larger scale.
+3. **timestamp()** still requires per-sample time retention in
+   InstantVector (architectural, queued with subquery caching).
+4. **fetch targets ignore their own limit before stats** — a `limit`
+   stage before `stats` truncates rows (correct), but the fetch itself
+   is unbounded; a fetch-level cap belongs with the row-cost fix.

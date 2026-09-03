@@ -135,6 +135,8 @@ def run_suite():
     pipeline_query("pipe_count_by_service", "fetch logs | stats count() by service")
     pipeline_query("pipe_filter_or_stats", "fetch logs | filter service=api-gateway OR severity>=ERROR | stats count()")
     pipeline_query("pipe_parse_p95", r'fetch logs | parse "duration_ms=(\d+)" as dur | stats p95(dur) by service')
+    pipeline_query("pipe_fetch_metrics", "fetch metrics | stats sum(value) by service")
+    pipeline_query("pipe_fetch_traces", "fetch traces | stats p95(duration_ms) by service")
 
     for name, path, params in suite:
         lats, series, err = [], None, None
