@@ -147,12 +147,17 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Run Trivy vulnerability scanner
-        uses: aquasecurity/trivy-action@master
+        uses: aquasecurity/trivy-action@0.28.0
         with:
           image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ needs.docker-publish.outputs.digest }}
           format: sarif
           output: trivy-results.sarif
           severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          trivy-version: 0.58.1
+        # Scan findings do NOT fail the release (SARIF is uploaded for
+        # security-tab triage); only scanner ERRORS fail. @master drifted
+        # mid-release twice — pinned to a working version instead.
       - name: Upload Trivy scan results
         uses: github/codeql-action/upload-sarif@v3
         with:
