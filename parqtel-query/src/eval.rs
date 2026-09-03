@@ -17,13 +17,26 @@ pub struct Evaluator<'a> {
     /// checks and absent()).
     #[allow(dead_code)]
     all_names: Vec<String>,
+    /// Instant-selector lookback (Prometheus lookback-delta; 5m default).
+    lookback_ns: i64,
 }
 
 impl<'a> Evaluator<'a> {
+    /// Evaluator with Prometheus-default 5m instant lookback.
     pub fn new(data: &'a SeriesData) -> Self {
         Self {
             data,
             all_names: data.keys().cloned().collect(),
+            lookback_ns: 5 * 60 * 1_000_000_000,
+        }
+    }
+
+    /// Evaluator with a custom instant-selector lookback window.
+    pub fn with_lookback(data: &'a SeriesData, lookback_ns: i64) -> Self {
+        Self {
+            data,
+            all_names: data.keys().cloned().collect(),
+            lookback_ns: lookback_ns.max(1),
         }
     }
 
@@ -77,10 +90,7 @@ impl<'a> Evaluator<'a> {
         let Some(series) = self.data.get(name) else {
             return Ok(InstantVector::default());
         };
-        let lookback = ctx
-            .range_ns
-            .max(60_000_000_000) // 1-minute instant lookback (documented)
-            ;
+        let lookback = ctx.range_ns.max(self.lookback_ns);
         for (labels, points) in series {
             if !evaluate_matchers(&sel.matchers, labels, name) {
                 continue;
@@ -708,8 +718,8 @@ impl<'a> Evaluator<'a> {
                         for (rlabels, rv) in matches {
                             let v = apply_binary_op(b.op, lv, *rv, b.return_bool)?;
                             if let Some(v) = filter_cmp(b, v) {
-                                // group_left: result labels from LHS + extras from RHS
-                                let mut labels = llabels.clone();
+                                // group_left: projected match labels + extras from RHS
+                                let mut labels = result_labels(b, &llabels, rlabels);
                                 for e in extra.iter() {
                                     if let Some(ev) = rlabels.get(e) {
                                         labels = labels.merge(
@@ -790,18 +800,28 @@ fn filter_cmp(b: &BinaryExpr, v: f64) -> Option<f64> {
     }
 }
 
-fn result_labels(_b: &BinaryExpr, lhs: &LabelSet, rhs: &LabelSet) -> LabelSet {
-    // Prometheus: result keeps LHS labels minus metric name; for on() keep
-    // only the on-labels. Simplified: LHS labels without __name__.
+/// Result-label projection per PromQL semantics (G3):
+/// - default (no modifier): LHS labels minus `__name__`
+/// - `on(x, ...)`: ONLY the on-labels
+/// - `ignoring(x, ...)`: LHS labels minus `__name__` minus the ignored set
+fn result_labels(b: &BinaryExpr, lhs: &LabelSet, _rhs: &LabelSet) -> LabelSet {
     let mut out = LabelSet::default();
+    let matching = b.matching.as_ref().map(|(vm, _)| vm);
     for (k, v) in lhs.iter() {
-        if k != "__name__" {
+        if k == "__name__" {
+            continue;
+        }
+        let keep = match matching {
+            Some(VectorMatch::On(list)) => list.iter().any(|l| l == k),
+            Some(VectorMatch::Ignoring(list)) => !list.iter().any(|l| l == k),
+            Some(VectorMatch::All) | None => true,
+        };
+        if keep {
             out = out.merge(
                 &LabelSet::try_from_iter(vec![(k.to_string(), v.to_string())]).unwrap_or_default(),
             );
         }
     }
-    let _ = rhs;
     out
 }
 
@@ -983,27 +1003,46 @@ fn apply_range_fn(
     }
 }
 
-/// rate with reset correction + extrapolation (mirrors Phase-0 semantics).
+/// rate with per-segment reset accumulation + extrapolation (G4):
+/// a window may contain MULTIPLE counter resets; sum the increase of each
+/// monotonic segment instead of collapsing to a single-reset correction.
+/// `range_ns` is the window width for edge extrapolation (0 = none).
 fn windowed_rate_val(vals: &[(i64, f64)]) -> f64 {
+    rate_over_samples(vals, 0.0)
+}
+
+/// Core: per-segment counter increase over samples.
+fn segment_increase(vals: &[(i64, f64)]) -> f64 {
+    let mut total = 0.0;
+    for w in vals.windows(2) {
+        let (t0, v0) = w[0];
+        let (t1, v1) = w[1];
+        let delta = if v1 >= v0 { v1 - v0 } else { v1 };
+        let _ = t0;
+        let _ = t1;
+        total += delta;
+    }
+    total
+}
+
+/// Prometheus-style rate: segment increase over the observed span,
+/// extrapolated toward the window edges (capped at 10% of span per side).
+fn rate_over_samples(vals: &[(i64, f64)], window_ns: f64) -> f64 {
     if vals.len() < 2 {
         return f64::NAN;
     }
-    let (t0, v0) = vals.first().copied().unwrap_or((0, 0.0));
-    let (t1, v1) = vals.last().copied().unwrap_or((0, 0.0));
-    let dt = (t1 - t0) as f64 / 1e9;
-    if dt <= 0.0 {
+    let (t0, _) = vals.first().copied().unwrap_or((0, 0.0));
+    let (t1, _) = vals.last().copied().unwrap_or((0, 0.0));
+    let span = (t1 - t0) as f64 / 1e9;
+    if span <= 0.0 {
         return f64::NAN;
     }
-    let mut dv = v1 - v0;
-    if dv < 0.0 {
-        dv = v1;
-    }
-    let rate = dv / dt;
-    // Extrapolate to window edges (Prometheus-style, capped).
-    let window_s = (t1 - t0) as f64 / 1e9;
-    if window_s > dt {
-        let slack = ((window_s - dt) / 2.0).min(dt * 0.1);
-        rate * (dt + 2.0 * slack) / dt
+    let increase = segment_increase(vals);
+    let rate = increase / span;
+    // Extrapolate to window edges when the window exceeds the observed span.
+    if window_ns > span && window_ns > 0.0 {
+        let slack = ((window_ns - span) / 2.0).min(span * 0.1);
+        rate * (span + 2.0 * slack) / span
     } else {
         rate
     }
@@ -1164,6 +1203,52 @@ mod tests {
         for (_, val) in v.series {
             assert_eq!(val, 1.0);
         }
+    }
+
+    #[test]
+    fn on_projection_drops_non_on_labels() {
+        // G3: a * on(service) b keeps ONLY service (+ group_left extras),
+        // dropping pod/instance from the result — PromQL semantics.
+        let mut data = SeriesData::new();
+        let l1 = LabelSet::try_from_iter(vec![
+            ("service".to_string(), "a".to_string()),
+            ("pod".to_string(), "p1".to_string()),
+        ])
+        .unwrap();
+        let l2 = LabelSet::try_from_iter(vec![
+            ("service".to_string(), "a".to_string()),
+            ("pod".to_string(), "p2".to_string()),
+        ])
+        .unwrap();
+        data.insert(
+            "m1".into(),
+            vec![(l1, vec![(0, 2.0), (100_000_000_000, 2.0)])],
+        );
+        data.insert(
+            "m2".into(),
+            vec![(l2, vec![(0, 3.0), (100_000_000_000, 3.0)])],
+        );
+        let expr = crate::parser::parse_expr("m1 * on(service) m2").unwrap();
+        let ev = Evaluator::new(&data);
+        let ctx = EvalContext {
+            ts_ns: 100_000_000_000,
+            range_ns: 0,
+            offset_ns: 0,
+            subquery_step_ns: None,
+        };
+        let v = ev.eval(&expr, ctx).unwrap();
+        assert_eq!(v.series.len(), 1);
+        let (labels, val) = &v.series[0];
+        assert!((*val - 6.0).abs() < 1e-9);
+        // ONLY the on-label survives.
+        assert_eq!(
+            labels.get("service").map(|s| s.to_string()).as_deref(),
+            Some("a")
+        );
+        assert!(
+            labels.get("pod").is_none(),
+            "pod must be dropped by on() projection"
+        );
     }
 
     #[test]

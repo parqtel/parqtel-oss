@@ -223,7 +223,8 @@ async fn run_server(
         trace_index.clone(),
         memory_buffer.clone(),
         trace_data_dir.clone(),
-    );
+    )
+    .with_query_lookback(config.query.lookback_delta_ns);
 
     start_maintenance(index.clone(), config.storage.clone());
     start_maintenance(log_index.clone(), config.logs.clone().into());
