@@ -367,22 +367,23 @@ fn downsample_impl(
                 } else if hi > lo {
                     let first = &points[lo];
                     let last = &points[hi - 1];
+                    let window = &points[lo..hi];
                     match op {
-                        AggregationOp::Rate => windowed_rate(first, last, range_f),
+                        AggregationOp::Rate => windowed_rate(window, range_f),
                         AggregationOp::Increase => {
-                            windowed_rate(first, last, range_f).map(|r| r * range_f / 1e9)
+                            windowed_rate(window, range_f).map(|r| r * range_f / 1e9)
                         }
                         AggregationOp::Delta => {
                             let dv = v_to_float(&last.1) - v_to_float(&first.1);
                             Some(dv)
                         }
-                        // Non-counter ops with a range: fall back to step
-                        // semantics over the lookback window (rare; keeps
-                        // e.g. `avg(x[5m])` meaningful rather than an error).
-                        _ => {
-                            let window = &points[lo..hi];
-                            aggregate(op, window, quantile, scalar_param, clamp)
-                        }
+                        // Non-counter ops with a range: PromQL REJECTS this
+                        // shape (e.g. `avg(x[5m])` needs avg_over_time).
+                        // Previously we silently fell back to lookback
+                        // aggregation — plausible-looking but wrong
+                        // semantics (G2): return no samples so callers
+                        // surface the error.
+                        _ => return Vec::new(),
                     }
                 } else {
                     None
@@ -402,26 +403,26 @@ fn downsample_impl(
 
 /// Per-second rate across a window with counter-reset correction and
 /// Prometheus-style extrapolation to the window edges.
-fn windowed_rate(
-    first: &(i64, MetricValue),
-    last: &(i64, MetricValue),
-    range_ns: f64,
-) -> Option<f64> {
-    let dt = (last.0 - first.0) as f64 / 1_000_000_000.0;
-    if dt <= 0.0 {
+/// Per-segment counter rate (G4): a window may contain MULTIPLE resets;
+/// sum each monotonic segment's increase, divide by the observed span,
+/// extrapolate toward the window edges (Prometheus behaviour).
+fn windowed_rate(window: &[(i64, MetricValue)], range_ns: f64) -> Option<f64> {
+    if window.len() < 2 {
         return None;
     }
-    let mut dv = v_to_float(&last.1) - v_to_float(&first.1);
-    // Counter reset: value decreased -> the counter restarted; treat the
-    // post-reset value as the increase (single-reset approximation, same
-    // as the legacy implementation).
-    if dv < 0.0 {
-        dv = v_to_float(&last.1);
+    let first = window.first()?;
+    let last = window.last()?;
+    let span = (last.0 - first.0) as f64 / 1_000_000_000.0;
+    if span <= 0.0 {
+        return None;
     }
-    let rate = dv / dt;
-    // Extrapolate toward window edges, capped at 1.1x the observed span
-    // on each side (Prometheus behaviour).
-    let span = dt;
+    let mut increase = 0.0f64;
+    for pair in window.windows(2) {
+        let v0 = v_to_float(&pair[0].1);
+        let v1 = v_to_float(&pair[1].1);
+        increase += if v1 >= v0 { v1 - v0 } else { v1 };
+    }
+    let rate = increase / span;
     let window_s = range_ns / 1_000_000_000.0;
     let extrapolated = if window_s > span {
         let slack = ((window_s - span) / 2.0).min(span * 0.1);
@@ -769,6 +770,46 @@ mod windowed_tests {
     }
 
     #[test]
+    fn multiple_resets_in_window_sum_segments() {
+        // G4: TWO resets inside one window. Counter: 0→50 (reset) →0→30
+        // (reset) →0→20. True increase in [0,60s] = 50+30+20 = 100 → rate
+        // = 100/60 per sec. The old single-reset approximation would use
+        // only the last segment (20) — under-counting 5x.
+        let data = [
+            (0, 0.0),
+            (10 * S, 50.0),
+            (20 * S, 0.0), // reset
+            (30 * S, 30.0),
+            (40 * S, 0.0), // reset
+            (50 * S, 20.0),
+            (60 * S, 10.0),
+        ];
+        let d: Vec<(i64, MetricValue)> = data
+            .iter()
+            .map(|(t, v)| (*t, MetricValue::Double(*v)))
+            .collect();
+        let r = downsample_windowed(
+            d,
+            60 * S,
+            120 * S,
+            60 * S,
+            M,
+            AggregationOp::Rate,
+            None,
+            None,
+            None,
+        );
+        assert!(!r.is_empty(), "must produce a sample");
+        let rate = r[0].value;
+        // segment increases: 50 + 30 + 20 + 10 = 110 over span 60s → ~1.833/s
+        // (plus extrapolation slack toward the 1m window edges).
+        assert!(
+            (rate - 110.0 / 60.0).abs() < 0.25,
+            "per-segment sum = 110/60 ≈ 1.833, got {rate}"
+        );
+    }
+
+    #[test]
     fn counter_reset_corrected() {
         // Counter resets to 0 midway through the window.
         let data = [
@@ -848,19 +889,19 @@ mod windowed_tests {
     }
 
     #[test]
-    fn non_windowed_aggregation_unaffected_by_range() {
-        // sum with a range present (post-AST this becomes avg_over_time etc.)
-        // falls back to step semantics — must not crash or mis-window.
+    fn non_windowed_aggregation_with_range_rejected() {
+        // G2: `sum(x[5m])`-style shapes are invalid PromQL — the windowed
+        // path returns no samples (callers surface the error) instead of
+        // silently aggregating the lookback window.
         let data = [(0, 1.0), (M, 2.0), (2 * M, 3.0)];
         let d: Vec<(i64, MetricValue)> = data
             .iter()
             .map(|(t, v)| (*t, MetricValue::Double(*v)))
             .collect();
         let r = downsample_windowed(d, 0, 3 * M, M, 5 * M, AggregationOp::Sum, None, None, None);
-        // Window at t covers [t-5m, t+1m): cumulative lookbehind sums.
-        assert_eq!(r.len(), 3);
-        assert!((r[0].value - 1.0).abs() < 1e-9); // only (0,1)
-        assert!((r[1].value - 3.0).abs() < 1e-9); // 1+2
-        assert!((r[2].value - 6.0).abs() < 1e-9); // 1+2+3
+        assert!(
+            r.is_empty(),
+            "non-counter op with [range] must yield no samples"
+        );
     }
 }

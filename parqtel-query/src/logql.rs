@@ -69,6 +69,10 @@ pub enum Clause {
     Exists { field: String },
     /// `severity >= WARN` etc. — maps to severity_number thresholds.
     SeverityMin(String),
+    /// G12: `NOT <clause>` — the inner clause must NOT match. Keeps
+    /// negation exact for range/comparison/exists clauses instead of
+    /// downgrading to positive matching.
+    Not(Box<Clause>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -271,7 +275,22 @@ fn collect_and(pred: &Predicate, q: &mut SearchQuery) -> bool {
             q.terms.push(t.clone());
             true
         }
-        Predicate::Or(_) | Predicate::Not(_) => false,
+        Predicate::Or(_) => false,
+        Predicate::Not(inner) => match &**inner {
+            // NOT of a single clause flattens to the inverted clause.
+            Predicate::Atom(Atom::Clause(cl)) => {
+                q.clauses.push(Clause::Not(Box::new(cl.clone())));
+                true
+            }
+            Predicate::Atom(Atom::Term(t)) => {
+                let mut t = t.clone();
+                t.negate = !t.negate;
+                q.terms.push(t);
+                true
+            }
+            // NOT of compound nodes requires the tree path.
+            _ => false,
+        },
     }
 }
 
@@ -641,6 +660,13 @@ pub fn log_matches(
                 .map(|n| n >= *min && n <= *max)
                 .unwrap_or(false),
             Exists { field } => field_value(field, log, extra).is_some(),
+            Not(inner) => {
+                let q = SearchQuery {
+                    clauses: vec![(**inner).clone()],
+                    terms: vec![],
+                };
+                !log_matches(&q, log, extra)
+            }
         };
         if !ok {
             return false;
@@ -804,6 +830,13 @@ pub fn span_matches(q: &SearchQuery, s: &parqtel_core::Span) -> bool {
             }
             Clause::Exists { field } => span_field(s, field).is_some(),
             Clause::SeverityMin(_) => true, // n/a for spans
+            Clause::Not(inner) => {
+                let q = SearchQuery {
+                    clauses: vec![(**inner).clone()],
+                    terms: vec![],
+                };
+                !span_matches(&q, s)
+            }
         };
         if !ok {
             return false;
@@ -979,6 +1012,37 @@ mod tests {
         let q = parse_search("service=api-*");
         let l = log("x", "INFO", 9, "api-gateway");
         assert!(log_matches(&q, &l, &HashMap::new()));
+    }
+
+    #[test]
+    fn not_on_range_clause_flattens_exact() {
+        // G12: NOT duration>500 must invert the comparison exactly,
+        // not downgrade to positive matching.
+        let q = parse_search("NOT duration>500");
+        // Flat shape (single Not-of-clause flattens to Clause::Not).
+        assert_eq!(
+            q.clauses,
+            vec![Clause::Not(Box::new(Clause::Cmp {
+                field: "duration".to_string(),
+                op: crate::logql::CmpOp::Gt,
+                value: 500.0,
+            }))]
+        );
+        let mut extra = HashMap::new();
+        extra.insert("duration".to_string(), "250".to_string());
+        let l = log("x", "INFO", 9, "api");
+        assert!(log_matches(&q, &l, &extra), "250 is NOT > 500");
+        let mut extra2 = HashMap::new();
+        extra2.insert("duration".to_string(), "900".to_string());
+        assert!(!log_matches(&q, &l, &extra2), "900 IS > 500");
+    }
+
+    #[test]
+    fn not_on_exists_clause() {
+        let q = parse_search("NOT trace_id:*");
+        // All test logs carry trace_id [1;16] — inverted: none match.
+        let l = log("x", "INFO", 9, "api");
+        assert!(!log_matches(&q, &l, &HashMap::new()));
     }
 
     #[test]

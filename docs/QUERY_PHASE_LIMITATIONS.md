@@ -213,3 +213,28 @@ the obvious next lever and is scheduled with the AST phase work.
 - Trace predicates: 200 rows at 16ms (previously 8 rows post-scan —
   push-down fixed both coverage AND kept latency ~2× the unfiltered scan)
 - Log/traces/metrics suites: no regression vs phase1b
+
+---
+
+## Wave 1 — Correctness (baseline: wave1.json; corpus: 88/88)
+
+Review plan (docs/QUERY_LIMITATIONS_REVIEW.md) Wave 1, all approved
+recommendations applied:
+
+| Item | Resolution |
+|---|---|
+| G0 conformance corpus | 88-case corpus (28 hand-derived core + 60 parameterized variants: windows/over_time-family/transforms/agg-matrix/matcher-matrix/binary-matrix/composition), deterministic fixtures, existence-mode + exact-value checks with tolerance; runs in cargo test — the reference gate for every future semantic change and the legacy-retirement decision |
+| G1 5m lookback | `query.lookback_delta_ns` config (default 5m, Prometheus semantics) threaded AST evaluator → executor → both handlers; benchmark proof: instant queries now return rows on the 35-60min-old dataset (0 rows in all prior baselines) |
+| G2 avg(x[5m]) fallback | legacy parser rejects `[range]` on non-counter fns with the `_over_time` suggestion; windowed path yields no samples; regression-tested |
+| G3 on() label projection | result keeps ONLY on-labels (+group_left extras); ignoring()/default keep LHS minus __name__/ignored; projection test verifies pod dropped |
+| G4 multi-reset rate | per-segment increase accumulation in BOTH engines (eval.rs + aggregation.rs); two-reset test: 110/60 ≈ 1.833/s where the old code returned 20/60 |
+| G12 NOT on clauses | Clause::Not flattens single-clause negation exactly (ranges/comparisons/exists invert); tree path unchanged for compound NOT |
+
+Corpus findings while calibrating (all engine-correct, expectations fixed):
+fixture counter slope is per-interval not per-second; stddev/stdvar drop
+single-sample groups (Prometheus parity); constant counters rate to 0
+(histogram_quantile fixture switched to instant form); on() join with
+missing RHS side correctly drops the unmatched group.
+
+Benchmark (wave1.json): zero regressions; instant queries return rows
+(G1); all 29 queries green.

@@ -154,6 +154,11 @@ fn row_matches_pred(row: &Row, pred: &Predicate) -> bool {
                         .map(|n| n >= min as f64)
                         .unwrap_or(false)
                 }
+                Clause::Not(inner) => {
+                    // Invert by evaluating the inner clause against the row.
+                    let pred = Predicate::Atom(crate::logql::Atom::Clause((**inner).clone()));
+                    !row_matches_pred(row, &pred)
+                }
             }
         }
     }

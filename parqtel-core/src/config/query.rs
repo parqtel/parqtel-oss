@@ -9,6 +9,15 @@ pub struct QueryConfig {
     pub max_samples_per_series: usize,
     /// Default query timeout in seconds.
     pub timeout_secs: u64,
+    /// Instant-query lookback window in nanoseconds: the newest sample
+    /// within `[time - lookback, time]` is used for instant selectors.
+    /// Prometheus semantics default: 5 minutes.
+    #[serde(default = "default_lookback_delta_ns")]
+    pub lookback_delta_ns: i64,
+}
+
+fn default_lookback_delta_ns() -> i64 {
+    5 * 60 * 1_000_000_000
 }
 
 impl Default for QueryConfig {
@@ -17,6 +26,7 @@ impl Default for QueryConfig {
             max_series: 1000,
             max_samples_per_series: 10000,
             timeout_secs: 30,
+            lookback_delta_ns: default_lookback_delta_ns(),
         }
     }
 }
