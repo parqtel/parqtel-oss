@@ -349,6 +349,7 @@ impl Compactor {
             size_bytes,
             metric_names,
             label_names,
+            label_values: Default::default(),
             signal_type,
         })
     }

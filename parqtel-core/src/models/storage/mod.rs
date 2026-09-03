@@ -201,6 +201,7 @@ mod tests {
             size_bytes: 4096,
             metric_names: std::collections::HashSet::from(["cpu".into()]),
             label_names: std::collections::HashSet::from(["host".into()]),
+            label_values: Default::default(),
             signal_type: SignalType::Metrics,
         };
         let json = serde_json::to_string(&meta).unwrap();

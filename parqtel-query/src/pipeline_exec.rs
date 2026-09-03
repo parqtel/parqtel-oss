@@ -93,7 +93,7 @@ pub fn run_stages(
 
 /// Row-level predicate evaluation (field ops against row.fields; body terms
 /// against the body field).
-fn row_matches_pred(row: &Row, pred: &Predicate) -> bool {
+pub fn row_matches_pred(row: &Row, pred: &Predicate) -> bool {
     match pred {
         Predicate::And(parts) => parts.iter().all(|p| row_matches_pred(row, p)),
         Predicate::Or(parts) => parts.iter().any(|p| row_matches_pred(row, p)),
