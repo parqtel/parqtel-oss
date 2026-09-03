@@ -188,4 +188,4 @@ Hot-path micro-benchmarks (ingest/flush/scan/query throughput, before/after): [d
 
 ## Dependencies (key)
 
-arrow/parquet 59 (arrow2/parquet2 removed — RUSTSEC-2025-0038), axum 0.7, tokio 1, prost 0.12, clap 4, figment 0.10, tracing 0.1, reqwest 0.12 (rustls), chrono 0.4. MSRV: Rust 1.87 (workspace Cargo.toml; CI matrix also checks 1.86).
+arrow/parquet 59, axum 0.7, tokio 1, tonic 0.13/prost 0.13 (hyper 1.x + h2 0.4 — RUSTSEC-2026-0258 fixed), clap 4, figment 0.10, tracing 0.1, reqwest 0.12 (rustls), chrono 0.4. MSRV: Rust 1.87 (workspace Cargo.toml, Dockerfile, CI — all three must move together).

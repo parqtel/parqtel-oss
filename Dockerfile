@@ -136,7 +136,10 @@ COPY --from=probe /usr/local/bin/healthcheck /usr/local/bin/healthcheck
 HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
     CMD ["/usr/local/bin/healthcheck"]
 
+# HTTP API + embedded UI
 EXPOSE 8080
+# OTLP gRPC (OTel SDK default)
+EXPOSE 4317
 # NOTE: do not declare VOLUME ["/data"] — it makes Docker mount a root-owned
 # anonymous volume that the nonroot (65532) process cannot write. The image's
 # own /data (owned 65532) is used instead; orchestrators mount a PVC/emptyDir

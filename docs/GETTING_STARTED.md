@@ -127,6 +127,7 @@ For production dashboards, we recommend Grafana.
 
 ## 5. Next Steps
 
+- **Query like a pro:** The full query language guide — ParQL (metrics), ParqtelQL (log/trace search), and cross-signal pipelines — lives in [docs/PQL_GUIDE.md](docs/PQL_GUIDE.md).
 - **Configure Alerting:** Learn how to set up YAML-based rules in [Alerting Guide](docs/CONFIGURATION.md#alerts).
 - **Architecture Deep Dive:** Understand how Parquet blocks work in the [Architecture Doc](docs/ARCHITECTURE.md).
 - **Deployment:** Move to production with [Kubernetes/Helm](docs/DEPLOYMENT.md#kubernetes-helm).

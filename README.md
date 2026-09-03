@@ -56,6 +56,7 @@ Parqtel is a single-binary observability backend written in Rust that ingests Op
 |------|--------|
 | **Onboarding** | [Getting Started](docs/GETTING_STARTED.md) • [Glossary](docs/GLOSSARY.md) • [FAQ](docs/FAQ.md) |
 | **Learning** | [Tutorials](docs/TUTORIALS.md) • [Use Cases](#common-use-cases) |
+| **Querying** | [**PQL Guide**](docs/PQL_GUIDE.md) — ParQL metrics, ParqtelQL log/trace search, cross-signal pipelines |
 | **Deep Dive** | [Architecture](docs/ARCHITECTURE.md) • [Configuration](docs/CONFIGURATION.md) • [Developer Guide](docs/DEVELOPER_GUIDE.md) • [MCP Integrations](docs/MCP.md) • [Query Functions](docs/QUERY_FUNCTIONS.md) • [UI/UX Plan](docs/UI_UX_IMPROVEMENT_PLAN.md) • [CI/CD](docs/CI_CD.md) |
 | **Operations** | [Deployment](docs/DEPLOYMENT.md) • [Troubleshooting](docs/TROUBLESHOOTING.md) • [Best Practices](docs/BEST_PRACTICES.md) • [Testing & Validation](docs/TESTING.md) |
 | **Community** | [Contributing](CONTRIBUTING.md) • [Code of Conduct](CODE_OF_CONDUCT.md) • [Security](SECURITY.md) |

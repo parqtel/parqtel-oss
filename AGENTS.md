@@ -34,6 +34,7 @@ make docker        # Build Docker image
 ## Key Facts (verify before documenting)
 
 - **MSRV**: 1.87 (workspace `Cargo.toml`; comfy-table 7.2+ via arrow 59 uses let-chains). Dockerfile `ARG RUST_VERSION=1.87`. CI matrix pins 1.87 — update all three together if bumping.
+- **gRPC stack**: tonic 0.13 / prost 0.13 (hyper 1.x + h2 0.4 — RUSTSEC-2026-0258 fixed by the upgrade from tonic 0.11)
 - **Arrow stack**: `arrow`/`parquet` 59.x (migrated from arrow2/parquet2 — RUSTSEC-2025-0038). Old arrow2-era Parquet blocks are unreadable by the current reader; wipe the data dir when upgrading across that boundary.
 - **Binary name**: `parqtel` (not `parqtel-server`) — the crate is `parqtel-server` but `[[bin]] name = "parqtel"`.
 - **Block index**: persisted as `index.json` (JSON sidecar, atomic tmp+rename), not bincode/`index.bin`.
