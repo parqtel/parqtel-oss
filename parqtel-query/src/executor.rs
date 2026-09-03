@@ -522,6 +522,61 @@ impl QueryExecutor {
     /// At petabyte scale, caps the number of blocks scanned and pushes limit down.
     /// ParqtelQL search over logs: reuses the scan/windowing of query_logs
     /// and applies the parsed SearchQuery clauses + terms post-scan.
+    /// ParqtelQL search with a boolean predicate tree (OR support).
+    /// AND-only shapes use the flat SearchQuery path via search_logs.
+    pub async fn search_logs_predicate(
+        &self,
+        start_ns: i64,
+        end_ns: i64,
+        pred: &crate::logql::Predicate,
+        limit: usize,
+        order_desc: bool,
+    ) -> Result<LogQueryResult> {
+        let start_time = Instant::now();
+        let blocks = {
+            let idx = self.log_index.read().await;
+            idx.query(start_ns, end_ns, None)
+        };
+        let buffered_logs = self.buffer.scan_logs(start_ns, end_ns).await;
+        let raw_logs = if blocks.is_empty() {
+            buffered_logs
+        } else {
+            let disk = Scanner::scan_logs(blocks, start_ns, end_ns).await?;
+            let mut all = disk;
+            all.extend(buffered_logs);
+            all
+        };
+
+        let window_ns = (end_ns - start_ns) / 60;
+        let mut filtered = Vec::new();
+        let mut total_logs_count = 0usize;
+        let mut volume_summary = vec![0u64; 60];
+        let extra = std::collections::HashMap::new();
+        for log in raw_logs {
+            if crate::logql::log_matches_predicate(pred, &log, &extra) {
+                total_logs_count += 1;
+                if window_ns > 0 {
+                    let bucket = ((log.timestamp_ns - start_ns) / window_ns).clamp(0, 59) as usize;
+                    volume_summary[bucket] += 1;
+                }
+                if filtered.len() < limit {
+                    filtered.push(log);
+                }
+            }
+        }
+        if order_desc {
+            filtered.sort_by_key(|b| std::cmp::Reverse(b.timestamp_ns));
+        } else {
+            filtered.sort_by_key(|a| a.timestamp_ns);
+        }
+        Ok(LogQueryResult {
+            logs: filtered,
+            execution_time: start_time.elapsed(),
+            total_logs_count,
+            volume_summary,
+        })
+    }
+
     pub async fn search_logs(
         &self,
         start_ns: i64,
@@ -586,6 +641,122 @@ impl QueryExecutor {
         })
     }
 
+    /// Executes a parsed ParqtelQL pipeline. Fetch materializes rows from
+    /// the log scan; correlate enriches rows with trace context when
+    /// requested (dimension-priority join on trace_id/service).
+    pub async fn execute_pipeline(
+        &self,
+        pipeline: &crate::pipeline::Pipeline,
+        start_ns: i64,
+        end_ns: i64,
+    ) -> Result<crate::pipeline_exec::PipelineResult> {
+        use crate::pipeline::Stage;
+        use crate::pipeline_exec::{run_stages, PipelineResult, Row};
+        use serde_json::json;
+
+        let signal = pipeline.fetch_signal();
+        if signal != "logs" {
+            // Metrics/traces fetch targets: Phase 2 scope is logs-first;
+            // declared but not materialized (see limitations doc).
+            return Ok(PipelineResult::Rows(Vec::new()));
+        }
+
+        // Fetch logs (blocks + buffer) into rows.
+        let blocks = {
+            let idx = self.log_index.read().await;
+            idx.query(start_ns, end_ns, None)
+        };
+        let buffered = self.buffer.scan_logs(start_ns, end_ns).await;
+        let logs = if blocks.is_empty() {
+            buffered
+        } else {
+            let disk = Scanner::scan_logs(blocks, start_ns, end_ns).await?;
+            let mut all = disk;
+            all.extend(buffered);
+            all
+        };
+
+        let rows: Vec<Row> = logs
+            .into_iter()
+            .map(|l| {
+                let mut fields = std::collections::BTreeMap::new();
+                fields.insert("timestamp_ns".to_string(), json!(l.timestamp_ns));
+                fields.insert("body".to_string(), json!(l.body));
+                fields.insert("severity".to_string(), json!(l.severity_text));
+                fields.insert("severity_number".to_string(), json!(l.severity_number));
+                fields.insert("trace_id".to_string(), json!(hex::encode(l.trace_id)));
+                for (k, v) in l.attributes.iter() {
+                    fields.insert(format!("attr.{k}"), json!(v));
+                    fields.insert(k.to_string(), json!(v));
+                }
+                for (k, v) in l.resource_attributes.iter() {
+                    fields.insert(k.to_string(), json!(v));
+                }
+                // `service` alias so pipelines can group/filter on the
+                // semantic name (row fields keep the raw service.name too).
+                if let Some(svc) = l.resource_attributes.get("service.name") {
+                    fields.insert("service".to_string(), json!(svc));
+                }
+                Row { fields }
+            })
+            .collect();
+
+        // Correlate enrichment: fetch related trace spans once and attach
+        // per-row via trace_id (or service+window when no trace_id).
+        if let Some(Stage::Correlate {
+            signal: corr_signal,
+            window_ns,
+        }) = pipeline.stages.iter().find_map(|s| match s {
+            Stage::Correlate { signal, window_ns } => Some(Stage::Correlate {
+                signal: signal.clone(),
+                window_ns: *window_ns,
+            }),
+            _ => None,
+        }) {
+            if corr_signal == "traces" {
+                let spans = self.query_traces(start_ns, end_ns, None, 10_000).await?;
+                let by_trace: std::collections::HashMap<String, Vec<&parqtel_core::Span>> = {
+                    let mut m: std::collections::HashMap<String, Vec<&parqtel_core::Span>> =
+                        std::collections::HashMap::new();
+                    for s in &spans {
+                        m.entry(hex::encode(s.trace_id)).or_default().push(s);
+                    }
+                    m
+                };
+                let mut enriched: Vec<Row> = Vec::with_capacity(rows.len());
+                for mut row in rows {
+                    if let Some(tid) = row.fields.get("trace_id").and_then(|v| v.as_str()) {
+                        if let Some(trace_spans) = by_trace.get(tid) {
+                            let svc_names: Vec<String> = trace_spans
+                                .iter()
+                                .filter_map(|s| {
+                                    s.attributes.get("service.name").map(|v| v.to_string())
+                                })
+                                .collect();
+                            row.fields
+                                .insert("correlated.trace_services".to_string(), json!(svc_names));
+                            row.fields.insert(
+                                "correlated.span_count".to_string(),
+                                json!(trace_spans.len()),
+                            );
+                            if let Some(dur) = trace_spans.iter().map(|s| s.duration_ns()).max() {
+                                row.fields.insert(
+                                    "correlated.trace_duration_ms".to_string(),
+                                    json!(dur as f64 / 1_000_000.0),
+                                );
+                            }
+                        }
+                    }
+                    let _ = window_ns;
+                    enriched.push(row);
+                }
+                return run_stages(pipeline, || Ok(enriched));
+            }
+        }
+
+        run_stages(pipeline, || Ok(rows))
+    }
+
     pub async fn query_traces(
         &self,
         start_ns: i64,
@@ -593,8 +764,27 @@ impl QueryExecutor {
         trace_id_filter: Option<&str>,
         limit: usize,
     ) -> Result<Vec<parqtel_core::Span>> {
+        self.query_traces_filtered(start_ns, end_ns, trace_id_filter, limit, None)
+            .await
+    }
+
+    /// Trace search with ParqtelQL span predicates pushed down INTO the
+    /// scan pipeline (before the result cap), so `filter` no longer loses
+    /// matches to the pre-filter span cap.
+    pub async fn query_traces_filtered(
+        &self,
+        start_ns: i64,
+        end_ns: i64,
+        trace_id_filter: Option<&str>,
+        limit: usize,
+        filter: Option<&crate::logql::SearchQuery>,
+    ) -> Result<Vec<parqtel_core::Span>> {
         // Cap blocks scanned to bound I/O — most recent blocks first for relevance
         const MAX_BLOCKS: usize = 64;
+        // Scan more when predicates apply (they reduce the result, so a
+        // larger scan keeps filtered result sets meaningful).
+        let scan_cap = if filter.is_some() { 10_000 } else { 200 };
+        let scan_cap = scan_cap.max(limit);
         let blocks = {
             let idx = self.trace_index.read().await;
             let mut b = idx.query(start_ns, end_ns, None);
@@ -607,7 +797,7 @@ impl QueryExecutor {
         let mut spans = if blocks.is_empty() {
             Vec::new()
         } else {
-            Scanner::scan_traces(blocks, start_ns, end_ns, limit).await?
+            Scanner::scan_traces(blocks, start_ns, end_ns, scan_cap).await?
         };
 
         // Merge in spans still buffered in memory (not yet flushed to a block).
@@ -622,6 +812,11 @@ impl QueryExecutor {
         if let Some(tid) = trace_id_filter {
             let tid_lower = tid.to_lowercase();
             spans.retain(|s| hex::encode(s.trace_id) == tid_lower);
+        }
+
+        // ParqtelQL span predicates (push-down, before the limit).
+        if let Some(sq) = filter {
+            spans.retain(|s| crate::logql::span_matches(sq, s));
         }
 
         spans.truncate(limit);

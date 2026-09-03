@@ -102,6 +102,40 @@ def run_suite():
     ]
 
     results = {}
+
+    # Pipeline queries run over POST /v1/search (different shape — runner).
+    def pipeline_query(name, query):
+        import urllib.request as _r
+        body = json.dumps({"query": query, "start": start, "end": now}).encode()
+        req = _r.Request(ADDR + "/v1/search", data=body, headers={"Content-Type": "application/json"}, method="POST")
+        lats, err = [], None
+        for _ in range(RUNS_PER_QUERY):
+            t0 = time.perf_counter()
+            try:
+                with _r.urlopen(req, timeout=120) as resp:
+                    data = json.loads(resp.read())
+                    n = (len(data.get("data", {}).get("rows", []))
+                         or len(data.get("data", {}).get("timeseries", {}).get("series", []))
+                         or -1)
+            except Exception as e:
+                n, err = -1, str(e)
+            lats.append((time.perf_counter() - t0) * 1000.0)
+        results[name] = {
+            "p50_ms": round(pct(lats, 50), 1),
+            "p95_ms": round(pct(lats, 95), 1),
+            "p99_ms": round(pct(lats, 99), 1),
+            "mean_ms": round(statistics.mean(lats), 1),
+            "series_or_rows": n,
+            "runs": len(lats),
+            "error": err,
+        }
+        status = "ERR " + str(err)[:40] if err else f"p50={results[name]['p50_ms']}ms"
+        print(f"  {name:22s} {status} rows={n}")
+
+    pipeline_query("pipe_count_by_service", "fetch logs | stats count() by service")
+    pipeline_query("pipe_filter_or_stats", "fetch logs | filter service=api-gateway OR severity>=ERROR | stats count()")
+    pipeline_query("pipe_parse_p95", r'fetch logs | parse "duration_ms=(\d+)" as dur | stats p95(dur) by service')
+
     for name, path, params in suite:
         lats, series, err = [], None, None
         for _ in range(RUNS_PER_QUERY):
