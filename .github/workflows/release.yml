@@ -154,8 +154,13 @@ jobs:
           output: trivy-results.sarif
           severity: CRITICAL,HIGH
           ignore-unfixed: true
-        # Findings surface in the security tab (SARIF); the scan does not
-        # gate the release. Pinned to v0.33.1 — @master drifted mid-release.
+          exit-code: 0
+        # REPORT-ONLY by design: findings surface in the Security tab for
+        # triage; the release is not gated on image-scan findings because
+        # runtime-layer CVEs (distroless base) have no source-level
+        # remediation — they block releases without a fix path. The SOURCE
+        # scan (CI Security Audit, exit-code 1) remains the hard gate.
+        # continue-on-error: false on purpose — scanner ERRORS still fail.
       - name: Upload Trivy scan results
         uses: github/codeql-action/upload-sarif@v3
         with:
