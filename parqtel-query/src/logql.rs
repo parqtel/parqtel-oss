@@ -28,6 +28,25 @@ pub struct SearchQuery {
     pub terms: Vec<SearchTerm>,
 }
 
+/// Boolean predicate tree (Phase 2): OR of ANDs of atoms.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Predicate {
+    /// Matches when ALL sub-predicates match.
+    And(Vec<Predicate>),
+    /// Matches when ANY sub-predicate matches.
+    Or(Vec<Predicate>),
+    /// Matches when the sub-predicate does NOT match.
+    Not(Box<Predicate>),
+    /// Leaf: a single clause or term.
+    Atom(Atom),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Atom {
+    Clause(Clause),
+    Term(SearchTerm),
+}
+
 /// One structured field constraint.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Clause {
@@ -88,21 +107,21 @@ pub fn parse_search(query: &str) -> SearchQuery {
         return SearchQuery::default();
     }
     if trimmed.starts_with('{') && trimmed.ends_with('}') {
-        // Legacy selector-shaped input on the ParqtelQL path: parse the
-        // inner matchers as field=value clauses.
         if let Ok(q) = parse_legacy_selector(trimmed) {
             return q;
         }
     }
-    match parse_search_inner(query) {
-        Ok(q) => q,
+    // AND-only queries flatten into SearchQuery (backward-compatible);
+    // anything with OR/NOT/grouping keeps the full tree.
+    match parse_predicate(trimmed) {
+        Ok(pred) => flatten_and(&pred).unwrap_or_default(),
         Err(_) => {
             // Lenient fallback: treat the whole input as body terms.
             let mut q = SearchQuery::default();
-            for tok in query.split_whitespace() {
+            for tok in trimmed.split_whitespace() {
                 if !tok.is_empty() {
                     q.terms.push(SearchTerm {
-                        text: tok.trim_matches('"').to_string(),
+                        text: tok.trim_matches('"').to_lowercase(),
                         negate: false,
                         phrase: false,
                         wildcard: false,
@@ -114,79 +133,146 @@ pub fn parse_search(query: &str) -> SearchQuery {
     }
 }
 
-fn parse_search_inner(input: &str) -> Result<SearchQuery> {
-    let mut q = SearchQuery::default();
+/// Parses a full boolean predicate tree with precedence
+/// OR < implicit-AND < NOT. Returns Err only on tokenization failure.
+pub fn parse_predicate(input: &str) -> Result<Predicate> {
     let toks = tokenize(input)?;
-    let mut i = 0;
-    let mut pending_not = false;
+    let mut p = TreeParser { toks, pos: 0 };
+    let pred = p.parse_or()?;
+    if p.pos < p.toks.len() {
+        return Err(Error::Validation("trailing tokens".into()));
+    }
+    Ok(pred)
+}
 
-    while i < toks.len() {
-        let tok = &toks[i];
-        match tok {
-            Tok::And => {
-                i += 1;
-            } // implicit
-            Tok::Or => {
-                // OR semantics need a tree; Phase 1B is AND-only. Lenient:
-                // treat OR as a term separator (both sides still required).
-                // Documented limitation.
-                i += 1;
+struct TreeParser {
+    toks: Vec<Tok>,
+    pos: usize,
+}
+
+impl TreeParser {
+    fn peek(&self) -> Option<&Tok> {
+        self.toks.get(self.pos)
+    }
+
+    fn parse_or(&mut self) -> Result<Predicate> {
+        let mut branches = vec![self.parse_and()?];
+        while matches!(self.peek(), Some(Tok::Or)) {
+            self.pos += 1;
+            branches.push(self.parse_and()?);
+        }
+        if branches.len() == 1 {
+            Ok(branches
+                .pop()
+                .ok_or_else(|| Error::Validation("empty or".into()))?)
+        } else {
+            Ok(Predicate::Or(branches))
+        }
+    }
+
+    fn parse_and(&mut self) -> Result<Predicate> {
+        let mut parts = vec![self.parse_not()?];
+        loop {
+            match self.peek() {
+                Some(Tok::And) => {
+                    self.pos += 1;
+                    parts.push(self.parse_not()?);
+                }
+                // implicit AND: a term/clause directly follows
+                Some(Tok::Term(_)) | Some(Tok::Str(_)) | Some(Tok::Not) | Some(Tok::LParen) => {
+                    parts.push(self.parse_not()?);
+                }
+                _ => break,
             }
-            Tok::Not => {
-                pending_not = true;
-                i += 1;
+        }
+        if parts.len() == 1 {
+            Ok(parts
+                .pop()
+                .ok_or_else(|| Error::Validation("empty and".into()))?)
+        } else {
+            Ok(Predicate::And(parts))
+        }
+    }
+
+    fn parse_not(&mut self) -> Result<Predicate> {
+        if matches!(self.peek(), Some(Tok::Not)) {
+            self.pos += 1;
+            return Ok(Predicate::Not(Box::new(self.parse_not()?)));
+        }
+        self.parse_atom()
+    }
+
+    fn parse_atom(&mut self) -> Result<Predicate> {
+        match self.peek().cloned() {
+            Some(Tok::LParen) => {
+                self.pos += 1;
+                let inner = self.parse_or()?;
+                if !matches!(self.peek(), Some(Tok::RParen)) {
+                    return Err(Error::Validation("missing )".into()));
+                }
+                self.pos += 1;
+                Ok(inner)
             }
-            Tok::LParen | Tok::RParen => {
-                i += 1;
-            } // grouping tolerated
-            Tok::Term(t) => {
-                if let Some(Tok::Op(op)) = toks.get(i + 1) {
-                    if let Some((field, _)) = split_field(t) {
-                        if let Some(clause) =
-                            build_field_clause(&field, *op, toks.get(i + 2), &mut i)?
-                        {
-                            apply_clause(&mut q, clause, pending_not)?;
-                            pending_not = false;
-                            continue;
+            Some(Tok::Str(s)) => {
+                self.pos += 1;
+                Ok(Predicate::Atom(Atom::Term(SearchTerm {
+                    text: s.to_lowercase(),
+                    negate: false,
+                    phrase: true,
+                    wildcard: false,
+                })))
+            }
+            Some(Tok::Term(t)) => {
+                // Peek the NEXT token (without consuming the Term) so
+                // build_field_clause sees the same [Term, Op, Value] shape
+                // the flat parser did (it advances past all three).
+                if let Some(Tok::Op(op)) = self.toks.get(self.pos + 1).cloned() {
+                    if let Some((field, _)) = split_field(&t) {
+                        let mut consumed = self.pos; // AT the Term, like the old parser
+                        if let Some(clause) = build_field_clause(
+                            &field,
+                            op,
+                            self.toks.get(self.pos + 2),
+                            &mut consumed,
+                        )? {
+                            self.pos = consumed;
+                            return Ok(Predicate::Atom(Atom::Clause(clause)));
                         }
                     }
                 }
-                // plain term
-                let term = build_term(t, pending_not)?;
-                pending_not = false;
-                q.terms.push(term);
-                i += 1;
+                self.pos += 1;
+                Ok(Predicate::Atom(Atom::Term(build_term(&t, false)?)))
             }
-            Tok::Op(_) => {
-                i += 1;
-            } // stray operator — skip
-            Tok::Str(s) => {
-                q.terms.push(SearchTerm {
-                    text: s.clone(),
-                    negate: pending_not,
-                    phrase: true,
-                    wildcard: false,
-                });
-                pending_not = false;
-                i += 1;
-            }
+            other => Err(Error::Validation(format!(
+                "unexpected token {other:?} in predicate"
+            ))),
         }
     }
-    Ok(q)
 }
 
-fn apply_clause(q: &mut SearchQuery, clause: Clause, negate: bool) -> Result<()> {
-    if negate {
-        // NOT on a field clause maps to Ne when possible; else ignored
-        // (lenient). Only Eq supports clean negation.
-        match clause {
-            Clause::Eq { field, value } => q.clauses.push(Clause::Ne { field, value }),
-            other => q.clauses.push(other),
-        }
-    } else {
-        q.clauses.push(clause);
+/// Flattens an AND-only tree into a SearchQuery. Returns None when the
+/// tree contains OR/Not (the caller must use the tree path).
+fn flatten_and(pred: &Predicate) -> Option<SearchQuery> {
+    let mut q = SearchQuery::default();
+    if !collect_and(pred, &mut q) {
+        return None;
     }
-    Ok(())
+    Some(q)
+}
+
+fn collect_and(pred: &Predicate, q: &mut SearchQuery) -> bool {
+    match pred {
+        Predicate::And(parts) => parts.iter().all(|p| collect_and(p, q)),
+        Predicate::Atom(Atom::Clause(c)) => {
+            q.clauses.push(c.clone());
+            true
+        }
+        Predicate::Atom(Atom::Term(t)) => {
+            q.terms.push(t.clone());
+            true
+        }
+        Predicate::Or(_) | Predicate::Not(_) => false,
+    }
 }
 
 fn build_term(t: &str, negate_hint: bool) -> Result<SearchTerm> {
@@ -328,7 +414,7 @@ fn build_field_clause(
     }
 }
 
-fn severity_rank(sev: &str) -> Option<i32> {
+pub fn severity_rank(sev: &str) -> Option<i32> {
     Some(match sev.to_ascii_uppercase().as_str() {
         "TRACE" | "VERBOSE" => 1,
         "DEBUG" => 5,
@@ -489,6 +575,33 @@ fn tokenize(input: &str) -> Result<Vec<Tok>> {
 // ── Matching ────────────────────────────────────────────────────────────────
 
 /// Evaluates a parsed query against a log record.
+/// Evaluates a boolean predicate tree against a log record.
+pub fn log_matches_predicate(
+    pred: &Predicate,
+    log: &parqtel_core::LogRecord,
+    extra: &HashMap<String, String>,
+) -> bool {
+    match pred {
+        Predicate::And(parts) => parts.iter().all(|p| log_matches_predicate(p, log, extra)),
+        Predicate::Or(parts) => parts.iter().any(|p| log_matches_predicate(p, log, extra)),
+        Predicate::Not(inner) => !log_matches_predicate(inner, log, extra),
+        Predicate::Atom(Atom::Clause(clause)) => {
+            let q = SearchQuery {
+                clauses: vec![clause.clone()],
+                terms: vec![],
+            };
+            log_matches(&q, log, extra)
+        }
+        Predicate::Atom(Atom::Term(term)) => {
+            let q = SearchQuery {
+                clauses: vec![],
+                terms: vec![term.clone()],
+            };
+            log_matches(&q, log, extra)
+        }
+    }
+}
+
 pub fn log_matches(
     q: &SearchQuery,
     log: &parqtel_core::LogRecord,
@@ -647,6 +760,107 @@ fn parse_legacy_selector(selector: &str) -> Result<SearchQuery> {
     Ok(q)
 }
 
+/// Applies a ParqtelQL SearchQuery to a span: service/status/duration/
+/// kind/name/attr.* predicates push down into the trace scan.
+pub fn span_matches(q: &SearchQuery, s: &parqtel_core::Span) -> bool {
+    for clause in &q.clauses {
+        let ok = match clause {
+            Clause::Eq { field, value } => span_field(s, field)
+                .map(|v| v.eq_ignore_ascii_case(value))
+                .unwrap_or(false),
+            Clause::Ne { field, value } => span_field(s, field)
+                .map(|v| !v.eq_ignore_ascii_case(value))
+                .unwrap_or(true),
+            Clause::Re { field, regex } => {
+                let re = regex::Regex::new(regex).ok();
+                match (span_field(s, field), re) {
+                    (Some(v), Some(re)) => re.is_match(&v),
+                    _ => false,
+                }
+            }
+            Clause::Cmp { field, op, value } => {
+                let n = if field == "duration" || field == "duration_ms" {
+                    Some(s.duration_ns() as f64 / 1_000_000.0)
+                } else {
+                    span_field(s, field).and_then(|v| v.parse::<f64>().ok())
+                };
+                match n {
+                    Some(n) => match op {
+                        CmpOp::Gt => n > *value,
+                        CmpOp::Ge => n >= *value,
+                        CmpOp::Lt => n < *value,
+                        CmpOp::Le => n <= *value,
+                    },
+                    None => false,
+                }
+            }
+            Clause::Range { field, min, max } => {
+                if field == "duration" || field == "duration_ms" {
+                    let d = s.duration_ns() as f64 / 1_000_000.0;
+                    d >= *min && d <= *max
+                } else {
+                    false
+                }
+            }
+            Clause::Exists { field } => span_field(s, field).is_some(),
+            Clause::SeverityMin(_) => true, // n/a for spans
+        };
+        if !ok {
+            return false;
+        }
+    }
+    for term in &q.terms {
+        let name = s.name.to_lowercase();
+        let matched = name.contains(&term.text)
+            || s.attributes
+                .iter()
+                .any(|(_, v)| v.to_lowercase().contains(&term.text));
+        if term.negate {
+            if matched {
+                return false;
+            }
+        } else if !matched {
+            return false;
+        }
+    }
+    true
+}
+
+/// Resolves a ParqtelQL field name to a span value.
+pub fn span_field(s: &parqtel_core::Span, field: &str) -> Option<String> {
+    match field {
+        "service" | "service.name" => s.attributes.get("service.name").map(|v| v.to_string()),
+        "name" | "operation" | "operation_name" => Some(s.name.clone()),
+        "status" => Some(
+            match s.status.code {
+                2 => "ERROR",
+                1 => "OK",
+                _ => "UNSET",
+            }
+            .to_string(),
+        ),
+        "kind" => Some(
+            match s.kind {
+                1 => "internal",
+                2 => "server",
+                3 => "client",
+                4 => "producer",
+                5 => "consumer",
+                _ => "unspecified",
+            }
+            .to_string(),
+        ),
+        "trace_id" => Some(hex::encode(s.trace_id)),
+        _ => {
+            if let Some(key) = field.strip_prefix("attr.") {
+                s.attributes.get(key).map(|v| v.to_string())
+            } else {
+                s.attributes.get(field).map(|v| v.to_string())
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -765,6 +979,71 @@ mod tests {
         let q = parse_search("service=api-*");
         let l = log("x", "INFO", 9, "api-gateway");
         assert!(log_matches(&q, &l, &HashMap::new()));
+    }
+
+    #[test]
+    fn or_semantics() {
+        // OR between terms
+        let pred = parse_predicate("error OR timeout").unwrap();
+        let l = log("upstream timeout", "INFO", 9, "api");
+        assert!(log_matches_predicate(&pred, &l, &HashMap::new()));
+        let l2 = log("unrelated message", "INFO", 9, "api");
+        assert!(!log_matches_predicate(&pred, &l2, &HashMap::new()));
+    }
+
+    #[test]
+    fn or_between_field_clauses() {
+        let pred = parse_predicate("service=api OR service=web").unwrap();
+        let l1 = log("x", "INFO", 9, "api");
+        let l2 = log("x", "INFO", 9, "web");
+        let l3 = log("x", "INFO", 9, "billing");
+        assert!(log_matches_predicate(&pred, &l1, &HashMap::new()));
+        assert!(log_matches_predicate(&pred, &l2, &HashMap::new()));
+        assert!(!log_matches_predicate(&pred, &l3, &HashMap::new()));
+    }
+
+    #[test]
+    fn not_semantics() {
+        let pred = parse_predicate("NOT service=api").unwrap();
+        let l1 = log("x", "INFO", 9, "web");
+        assert!(log_matches_predicate(&pred, &l1, &HashMap::new()));
+        let l2 = log("x", "INFO", 9, "api");
+        assert!(!log_matches_predicate(&pred, &l2, &HashMap::new()));
+    }
+
+    #[test]
+    fn paren_grouping_with_and_or() {
+        // (service=api AND error) OR (service=web AND timeout)
+        let pred = parse_predicate("(service=api AND error) OR (service=web AND timeout)").unwrap();
+        let l1 = log("fatal error", "ERROR", 17, "api");
+        let l2 = log("upstream timeout", "INFO", 9, "web");
+        let l3 = log("fatal error", "ERROR", 17, "web");
+        let l4 = log("nothing here", "INFO", 9, "api");
+        assert!(log_matches_predicate(&pred, &l1, &HashMap::new()));
+        assert!(log_matches_predicate(&pred, &l2, &HashMap::new()));
+        assert!(!log_matches_predicate(&pred, &l3, &HashMap::new()));
+        assert!(!log_matches_predicate(&pred, &l4, &HashMap::new()));
+    }
+
+    #[test]
+    fn and_or_precedence() {
+        // a AND b OR c == (a AND b) OR c
+        let pred = parse_predicate("service=api error OR timeout").unwrap();
+        // matches: (api + body error) OR (body timeout)
+        let l1 = log("error", "INFO", 9, "api");
+        let l2 = log("timeout", "INFO", 9, "web");
+        let l3 = log("error", "INFO", 9, "web"); // c matches? no term 'timeout', service!=api -> false
+        assert!(log_matches_predicate(&pred, &l1, &HashMap::new()));
+        assert!(log_matches_predicate(&pred, &l2, &HashMap::new()));
+        assert!(!log_matches_predicate(&pred, &l3, &HashMap::new()));
+    }
+
+    #[test]
+    fn or_flattens_backwards_compatible() {
+        // AND-only queries still flatten into SearchQuery (same shape as Phase 1B)
+        let q = parse_search("service=api severity>=ERROR timeout");
+        assert_eq!(q.clauses.len(), 2);
+        assert_eq!(q.terms.len(), 1);
     }
 
     #[test]

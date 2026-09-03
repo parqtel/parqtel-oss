@@ -1244,3 +1244,127 @@ async fn test_saved_searches_end_to_end() {
     assert!(state.inner.saved_searches.delete(&s.id).await);
     assert!(state.inner.saved_searches.list().await.is_empty());
 }
+
+#[tokio::test]
+async fn test_pipeline_end_to_end() {
+    let state = AppState::default_for_tests().await;
+    let base = 1_788_600_000_000_000_000i64;
+
+    // Seed logs through the production JSON path.
+    let records: Vec<(i64, &str, i32, &str)> = vec![
+        (1, "ERROR", 17, "api"),
+        (2, "ERROR", 17, "api"),
+        (3, "WARN", 13, "web"),
+        (4, "INFO", 9, "web"),
+    ];
+    let payload = serde_json::json!({
+        "resourceLogs": [
+            json_resource("api", &records[..2], base),
+            json_resource("web", &records[2..], base),
+        ]
+    });
+    state
+        .inner
+        .log_ingestion_service
+        .ingest_json(bytes::Bytes::from(payload.to_string()))
+        .await
+        .unwrap();
+
+    // 1. stats by service
+    let p =
+        parqtel_query::pipeline::parse_pipeline("fetch logs | stats count() by service").unwrap();
+    let result = state
+        .inner
+        .query_executor
+        .execute_pipeline(&p, base, base + 10_000_000_000)
+        .await
+        .unwrap();
+    match result {
+        parqtel_query::pipeline_exec::PipelineResult::Table { rows, .. } => {
+            // api=2, web=2 (sorted by canonical key)
+            assert_eq!(rows.len(), 2);
+        }
+        other => panic!("expected table, got {other:?}"),
+    }
+
+    // 2. filter OR + stats
+    let p = parqtel_query::pipeline::parse_pipeline(
+        "fetch logs | filter service=api OR severity>=WARN | stats count()",
+    )
+    .unwrap();
+    let result = state
+        .inner
+        .query_executor
+        .execute_pipeline(&p, base, base + 10_000_000_000)
+        .await
+        .unwrap();
+    match result {
+        parqtel_query::pipeline_exec::PipelineResult::Table { rows, .. } => {
+            // api(2 ERROR) + web(1 WARN) = 3
+            let count = rows[0].last().unwrap().as_i64().unwrap();
+            assert_eq!(count, 3, "api errors + web warn");
+        }
+        other => panic!("expected table, got {other:?}"),
+    }
+
+    // 3. parse extraction
+    let payload2 = serde_json::json!({
+        "resourceLogs": [{
+            "resource": {"attributes": [{"key": "service.name", "value": {"stringValue": "api"}}]},
+            "scopeLogs": [{"logRecords": [
+                {"timeUnixNano": (base + 5_000_000_000).to_string(),
+                 "severityText": "ERROR", "severityNumber": 17,
+                 "body": {"stringValue": "slow request duration_ms=420"},
+                 "attributes": []}
+            ]}]
+        }]
+    });
+    state
+        .inner
+        .log_ingestion_service
+        .ingest_json(bytes::Bytes::from(payload2.to_string()))
+        .await
+        .unwrap();
+    let p = parqtel_query::pipeline::parse_pipeline(
+        r#"fetch logs | parse "duration_ms=(\d+)" as dur | stats max(dur)"#,
+    )
+    .unwrap();
+    let result = state
+        .inner
+        .query_executor
+        .execute_pipeline(&p, base, base + 10_000_000_000)
+        .await
+        .unwrap();
+    match result {
+        parqtel_query::pipeline_exec::PipelineResult::Table { rows, .. } => {
+            let max = rows[0].last().unwrap().as_f64().unwrap();
+            assert_eq!(max, 420.0, "parsed duration");
+        }
+        other => panic!("expected table, got {other:?}"),
+    }
+}
+
+fn json_resource(svc: &str, recs: &[(i64, &str, i32, &str)], base: i64) -> serde_json::Value {
+    let mut logs = Vec::new();
+    for (i, sev, num, _svc) in recs {
+        let bodies = [
+            "upstream timeout after 500ms",
+            "upstream error boom",
+            "slow query detected",
+            "request ok",
+        ];
+        logs.push(serde_json::json!({
+            "timeUnixNano": (base + i * 1_000_000_000).to_string(),
+            "severityText": sev,
+            "severityNumber": num,
+            "body": {"stringValue": bodies[(*i as usize) % 4]},
+            "attributes": []
+        }));
+    }
+    serde_json::json!({
+        "resource": {"attributes": [
+            {"key": "service.name", "value": {"stringValue": svc}}
+        ]},
+        "scopeLogs": [{"logRecords": logs}]
+    })
+}

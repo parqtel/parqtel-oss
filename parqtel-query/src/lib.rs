@@ -6,6 +6,8 @@ pub mod logql;
 pub mod matcher;
 pub mod models;
 pub mod parser;
+pub mod pipeline;
+pub mod pipeline_exec;
 pub mod plan;
 
 pub use executor::QueryExecutor;
