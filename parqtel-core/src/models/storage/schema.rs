@@ -1,6 +1,6 @@
 use arrow_schema::{DataType, Field, Schema, TimeUnit};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::PathBuf;
 
 /// Metadata about a written Parquet block.
@@ -14,6 +14,10 @@ pub struct BlockMetadata {
     pub metric_names: HashSet<String>,
     #[serde(default)]
     pub label_names: HashSet<String>,
+    /// Per-field distinct values collected at flush time (G5 label-value
+    /// index). Capped per field at flush to bound memory; merged on read.
+    #[serde(default)]
+    pub label_values: BTreeMap<String, BTreeSet<String>>,
     #[serde(default)]
     pub signal_type: SignalType,
 }

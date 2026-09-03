@@ -688,9 +688,15 @@ impl QueryExecutor {
             all
         };
 
+        // G6 push-down: apply the FIRST filter stage's predicate during row
+        // materialization so non-matching logs never allocate full rows.
+        let first_filter = pipeline.stages.iter().find_map(|s| match s {
+            Stage::Filter { pred } => Some(pred.clone()),
+            _ => None,
+        });
         let rows: Vec<Row> = logs
             .into_iter()
-            .map(|l| {
+            .filter_map(|l| {
                 let mut fields = std::collections::BTreeMap::new();
                 fields.insert("timestamp_ns".to_string(), json!(l.timestamp_ns));
                 fields.insert("body".to_string(), json!(l.body));
@@ -709,7 +715,11 @@ impl QueryExecutor {
                 if let Some(svc) = l.resource_attributes.get("service.name") {
                     fields.insert("service".to_string(), json!(svc));
                 }
-                Row { fields }
+                let row = Row { fields };
+                match &first_filter {
+                    Some(pred) => crate::pipeline_exec::row_matches_pred(&row, pred).then_some(row),
+                    None => Some(row),
+                }
             })
             .collect();
 
@@ -791,8 +801,11 @@ impl QueryExecutor {
         limit: usize,
         filter: Option<&crate::logql::SearchQuery>,
     ) -> Result<Vec<parqtel_core::Span>> {
-        // Cap blocks scanned to bound I/O — most recent blocks first for relevance
-        const MAX_BLOCKS: usize = 64;
+        // Cap blocks scanned to bound I/O — most recent blocks first for
+        // relevance. 256 covers a week of hourly blocks or a day of
+        // 5-minute log-trace flush intervals (G8: raised from 64 after the
+        // multi-block baseline showed coverage loss at scale).
+        const MAX_BLOCKS: usize = 256;
         // Scan more when predicates apply (they reduce the result, so a
         // larger scan keeps filtered result sets meaningful).
         let scan_cap = if filter.is_some() { 10_000 } else { 200 };
@@ -870,14 +883,58 @@ impl QueryExecutor {
 
     /// Returns distinct values for a given log field, sorted by frequency.
     pub async fn get_log_field_values(&self, field: &str, limit: usize) -> Vec<String> {
-        let mut freq = BTreeMap::new();
-        let blocks = {
+        // G5 label-value index: blocks flushed since the index landed carry
+        // distinct-value dictionaries in metadata — merge those instead of
+        // decoding whole blocks. Old blocks (no entry for the field) fall
+        // back to a scan, still bounded to the most recent 5.
+        let (blocks, indexed) = {
+            let idx = self.log_index.read().await;
+            let len = idx.blocks.len();
+            let start = len.saturating_sub(5);
+            let recent = idx.blocks[start..].to_vec();
+            // Use indexed metadata for every recent block that has an
+            // entry for this field; scan only those that do not.
+            let mut freq_inner = BTreeMap::new();
+            let mut needs_scan = Vec::new();
+            let mut all_indexed = true;
+            for b in recent {
+                match b.label_values.get(field) {
+                    Some(values) => {
+                        for v in values {
+                            *freq_inner.entry(v.clone()).or_insert(0u64) += 1;
+                        }
+                    }
+                    None => {
+                        all_indexed = false;
+                        needs_scan.push(b);
+                    }
+                }
+            }
+            if all_indexed {
+                (Vec::new(), freq_inner)
+            } else {
+                // Partial coverage: fall back to the full scan (correct
+                // counts) — index-only when coverage is complete.
+                (needs_scan, freq_inner)
+            }
+        };
+
+        if blocks.is_empty() && !indexed.is_empty() {
+            let mut entries: Vec<_> = indexed.into_iter().collect();
+            entries.sort_by_key(|b| std::cmp::Reverse(b.1));
+            return entries.into_iter().take(limit).map(|(v, _)| v).collect();
+        }
+
+        // Fallback scan path (pre-index blocks).
+        let mut freq = indexed;
+        let blocks = if blocks.is_empty() {
             let idx = self.log_index.read().await;
             let len = idx.blocks.len();
             let start = len.saturating_sub(5);
             idx.blocks[start..].to_vec()
+        } else {
+            blocks
         };
-
         for block in blocks {
             if let Ok(logs) = Scanner::scan_logs(vec![block], 0, i64::MAX).await {
                 for l in logs {
@@ -922,19 +979,39 @@ impl QueryExecutor {
 
     /// Returns all values for a given label name across both metrics and logs.
     pub async fn list_label_values(&self, label: &str) -> HashSet<String> {
+        // G5: merge per-block label-value dictionaries from metadata
+        // (flush-time index) instead of decoding blocks. Blocks whose
+        // metadata lacks the field (pre-index blocks) fall back to a scan.
         let mut values = HashSet::new();
+        let mut scan_metric = Vec::new();
+        let mut scan_logs = Vec::new();
 
-        let metric_blocks = {
+        {
             let idx = self.index.read().await;
             let len = idx.blocks.len();
             let start = len.saturating_sub(5);
-            idx.blocks[start..].to_vec()
-        };
-
-        for block in metric_blocks {
-            if !block.label_names.contains(label) {
-                continue;
+            for block in &idx.blocks[start..] {
+                match block.label_values.get(label) {
+                    Some(vs) => values.extend(vs.iter().cloned()),
+                    None if block.label_names.contains(label) => scan_metric.push(block.clone()),
+                    None => {}
+                }
             }
+        }
+        {
+            let idx = self.log_index.read().await;
+            let len = idx.blocks.len();
+            let start = len.saturating_sub(5);
+            for block in &idx.blocks[start..] {
+                match block.label_values.get(label) {
+                    Some(vs) => values.extend(vs.iter().cloned()),
+                    None if block.label_names.contains(label) => scan_logs.push(block.clone()),
+                    None => {}
+                }
+            }
+        }
+
+        for block in scan_metric {
             if let Ok(points) = Scanner::scan(vec![block], "".into(), 0, i64::MAX).await {
                 for p in points {
                     if let Some(v) = p.labels.get(label) {
@@ -943,18 +1020,7 @@ impl QueryExecutor {
                 }
             }
         }
-
-        let log_blocks = {
-            let idx = self.log_index.read().await;
-            let len = idx.blocks.len();
-            let start = len.saturating_sub(5);
-            idx.blocks[start..].to_vec()
-        };
-
-        for block in log_blocks {
-            if !block.label_names.contains(label) {
-                continue;
-            }
+        for block in scan_logs {
             if let Ok(logs) = Scanner::scan_logs(vec![block], 0, i64::MAX).await {
                 for l in logs {
                     if let Some(v) = l.attributes.get(label) {

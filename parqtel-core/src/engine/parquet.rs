@@ -145,6 +145,7 @@ impl ParquetStorageEngine {
             size_bytes,
             metric_names,
             label_names,
+            label_values: Default::default(),
             signal_type: SignalType::Metrics,
         })
     }
@@ -196,6 +197,7 @@ impl ParquetStorageEngine {
             size_bytes,
             metric_names: HashSet::new(),
             label_names,
+            label_values: Default::default(),
             signal_type: SignalType::Logs,
         })
     }
