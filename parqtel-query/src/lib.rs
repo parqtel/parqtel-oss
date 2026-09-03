@@ -1,5 +1,6 @@
 pub mod aggregation;
 pub mod ast;
+pub mod conformance;
 pub mod eval;
 pub mod executor;
 pub mod logql;

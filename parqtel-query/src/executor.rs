@@ -22,9 +22,17 @@ pub struct QueryExecutor {
     buffer: MemoryBuffer,
     #[allow(dead_code)]
     trace_data_dir: std::path::PathBuf,
+    /// Instant-selector lookback (Prometheus lookback-delta). 5m default.
+    lookback_ns: i64,
 }
 
 impl QueryExecutor {
+    /// Sets the instant-selector lookback window (builder).
+    pub fn with_query_lookback(mut self, lookback_ns: i64) -> Self {
+        self.lookback_ns = lookback_ns.max(1);
+        self
+    }
+
     /// Creates a new [QueryExecutor] with shared block indexes.
     pub fn new(
         index: Arc<RwLock<BlockIndex>>,
@@ -45,6 +53,7 @@ impl QueryExecutor {
             trace_index,
             buffer: MemoryBuffer::new(),
             trace_data_dir,
+            lookback_ns: 5 * 60 * 1_000_000_000,
         }
     }
 
@@ -69,6 +78,7 @@ impl QueryExecutor {
             trace_index,
             buffer,
             trace_data_dir,
+            lookback_ns: 5 * 60 * 1_000_000_000,
         }
     }
 
@@ -91,6 +101,7 @@ impl QueryExecutor {
             trace_index,
             buffer,
             trace_data_dir,
+            lookback_ns: 5 * 60 * 1_000_000_000,
         }
     }
 
@@ -111,6 +122,7 @@ impl QueryExecutor {
             trace_index,
             buffer: MemoryBuffer::new(),
             trace_data_dir,
+            lookback_ns: 5 * 60 * 1_000_000_000,
         }
     }
 
@@ -195,7 +207,7 @@ impl QueryExecutor {
 
         // Evaluate per step.
         let step = step_ns.unwrap_or((end_ns - start_ns).max(1));
-        let eval = crate::eval::Evaluator::new(&data);
+        let eval = crate::eval::Evaluator::with_lookback(&data, self.lookback_ns);
         let steps = eval.eval_steps(expr, start_ns, end_ns, step)?;
 
         // Convert per-step instant vectors into TimeSeries.

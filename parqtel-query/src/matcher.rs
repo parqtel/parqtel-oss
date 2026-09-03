@@ -391,6 +391,16 @@ pub fn parse_query(query: &str) -> Result<ParsedQuery> {
         ("stdvar", crate::plan::AggregationOp::Stdvar),
     ] {
         if let Some(inner) = strip_fn(fname, query) {
+            // G2: a [range] on a non-counter aggregation is invalid PromQL
+            // — reject with the _over_time suggestion instead of silently
+            // mis-windowing (previously fell back to lookback aggregation).
+            if let Some(idx) = inner.rfind('[') {
+                if inner[idx..].trim_end().ends_with(']') {
+                    return Err(Error::Validation(format!(
+                        "{fname}() does not accept a range selector; use the _over_time form (e.g. {fname}_over_time(x[5m])) or drop the [range]"
+                    )));
+                }
+            }
             let (selector, by, without) = parse_selector_with_grouping(inner)?;
             let (name, matchers) = parse_selector(selector)?;
             return Ok((
