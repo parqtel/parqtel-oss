@@ -79,13 +79,38 @@ impl BlockWriter {
 
         let mut metric_names = HashSet::new();
         let mut label_names = HashSet::new();
+        // G5 label-value index for the metrics signal as well.
+        const MAX_VALUES_PER_FIELD: usize = 10_000;
+        let mut label_values: std::collections::BTreeMap<
+            String,
+            std::collections::BTreeSet<String>,
+        > = std::collections::BTreeMap::new();
         for ctx in &self.buffer {
             metric_names.insert((*ctx.name).clone());
             for label in ctx.resource.keys() {
                 label_names.insert(label.clone());
+                let entry = label_values.entry(label.clone()).or_default();
+                if entry.len() < MAX_VALUES_PER_FIELD {
+                    entry.insert(
+                        ctx.resource
+                            .get(label)
+                            .map(|s| s.to_string())
+                            .unwrap_or_default(),
+                    );
+                }
             }
             for label in ctx.dp.labels.keys() {
                 label_names.insert(label.clone());
+                let entry = label_values.entry(label.clone()).or_default();
+                if entry.len() < MAX_VALUES_PER_FIELD {
+                    entry.insert(
+                        ctx.dp
+                            .labels
+                            .get(label)
+                            .map(|s| s.to_string())
+                            .unwrap_or_default(),
+                    );
+                }
             }
         }
 
@@ -114,6 +139,7 @@ impl BlockWriter {
             size_bytes,
             metric_names,
             label_names,
+            label_values,
             signal_type: parqtel_core::models::storage::SignalType::Metrics,
         })
     }
@@ -185,12 +211,38 @@ impl LogWriter {
         let row_count = self.buffer.len();
 
         let mut label_names = HashSet::new();
+        // G5 label-value index: distinct values per field collected at
+        // flush time so label-value queries stop decoding whole blocks.
+        // Capped per field to bound metadata size.
+        const MAX_VALUES_PER_FIELD: usize = 10_000;
+        let mut label_values: std::collections::BTreeMap<
+            String,
+            std::collections::BTreeSet<String>,
+        > = std::collections::BTreeMap::new();
         for log in &self.buffer {
             for label in log.attributes.keys() {
                 label_names.insert(label.clone());
+                let entry = label_values.entry(label.clone()).or_default();
+                if entry.len() < MAX_VALUES_PER_FIELD {
+                    entry.insert(
+                        log.attributes
+                            .get(label)
+                            .map(|s| s.to_string())
+                            .unwrap_or_default(),
+                    );
+                }
             }
             for label in log.resource_attributes.keys() {
                 label_names.insert(label.clone());
+                let entry = label_values.entry(label.clone()).or_default();
+                if entry.len() < MAX_VALUES_PER_FIELD {
+                    entry.insert(
+                        log.resource_attributes
+                            .get(label)
+                            .map(|s| s.to_string())
+                            .unwrap_or_default(),
+                    );
+                }
             }
         }
 
@@ -218,6 +270,7 @@ impl LogWriter {
             size_bytes,
             metric_names: HashSet::new(),
             label_names,
+            label_values,
             signal_type: parqtel_core::models::storage::SignalType::Logs,
         })
     }
@@ -300,6 +353,7 @@ impl TraceWriter {
             size_bytes,
             metric_names: HashSet::new(),
             label_names,
+            label_values: Default::default(),
             signal_type: parqtel_core::models::storage::SignalType::Traces,
         })
     }

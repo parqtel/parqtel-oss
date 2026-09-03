@@ -238,3 +238,31 @@ missing RHS side correctly drops the unmatched group.
 
 Benchmark (wave1.json): zero regressions; instant queries return rows
 (G1); all 29 queries green.
+
+---
+
+## Wave 2 — Latency (baseline: wave2.json)
+
+Review plan Wave 2, approved recommendations applied:
+
+| Item | Resolution |
+|---|---|
+| G7 multi-block benchmark | `--blocks=N` generator option (disjoint time windows per pass; short block-duration config cuts one block per pass); validated 3 log blocks via the label-value index under fan-out |
+| G5 label-value hot spot | **830ms p50 / 1.3-5.3s p95 → 0.3ms p50 / 0.4ms p95 (~3000×)**: flush-time label-value dictionaries (BTreeMap per field, 10K value cap) in BlockMetadata for BOTH metrics and logs; both `list_label_values` and `get_log_field_values` merge metadata first and scan only pre-index blocks |
+| G8 trace scan cap | 64 → 256 blocks (covers a week of hourly blocks / a day of 5-min trace flushes); verified against the multi-block dataset |
+| G6 pipeline push-down | first `filter` stage applies during row materialization (non-matching logs never allocate rows); measured −7% on filter+stats pipelines |
+
+### Correctness findings (fixed)
+
+| # | Finding | Fix |
+|---|---|---|
+| W2-F1 | **Benchmark generator collapsed log resources**: a 25K-record batch carried ONE ResourceLogs (the last record's service) — all prior baselines seeded logs with only 8 of 40 services; block service counts were wrong since Phase 0 | one ResourceLogs per service per batch |
+| W2-F2 | Multi-block pass shifting moved seeded data outside the suite's 50-min query window (benchmark-protocol artifact, not engine) | documented; multi-block mode is for index/fan-out validation, suite baselines stay single-pass |
+
+### Carried forward (updated)
+
+- `label_values` falls back to full scan for pre-index blocks; after one
+  retention cycle the fallback disappears naturally. A compaction merge of
+  label_values (currently Default::default() on compacted blocks — G2 of
+  the next review) is scheduled with compaction work.
+- Trace predicate scan cap (10k spans) unchanged.
