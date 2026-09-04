@@ -138,12 +138,16 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      # Advisory database check via prebuilt action: no cargo-audit compile
-      # (the old `cargo install cargo-audit` burned ~5 min of CPU per run).
+      # Advisory database check. cargo-audit binary from the RustSec
+      # release artifacts (fast, no compile); the rustsec/audit-check@v2
+      # action's embedded toolchain began exiting 101 under the Node 24
+      # runner migration.
       - name: Dependency audit
-        uses: rustsec/audit-check@v2
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p "$HOME/.cargo/bin"
+          curl -sSfL https://github.com/rustsec/rustsec/releases/latest/download/cargo-audit-x86_64-unknown-linux-gnu.tgz \
+            | tar xz -C "$HOME/.cargo/bin"
+          cargo audit --deny warnings
       - name: Trivy filesystem scan
         uses: aquasecurity/trivy-action@master
         with:
