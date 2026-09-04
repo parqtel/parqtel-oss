@@ -13,6 +13,17 @@ Seeds 4 hours of story-arc telemetry via OTLP gRPC (production path):
   - Trace-linked logs (same trace_ids) so correlation clicks work
 
 Usage: python3 seed_demo.py [grpc_addr] [http_addr]
+
+Prereq (one-time): regenerate the gRPC stubs (gitignored) into scripts/bench_stubs:
+  python3 -m grpc_tools.protoc -I parqtel-ingest/proto \
+    --python_out=scripts/bench_stubs --grpc_python_out=scripts/bench_stubs \
+    opentelemetry/proto/trace/v1/trace.proto opentelemetry/proto/common/v1/common.proto \
+    opentelemetry/proto/resource/v1/resource.proto opentelemetry/proto/logs/v1/logs.proto \
+    opentelemetry/proto/metrics/v1/metrics.proto \
+    opentelemetry/proto/collector/trace/v1/trace_service.proto \
+    opentelemetry/proto/collector/metrics/v1/metrics_service.proto \
+    opentelemetry/proto/collector/logs/v1/logs_service.proto
+  find scripts/bench_stubs -type d -exec touch {}/__init__.py \;
 """
 import json
 import math
