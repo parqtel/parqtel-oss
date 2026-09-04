@@ -23,7 +23,7 @@ Prereq (one-time): regenerate the gRPC stubs (gitignored) into scripts/bench_stu
     opentelemetry/proto/collector/trace/v1/trace_service.proto \
     opentelemetry/proto/collector/metrics/v1/metrics_service.proto \
     opentelemetry/proto/collector/logs/v1/logs_service.proto
-  find scripts/bench_stubs -type d -exec touch {}/__init__.py \;
+  find scripts/bench_stubs -type d -exec touch {}/__init__.py ;
 """
 import json
 import math
