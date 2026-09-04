@@ -1,4 +1,6 @@
-# Parqtel Query Functions Reference
+# Query Functions
+
+> **Comprehensive guide:** the full query-language reference (metrics ParQL, ParqtelQL search, pipelines) now lives in [PQL_GUIDE.md](PQL_GUIDE.md). This page covers the classic metric function set.
 
 Parqtel exposes a Prometheus-compatible query API at `/api/v1/query` (instant) and `/api/v1/query_range` (range). All examples below use `localhost:9090` — the default compose port.
 

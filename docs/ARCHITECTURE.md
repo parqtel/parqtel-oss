@@ -105,15 +105,15 @@ parqtel-mcp-{slack,pagerduty,jira,notion,discord,gdocs,parqtel}
 
 ### Query Path
 
-1. **HTTP Request** → Prometheus-compatible query parameters parsed
-2. **Parse** → `parse_query()` extracts metric name, label matchers, aggregation, and time range
-3. **Plan** → `QueryPlan` identifies which blocks to scan via `BlockIndex::query(start, end, metric_name)`
-4. **Scan** → `Scanner::scan()` reads matching Parquet files on the blocking pool (bounded by a pre-acquired semaphore), applying time-range and metric-name filters at the columnar level with row-group statistics pruning. The scanner merges the dedicated `service_name` column back into point labels as `service.name`
-5. **Merge** → in-memory buffer results are merged with block results
-6. **Aggregate** → Aggregation functions (sum, avg, rate, histogram_quantile, etc.) are applied
-7. **Response** → Results formatted as Prometheus JSON response
+Parqtel ships **three query surfaces** over one storage engine (see [PQL_GUIDE.md](PQL_GUIDE.md)):
 
-**Instant query semantics**: `/api/v1/query` evaluates over a 1-minute lookback window ending at `time`. Recent buffered data appears immediately; older data requires a `query_range` covering the flushed blocks.
+1. **ParQL (PromQL-compatible, metrics)** — a Pratt parser builds an expression AST (selectors, calls, aggregations with `by/without`, binary ops with `on()/ignoring()/group_left`, subqueries, `offset`). The evaluator runs **per step** over pre-loaded series data: instant selectors use the 5-minute lookback (`query.lookback_delta_ns`); range functions (`rate/increase/irate/delta`, the `_over_time` family, `predict_linear`, `double_exponential_smoothing`) evaluate windows `[t-range, t+step)` with per-segment counter-reset accumulation. Simple single-function shapes keep the legacy plan path (`needs_ast` dispatch); an 88→98-case **conformance corpus** (`parqtel-query/src/conformance.rs`) gates semantic changes.
+2. **ParqtelQL (logs/traces)** — a lenient boolean grammar (terms, phrases, wildcards, `-exclusion`, `OR/AND/NOT`, field ops `=/!=/=~/>=/</:`, ranges `a-b`, `field:*` exists, `body:` contains, severity thresholds). Trace predicates are **pushed down into the scan** (before result caps). Log queries scan blocks + buffer and apply clauses post-scan; `label_values` merges flush-time dictionaries from block metadata (index first, scan only pre-index blocks).
+3. **PQL Pipelines (`POST /v1/search`)** — `fetch logs|metrics|traces | filter <pql> | parse "<re>" as f | stats count/avg/min/max/sum/p50/p95/p99 by … interval=… | limit | correlate traces|logs window=…`. Rows are a unified field map; correlate joins by `trace_id` with service+window fallback.
+
+**Scan layer (shared)**: `Scanner` reads Parquet on the blocking pool (pre-acquired semaphore), applies time/metric pruning via row-group statistics, merges the dedicated `service_name` column back as `service.name`. In-memory buffer results merge with block results (drained on flush — no double-counting). Trace scans cap at 256 blocks; filtered scans raise the span cap 200→10,000.
+
+**Instant query semantics**: `/api/v1/query` uses the Prometheus-default 5-minute lookback ending at `time`.
 
 ### Alert Path
 
@@ -163,6 +163,7 @@ The `BlockIndex` is an in-memory structure that tracks all blocks per signal:
 - **Persistence**: Serialized to `index.json` (JSON sidecar, atomic tmp+rename) in each signal's data directory — one index for metrics, one for logs, one for traces
 - **Queries**: Supports time-range filtering and metric-name filtering
 - **Statistics**: Tracks total blocks, rows, bytes, metric names, and label names
+- **Label-value dictionaries (G5 index)**: flush-time per-field distinct-value sets (capped 10K values/field) live in `BlockMetadata`; `label_values` endpoints merge these instead of decoding blocks (~3000× faster). Compaction merges dictionaries into compacted-block metadata (carried item).
 
 ### Compaction
 

@@ -14,6 +14,9 @@
   <a href="https://securityscorecards.dev/viewer/?uri=github.com/parqtel/parqtel-oss"><img src="https://api.securityscorecards.dev/projects/github.com/parqtel/parqtel-oss/badge" alt="OpenSSF Scorecard"></a>
   <a href="https://github.com/parqtel/parqtel-oss/security"><img src="https://img.shields.io/badge/trivy-scanned-blueviolet?logo=aqua" alt="Trivy Scanned"></a>
   <a href="https://github.com/parqtel/parqtel-oss/actions/workflows/release.yml"><img src="https://img.shields.io/badge/cosign-signed-green?logo=sigstore" alt="Cosign Signed"></a>
+  <a href="https://github.com/parqtel/parqtel-oss/releases"><img src="https://img.shields.io/github/v/release/parqtel/parqtel-oss?color=success&include_prereleases" alt="GitHub Release"></a>
+  <a href="https://parqtel.github.io"><img src="https://img.shields.io/badge/docs-parqtel.github.io-success?logo=github" alt="GitHub Pages"></a>
+  <img src="https://img.shields.io/badge/query-PQL%20%7C%20ParQL%20%7C%20ParqtelQL%20%7C%20Pipelines-00F5D4" alt="PQL query surfaces">
 </p>
 
 <p align="center">
@@ -80,13 +83,17 @@ Parqtel is a single-binary observability backend written in Rust that ingests Op
 
 Parqtel ships with a zero-dependency embedded web console at `/ui` — no CDNs, no web fonts, no frameworks, works air-gapped. Single file, ~42 KB gzipped, served with gzip + ETag caching at zero per-request server cost.
 
-| Metrics | Logs |
-|---------|------|
-| ![Metrics View](docs/screenshots/ui-metrics.png) | ![Logs View](docs/screenshots/ui-logs.png) |
+| Overview | Metrics |
+|----------|---------|
+| ![Overview](docs/screenshots/ui-overview.png) | ![Metrics View](docs/screenshots/ui-metrics.png) |
 
-| Traces | Alerts |
-|--------|--------|
-| ![Traces View](docs/screenshots/ui-traces.png) | ![Alerts View](docs/screenshots/ui-alerts.png) |
+| Logs | Traces |
+|------|--------|
+| ![Logs View](docs/screenshots/ui-logs.png) | ![Traces View](docs/screenshots/ui-traces.png) |
+
+| Alerts (live firing) | Alert rules |
+|---------------------|-------------|
+| ![Alerts View](docs/screenshots/ui-alerts.png) | ![Rules View](docs/screenshots/ui-alerts-rules.png) |
 
 **Features:** Overview landing pane with per-signal stat cards, deep-linkable URLs (share the exact query + time range), guided metrics Builder⇄Code query toggle with live PromQL preview, log field facets, trace-grouped browse list + waterfall, alert stream with Evidence tab (incident-window metric chart + correlated logs), form-based rule editor with YAML escape hatch, saved views, keyboard shortcuts (`?` for the reference), WCAG AA contrast and reduced-motion support.
 
@@ -111,67 +118,49 @@ Hot-path optimizations (non-blocking flushes, row-group pruning, label caching) 
 
 ## Architecture
 
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                         parqtel-server (Axum)                       │
-│  ┌──────────┐  ┌──────────────┐  ┌────────────┐  ┌─────────────┐  │
-│  │  OTLP    │  │ Prometheus   │  │  Grafana   │  │   Alert     │  │
-│  │ Handlers │  │  API v1      │  │ SimpleJSON │  │   API       │  │
-│  └────┬─────┘  └──────┬───────┘  └─────┬──────┘  └──────┬──────┘  │
-│       │                │                │                │         │
-├───────┼────────────────┼────────────────┼────────────────┼─────────┤
-│       ▼                ▼                ▼                ▼         │
-│  ┌─────────┐     ┌──────────┐     ┌──────────┐    ┌──────────┐   │
-│  │ Ingest  │     │  Query   │     │ Pipeline │    │  Alert   │   │
-│  │ Service │     │ Executor │     │  Engine  │    │  Engine  │   │
-│  └────┬────┘     └────┬─────┘     └────┬─────┘    └────┬─────┘   │
-│       │                │                │               │         │
-├───────┼────────────────┼────────────────┼───────────────┼─────────┤
-│       ▼                ▼                ▼               ▼         │
-│  ┌────────────────────────────────────────────────────────────┐   │
-│  │                    parqtel-core                             │   │
-│  │  ┌─────────┐  ┌───────────┐  ┌──────────┐  ┌──────────┐  │   │
-│  │  │ Storage │  │   Block   │  │ Compactor│  │Retention │  │   │
-│  │  │ Engine  │  │   Index   │  │          │  │  Policy  │  │   │
-│  │  └────┬────┘  └─────┬─────┘  └────┬─────┘  └────┬─────┘  │   │
-│  │       └──────────────┴─────────────┴──────────────┘        │   │
-│  └────────────────────────────┬───────────────────────────────┘   │
-│                               ▼                                   │
-│                    ┌─────────────────────┐                        │
-│                    │  Parquet + Zstd     │                        │
-│                    │  (filesystem)       │                        │
-│                    └─────────────────────┘                        │
-└───────────────────────────────────────────────────────────────────┘
+**The telemetry flow** — OTLP in, Parquet down, three query surfaces up:
 
-┌─────────────────────────────────────────────────────────────────────┐
-│                     MCP Servers (separate binaries)                  │
-│  ┌───────┐ ┌──────────┐ ┌──────┐ ┌────────┐ ┌─────────┐ ┌──────┐ │
-│  │ Slack │ │PagerDuty │ │ Jira │ │ Notion │ │ Discord │ │GDocs │ │
-│  └───────┘ └──────────┘ └──────┘ └────────┘ └─────────┘ └──────┘ │
-└─────────────────────────────────────────────────────────────────────┘
+```
+                          ┌─────────────────────────────────┐
+                          │      OpenTelemetry SDKs          │
+                          │   metrics · logs · traces       │
+                          └───────┬─────────────────┬───────┘
+                     OTLP gRPC :4317   OTLP HTTP /v1/*
+                          └───────┴────────┬────────┘
+                                            ▼
+        ┌───────────────────────────────────────────────────────────────┐
+        │                      parqtel (single binary)                   │
+        │                                                                │
+        │  INGEST          QUERY                 ANALYZE                 │
+        │  ───────         ─────                 ───────                 │
+        │  OTLP decode     ParQL (PromQL)        Alert engine            │
+        │  Span-metrics    ├ instant + range      ├ rules + eval         │
+        │    RED bridge    ├ binary ops/on()      ├ webhook routes       │
+        │  Tail sampling   ParqtelQL search       ├ silences             │
+        │  Memory buffer   ├ logs + traces        └ MCP servers          │
+        │  (all signals)   └ predicate pushdown     (Slack·PagerDuty·     │
+        │                  PQL Pipelines            Jira·Notion·…)       │
+        │                  fetch│filter│parse│                          │
+        │                  stats│correlate          ── signals:          │
+        │                                          metrics·logs·        │
+        │  ── shared engine ──────────────────      traces·alerts        │
+        │  BlockIndex · Scanner · label-value index · compaction         │
+        └───────────────────────────┬───────────────────────────────────┘
+                                    ▼
+                    ┌───────────────────────────────┐
+                    │   Compressed Parquet blocks    │
+                    │   zstd · open format · query   │
+                    │   with DuckDB/Spark/Athena     │
+                    └───────────────────────────────┘
+
+         SERVED:  Prometheus API · Grafana · /ui console · HTTP+gRPC
 ```
 
-### Workspace Crates
+**Deep dive:** [Architecture](docs/ARCHITECTURE.md) • [PQL Guide](docs/PQL_GUIDE.md)
 
-| Crate | Description |
-|-------|-------------|
-| `parqtel-core` | Data models (metrics, logs, traces), storage engine, block index, compaction, retention, configuration |
-| `parqtel-ingest` | OTLP protobuf/JSON decoding, block rotation, crash-safe Parquet writing |
-| `parqtel-query` | PromQL-compatible query execution, label matching, aggregation functions |
-| `parqtel-alert` | Alert rule registry, threshold evaluation, state machine, alert store |
-| `parqtel-pipeline` | Recording rules, stream processing pipelines, PromQL/DQL expression evaluation |
-| `parqtel-server` | Axum HTTP server, route handlers, middleware, telemetry, built-in UI |
-| `parqtel-mcp-core` | Shared MCP server framework (JSON-RPC, rate limiting, tool registry) |
-| `parqtel-mcp-*` | Individual MCP tool servers for external integrations |
+---
 
 ## Quick Start
-
-### Prerequisites
-
-- Rust 1.87+ (for building from source)
-- Docker (for containerized deployment)
-
-### Run from Source
 
 ```bash
 # Clone and build
