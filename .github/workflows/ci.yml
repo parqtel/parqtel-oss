@@ -138,16 +138,16 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      # Advisory database check. cargo-audit binary from the RustSec
-      # release artifacts (fast, no compile); the rustsec/audit-check@v2
-      # action's embedded toolchain began exiting 101 under the Node 24
-      # runner migration.
+      # Advisory database check. cargo-audit installed via taiki-e's
+      # fast installer (prebuilt + cached); the rustsec/audit-check@v2
+      # action's embedded cargo exits 101 under the Node 24 runner
+      # migration.
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
       - name: Dependency audit
-        run: |
-          mkdir -p "$HOME/.cargo/bin"
-          curl -sSfL https://github.com/rustsec/rustsec/releases/latest/download/cargo-audit-x86_64-unknown-linux-gnu.tgz \
-            | tar xz -C "$HOME/.cargo/bin"
-          cargo audit --deny warnings
+        run: cargo audit --deny warnings
       - name: Trivy filesystem scan
         uses: aquasecurity/trivy-action@master
         with:
