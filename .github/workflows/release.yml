@@ -240,7 +240,11 @@ jobs:
             ```
 
             **Binary:**
-            Download from the assets below for your platform.
+            Download from the assets below for your platform, or via Homebrew:
+            ```bash
+            brew tap parqtel/tap
+            brew install parqtel
+            ```
 
             ## Verify
 
@@ -251,3 +255,28 @@ jobs:
             # Binary checksum
             sha256sum -c parqtel-linux-amd64.tar.gz.sha256
             ```
+
+  # ── Homebrew Tap ─────────────────────────────────────────────────────────
+  # Zero-touch coordination with parqtel/homebrew-tap (see that repo's
+  # docs/RELEASE_COORDINATION.md): on every release we fire a
+  # repository_dispatch that makes the tap build its four per-platform
+  # tarballs from this exact tag, publish them as a tap release, and open
+  # a formula-bump PR. The tap's own audit workflow then verifies a real
+  # `brew install` before the maintainer merges.
+  # Requires secrets.HOMEBREW_TAP_DISPATCH_TOKEN (PAT with repo scope).
+  notify-homebrew-tap:
+    name: Notify homebrew-tap
+    runs-on: ubuntu-latest
+    needs: [github-release, docker-publish]
+    steps:
+      - name: Trigger homebrew-tap build
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.HOMEBREW_TAP_DISPATCH_TOKEN }}
+          repository: parqtel/homebrew-tap
+          event-type: parqtel-oss-release
+          client-payload: |
+            {
+              "version": "${{ needs.docker-publish.outputs.version }}",
+              "ref":     "${{ github.ref_name }}"
+            }

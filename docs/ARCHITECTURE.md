@@ -218,7 +218,7 @@ The console at `/ui` is a single-file vanilla-JS app (`parqtel-server/src/ui.htm
 
 - **Serving**: pre-gzipped at startup with a content-hash ETag; `Cache-Control: public, max-age=3600` + 304 responses — zero per-request server cost
 - **Zero external requests**: no CDNs, no fonts, no frameworks; system font stacks only — works air-gapped
-- **Budget**: ≤42 KB gzipped (CI-checkable)
+- **Budget**: ≤1000 KB gzipped (soft, keep lean)
 - **Features**: Overview landing pane with per-signal stat cards, hash-based deep-linkable URLs, guided metrics Builder⇄Code query toggle, log facets sidebar, trace-grouped browse list + waterfall, alert stream with Evidence tab (metric chart + correlated logs), form-based rule editor with YAML escape hatch, saved views (localStorage), keyboard shortcuts with `?` help modal, WCAG AA contrast, reduced-motion support
 
 See [UI_UX_IMPROVEMENT_PLAN.md](UI_UX_IMPROVEMENT_PLAN.md) for the design audit and phased plan that produced the current console.

@@ -27,6 +27,16 @@ pub struct QueryExecutor {
     lookback_ns: i64,
 }
 
+/// Snapshot of per-signal storage stats for ops surfaces (UI overview,
+/// /api/v1/stats): block counts, stored row counts, on-disk bytes —
+/// all from block metadata, no Parquet decoding.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SignalStats {
+    pub blocks: usize,
+    pub rows: usize,
+    pub bytes: u64,
+}
+
 impl QueryExecutor {
     /// Sets the instant-selector lookback window (builder).
     pub fn with_query_lookback(mut self, lookback_ns: i64) -> Self {
@@ -130,6 +140,51 @@ impl QueryExecutor {
     /// Returns a clone of the memory buffer for use by ingestion services.
     pub fn memory_buffer(&self) -> MemoryBuffer {
         self.buffer.clone()
+    }
+
+    /// Snapshot of per-signal storage stats for ops surfaces (UI overview,
+    /// /api/v1/stats): block counts, stored row counts, on-disk bytes —
+    /// all from block metadata, no Parquet decoding.
+    ///
+    /// Per-signal storage stats (metrics, logs, traces) from block index
+    /// metadata. O(#blocks) over three in-memory indexes; never decodes
+    /// Parquet or hits the filesystem.
+    pub async fn storage_stats(&self) -> parqtel_core::Result<[SignalStats; 3]> {
+        let (m, l, t) = {
+            let metrics = self.index.read().await;
+            let logs = self.log_index.read().await;
+            let traces = self.trace_index.read().await;
+            (
+                (
+                    metrics.total_blocks(),
+                    metrics.total_rows(),
+                    metrics.total_bytes(),
+                ),
+                (logs.total_blocks(), logs.total_rows(), logs.total_bytes()),
+                (
+                    traces.total_blocks(),
+                    traces.total_rows(),
+                    traces.total_bytes(),
+                ),
+            )
+        };
+        Ok([
+            SignalStats {
+                blocks: m.0,
+                rows: m.1,
+                bytes: m.2,
+            },
+            SignalStats {
+                blocks: l.0,
+                rows: l.1,
+                bytes: l.2,
+            },
+            SignalStats {
+                blocks: t.0,
+                rows: t.1,
+                bytes: t.2,
+            },
+        ])
     }
 
     /// Executes a [QueryPlan] for metrics and returns a [QueryResult].
@@ -468,60 +523,94 @@ impl QueryExecutor {
             });
         }
 
-        let raw_logs = if blocks.is_empty() {
-            buffered_logs
-        } else {
-            let mut disk_logs = Scanner::scan_logs(blocks, start_ns, end_ns).await?;
-            disk_logs.extend(buffered_logs);
-            disk_logs
-        };
+        // Build the row predicate once: severity → body search → matchers.
+        // It is pushed down INTO the block scan (runs inside the blocking
+        // task), so only matching rows materialize — bounded by `limit` —
+        // while the scan still counts every match and buckets volume.
+        // Previously every row of every block in range was decoded into
+        // memory before filtering: the primary RSS driver under the UI's
+        // 10s auto-refresh.
+        let make_filter =
+            |matchers: Vec<crate::matcher::LabelMatcher>,
+             severity_min: Option<i32>,
+             search: Option<String>|
+             -> std::sync::Arc<dyn Fn(&parqtel_core::LogRecord) -> bool + Send + Sync> {
+                std::sync::Arc::new(move |log| {
+                    if let Some(min) = severity_min {
+                        if log.severity_number < min {
+                            return false;
+                        }
+                    }
+                    if let Some(ref pattern) = search {
+                        if !contains_ci(&log.body, pattern) {
+                            return false;
+                        }
+                    }
+                    let all_labels = log.attributes.merge(&log.resource_attributes);
+                    evaluate_matchers(&matchers, &all_labels, "")
+                })
+            };
 
-        // Filter first, then sort only the matching subset (total_logs_count
-        // needs the full pass anyway, but sorting all raw logs does not).
-        let mut filtered = Vec::new();
-        let mut volume_summary = vec![0u64; 60];
         let window_ns = (end_ns - start_ns) / 60;
-        let mut total_logs_count = 0;
+        let mut total_logs_count = 0usize;
+        let mut volume_summary = vec![0u64; 60];
 
-        for log in raw_logs {
-            // 1. Severity filter
-            if let Some(min) = severity_min {
-                if log.severity_number < min {
-                    continue;
+        // Filter the buffered (unflushed) rows in place with the same
+        // predicate — small, and never part of the disk scan.
+        let mut buffered_matching = buffered_logs;
+        if !buffered_matching.is_empty() {
+            let filter = make_filter(matchers.clone(), severity_min, search.clone());
+            let mut buckets = vec![0u64; 60];
+            let mut kept = Vec::with_capacity(buffered_matching.len());
+            for log in buffered_matching {
+                if filter(&log) {
+                    if window_ns > 0 {
+                        let bucket =
+                            ((log.timestamp_ns - start_ns) / window_ns).clamp(0, 59) as usize;
+                        buckets[bucket] += 1;
+                    }
+                    kept.push(log);
                 }
             }
-
-            // 2. Search filter — case-insensitive ASCII contains, no allocation.
-            // ponytail: non-ASCII case folding not handled; switch to a unicode
-            // crate if log bodies need it.
-            if let Some(ref pattern) = search {
-                if !contains_ci(&log.body, pattern) {
-                    continue;
-                }
+            total_logs_count += kept.len();
+            for (acc, b) in volume_summary.iter_mut().zip(buckets) {
+                *acc += b;
             }
-
-            // 3. Label matchers
-            let all_labels = log.attributes.merge(&log.resource_attributes);
-            if evaluate_matchers(&matchers, &all_labels, "") {
-                total_logs_count += 1;
-
-                if window_ns > 0 {
-                    let bucket = ((log.timestamp_ns - start_ns) / window_ns).clamp(0, 59) as usize;
-                    volume_summary[bucket] += 1;
-                }
-
-                if filtered.len() < limit {
-                    filtered.push(log);
-                }
-            }
+            buffered_matching = kept;
         }
 
-        // Apply ordering to the (much smaller) filtered set
+        let mut filtered = if blocks.is_empty() {
+            buffered_matching
+        } else {
+            let filter = make_filter(matchers, severity_min, search);
+            // keep_newest follows the ordering contract: `desc` (the UI's
+            // logs view) returns the newest `limit` matches — Loki-style
+            // "last N logs" — while `asc` keeps the oldest.
+            let (disk_logs, stats) = Scanner::scan_logs_counted_filtered(
+                blocks,
+                start_ns,
+                end_ns,
+                limit,
+                order_desc,
+                Some(filter),
+            )
+            .await?;
+            total_logs_count += stats.total_matched;
+            for (acc, b) in volume_summary.iter_mut().zip(stats.volume_buckets) {
+                *acc += b;
+            }
+            let mut logs = disk_logs;
+            logs.extend(buffered_matching);
+            logs
+        };
+
+        // Apply ordering to the (much smaller) merged set.
         if order_desc {
             filtered.sort_by_key(|b| std::cmp::Reverse(b.timestamp_ns));
         } else {
             filtered.sort_by_key(|a| a.timestamp_ns);
         }
+        filtered.truncate(limit);
 
         Ok(LogQueryResult {
             logs: filtered,
@@ -551,37 +640,65 @@ impl QueryExecutor {
             idx.query(start_ns, end_ns, None)
         };
         let buffered_logs = self.buffer.scan_logs(start_ns, end_ns).await;
-        let raw_logs = if blocks.is_empty() {
-            buffered_logs
-        } else {
-            let disk = Scanner::scan_logs(blocks, start_ns, end_ns).await?;
-            let mut all = disk;
-            all.extend(buffered_logs);
-            all
-        };
 
         let window_ns = (end_ns - start_ns) / 60;
-        let mut filtered = Vec::new();
+        let extra = std::collections::HashMap::new();
+        // Predicate pushed down into the scan (see query_logs): only
+        // matching rows materialize, bounded by `limit`; totals and volume
+        // buckets still cover every match.
+        let pred_filter = {
+            let pred = std::sync::Arc::new(pred.clone());
+            let extra = extra.clone();
+            std::sync::Arc::new(move |log: &parqtel_core::LogRecord| {
+                crate::logql::log_matches_predicate(&pred, log, &extra)
+            }) as std::sync::Arc<dyn Fn(&parqtel_core::LogRecord) -> bool + Send + Sync>
+        };
+        let apply_pred =
+            |log: &parqtel_core::LogRecord| crate::logql::log_matches_predicate(pred, log, &extra);
+
         let mut total_logs_count = 0usize;
         let mut volume_summary = vec![0u64; 60];
-        let extra = std::collections::HashMap::new();
-        for log in raw_logs {
-            if crate::logql::log_matches_predicate(pred, &log, &extra) {
-                total_logs_count += 1;
-                if window_ns > 0 {
-                    let bucket = ((log.timestamp_ns - start_ns) / window_ns).clamp(0, 59) as usize;
-                    volume_summary[bucket] += 1;
-                }
-                if filtered.len() < limit {
-                    filtered.push(log);
+        let mut buffered_matching: Vec<parqtel_core::LogRecord> = Vec::new();
+        if !buffered_logs.is_empty() {
+            for log in buffered_logs {
+                if apply_pred(&log) {
+                    if window_ns > 0 {
+                        let bucket =
+                            ((log.timestamp_ns - start_ns) / window_ns).clamp(0, 59) as usize;
+                        volume_summary[bucket] += 1;
+                    }
+                    total_logs_count += 1;
+                    buffered_matching.push(log);
                 }
             }
         }
+
+        let mut filtered = if blocks.is_empty() {
+            buffered_matching
+        } else {
+            let (disk, stats) = Scanner::scan_logs_counted_filtered(
+                blocks,
+                start_ns,
+                end_ns,
+                limit,
+                order_desc,
+                Some(pred_filter),
+            )
+            .await?;
+            total_logs_count += stats.total_matched;
+            for (acc, b) in volume_summary.iter_mut().zip(stats.volume_buckets) {
+                *acc += b;
+            }
+            let mut all = disk;
+            all.extend(buffered_matching);
+            all
+        };
         if order_desc {
             filtered.sort_by_key(|b| std::cmp::Reverse(b.timestamp_ns));
         } else {
             filtered.sort_by_key(|a| a.timestamp_ns);
         }
+        filtered.truncate(limit);
         Ok(LogQueryResult {
             logs: filtered,
             execution_time: start_time.elapsed(),
@@ -613,38 +730,63 @@ impl QueryExecutor {
             });
         }
 
-        let raw_logs = if blocks.is_empty() {
-            buffered_logs
-        } else {
-            let disk = Scanner::scan_logs(blocks, start_ns, end_ns).await?;
-            let mut all = disk;
-            all.extend(buffered_logs);
-            all
-        };
-
         let window_ns = (end_ns - start_ns) / 60;
-        let mut filtered = Vec::new();
+        let extra = std::collections::HashMap::new();
+        // Search pushed down into the scan (see query_logs).
+        let search_filter = {
+            let search = std::sync::Arc::new(search.clone());
+            let extra = extra.clone();
+            std::sync::Arc::new(move |log: &parqtel_core::LogRecord| {
+                crate::logql::log_matches(&search, log, &extra)
+            }) as std::sync::Arc<dyn Fn(&parqtel_core::LogRecord) -> bool + Send + Sync>
+        };
+        let apply_search =
+            |log: &parqtel_core::LogRecord| crate::logql::log_matches(search, log, &extra);
+
         let mut total_logs_count = 0usize;
         let mut volume_summary = vec![0u64; 60];
-        let extra = std::collections::HashMap::new();
-        for log in raw_logs {
-            if crate::logql::log_matches(search, &log, &extra) {
-                total_logs_count += 1;
-                if window_ns > 0 {
-                    let bucket = ((log.timestamp_ns - start_ns) / window_ns).clamp(0, 59) as usize;
-                    volume_summary[bucket] += 1;
-                }
-                if filtered.len() < limit {
-                    filtered.push(log);
+        let mut buffered_matching: Vec<parqtel_core::LogRecord> = Vec::new();
+        if !buffered_logs.is_empty() {
+            for log in buffered_logs {
+                if apply_search(&log) {
+                    if window_ns > 0 {
+                        let bucket =
+                            ((log.timestamp_ns - start_ns) / window_ns).clamp(0, 59) as usize;
+                        volume_summary[bucket] += 1;
+                    }
+                    total_logs_count += 1;
+                    buffered_matching.push(log);
                 }
             }
         }
+
+        let mut filtered = if blocks.is_empty() {
+            buffered_matching
+        } else {
+            let (disk, stats) = Scanner::scan_logs_counted_filtered(
+                blocks,
+                start_ns,
+                end_ns,
+                limit,
+                order_desc,
+                Some(search_filter),
+            )
+            .await?;
+            total_logs_count += stats.total_matched;
+            for (acc, b) in volume_summary.iter_mut().zip(stats.volume_buckets) {
+                *acc += b;
+            }
+            let mut all = disk;
+            all.extend(buffered_matching);
+            all
+        };
 
         if order_desc {
             filtered.sort_by_key(|b| std::cmp::Reverse(b.timestamp_ns));
         } else {
             filtered.sort_by_key(|a| a.timestamp_ns);
         }
+        filtered.truncate(limit);
 
         Ok(LogQueryResult {
             logs: filtered,
@@ -996,24 +1138,44 @@ impl QueryExecutor {
         limit: usize,
         filter: Option<&crate::logql::SearchQuery>,
     ) -> Result<Vec<parqtel_core::Span>> {
+        Ok(self
+            .query_traces_filtered_counted(start_ns, end_ns, trace_id_filter, limit, filter)
+            .await?
+            .spans)
+    }
+
+    /// [query_traces_filtered] with volume stats: the true span total for
+    /// the range (exact, from block metadata — no Parquet decode), the
+    /// bounded-scan match count, and whether the result was truncated.
+    pub async fn query_traces_filtered_counted(
+        &self,
+        start_ns: i64,
+        end_ns: i64,
+        trace_id_filter: Option<&str>,
+        limit: usize,
+        filter: Option<&crate::logql::SearchQuery>,
+    ) -> Result<crate::models::TraceQueryResult> {
+        let start_time = Instant::now();
         // Cap blocks scanned to bound I/O — most recent blocks first for
         // relevance. 256 covers a week of hourly blocks or a day of
         // 5-minute log-trace flush intervals (G8: raised from 64 after the
         // multi-block baseline showed coverage loss at scale).
         const MAX_BLOCKS: usize = 256;
+        let mut blocks = {
+            let idx = self.trace_index.read().await;
+            idx.query(start_ns, end_ns, None)
+        };
+        // Exact volume from block metadata — the row_count of every block
+        // overlapping the range. Never requires decoding a single span.
+        let total_spans_in_range: usize = blocks.iter().map(|b| b.row_count).sum();
+
         // Scan more when predicates apply (they reduce the result, so a
         // larger scan keeps filtered result sets meaningful).
         let scan_cap = if filter.is_some() { 10_000 } else { 200 };
         let scan_cap = scan_cap.max(limit);
-        let blocks = {
-            let idx = self.trace_index.read().await;
-            let mut b = idx.query(start_ns, end_ns, None);
-            // Reverse so newest blocks are scanned first (more useful for debugging)
-            b.reverse();
-            b.truncate(MAX_BLOCKS);
-            b
-        };
-
+        // Reverse so newest blocks are scanned first (more useful for debugging)
+        blocks.reverse();
+        blocks.truncate(MAX_BLOCKS);
         let mut spans = if blocks.is_empty() {
             Vec::new()
         } else {
@@ -1039,8 +1201,17 @@ impl QueryExecutor {
             spans.retain(|s| crate::logql::span_matches(sq, s));
         }
 
+        let spans_matched = spans.len();
+        let truncated = spans.len() > limit;
         spans.truncate(limit);
-        Ok(spans)
+
+        Ok(crate::models::TraceQueryResult {
+            spans,
+            execution_time: start_time.elapsed(),
+            total_spans_in_range,
+            spans_matched,
+            truncated,
+        })
     }
 
     /// Returns all known field names across the log schema.

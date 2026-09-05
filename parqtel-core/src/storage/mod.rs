@@ -6,7 +6,7 @@ pub mod scanner;
 pub use compactor::Compactor;
 pub use index::BlockIndex;
 pub use retention::RetentionPolicy;
-pub use scanner::Scanner;
+pub use scanner::{LogRowFilter, LogScanStats, Scanner};
 
 use crate::config::BlockConfig;
 use std::sync::Arc;

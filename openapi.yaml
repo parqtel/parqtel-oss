@@ -45,6 +45,49 @@ components:
           type: string
           example: ok
 
+    SignalStats:
+      type: object
+      description: Per-signal storage stats from block index metadata.
+      properties:
+        blocks:
+          type: integer
+          description: Number of stored Parquet blocks.
+        rows:
+          type: integer
+          description: Total stored rows across blocks.
+        bytes:
+          type: integer
+          format: int64
+          description: On-disk bytes across blocks.
+
+    SignalRates:
+      type: object
+      description: Live ingestion-rate stats for one signal.
+      properties:
+        current_per_sec:
+          type: integer
+          description: Items ingested in the last complete second.
+        avg_60s:
+          type: number
+          description: Items/sec averaged over the last 60 complete seconds.
+        avg_5m:
+          type: number
+          description: Items/sec averaged over the last 5 minutes.
+        avg_15m:
+          type: number
+          description: Items/sec averaged over the last 15 minutes.
+        bytes_per_sec:
+          type: number
+          description: Wire payload bytes/sec averaged over the last 60 seconds.
+        gap_secs:
+          type: integer
+          description: Seconds since the last ingested item (capped at the 15m window).
+        total:
+          type: integer
+          format: int64
+          description: Items ingested since process start.
+
+
     ApiResponse:
       type: object
       properties:
@@ -412,6 +455,83 @@ paths:
             text/plain:
               schema:
                 type: string
+
+  /api/v1/stats:
+    get:
+      tags: [Health]
+      summary: Storage, buffer, and configuration snapshot
+      description: >
+        Per-signal storage stats (blocks, stored rows, on-disk bytes from
+        block index metadata), live in-memory buffer counts, and the
+        effective storage/ingest/query configuration. Powers the UI
+        overview storage card and settings panel.
+      operationId: getStats
+      responses:
+        "200":
+          description: Stats snapshot
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                  data:
+                    type: object
+                    properties:
+                      storage:
+                        type: object
+                        properties:
+                          metrics: { $ref: "#/components/schemas/SignalStats" }
+                          logs: { $ref: "#/components/schemas/SignalStats" }
+                          traces: { $ref: "#/components/schemas/SignalStats" }
+                      buffer:
+                        type: object
+                        properties:
+                          metrics_points: { type: integer }
+                          logs: { type: integer }
+                          spans: { type: integer }
+                      config:
+                        type: object
+                        description: Effective config (data dirs, retention, block duration, compression, limits).
+
+  /api/v1/ingest_rates:
+    get:
+      tags: [Health]
+      summary: Live per-signal ingestion rates
+      description: >
+        Current per-second rate, 60s/5m/15m averages, seconds since the
+        last ingested item (gap), and lifetime totals for metrics, logs,
+        and traces, plus per-second counts for the last 3 minutes
+        (sparkline history). Sourced from lock-free in-memory counters —
+        no Parquet access. Powers the UI overview live-rate cards and
+        spike/gap detection.
+      operationId: getIngestRates
+      responses:
+        "200":
+          description: Rate snapshot
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                  data:
+                    type: object
+                    properties:
+                      now: { type: integer, description: Current epoch second }
+                      history_secs: { type: integer, description: Length of the per-second history arrays (180) }
+                      metrics: { $ref: "#/components/schemas/SignalRates" }
+                      logs: { $ref: "#/components/schemas/SignalRates" }
+                      traces: { $ref: "#/components/schemas/SignalRates" }
+                      history:
+                        type: object
+                        description: Per-second counts, oldest first, keyed by signal (metrics/logs/traces).
+                        properties:
+                          metrics: { type: array, items: { type: integer } }
+                          logs: { type: array, items: { type: integer } }
+                          traces: { type: array, items: { type: integer } }
 
   /v1/metrics:
     post:
@@ -1402,9 +1522,11 @@ paths:
             type: number
         - name: limit
           in: query
+          description: Max spans returned (1-10000).
           schema:
             type: integer
-            default: 20
+            default: 200
+            maximum: 10000
       responses:
         "200":
           description: Matching traces
@@ -1416,6 +1538,19 @@ paths:
                   status:
                     type: string
                   data:
-                    type: array
-                    items:
-                      type: object
+                    type: object
+                    properties:
+                      trace_id:
+                        type: string
+                      spans:
+                        type: array
+                        items:
+                          type: object
+                      total_spans_in_range:
+                        type: integer
+                        description: Exact span rows stored in the time range (from block metadata).
+                      spans_matched:
+                        type: integer
+                        description: Matches found by the bounded scan pass.
+                      truncated:
+                        type: boolean

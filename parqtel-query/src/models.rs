@@ -55,6 +55,23 @@ pub struct LogQueryResult {
     pub volume_summary: Vec<u64>,
 }
 
+/// The result of a trace search.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TraceQueryResult {
+    /// Spans returned (bounded by the requested limit).
+    pub spans: Vec<parqtel_core::Span>,
+    /// Time taken to execute the query.
+    pub execution_time: Duration,
+    /// Total span rows stored in the time range (exact, from block
+    /// metadata — never capped by the scan limit).
+    pub total_spans_in_range: usize,
+    /// Number of matches found by the bounded scan pass (before the
+    /// final truncation to `limit`).
+    pub spans_matched: usize,
+    /// Whether the returned span set was truncated to `limit`.
+    pub truncated: bool,
+}
+
 /// A single event correlated with an anchor.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CorrelatedEvent {

@@ -7,7 +7,7 @@ use figment::{
 };
 use flate2::write::GzEncoder;
 use flate2::Compression;
-use parqtel_core::{start_maintenance, BlockIndex, Config};
+use parqtel_core::{start_maintenance, BlockIndex, Config, RetentionPolicy};
 use parqtel_ingest::{IngestionService, LogIngestionService, TraceIngestionService};
 use parqtel_query::QueryExecutor;
 use sha2::{Digest, Sha256};
@@ -228,6 +228,16 @@ async fn run_server(
 
     start_maintenance(index.clone(), config.storage.clone());
     start_maintenance(log_index.clone(), config.logs.clone().into());
+    // Traces: retention only. Trace blocks share the metrics BlockConfig
+    // (TraceWriter is built from config.storage), but the compactor's
+    // read_source_blocks only decodes metrics/logs schemas — running full
+    // maintenance would attempt trace merges and fail on schema mismatch.
+    // Without retention the trace index grows without bound (observed:
+    // 62 blocks/700K rows in ~8h on the OOM-affected deployment).
+    tokio::spawn(RetentionPolicy::run_loop(
+        trace_index.clone(),
+        config.storage.clone(),
+    ));
 
     let state = AppState::new(
         ingestion_service,

@@ -17,4 +17,4 @@ pub use config::{
 pub use engine::StorageEngine;
 pub use error::{Error, Result};
 pub use models::*;
-pub use storage::{start_maintenance, BlockIndex, Scanner};
+pub use storage::{start_maintenance, BlockIndex, RetentionPolicy, Scanner};

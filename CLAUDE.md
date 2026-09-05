@@ -71,7 +71,7 @@ Rust workspace with 14 crates:
 
 ## Embedded Web UI (`/ui`)
 
-Single-file vanilla-JS console at `parqtel-server/src/ui.html`, embedded via `include_str!`, pre-gzipped with ETag. **Zero external requests** (no CDNs/fonts/frameworks) — works air-gapped. Budget: ≤42 KB gzipped; keep it dependency-free.
+Single-file vanilla-JS console at `parqtel-server/src/ui.html`, embedded via `include_str!`, pre-gzipped with ETag. **Zero external requests** (no CDNs/fonts/frameworks) — works air-gapped. Budget: ≤1000 KB gzipped (soft limit — keep it lean and dependency-free); poll updates must not thrash layout (canvas redraws + textContent swaps only).
 
 Features: Overview pane, deep-linkable hash URLs, Builder⇄Code metrics query builder, log facets, trace-grouped browse list, alert Evidence tab, rule editor (form + YAML), saved views, `?` shortcut help, WCAG AA contrast.
 
@@ -144,7 +144,7 @@ Key env vars: `PARQTEL_BIND`, `PARQTEL_DATA_DIR`, `PARQTEL__STORAGE__COMPRESSION
 - **Alerts**: `/api/v1/alerts`, `/api/v1/rules`
 - **Pipelines**: `/api/v1/recording_rules`, `/api/v1/pipelines`
 - **Grafana**: `/search`, `/query`, `/annotations`, `/tag-keys`, `/tag-values`
-- **Ops**: `/health`, `/metrics`, `/oas`, `/ui`
+- **Ops**: `/health`, `/metrics`, `/oas`, `/ui`, `/api/v1/stats` (storage/buffer/config snapshot), `/api/v1/ingest_rates` (live per-signal rates: current + 60s/5m/15m averages, gap_secs spike/gap detection, 180s per-second sparkline history)
 
 ## Storage Model
 

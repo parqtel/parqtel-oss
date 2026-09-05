@@ -186,6 +186,7 @@ async fn test_ingest_metrics_json() {
         "resourceMetrics": [{"scopeMetrics": [{"metrics": [{"name": "test", "gauge": {"dataPoints": [{"timeUnixNano": 1000, "asDouble": 1.0}]}}]}]}]
     });
     let response = app
+        .clone()
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -1544,4 +1545,96 @@ async fn test_pipeline_fetch_metrics_and_traces() {
         }
         other => panic!("expected table, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn test_ingest_rates_endpoint_reflects_ingest() {
+    let app = setup_test_app().await;
+
+    // Ingest one log record via the JSON path (should count as 1 log).
+    let payload = serde_json::json!({
+        "resourceLogs": [{"scopeLogs": [{"logRecords": [{"timeUnixNano": 1000, "body": "rate-test"}]}]}]
+    });
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/logs/json")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(payload.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // One metrics point too.
+    let payload = serde_json::json!({
+        "resourceMetrics": [{"scopeMetrics": [{"metrics": [{"name": "rate_test", "gauge": {"dataPoints": [{"timeUnixNano": 1000, "asDouble": 1.0}]}}]}]}]
+    });
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/metrics/json")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(payload.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // Now the rates endpoint must reflect both signals.
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/v1/ingest_rates")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["status"], "success");
+    let d = &json["data"];
+    assert_eq!(
+        d["logs"]["total"], 1,
+        "log total must count the ingested record"
+    );
+    assert_eq!(
+        d["metrics"]["total"], 1,
+        "metrics total must count the ingested point"
+    );
+    assert_eq!(d["traces"]["total"], 0, "no spans ingested");
+    // Shape: per-signal stats + sparkline history arrays.
+    for sig in ["metrics", "logs", "traces"] {
+        assert!(d[sig]["current_per_sec"].is_u64(), "{sig} current_per_sec");
+        assert!(d[sig]["avg_60s"].is_number(), "{sig} avg_60s");
+        assert!(d[sig]["avg_5m"].is_number(), "{sig} avg_5m");
+        assert!(d[sig]["avg_15m"].is_number(), "{sig} avg_15m");
+        assert!(d[sig]["bytes_per_sec"].is_number(), "{sig} bytes_per_sec");
+        assert!(d[sig]["gap_secs"].is_u64(), "{sig} gap_secs");
+        let hist = &d["history"][sig];
+        assert!(hist.is_array(), "{sig} history array");
+        assert_eq!(
+            hist.as_array().unwrap().len(),
+            d["history_secs"].as_u64().unwrap() as usize,
+            "{sig} history length == history_secs"
+        );
+    }
+    // The ingested second shows up as at least one nonzero bucket in logs history.
+    let logs_hist = d["history"]["logs"].as_array().unwrap();
+    assert!(
+        logs_hist.iter().any(|v| v.as_u64().unwrap_or(0) > 0),
+        "logs history must contain the ingested second: {logs_hist:?}"
+    );
+    // Gap for logs is 0 (just ingested); metrics likewise.
+    assert_eq!(d["logs"]["gap_secs"], 0);
+    assert_eq!(d["metrics"]["gap_secs"], 0);
 }

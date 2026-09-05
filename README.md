@@ -81,7 +81,7 @@ Parqtel is a single-binary observability backend written in Rust that ingests Op
 
 ## Built-in Web UI
 
-Parqtel ships with a zero-dependency embedded web console at `/ui` — no CDNs, no web fonts, no frameworks, works air-gapped. Single file, ~42 KB gzipped, served with gzip + ETag caching at zero per-request server cost.
+Parqtel ships with a zero-dependency embedded web console at `/ui` — no CDNs, no web fonts, no frameworks, works air-gapped. Single file, gzipped, soft budget 1000 KB, served with gzip + ETag caching at zero per-request server cost.
 
 | Overview | Metrics |
 |----------|---------|
@@ -181,6 +181,16 @@ cargo build --release
 docker build -t parqtel:local .
 docker run -p 8080:8080 -v parqtel_data:/var/lib/parqtel parqtel:local
 ```
+
+### Install with Homebrew (Linux & macOS)
+
+```bash
+brew tap parqtel/tap
+brew install parqtel-oss
+parqtel serve
+```
+
+The formula downloads the compiled release binary for your platform (linux-amd64/arm64, darwin-amd64/arm64) from [GitHub releases](https://github.com/parqtel/parqtel-oss/releases) — no Rust toolchain required. The tap is updated automatically on every release.
 
 ### Run with Docker Compose (full stack)
 

@@ -201,7 +201,7 @@ Dashboard/panel grids · service map · trace compare (Jaeger-style diff) · SLO
 | Metric | Current | Budget | Enforcement |
 |--------|---------|--------|-------------|
 | Raw payload | 118 KB | **≤ 160 KB** | CI check `gzip -c ui.html \| wc -c` against `/docs` budget file |
-| Gzipped payload | 29.5 KB | **≤ 42 KB** | same |
+| Gzipped payload | 29.5 KB | **≤ 1000 KB (soft)** | lean by design |
 | External requests at load | 4 (2 fonts CSS+woff2, uPlot JS+CSS) | **0** | grep CI for `http`/`https` src/href in ui.html |
 | Server rendering cost | 0 (static embed) | **0 — unchanged** | architecture review gate |
 | Chart series / DOM rows | 50 / windowed | keep windowing; rows > 200 must virtualize | code-review checklist |

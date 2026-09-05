@@ -34,3 +34,9 @@ __pycache__/
 scripts/bench_stubs/
 scripts/bench_results/
 parqtel-server/data/
+
+# Agent-local artifacts
+.kiro/
+.rtk/
+data/
+server.pid

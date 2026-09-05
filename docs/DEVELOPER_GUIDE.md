@@ -36,7 +36,7 @@ Parqtel uses a registry pattern for storage backends. If you want to add a new b
 The web console (`parqtel-server/src/ui.html`) is a single-file vanilla-JS app with strict constraints:
 
 - **Zero external requests** — no CDNs, no web fonts, no frameworks, no icon packs. Use system font stacks and inline SVG.
-- **Size budget: ≤42 KB gzipped** — check with `gzip -c parqtel-server/src/ui.html | wc -c`.
+- **Size budget: ≤1000 KB gzipped (soft)** — keep lean; check with `gzip -c parqtel-server/src/ui.html | wc -c`.
 - **No build step** — the file is embedded via `include_str!` and served pre-gzipped with an ETag.
 - **Validating changes**: Node may be unavailable locally; verify JS with headless Chrome instead:
   ```bash

@@ -27,6 +27,7 @@ pub async fn ingest_proto(State(state): State<AppState>, body: Bytes) -> Respons
         .metrics
         .batches_received
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let wire_bytes = body.len() as u64;
     match state.inner.ingestion_service.ingest_proto(body).await {
         Ok(count) => {
             state
@@ -34,6 +35,7 @@ pub async fn ingest_proto(State(state): State<AppState>, body: Bytes) -> Respons
                 .metrics
                 .ingested_points
                 .fetch_add(count, std::sync::atomic::Ordering::Relaxed);
+            state.inner.metrics.rates.record_metrics(count, wire_bytes);
             (StatusCode::OK, Json(json!({ "ingested": count }))).into_response()
         }
         Err(e) => {
@@ -66,6 +68,7 @@ pub async fn ingest_json(State(state): State<AppState>, body: Bytes) -> Response
         .metrics
         .batches_received
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let wire_bytes = body.len() as u64;
     match state.inner.ingestion_service.ingest_json(body).await {
         Ok(count) => {
             state
@@ -73,6 +76,7 @@ pub async fn ingest_json(State(state): State<AppState>, body: Bytes) -> Response
                 .metrics
                 .ingested_points
                 .fetch_add(count, std::sync::atomic::Ordering::Relaxed);
+            state.inner.metrics.rates.record_metrics(count, wire_bytes);
             (StatusCode::OK, Json(json!({ "ingested": count }))).into_response()
         }
         Err(e) => {
@@ -105,6 +109,7 @@ pub async fn ingest_logs_proto(State(state): State<AppState>, body: Bytes) -> Re
         .metrics
         .batches_received
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let wire_bytes = body.len() as u64;
     match state.inner.log_ingestion_service.ingest_proto(body).await {
         Ok(count) => {
             state
@@ -112,6 +117,7 @@ pub async fn ingest_logs_proto(State(state): State<AppState>, body: Bytes) -> Re
                 .metrics
                 .ingested_points
                 .fetch_add(count, std::sync::atomic::Ordering::Relaxed);
+            state.inner.metrics.rates.record_logs(count, wire_bytes);
             (StatusCode::OK, Json(json!({ "ingested": count }))).into_response()
         }
         Err(e) => {
@@ -144,6 +150,7 @@ pub async fn ingest_logs_json(State(state): State<AppState>, body: Bytes) -> Res
         .metrics
         .batches_received
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let wire_bytes = body.len() as u64;
     match state.inner.log_ingestion_service.ingest_json(body).await {
         Ok(count) => {
             state
@@ -151,6 +158,7 @@ pub async fn ingest_logs_json(State(state): State<AppState>, body: Bytes) -> Res
                 .metrics
                 .ingested_points
                 .fetch_add(count, std::sync::atomic::Ordering::Relaxed);
+            state.inner.metrics.rates.record_logs(count, wire_bytes);
             (StatusCode::OK, Json(json!({ "ingested": count }))).into_response()
         }
         Err(e) => {
@@ -183,6 +191,7 @@ pub async fn ingest_traces_json(State(state): State<AppState>, body: Bytes) -> R
         .metrics
         .batches_received
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let wire_bytes = body.len() as u64;
     match state.inner.trace_ingestion_service.ingest_json(body).await {
         Ok(count) => {
             state
@@ -190,6 +199,7 @@ pub async fn ingest_traces_json(State(state): State<AppState>, body: Bytes) -> R
                 .metrics
                 .ingested_points
                 .fetch_add(count, std::sync::atomic::Ordering::Relaxed);
+            state.inner.metrics.rates.record_spans(count, wire_bytes);
             (StatusCode::OK, Json(json!({ "ingested": count }))).into_response()
         }
         Err(e) => {

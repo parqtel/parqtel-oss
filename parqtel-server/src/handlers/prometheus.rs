@@ -822,6 +822,16 @@ pub async fn search_traces(
 
     let start_ns = (start * 1_000_000_000.0) as i64;
     let end_ns = (end * 1_000_000_000.0) as i64;
+    // Configurable result cap (default 200). Traces search semantics are
+    // per-span; the UI groups into traces client-side.
+    let limit = params
+        .get("limit")
+        .and_then(|v| {
+            v.as_u64()
+                .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+        })
+        .unwrap_or(200)
+        .min(10_000) as usize;
     let filter = if trace_id.is_empty() {
         None
     } else {
@@ -838,10 +848,11 @@ pub async fn search_traces(
     match state
         .inner
         .query_executor
-        .query_traces_filtered(start_ns, end_ns, filter, 200, search.as_ref())
+        .query_traces_filtered_counted(start_ns, end_ns, filter, limit, search.as_ref())
         .await
     {
-        Ok(spans) => {
+        Ok(result) => {
+            let spans = &result.spans;
             // Predicates already applied in the scan (push-down).
             let tid = if let Some(first) = spans.first() {
                 hex::encode(first.trace_id)
@@ -882,7 +893,14 @@ pub async fn search_traces(
                 StatusCode::OK,
                 Json(json!({
                     "status": "success",
-                    "data": { "trace_id": tid, "spans": span_json }
+                    "data": {
+                        "trace_id": tid,
+                        "spans": span_json,
+                        "total_spans_in_range": result.total_spans_in_range,
+                        "spans_matched": result.spans_matched,
+                        "truncated": result.truncated,
+                        "limit": limit,
+                    }
                 })),
             )
                 .into_response()

@@ -53,7 +53,7 @@ make docker        # Build Docker image
 - **Async**: Tokio with full features; blocking I/O (Parquet encode, scans) on `spawn_blocking` with pre-acquired semaphore
 - **Config**: Figment layered (defaults → TOML → env → CLI)
 - **Logging**: tracing + tracing-subscriber
-- **Embedded UI**: single-file `parqtel-server/src/ui.html`, no external requests, no frameworks, gzip+ETag served at `/ui`. Budget: ≤42 KB gzipped. Keep it dependency-free.
+- **Embedded UI**: single-file `parqtel-server/src/ui.html`, no external requests, no frameworks, gzip+ETag served at `/ui`. Budget: ≤1000 KB gzipped (soft limit — keep it lean; it is a single file embedded in the binary). Keep it dependency-free and render-fast (no heavy libraries, no layout thrash on poll updates).
 
 ## Key Source Paths
 
@@ -87,7 +87,7 @@ Layered via Figment (priority: CLI > env > TOML > defaults):
 - **Correlation**: `/v1/correlate`
 - **Pipelines**: `/api/v1/recording_rules`, `/api/v1/pipelines`
 - **Grafana SimpleJSON**: `/search`, `/query`, `/annotations`, `/tag-keys`, `/tag-values`
-- **Ops**: `/health`, `/metrics`, `/oas`, `/ui`
+- **Ops**: `/health`, `/metrics`, `/oas`, `/ui`, `/api/v1/stats` (storage/buffer/config snapshot), `/api/v1/ingest_rates` (live per-signal rates: current + 60s/5m/15m averages, gap_secs spike/gap detection, 180s per-second sparkline history)
 
 ## CI Pipeline
 

@@ -18,7 +18,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.87" # comfy-table 7.2+ (via arrow 59) requires 1.87
 authors = ["parqtel team"]

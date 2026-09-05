@@ -167,6 +167,12 @@ parqtel:
     logLevel: "info"
     # -- Log format: text or json.
     logFormat: "json"
+  # -- glibc malloc arena cap (MALLOC_ARENA_MAX). Tokio workers + the
+  # blocking scan pool each default to their own 64MB arena (8×ncores,
+  # up to 32 on 4-CPU nodes); bounding them caps retained-but-unused
+  # heap from transient Parquet allocations. Lower = less RSS, more
+  # arena contention.
+  mallocArenaMax: 2
 
 # ── Autoscaling ──────────────────────────────────────────────────────────────
 autoscaling:
