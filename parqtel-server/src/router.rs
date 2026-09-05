@@ -27,6 +27,8 @@ pub fn build_router(state: AppState) -> Router {
         // Health & UI
         .route("/health", get(handlers::misc::health))
         .route("/metrics", get(handlers::misc::metrics))
+        .route("/api/v1/stats", get(handlers::misc::stats))
+        .route("/api/v1/ingest_rates", get(handlers::misc::ingest_rates))
         .route("/", get(|| async { Redirect::to("/ui") }))
         .route("/ui", get(handlers::misc::ui))
         .route("/oas", get(handlers::misc::openapi_spec))

@@ -67,6 +67,13 @@ spec:
               value: "/etc/parqtel/parqtel.toml"
             - name: RUST_LOG
               value: {{ .Values.parqtel.telemetry.logLevel | quote }}
+            # Bound glibc malloc arenas: tokio workers + blocking scan pool
+            # otherwise each get their own 64MB arena (up to 32 on 4-CPU
+            # nodes); transient Parquet allocations fragment them and RSS
+            # climbs until OOM. Image default is 2; keep explicit for
+            # chart-only deploys.
+            - name: MALLOC_ARENA_MAX
+              value: {{ .Values.parqtel.mallocArenaMax | default 2 | quote }}
             {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

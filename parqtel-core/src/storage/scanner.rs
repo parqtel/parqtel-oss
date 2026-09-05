@@ -13,6 +13,18 @@ use std::sync::Arc;
 const MAX_CONCURRENT: usize = 16;
 /// Hard cap on blocks scanned per query.
 const MAX_BLOCKS: usize = 128;
+
+/// Row predicate pushed down into blocking scan tasks.
+pub type LogRowFilter = Arc<dyn Fn(&LogRecord) -> bool + Send + Sync>;
+
+/// Aggregate statistics for a counted log scan: the true match count
+/// (never capped by `keep`) and 60 ingestion-volume buckets spread over
+/// `[start_ns, end_ns]`.
+#[derive(Debug, Default)]
+pub struct LogScanStats {
+    pub total_matched: usize,
+    pub volume_buckets: Vec<u64>,
+}
 /// Label-cache size ceiling per chunk before it is cleared.
 /// ponytail: naive bound — clear-on-overflow instead of LRU; revisit if
 /// high-cardinality queries dominate profiles.
@@ -191,7 +203,34 @@ impl Scanner {
         start_ns: i64,
         end_ns: i64,
     ) -> Result<Vec<LogRecord>> {
+        // Full-materialization path (pipelines/correlate need every row).
+        let (logs, _) =
+            Self::scan_logs_counted_filtered(blocks, start_ns, end_ns, usize::MAX, true, None)
+                .await?;
+        Ok(logs)
+    }
+
+    /// Scans blocks for logs with a pre-filter pushed down into the scan so
+    /// non-matching rows never materialize, while still counting every
+    /// matching row and bucketing it for volume summaries. `keep` bounds
+    /// how many records are retained in memory: with `keep_newest` the
+    /// NEWEST `keep` matches are kept (Loki-style "last N logs"), otherwise
+    /// the OLDEST `keep` — rows inside a flushed block are stored in
+    /// timestamp order (both flush and compaction sort before writing).
+    ///
+    /// The filter runs inside each blocking task; it must be cheap
+    /// (label-equality checks over already-decoded rows).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn scan_logs_counted_filtered(
+        blocks: Vec<BlockMetadata>,
+        start_ns: i64,
+        end_ns: i64,
+        keep: usize,
+        keep_newest: bool,
+        filter: Option<LogRowFilter>,
+    ) -> Result<(Vec<LogRecord>, LogScanStats)> {
         let sem = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT));
+        let window_ns = (end_ns - start_ns) / 60;
         let mut tasks = Vec::new();
         for block in blocks.into_iter().take(MAX_BLOCKS) {
             let permit = sem
@@ -199,27 +238,63 @@ impl Scanner {
                 .acquire_owned()
                 .await
                 .map_err(|e| Error::Internal(e.to_string()))?;
+            let filter = filter.clone();
             tasks.push(tokio::task::spawn_blocking(move || {
                 let _permit = permit;
-                Self::scan_log_block(block, start_ns, end_ns)
+                Self::scan_log_block_filtered(
+                    block,
+                    start_ns,
+                    end_ns,
+                    keep,
+                    keep_newest,
+                    filter,
+                    window_ns,
+                )
             }));
         }
 
         let mut all_logs = Vec::new();
+        let mut stats = LogScanStats {
+            total_matched: 0,
+            volume_buckets: vec![0; 60],
+        };
         for task in tasks {
-            let logs = task.await.map_err(|e| Error::Internal(e.to_string()))??;
+            let (logs, matched, buckets) =
+                task.await.map_err(|e| Error::Internal(e.to_string()))??;
+            stats.total_matched += matched;
+            for (acc, b) in stats.volume_buckets.iter_mut().zip(buckets) {
+                *acc += b;
+            }
             all_logs.extend(logs);
+            // Incremental trim keeps the working set at ~`keep` records
+            // even when many blocks are in range.
+            all_logs.sort_by_key(|l| l.timestamp_ns);
+            if all_logs.len() > keep {
+                if keep_newest {
+                    let excess = all_logs.len() - keep;
+                    all_logs.drain(..excess);
+                } else {
+                    all_logs.truncate(keep);
+                }
+            }
         }
-        all_logs.sort_by_key(|l| l.timestamp_ns);
-        Ok(all_logs)
+        Ok((all_logs, stats))
     }
 
-    fn scan_log_block(meta: BlockMetadata, start_ns: i64, end_ns: i64) -> Result<Vec<LogRecord>> {
+    fn scan_log_block_filtered(
+        meta: BlockMetadata,
+        start_ns: i64,
+        end_ns: i64,
+        keep: usize,
+        keep_newest: bool,
+        filter: Option<LogRowFilter>,
+        window_ns: i64,
+    ) -> Result<(Vec<LogRecord>, usize, Vec<u64>)> {
         let file = match File::open(&meta.path) {
             Ok(f) => f,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 tracing::warn!("Log block file not found, skipping: {:?}", meta.path);
-                return Ok(Vec::new());
+                return Ok((Vec::new(), 0, vec![0; 60]));
             }
             Err(e) => return Err(Error::Io(e)),
         };
@@ -232,7 +307,9 @@ impl Scanner {
             .build()
             .map_err(|e| Error::Parquet(e.to_string()))?;
 
-        let mut logs = Vec::new();
+        let mut kept: std::collections::VecDeque<LogRecord> = std::collections::VecDeque::new();
+        let mut matched = 0usize;
+        let mut buckets = vec![0u64; 60];
         for record_batch in reader {
             let record_batch = record_batch.map_err(|e| Error::Parquet(e.to_string()))?;
 
@@ -242,12 +319,30 @@ impl Scanner {
             for row in 0..record_batch.num_rows() {
                 let log =
                     StorageModel::row_to_log(&record_batch, row, &mut attr_cache, &mut res_cache)?;
-                if log.timestamp_ns >= start_ns && log.timestamp_ns <= end_ns {
-                    logs.push(log);
+                if log.timestamp_ns < start_ns || log.timestamp_ns > end_ns {
+                    continue;
+                }
+                if let Some(f) = &filter {
+                    if !f(&log) {
+                        continue;
+                    }
+                }
+                matched += 1;
+                if window_ns > 0 {
+                    let bucket = ((log.timestamp_ns - start_ns) / window_ns).clamp(0, 59) as usize;
+                    buckets[bucket] += 1;
+                }
+                if keep > 0 {
+                    if keep_newest && kept.len() >= keep {
+                        kept.pop_front();
+                    }
+                    if kept.len() < keep {
+                        kept.push_back(log);
+                    }
                 }
             }
         }
-        Ok(logs)
+        Ok((kept.into_iter().collect(), matched, buckets))
     }
 
     /// Scans a set of blocks for spans matching a time range.

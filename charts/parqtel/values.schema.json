@@ -470,6 +470,11 @@
               ]
             }
           }
+        },
+        "mallocArenaMax": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 64
         }
       }
     },

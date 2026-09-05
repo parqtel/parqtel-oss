@@ -14,6 +14,14 @@ docker run -d \
   ghcr.io/parqtel/parqtel-oss:latest
 ```
 
+Or install the compiled release binary via Homebrew (Linux & macOS; no Rust toolchain needed):
+
+```bash
+brew tap parqtel/tap
+brew install parqtel-oss
+parqtel serve   # web console at http://localhost:8080/ui
+```
+
 Verify it's running:
 ```bash
 curl http://localhost:8080/health
@@ -108,8 +116,24 @@ curl "http://localhost:8080/api/v1/logs?query=service%3D%22my-web-app%22&start=$
 Parqtel ships with a built-in zero-dependency web console for quick exploration.
 
 1. Open your browser and go to `http://localhost:8080/ui`.
-2. The **Overview** pane shows stat cards for each signal plus a 6-hour log-volume sparkline.
+2. The **Overview** pane is a three-row dashboard: per-signal stat cards on top, storage + a 6-hour ingest-volume chart in the middle, and **live ingestion-rate cards** at the bottom — one per signal showing the 60s average rate, a per-second spike/gap sparkline (last 3 minutes), a status dot (green active / amber slowing / red silent), and wire bytes/sec alongside lifetime totals.
 3. Click a card (Metrics / Logs / Traces / Alerts) to explore that signal.
+
+The rate cards make ingestion problems visible at a glance:
+
+- **Spike** — a tall burst in the sparkline while the 60s average climbs (e.g. a service restarting and replaying its queue)
+- **Gap** — the sparkline goes flat, the status dot turns amber (≤60s) then red (>60s), and a `gap Ns` badge counts the silence
+- **Wire pressure** — the bytes/sec line shows protocol-level load (a few large batches vs. many tiny requests), even when item counts look identical
+
+The same data is queryable for dashboards and alerting:
+
+```bash
+# JSON snapshot (current + 60s/5m/15m averages, bytes/sec, gap, sparkline history)
+curl http://localhost:8080/api/v1/ingest_rates
+
+# Prometheus exposition (self-monitoring)
+curl http://localhost:8080/metrics | grep parqtel_ingest
+```
 
 The console includes:
 - **Deep-linkable URLs** — the query, time range, and view are encoded in the page URL; share it to restore the exact state

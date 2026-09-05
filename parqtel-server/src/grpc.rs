@@ -59,6 +59,7 @@ impl MetricsService for OtlpGrpcService {
         request: Request<ExportMetricsServiceRequest>,
     ) -> Result<Response<ExportMetricsServiceResponse>, Status> {
         let body = prost::Message::encode_to_vec(&request.into_inner());
+        let wire_bytes = body.len() as u64;
         match self
             .state
             .inner
@@ -78,6 +79,11 @@ impl MetricsService for OtlpGrpcService {
                     .metrics
                     .ingested_points
                     .fetch_add(count, Ordering::Relaxed);
+                self.state
+                    .inner
+                    .metrics
+                    .rates
+                    .record_metrics(count, wire_bytes);
                 Ok(Response::new(ExportMetricsServiceResponse {
                     partial_success: None,
                 }))
@@ -97,6 +103,7 @@ impl LogsService for OtlpGrpcService {
         request: Request<ExportLogsServiceRequest>,
     ) -> Result<Response<ExportLogsServiceResponse>, Status> {
         let body = prost::Message::encode_to_vec(&request.into_inner());
+        let wire_bytes = body.len() as u64;
         match self
             .state
             .inner
@@ -116,6 +123,11 @@ impl LogsService for OtlpGrpcService {
                     .metrics
                     .ingested_points
                     .fetch_add(count, Ordering::Relaxed);
+                self.state
+                    .inner
+                    .metrics
+                    .rates
+                    .record_logs(count, wire_bytes);
                 Ok(Response::new(ExportLogsServiceResponse {
                     partial_success: None,
                 }))
@@ -135,6 +147,7 @@ impl TraceService for OtlpGrpcService {
         request: Request<ExportTraceServiceRequest>,
     ) -> Result<Response<ExportTraceServiceResponse>, Status> {
         let body = prost::Message::encode_to_vec(&request.into_inner());
+        let wire_bytes = body.len() as u64;
         match self
             .state
             .inner
@@ -154,6 +167,11 @@ impl TraceService for OtlpGrpcService {
                     .metrics
                     .ingested_points
                     .fetch_add(count, Ordering::Relaxed);
+                self.state
+                    .inner
+                    .metrics
+                    .rates
+                    .record_spans(count, wire_bytes);
                 Ok(Response::new(ExportTraceServiceResponse {
                     partial_success: None,
                 }))

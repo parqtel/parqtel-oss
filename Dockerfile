@@ -133,6 +133,13 @@ COPY --from=runtime-libs /out/ /
 COPY --from=builder /usr/local/bin/parqtel /usr/local/bin/parqtel
 COPY --from=probe /usr/local/bin/healthcheck /usr/local/bin/healthcheck
 
+# Bound glibc malloc arenas: tokio worker threads + the blocking scan pool
+# each get their own 64MB arena by default (8×ncores, up to 32 on a 4-CPU
+# node), and transient Parquet scan/flush allocations fragment them — RSS
+# climbs and never returns (observed OOMKilled at 4Gi after ~8h). 2 arenas
+# keep contention acceptable while capping retained-but-unused heap.
+ENV MALLOC_ARENA_MAX=2
+
 HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
     CMD ["/usr/local/bin/healthcheck"]
 

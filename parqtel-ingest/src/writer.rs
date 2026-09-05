@@ -29,9 +29,12 @@ struct DataPointContext {
 impl BlockWriter {
     pub fn new(config: BlockConfig) -> Self {
         let capacity = config.max_rows_per_block;
+        // Grow on demand instead of pre-allocating `max_rows_per_block`
+        // slots: at 1M rows × ~100 bytes/ctx this parks hundreds of MB per
+        // writer in the allocator, and every flush swaps in a fresh writer.
         Self {
             config,
-            buffer: Vec::with_capacity(capacity),
+            buffer: Vec::new(),
             capacity,
         }
     }
@@ -174,9 +177,11 @@ pub struct LogWriter {
 impl LogWriter {
     pub fn new(config: LogBlockConfig) -> Self {
         let capacity = config.max_rows_per_block;
+        // Grown on demand — a 200K-row pre-allocation is tens of MB parked
+        // per writer and re-allocated on every rotator flush swap.
         Self {
             config,
-            buffer: Vec::with_capacity(capacity),
+            buffer: Vec::new(),
             capacity,
         }
     }
@@ -286,9 +291,12 @@ pub struct TraceWriter {
 impl TraceWriter {
     pub fn new(config: BlockConfig) -> Self {
         let capacity = config.max_rows_per_block;
+        // Span is a large struct (inline arrays + Strings + LabelSet + Vec
+        // events/links); at 1M rows a pre-allocation here reserves a
+        // multi-hundred-MB chunk every flush cycle. Grow on demand.
         Self {
             config,
-            buffer: Vec::with_capacity(capacity),
+            buffer: Vec::new(),
             capacity,
         }
     }

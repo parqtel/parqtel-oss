@@ -41,12 +41,14 @@ test ──┬─► build-binaries (4 targets, --locked)
        │        ├─► trivy-scan (SARIF → Security tab)
        │        ├─► sign-image (cosign keyless)
        │        └─► helm-publish (OCI chart)
-       └────────────────────► github-release (needs everything above)
+       └────────────────────► github-release ─► notify-homebrew-tap (repository_dispatch)
 ```
 
 The new `test` gate re-runs clippy `-D warnings` + the full workspace suite on the tagged commit. Tags can point at stale commits — without this gate a tag could publish binaries that were never validated.
 
 Supply chain guarantees retained: build provenance attestation, SBOM, cosign signing, Trivy image scan, checksums for every binary asset.
+
+**Homebrew tap coordination** — after the GitHub release, `notify-homebrew-tap` fires a `repository_dispatch` (`event-type: parqtel-oss-release`) at `parqtel/homebrew-tap`, carrying the version + tag. The tap's own pipeline then builds its four per-platform tarballs from that tag, publishes them as a tap release, opens a formula-bump PR, and audits a real `brew install` before merge (full contract: `parqtel/homebrew-tap` → `docs/RELEASE_COORDINATION.md`). Users get `brew upgrade parqtel-oss`. Requires the `HOMEBREW_TAP_DISPATCH_TOKEN` secret (PAT, `repo` scope); without it the tap's daily schedule poll is the fallback trigger.
 
 ### `scorecard.yml` — weekly OpenSSF Scorecard analysis
 
