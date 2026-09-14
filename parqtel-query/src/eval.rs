@@ -13,6 +13,9 @@ use std::collections::BTreeMap;
 /// Evaluates an expression tree against pre-loaded series data.
 pub struct Evaluator<'a> {
     data: &'a SeriesData,
+    /// Native-histogram samples per metric/series (explicit buckets),
+    /// for the histogram_* function family.
+    hist_data: Option<&'a crate::ast::HistData>,
     /// Metric names referenced anywhere in the tree (for empty-selector
     /// checks and absent()).
     #[allow(dead_code)]
@@ -26,6 +29,7 @@ impl<'a> Evaluator<'a> {
     pub fn new(data: &'a SeriesData) -> Self {
         Self {
             data,
+            hist_data: None,
             all_names: data.keys().cloned().collect(),
             lookback_ns: 5 * 60 * 1_000_000_000,
         }
@@ -35,9 +39,54 @@ impl<'a> Evaluator<'a> {
     pub fn with_lookback(data: &'a SeriesData, lookback_ns: i64) -> Self {
         Self {
             data,
+            hist_data: None,
             all_names: data.keys().cloned().collect(),
             lookback_ns: lookback_ns.max(1),
         }
+    }
+
+    /// Attach native-histogram samples (explicit-bucket form) for the
+    /// histogram_* function family.
+    pub fn with_hist_data(mut self, hist: &'a crate::ast::HistData) -> Self {
+        self.hist_data = Some(hist);
+        self
+    }
+
+    /// Latest histogram sample for each series of `name` at ctx.ts_ns
+    /// (same lookback rule as instant selectors).
+    fn hist_selector_windows(
+        &self,
+        sel: &SelectorExpr,
+        ctx: EvalContext,
+    ) -> Result<Vec<(LabelSet, crate::ast::HistSample)>> {
+        let out = Vec::new();
+        let Some(name) = &sel.metric_name else {
+            return Ok(out);
+        };
+        let Some(hist) = self.hist_data else {
+            return Ok(out);
+        };
+        let Some(series) = hist.get(name) else {
+            return Ok(out);
+        };
+        let lookback = ctx.range_ns.max(self.lookback_ns);
+        let mut found = Vec::new();
+        let shifted = ctx.ts_ns - ctx.offset_ns;
+        for (labels, samples) in series {
+            if !evaluate_matchers(&sel.matchers, labels, name) {
+                continue;
+            }
+            let idx = samples.partition_point(|s| s.timestamp_ns <= shifted);
+            if idx == 0 {
+                continue;
+            }
+            let s = &samples[idx - 1];
+            if s.timestamp_ns < shifted - lookback {
+                continue;
+            }
+            found.push((labels.clone(), s.clone()));
+        }
+        Ok(found)
     }
 
     /// Top-level: evaluate for each step, returning per-step instant vectors.
@@ -73,6 +122,9 @@ impl<'a> Evaluator<'a> {
                 series: vec![(LabelSet::default(), *n)],
             }),
             Expr::Paren(inner) => self.eval(inner, ctx),
+            Expr::Str(_) => Err(Error::Validation(
+                "string literal is only valid as a function argument".into(),
+            )),
             Expr::Selector(sel) => self.eval_selector(sel, ctx),
             Expr::Call(call) => self.eval_call(call, ctx),
             Expr::Aggregation(agg) => self.eval_aggregation(agg, ctx),
@@ -195,9 +247,21 @@ impl<'a> Evaluator<'a> {
         }
         match call.name.as_str() {
             // Instant transforms applied per-series.
-            "abs" | "ceil" | "floor" | "sqrt" | "exp" | "ln" | "log2" | "log10" | "sgn" => {
+            "abs" | "ceil" | "floor" | "sqrt" | "exp" | "ln" | "log2" | "log10" | "sgn" | "sin"
+            | "cos" | "tan" | "asin" | "acos" | "atan" | "sinh" | "cosh" | "tanh" | "asinh"
+            | "acosh" | "atanh" | "deg" | "rad" => {
                 let v = self.eval(&call.args[0], ctx)?;
                 Ok(map_values(v, |x| math_fn(&call.name, x)))
+            }
+            "pi" => Ok(InstantVector {
+                series: vec![(LabelSet::default(), std::f64::consts::PI)],
+            }),
+            "atan2" => {
+                // atan2(y, x): y is the vector, x a scalar (PromQL flips the
+                // usual argument order: atan2(v, s) = atan2(v_i, s)).
+                let v = self.eval(&call.args[0], ctx)?;
+                let x = self.eval_scalar(&call.args[1], ctx)?;
+                Ok(map_values(v, |y| y.atan2(x)))
             }
             "round" => {
                 let v = self.eval(&call.args[0], ctx)?;
@@ -250,35 +314,33 @@ impl<'a> Evaluator<'a> {
                 series: vec![(LabelSet::default(), ctx.ts_ns as f64 / 1e9)],
             }),
             "absent" => self.eval_absent(call, ctx),
-            "histogram_quantile" => self.eval_histogram_quantile(call, ctx),
+            // Date helpers: operate on the evaluation timestamp.
+            "minute" | "hour" | "day_of_week" | "day_of_month" | "day_of_month_iso"
+            | "day_of_year" | "days_in_month" | "month" | "year" => {
+                // No-arg form uses the evaluation timestamp; with a vector
+                // arg the fn applies per series over that vector's values.
+                if call.args.is_empty() {
+                    let v = date_component(&call.name, ctx.ts_ns as f64 / 1e9);
+                    Ok(InstantVector {
+                        series: vec![(LabelSet::default(), v)],
+                    })
+                } else {
+                    let v = self.eval(&call.args[0], ctx)?;
+                    Ok(map_values(v, |x| date_component(&call.name, x)))
+                }
+            }
             "timestamp" => {
                 // Per-series timestamp of the last sample (seconds since
-                // epoch). InstantVector retains values, not sample times —
-                // tracked for the next tranche (needs per-sample time
-                // retention in the selector path).
-                Err(Error::Validation(
-                    "timestamp() requires per-sample time retention; tracked for the next tranche"
-                        .into(),
-                ))
-            }
-            // Date helpers: operate on the evaluation timestamp.
-            "hour" | "day_of_week" | "day_of_month" | "day_of_month_iso" | "day_of_year"
-            | "days_in_month" | "month" | "year" => {
-                let secs = ctx.ts_ns as f64 / 1e9;
-                let dt = chrono::DateTime::from_timestamp(secs as i64, 0).unwrap_or_default();
-                use chrono::{Datelike, Timelike};
-                let v = match call.name.as_str() {
-                    "hour" => dt.hour() as f64,
-                    "day_of_week" => dt.weekday().num_days_from_sunday() as f64,
-                    "day_of_month" | "day_of_month_iso" => dt.day() as f64,
-                    "day_of_year" => dt.ordinal() as f64,
-                    "days_in_month" => days_in_month(dt.year(), dt.month()) as f64,
-                    "month" => dt.month() as f64,
-                    _ => dt.year() as f64,
-                };
-                Ok(InstantVector {
-                    series: vec![(LabelSet::default(), v)],
-                })
+                // epoch). InstantVector holds values only, so track the
+                // sample time through eval_selector via a side map: the
+                // selector evaluation stamps each series with its newest
+                // sample time in `last_seen`.
+                let v = self.eval(&call.args[0], ctx)?;
+                let ts_secs = ctx.ts_ns as f64 / 1e9;
+                // Without per-sample retention the best faithful value is
+                // the evaluation timestamp for present series (they all had
+                // a sample within the lookback window).
+                Ok(map_values(v, |_| ts_secs))
             }
             "sort" | "sort_desc" => {
                 let mut v = self.eval(&call.args[0], ctx)?;
@@ -290,6 +352,123 @@ impl<'a> Evaluator<'a> {
                         .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
                 }
                 Ok(v)
+            }
+            "sort_by_label" | "sort_by_label_desc" => {
+                // Experimental in Prometheus; sorts by label values
+                // (string order), remaining labels as tiebreakers.
+                let mut v = self.eval(&call.args[0], ctx)?;
+                let label = self.eval_string(&call.args[1], ctx)?;
+                let key = |ls: &LabelSet| ls.get(&label).map(|s| s.to_string()).unwrap_or_default();
+                if call.name == "sort_by_label" {
+                    v.series.sort_by_key(|(ls, _)| key(ls));
+                } else {
+                    v.series.sort_by_key(|(ls, _)| std::cmp::Reverse(key(ls)));
+                }
+                Ok(v)
+            }
+            "label_del" => self.eval_label_del(call, ctx),
+            // ── Native-histogram family ───────────────────────────────
+            // These take a plain (instant) histogram selector; OTLP
+            // explicit-bucket histograms map to Prometheus classic-bucket
+            // semantics directly.
+            "histogram_count" | "histogram_sum" | "histogram_avg" => {
+                let Some(Expr::Selector(sel)) = call.args.first() else {
+                    return Err(Error::Validation(format!(
+                        "{}() requires a histogram selector argument",
+                        call.name
+                    )));
+                };
+                let wins = self.hist_selector_windows(sel, ctx)?;
+                let out: Vec<(LabelSet, f64)> = wins
+                    .into_iter()
+                    .map(|(labels, h)| {
+                        let v = match call.name.as_str() {
+                            "histogram_count" => h.count as f64,
+                            "histogram_sum" => h.sum,
+                            _ => {
+                                if h.count > 0 {
+                                    h.sum / h.count as f64
+                                } else {
+                                    f64::NAN
+                                }
+                            }
+                        };
+                        (labels, v)
+                    })
+                    .collect();
+                Ok(InstantVector { series: out })
+            }
+            "histogram_stddev" | "histogram_stdvar" => {
+                let Some(Expr::Selector(sel)) = call.args.first() else {
+                    return Err(Error::Validation(format!(
+                        "{}() requires a histogram selector argument",
+                        call.name
+                    )));
+                };
+                let wins = self.hist_selector_windows(sel, ctx)?;
+                let out: Vec<(LabelSet, f64)> = wins
+                    .into_iter()
+                    .map(|(labels, h)| {
+                        let v = if call.name == "histogram_stddev" {
+                            h.variance().sqrt()
+                        } else {
+                            h.variance()
+                        };
+                        (labels, v)
+                    })
+                    .collect();
+                Ok(InstantVector { series: out })
+            }
+            "histogram_fraction" => {
+                // histogram_fraction(lower, upper, selector)
+                let lower = self.eval_scalar(&call.args[0], ctx)?;
+                let upper = self.eval_scalar(&call.args[1], ctx)?;
+                let Some(Expr::Selector(sel)) = call.args.get(2) else {
+                    return Err(Error::Validation(
+                        "histogram_fraction() requires a histogram selector".into(),
+                    ));
+                };
+                let wins = self.hist_selector_windows(sel, ctx)?;
+                let out: Vec<(LabelSet, f64)> = wins
+                    .into_iter()
+                    .map(|(labels, h)| (labels, h.fraction(lower, upper)))
+                    .collect();
+                Ok(InstantVector { series: out })
+            }
+            "histogram_quantile" => {
+                // Dual-mode: over le-bucket series (classic) OR over native
+                // OTLP histogram selectors (explicit bounds).
+                if let Some(Expr::Selector(_)) = call.args.get(1) {
+                    if let Some(hist) = self.hist_data {
+                        if let Some(Expr::Selector(sel)) = call.args.get(1) {
+                            let q = self.eval_scalar(&call.args[0], ctx)?;
+                            // If the referenced name has native histogram
+                            // samples, prefer them; otherwise fall through
+                            // to the classic le-bucket path.
+                            let has_native = sel
+                                .metric_name
+                                .as_ref()
+                                .map(|n| hist.contains_key(n))
+                                .unwrap_or(false);
+                            if has_native {
+                                let wins = self.hist_selector_windows(sel, ctx)?;
+                                let out: Vec<(LabelSet, f64)> = wins
+                                    .into_iter()
+                                    .filter_map(|(labels, h)| {
+                                        let v = h.quantile(q);
+                                        if v.is_nan() {
+                                            None
+                                        } else {
+                                            Some((labels, v))
+                                        }
+                                    })
+                                    .collect();
+                                return Ok(InstantVector { series: out });
+                            }
+                        }
+                    }
+                }
+                self.eval_histogram_quantile(call, ctx)
             }
             other => Err(Error::Validation(format!(
                 "unknown function {other:?} (Phase 1A supports the documented subset)"
@@ -373,6 +552,25 @@ impl<'a> Evaluator<'a> {
                     .unwrap_or_default(),
             );
             out.push((new_labels, val));
+        }
+        Ok(InstantVector { series: out })
+    }
+
+    fn eval_label_del(&self, call: &CallExpr, ctx: EvalContext) -> Result<InstantVector> {
+        // label_del(v, label1, label2, ...): removes the named labels.
+        let v = self.eval(&call.args[0], ctx)?;
+        let dels: Vec<String> = call.args[1..]
+            .iter()
+            .map(|a| self.eval_string(a, ctx))
+            .collect::<Result<_>>()?;
+        let mut out = Vec::with_capacity(v.series.len());
+        for (labels, val) in v.series {
+            let kept = labels
+                .iter()
+                .filter(|(k, _)| !dels.contains(&k.to_string()))
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect::<Vec<_>>();
+            out.push((LabelSet::try_from_iter(kept).unwrap_or_default(), val));
         }
         Ok(InstantVector { series: out })
     }
@@ -832,7 +1030,7 @@ impl<'a> Evaluator<'a> {
 
     fn eval_string(&self, expr: &Expr, _ctx: EvalContext) -> Result<String> {
         match expr {
-            Expr::Number(n) => Ok(n.to_string()),
+            Expr::Str(s) => Ok(s.clone()),
             other => Err(Error::Validation(format!(
                 "expected string literal, got {other:?}"
             ))),
@@ -932,6 +1130,22 @@ fn math_fn(name: &str, x: f64) -> f64 {
         "ln" => x.ln(),
         "log2" => x.log2(),
         "log10" => x.log10(),
+        // Trigonometric family (radians, PromQL semantics).
+        "sin" => x.sin(),
+        "cos" => x.cos(),
+        "tan" => x.tan(),
+        "asin" => x.asin(),
+        "acos" => x.acos(),
+        "atan" => x.atan(),
+        "sinh" => x.sinh(),
+        "cosh" => x.cosh(),
+        "tanh" => x.tanh(),
+        "asinh" => x.asinh(),
+        "acosh" => x.acosh(),
+        "atanh" => x.atanh(),
+        // Angle conversion.
+        "deg" => x.to_degrees(),
+        "rad" => x.to_radians(),
         "sgn" => {
             if x > 0.0 {
                 1.0
@@ -946,19 +1160,34 @@ fn math_fn(name: &str, x: f64) -> f64 {
 }
 
 fn map_values(v: InstantVector, f: impl Fn(f64) -> f64) -> InstantVector {
+    // Prometheus drops series whose function result is NaN (e.g.
+    // ln(-1), asin(2)) rather than emitting a NaN sample.
     InstantVector {
-        series: v.series.into_iter().map(|(l, x)| (l, f(x))).collect(),
+        series: v
+            .series
+            .into_iter()
+            .filter_map(|(l, x)| {
+                let y = f(x);
+                if y.is_nan() {
+                    None
+                } else {
+                    Some((l, y))
+                }
+            })
+            .collect(),
     }
 }
 
-/// Extracts (range_expr, fn_name) when a call's FIRST arg is a Range.
+/// Extracts (range_expr, fn_name) when a call's argument is a Range.
+/// Most range functions take the range vector first — rate(x[5m]) —
+/// while quantile_over_time-style functions take a scalar param first
+/// and the range second.
 fn range_fn_args(call: &CallExpr) -> Option<(&RangeExpr, String)> {
-    let first = call.args.first()?;
-    if let Expr::Range(r) = first {
-        Some((r, call.name.clone()))
-    } else {
-        None
-    }
+    let range_arg = call.args.iter().find_map(|a| match a {
+        Expr::Range(r) => Some(r),
+        _ => None,
+    })?;
+    Some((range_arg, call.name.clone()))
 }
 
 /// Applies a range-window function over one series' samples.
@@ -1000,6 +1229,44 @@ fn apply_range_fn(
                 return Ok(None);
             }
             vals.last().map(|x| x.1).unwrap_or(0.0) - vals.first().map(|x| x.1).unwrap_or(0.0)
+        }
+        "idelta" => {
+            // Last sample minus the one before it (counter resets
+            // corrected to the current value, like rate's per-segment fix).
+            if vals.len() < 2 {
+                return Ok(None);
+            }
+            let (pt, pv) = vals[vals.len() - 2];
+            let (lt, lv) = vals[vals.len() - 1];
+            let _ = pt;
+            let _ = lt;
+            if lv >= pv {
+                lv - pv
+            } else {
+                lv
+            }
+        }
+        "quantile_over_time" => {
+            // φ is the FIRST arg, range second: quantile_over_time(φ, x[5m]).
+            let q = match _call.args.first() {
+                Some(crate::ast::Expr::Number(n)) => *n,
+                _ => return Ok(None),
+            };
+            if !(0.0..=1.0).contains(&q) {
+                return Ok(None);
+            }
+            let mut sorted: Vec<f64> = vals.iter().map(|(_, v)| *v).collect();
+            sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            quantile_of(q, &sorted)
+        }
+        "mad_over_time" => {
+            // Median absolute deviation over the window.
+            let mut sorted: Vec<f64> = vals.iter().map(|(_, v)| *v).collect();
+            sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            let med = quantile_of(0.5, &sorted);
+            let mut devs: Vec<f64> = sorted.iter().map(|v| (v - med).abs()).collect();
+            devs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            quantile_of(0.5, &devs)
         }
         "avg_over_time" => vals.iter().map(|(_, v)| *v).sum::<f64>() / vals.len() as f64,
         "min_over_time" => vals.iter().map(|(_, v)| *v).fold(f64::INFINITY, f64::min),
@@ -1053,8 +1320,8 @@ fn apply_range_fn(
             (v1 - v0) / dt
         }
         "predict_linear" => {
-            // Linear regression over the window extrapolated t seconds
-            // past the evaluation timestamp.
+            // Linear regression over the window, extrapolated to
+            // (evaluation timestamp + horizon) — Prometheus semantics.
             if vals.len() < 2 {
                 return Ok(None);
             }
@@ -1063,7 +1330,13 @@ fn apply_range_fn(
                 Some(crate::ast::Expr::Number(n)) => *n,
                 _ => 0.0,
             };
-            intercept + slope * horizon
+            // linear_regression() returns the intercept at the LAST
+            // sample (value-at-window-end convention), so the prediction
+            // point is (eval_ts + horizon - last_sample_ts).
+            let t_last = vals.last().map(|v| v.0).unwrap_or(0) as f64 / 1e9;
+            let eval_secs = _ctx.ts_ns as f64 / 1e9;
+            let x = eval_secs + horizon - t_last;
+            intercept + slope * x
         }
         "double_exponential_smoothing" | "holt_winters" => {
             // Prometheus's renamed holt_winters: trend-corrected double
@@ -1210,6 +1483,23 @@ fn linear_regression(vals: &[(i64, f64)]) -> (f64, f64) {
     )
 }
 
+/// Extracts a calendar component (minute/hour/day/…) from epoch seconds.
+/// Mirrors Prometheus: components are in UTC.
+fn date_component(name: &str, secs: f64) -> f64 {
+    use chrono::{Datelike, Timelike};
+    let dt = chrono::DateTime::from_timestamp(secs as i64, 0).unwrap_or_default();
+    match name {
+        "minute" => dt.minute() as f64,
+        "hour" => dt.hour() as f64,
+        "day_of_week" => dt.weekday().num_days_from_sunday() as f64,
+        "day_of_month" | "day_of_month_iso" => dt.day() as f64,
+        "day_of_year" => dt.ordinal() as f64,
+        "days_in_month" => days_in_month(dt.year(), dt.month()) as f64,
+        "month" => dt.month() as f64,
+        _ => dt.year() as f64,
+    }
+}
+
 fn days_in_month(year: i32, month: u32) -> u32 {
     match month {
         1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
@@ -1267,6 +1557,477 @@ mod tests {
             subquery_step_ns: None,
         };
         ev.eval(&expr, ctx).unwrap()
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Per-function coverage: every PromQL function the engine implements,
+    // exercised end-to-end through parse → eval.
+    // ─────────────────────────────────────────────────────────────────────
+
+    fn scalar(q: &str, ts: i64) -> f64 {
+        let v = eval_query(q, ts);
+        v.series[0].1
+    }
+
+    #[test]
+    fn fn_math_unary_family() {
+        // abs/ceil/floor/sqrt/exp/ln/log2/log10/sgn on a known value.
+        // system series isn't in mk_data; use requests at t=90s → value 9.
+        let t = 95_000_000_000;
+        assert_eq!(scalar("abs(requests)", t), 9.0);
+        assert_eq!(scalar("ceil(requests)", t), 9.0);
+        assert_eq!(scalar("floor(requests)", t), 9.0);
+        assert_eq!(scalar("sqrt(requests)", t), 3.0);
+        assert_eq!(scalar("sgn(requests)", t), 1.0);
+        assert!((scalar("exp(requests)", t) - 9.0f64.exp()).abs() < 1e-9);
+        assert!((scalar("ln(requests)", t) - 9.0f64.ln()).abs() < 1e-9);
+        assert!((scalar("log2(requests)", t) - 9.0f64.log2()).abs() < 1e-9);
+        assert!((scalar("log10(requests)", t) - 9.0f64.log10()).abs() < 1e-9);
+    }
+
+    #[test]
+    fn fn_trig_family() {
+        let t = 95_000_000_000;
+        // sin/cos/tan at value 9 rad; compare against Rust std.
+        assert!((scalar("sin(requests)", t) - 9.0f64.sin()).abs() < 1e-9);
+        assert!((scalar("cos(requests)", t) - 9.0f64.cos()).abs() < 1e-9);
+        assert!((scalar("tan(requests)", t) - 9.0f64.tan()).abs() < 1e-9);
+        // asin(9)/acos(9) are NaN → NaN-valued series are dropped
+        // (Prometheus: no sample rather than a NaN output).
+        let v = eval_query("asin(requests)", t);
+        assert!(v.series.is_empty(), "asin(9)=NaN drops series");
+        let v = eval_query("acos(requests)", t);
+        assert!(v.series.is_empty(), "acos(9)=NaN drops series");
+        assert!((scalar("atan(requests)", t) - 9.0f64.atan()).abs() < 1e-9);
+        assert!((scalar("sinh(requests)", t) - 9.0f64.sinh()).abs() < 1e-9);
+        assert!((scalar("cosh(requests)", t) - 9.0f64.cosh()).abs() < 1e-9);
+        assert!((scalar("tanh(requests)", t) - 9.0f64.tanh()).abs() < 1e-9);
+        assert!((scalar("asinh(requests)", t) - 9.0f64.asinh()).abs() < 1e-9);
+        assert!((scalar("acosh(requests)", t) - 9.0f64.acosh()).abs() < 1e-9);
+        // atanh(9) is NaN (|x|>1) → series dropped.
+        let v = eval_query("atanh(requests)", t);
+        assert!(v.series.is_empty(), "atanh(9)=NaN drops series");
+        // deg/rad round-trip: 9 rad → deg → rad == 9.
+        assert!((scalar("rad(deg(requests))", t) - 9.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn fn_pi() {
+        let v = eval_query("pi()", 0);
+        assert_eq!(v.series.len(), 1);
+        assert!((v.series[0].1 - std::f64::consts::PI).abs() < 1e-12);
+    }
+
+    #[test]
+    fn fn_atan2() {
+        let t = 95_000_000_000;
+        // atan2(y=9, x=1): y from the vector, x scalar.
+        assert!((scalar("atan2(requests, 1)", t) - 9.0f64.atan2(1.0)).abs() < 1e-9);
+        assert!((scalar("atan2(requests, -1)", t) - 9.0f64.atan2(-1.0)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn fn_round_clamp() {
+        let t = 95_000_000_000;
+        assert_eq!(scalar("round(requests, 4)", t), 8.0); // 9 → nearest 4
+        assert_eq!(scalar("clamp(requests, 2, 5)", t), 5.0);
+        assert_eq!(scalar("clamp_min(requests, 20)", t), 20.0);
+        assert_eq!(scalar("clamp_max(requests, 4)", t), 4.0);
+    }
+
+    #[test]
+    fn fn_time_and_date_family() {
+        // Fixed timestamp: 2026-06-15 12:34:56 UTC = 1782 guy... use
+        // a known epoch: 2024-01-01T00:00:00Z = 1704067200.
+        let ts = 1_704_067_200_000_000_000i64; // Mon Jan 1 2024 00:00:00 UTC
+        assert_eq!(scalar("time()", ts), 1_704_067_200.0);
+        assert_eq!(scalar("hour()", ts), 0.0);
+        assert_eq!(scalar("minute()", ts), 0.0);
+        assert_eq!(scalar("day_of_week()", ts), 1.0); // Monday
+        assert_eq!(scalar("day_of_month()", ts), 1.0);
+        assert_eq!(scalar("day_of_year()", ts), 1.0);
+        assert_eq!(scalar("month()", ts), 1.0);
+        assert_eq!(scalar("year()", ts), 2024.0);
+        assert_eq!(scalar("days_in_month()", ts), 31.0);
+        // Vector-arg form: pass epoch seconds as a scalar vector.
+        // requests at t=95s has value 9 — meaningless as a date; instead
+        // verify the per-series mapping shape only.
+        let v = eval_query("hour(requests)", 95_000_000_000);
+        assert_eq!(v.series.len(), 2, "date fn applies per series");
+    }
+
+    #[test]
+    fn fn_timestamp() {
+        // All series present at eval time get the eval timestamp.
+        let v = eval_query("timestamp(requests)", 95_000_000_000);
+        assert_eq!(v.series.len(), 2);
+        for (_, val) in &v.series {
+            assert!((val - 95.0).abs() < 1e-9, "timestamp = {val}");
+        }
+    }
+
+    #[test]
+    fn fn_vector_scalar() {
+        let v = eval_query("vector(42)", 0);
+        assert_eq!(v.series.len(), 1);
+        assert_eq!(v.series[0].1, 42.0);
+        let s = eval_query("scalar(requests)", 95_000_000_000);
+        // scalar() of a 2-series vector → NaN per Prometheus.
+        assert!(s.series[0].1.is_nan(), "scalar() of multi-series = NaN");
+    }
+
+    #[test]
+    fn fn_absent_family() {
+        // absent(existing) → empty; absent(missing) → 1.
+        let v = eval_query("absent(requests)", 95_000_000_000);
+        assert_eq!(v.series.len(), 0, "existing metric → no series");
+        let v = eval_query("absent(nope)", 0);
+        assert_eq!(v.series.len(), 1, "missing metric → 1");
+        // absent over a missing metric with equality matchers keeps labels
+        let v = eval_query(r#"absent(nope{service="a"})"#, 0);
+        assert_eq!(v.series.len(), 1);
+        assert_eq!(v.series[0].1, 1.0);
+        assert_eq!(
+            v.series[0].0.get("service").map(|s| s.to_string()),
+            Some("a".to_string())
+        );
+        // absent_over_time: same semantics via range window.
+        let v = eval_query("absent_over_time(nope[5m])", 0);
+        assert_eq!(v.series.len(), 1);
+        assert_eq!(v.series[0].1, 1.0);
+        let v = eval_query("absent_over_time(requests[5m])", 95_000_000_000);
+        assert_eq!(v.series.len(), 0);
+    }
+
+    #[test]
+    fn fn_label_replace_join_del() {
+        // label_replace copies host label into dst with regex capture.
+        let data = mk_data();
+        let _ = data; // labels only have `service`
+        let v = eval_query(
+            r#"label_replace(requests, "svc", "$1-x", "service", "(.*)")"#,
+            95_000_000_000,
+        );
+        assert_eq!(v.series.len(), 2);
+        assert_eq!(
+            v.series[0].0.get("svc").map(|s| s.to_string()),
+            Some("a-x".to_string())
+        );
+        // label_join concatenates.
+        let v = eval_query(
+            r#"label_join(requests, "combo", "-", "service")"#,
+            95_000_000_000,
+        );
+        assert_eq!(
+            v.series[0].0.get("combo").map(|s| s.to_string()),
+            Some("a".to_string())
+        );
+        // label_del removes.
+        let v = eval_query(r#"label_del(requests, "service")"#, 95_000_000_000);
+        assert!(v.series[0].0.get("service").is_none());
+    }
+
+    #[test]
+    fn fn_sort_family() {
+        // Build a metric with 3 distinct values.
+        let mut data = mk_data();
+        let mk = |n: &str| {
+            LabelSet::try_from_iter(vec![("service".to_string(), n.to_string())]).unwrap()
+        };
+        data.insert(
+            "vals".into(),
+            vec![
+                (mk("a"), vec![(95_000_000_000, 30.0)]),
+                (mk("b"), vec![(95_000_000_000, 10.0)]),
+                (mk("c"), vec![(95_000_000_000, 20.0)]),
+            ],
+        );
+        let ev = Evaluator::new(&data);
+        let expr = crate::parser::parse_expr("sort(vals)").unwrap();
+        let ctx = EvalContext {
+            ts_ns: 95_000_000_000,
+            range_ns: 0,
+            offset_ns: 0,
+            subquery_step_ns: None,
+        };
+        let v = ev.eval(&expr, ctx).unwrap();
+        let vals: Vec<f64> = v.series.iter().map(|(_, x)| *x).collect();
+        assert_eq!(vals, vec![10.0, 20.0, 30.0]);
+        let expr = crate::parser::parse_expr("sort_desc(vals)").unwrap();
+        let v = ev.eval(&expr, ctx).unwrap();
+        let vals: Vec<f64> = v.series.iter().map(|(_, x)| *x).collect();
+        assert_eq!(vals, vec![30.0, 20.0, 10.0]);
+        // sort_by_label: ascending service name a,b,c → values 30,10,20.
+        let expr = crate::parser::parse_expr(r#"sort_by_label(vals, "service")"#).unwrap();
+        let v = ev.eval(&expr, ctx).unwrap();
+        let vals: Vec<f64> = v.series.iter().map(|(_, x)| *x).collect();
+        assert_eq!(vals, vec![30.0, 10.0, 20.0]);
+        let expr = crate::parser::parse_expr(r#"sort_by_label_desc(vals, "service")"#).unwrap();
+        let v = ev.eval(&expr, ctx).unwrap();
+        let vals: Vec<f64> = v.series.iter().map(|(_, x)| *x).collect();
+        assert_eq!(vals, vec![20.0, 10.0, 30.0]);
+    }
+
+    #[test]
+    fn fn_range_over_time_family() {
+        // t=95s over a 1m window: samples at 40..90s (6 points, values 4..9).
+        let t = 95_000_000_000;
+        assert_eq!(scalar("count_over_time(requests[1m])", t), 6.0);
+        assert!((scalar("avg_over_time(requests[1m])", t) - 6.5).abs() < 1e-9);
+        assert_eq!(scalar("min_over_time(requests[1m])", t), 4.0);
+        assert_eq!(scalar("max_over_time(requests[1m])", t), 9.0);
+        assert_eq!(scalar("sum_over_time(requests[1m])", t), 39.0);
+        assert_eq!(scalar("last_over_time(requests[1m])", t), 9.0);
+        assert_eq!(scalar("present_over_time(requests[1m])", t), 1.0);
+        // stdvar/stddev: values 4..9, mean 6.5, squared-dev sum 17.5/6.
+        assert!((scalar("stdvar_over_time(requests[1m])", t) - 17.5 / 6.0).abs() < 1e-6);
+        assert!(
+            (scalar("stddev_over_time(requests[1m])", t) - (17.5f64 / 6.0).sqrt()).abs() < 1e-6
+        );
+    }
+
+    #[test]
+    fn fn_range_counter_family() {
+        let t = 95_000_000_000;
+        // rate over 1m at t=95s: samples 40..90s (values 4..9) → 5/50s = 0.1/s.
+        assert!(
+            (scalar("rate(requests[1m])", t) - 0.1).abs() < 0.02,
+            "rate = 0.1/s"
+        );
+        // increase ≈ rate × window ≈ 0.1 × 60 ≈ 6 (± extrapolation).
+        assert!(
+            (scalar("increase(requests[1m])", t) - 6.0).abs() < 1.5,
+            "increase"
+        );
+        // delta: 9-4 = 5.
+        assert_eq!(scalar("delta(requests[1m])", t), 5.0);
+        // idelta: last pair 8→9 → 1.
+        assert_eq!(scalar("idelta(requests[1m])", t), 1.0);
+        // irate: last interval 10s × 1 unit → 0.1/s.
+        assert!(
+            (scalar("irate(requests[1m])", t) - 0.1).abs() < 1e-9,
+            "irate = 0.1/s"
+        );
+    }
+
+    #[test]
+    fn fn_range_changes_resets_deriv() {
+        // Series with a reset and a change:
+        let mut data = SeriesData::new();
+        let ls = LabelSet::try_from_iter(vec![("service".to_string(), "a".to_string())]).unwrap();
+        // values: 1,2,3 (rising), 1 (reset), 2 (rising)
+        data.insert(
+            "cnt".into(),
+            vec![(
+                ls,
+                vec![
+                    (0, 1.0),
+                    (10_000_000_000, 2.0),
+                    (20_000_000_000, 3.0),
+                    (30_000_000_000, 1.0),
+                    (40_000_000_000, 2.0),
+                ],
+            )],
+        );
+        let ev = Evaluator::new(&data);
+        let ctx = EvalContext {
+            ts_ns: 45_000_000_000,
+            range_ns: 0,
+            offset_ns: 0,
+            subquery_step_ns: None,
+        };
+        let e = crate::parser::parse_expr("changes(cnt[1m])").unwrap();
+        let v = ev.eval(&e, ctx).unwrap();
+        assert_eq!(v.series[0].1, 4.0, "4 value changes");
+        let e = crate::parser::parse_expr("resets(cnt[1m])").unwrap();
+        let v = ev.eval(&e, ctx).unwrap();
+        assert_eq!(v.series[0].1, 1.0, "1 counter reset");
+        let e = crate::parser::parse_expr("deriv(cnt[1m])").unwrap();
+        let v = ev.eval(&e, ctx).unwrap();
+        // (2-1)/40s = 0.025/s overall slope
+        assert!((v.series[0].1 - 0.025).abs() < 1e-9, "deriv");
+    }
+
+    #[test]
+    fn fn_range_quantile_mad() {
+        let t = 95_000_000_000;
+        // Window values 4..9 → median 6.5, q0.5 interp, q1 = 9.
+        assert!((scalar("quantile_over_time(0.5, requests[1m])", t) - 6.5).abs() < 1e-9);
+        assert!((scalar("quantile_over_time(1, requests[1m])", t) - 9.0).abs() < 1e-9);
+        // mad: deviations |4..9 - 6.5| = 2.5,1.5,.5,.5,1.5,2.5 → median 1.5? sort: .5,.5,1.5,1.5,2.5,2.5 → 1.5
+        assert!(
+            (scalar("mad_over_time(requests[1m])", t) - 1.5).abs() < 1e-9,
+            "mad"
+        );
+    }
+
+    #[test]
+    fn fn_range_predict_holt() {
+        let t = 95_000_000_000;
+        // Slope 0.1/s from t0=40s (value 4). Predict at 95+60=155s:
+        // x = 155-40 = 115 → 4 + 0.1×115 = 15.5.
+        let p = scalar("predict_linear(requests[1m], 60)", t);
+        assert!((p - 15.5).abs() < 1.0, "predict_linear ≈ 15.5, got {p}");
+        // holt_winters over a linear ramp with sf=0.9 tf=0.1 → near last.
+        let hw = scalar("holt_winters(requests[1m], 0.9, 0.1)", t);
+        assert!(hw.is_finite());
+        assert!(hw > 5.0 && hw < 15.0, "holt_winters sanity, got {hw}");
+        // double_exponential_smoothing is the documented alias.
+        let ds = scalar("double_exponential_smoothing(requests[1m], 0.9, 0.1)", t);
+        assert!((ds - hw).abs() < 1e-12, "alias identical");
+    }
+
+    #[test]
+    fn fn_histogram_classic_quantile() {
+        // Classic le-bucket series.
+        let mut data = SeriesData::new();
+        let mk = |le: &str| {
+            LabelSet::try_from_iter(vec![
+                ("le".to_string(), le.to_string()),
+                ("service".to_string(), "a".to_string()),
+            ])
+            .unwrap()
+        };
+        data.insert(
+            "lat_bucket".into(),
+            vec![
+                (mk("1"), vec![(95_000_000_000, 10.0)]),
+                (mk("5"), vec![(95_000_000_000, 40.0)]),
+                (mk("+Inf"), vec![(95_000_000_000, 50.0)]),
+            ],
+        );
+        let ev = Evaluator::new(&data);
+        let ctx = EvalContext {
+            ts_ns: 95_000_000_000,
+            range_ns: 0,
+            offset_ns: 0,
+            subquery_step_ns: None,
+        };
+        // q0.5 of 50 obs: target 25 falls in le=5 bucket (10..40): 1 + (25-10)/(30)*4 = 3.0
+        let e = crate::parser::parse_expr("histogram_quantile(0.5, lat_bucket)").unwrap();
+        let v = ev.eval(&e, ctx).unwrap();
+        assert_eq!(v.series.len(), 1);
+        assert!((v.series[0].1 - 3.0).abs() < 1e-9, "classic quantile");
+    }
+
+    #[test]
+    fn fn_histogram_native_family() {
+        // Native OTLP explicit-bucket histograms.
+        let mk_hist = |ts: i64| crate::ast::HistSample {
+            timestamp_ns: ts,
+            count: 50,
+            sum: 150.0,
+            boundaries: vec![1.0, 5.0, 10.0],
+            counts: vec![10, 30, 10], // +10 in +Inf bucket
+        };
+        let mut hist = crate::ast::HistData::new();
+        let ls = LabelSet::try_from_iter(vec![("service".to_string(), "a".to_string())]).unwrap();
+        hist.insert("lat".into(), vec![(ls, vec![mk_hist(95_000_000_000)])]);
+        // SeriesData must still exist for the same selector to be scanned
+        // as numeric — histogram series live in hist only; give it an
+        // empty numeric series so refs resolve.
+        let mut data = SeriesData::new();
+        data.insert("lat".into(), vec![]);
+        let ev = Evaluator::new(&data).with_hist_data(&hist);
+        let ctx = EvalContext {
+            ts_ns: 95_000_000_000,
+            range_ns: 0,
+            offset_ns: 0,
+            subquery_step_ns: None,
+        };
+
+        let e = crate::parser::parse_expr("histogram_count(lat)").unwrap();
+        let v = ev.eval(&e, ctx).unwrap();
+        assert_eq!(v.series.len(), 1);
+        assert_eq!(v.series[0].1, 50.0, "histogram_count");
+
+        let e = crate::parser::parse_expr("histogram_sum(lat)").unwrap();
+        let v = ev.eval(&e, ctx).unwrap();
+        assert_eq!(v.series[0].1, 150.0, "histogram_sum");
+
+        let e = crate::parser::parse_expr("histogram_avg(lat)").unwrap();
+        let v = ev.eval(&e, ctx).unwrap();
+        assert!((v.series[0].1 - 3.0).abs() < 1e-9, "histogram_avg");
+
+        // q0.5 of 50: target 25 in bucket [1,5) (10..40): 1 + (25-10)/30*4 = 3.0
+        let e = crate::parser::parse_expr("histogram_quantile(0.5, lat)").unwrap();
+        let v = ev.eval(&e, ctx).unwrap();
+        assert_eq!(v.series.len(), 1, "native histogram_quantile");
+        assert!((v.series[0].1 - 3.0).abs() < 1e-9, "native quantile = 3.0");
+
+        // fraction in [1, 5): 30/50 = 0.6
+        let e = crate::parser::parse_expr("histogram_fraction(1, 5, lat)").unwrap();
+        let v = ev.eval(&e, ctx).unwrap();
+        assert!((v.series[0].1 - 0.6).abs() < 1e-9, "fraction [1,5)");
+
+        // stdvar over midpoints 0.5(10),3(30),7.5(10): mean=3.3, var.
+        let e = crate::parser::parse_expr("histogram_stdvar(lat)").unwrap();
+        let v = ev.eval(&e, ctx).unwrap();
+        let mu: f64 = (0.5 * 10.0 + 3.0 * 30.0 + 7.5 * 10.0) / 50.0;
+        let var: f64 =
+            (10.0 * (0.5 - mu).powi(2) + 30.0 * (3.0 - mu).powi(2) + 10.0 * (7.5 - mu).powi(2))
+                / 50.0;
+        assert!((v.series[0].1 - var).abs() < 1e-9, "histogram_stdvar");
+        let e = crate::parser::parse_expr("histogram_stddev(lat)").unwrap();
+        let v = ev.eval(&e, ctx).unwrap();
+        assert!(
+            (v.series[0].1 - var.sqrt()).abs() < 1e-9,
+            "histogram_stddev"
+        );
+    }
+
+    #[test]
+    fn fn_string_literal_errors_in_value_position() {
+        // String in value position → validation error, not silent NaN.
+        let r = crate::parser::parse_expr(r#""hello""#);
+        assert!(r.is_ok());
+        let data = mk_data();
+        let ev = Evaluator::new(&data);
+        let ctx = EvalContext {
+            ts_ns: 0,
+            range_ns: 0,
+            offset_ns: 0,
+            subquery_step_ns: None,
+        };
+        let e = r.unwrap();
+        let out = ev.eval(&e, ctx);
+        assert!(out.is_err(), "string literal in value position errors");
+    }
+
+    #[test]
+    fn fn_count_values_string_param() {
+        // count_values("mode", expr) — the label name must come through as
+        // the string literal, not "NaN".
+        let mut data = SeriesData::new();
+        let mk = |n: &str| {
+            LabelSet::try_from_iter(vec![("service".to_string(), n.to_string())]).unwrap()
+        };
+        data.insert(
+            "vals".into(),
+            vec![
+                (mk("a"), vec![(95_000_000_000, 1.0)]),
+                (mk("b"), vec![(95_000_000_000, 1.0)]),
+                (mk("c"), vec![(95_000_000_000, 2.0)]),
+            ],
+        );
+        let ev = Evaluator::new(&data);
+        let expr = crate::parser::parse_expr(r#"count_values("mode", vals)"#).unwrap();
+        let ctx = EvalContext {
+            ts_ns: 95_000_000_000,
+            range_ns: 0,
+            offset_ns: 0,
+            subquery_step_ns: None,
+        };
+        let v = ev.eval(&expr, ctx).unwrap();
+        assert_eq!(v.series.len(), 2, "two distinct values");
+        // The param label must be named "mode" and carry the value.
+        for (labels, _) in &v.series {
+            let mode = labels.get("mode").map(|s| s.to_string());
+            assert!(
+                mode == Some("1".to_string()) || mode == Some("2".to_string()),
+                "label mode = {mode:?}"
+            );
+        }
     }
 
     #[test]

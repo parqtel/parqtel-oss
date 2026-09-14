@@ -1,5 +1,7 @@
 # Development Dockerfile for parqtel
-FROM rust:1.86-slim AS builder
+# Keep in sync with the workspace MSRV (Cargo.toml rust-version = 1.87) and the
+# production Dockerfile ARG RUST_VERSION=1.87.
+FROM rust:1.87-slim AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends protobuf-compiler pkg-config g++ && rm -rf /var/lib/apt/lists/*
 

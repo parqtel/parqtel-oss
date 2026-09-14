@@ -62,3 +62,46 @@ Baseline comparison requires checking out `main` (the harness only uses APIs pre
 - Expose `ROW_GROUP_ROWS` (currently 25K, hardcoded) via `BlockConfig`.
 - Non-ASCII case folding for log search (currently ASCII-only).
 - `get_log_field_values` / `list_label_values` re-scan blocks per call; add a short-TTL cache if UI traffic makes them hot.
+
+## High-Cardinality Label-Value Autocomplete (query builder)
+
+Benchmark harness: `parqtel-query/examples/bench_label_values.rs` (run with
+`cargo run --release -p parqtel-query --example bench_label_values`).
+
+The UI query builder's label-value autocomplete must never enumerate a
+high-cardinality label (tens of thousands of distinct values). It asks the
+server for a bounded top-N of *recent* values, and narrows server-side as
+the user types (`/api/v1/label/<name>/values?limit=10&match=<prefix>`).
+
+### Worst case: 100,000 distinct `user_id` values (300K buffered points)
+
+| Path | Latency (best of 20) | Payload per keystroke |
+|------|----------------------|----------------------|
+| **Bounded top-10 (no prefix)** — buffer walk, newest-first, stops at 10 | **~1.2 µs** | 10 values |
+| **Bounded top-10 (prefix `user-099`)** — server-side `starts_with` filter | **~1.2 µs** | 10 values |
+| Full enumeration (unbounded dropdown) | ~15.6 ms | 100,000 values |
+
+- Bounded autocomplete is **~13,000× faster** than full enumeration and sends
+  **10,000× less data** per keystroke.
+- Implementation: `MemoryBuffer::recent_label_values` walks each series'
+  points newest-first (points append in ingest order) and stops at the
+  limit; the executor's `recent_label_values` layers the in-memory buffer
+  (freshest) over the newest blocks' flush-time `label_values` index,
+  bounded to the last 5 blocks. No full-history scan ever happens.
+- The flush-time per-field index is capped at 10K values per label at write
+  time (`MAX_VALUES_PER_FIELD`), so even cold (buffer-drained) lookups are
+  bounded; the API clamps `limit` to 100.
+- Unit tests: `parqtel-core/src/buffer.rs` (`recent_label_values_*`) and
+  `parqtel-query/src/executor.rs` (`test_recent_label_values_*`) cover
+  bounded-count, newest-first ordering, prefix filtering, and graceful
+  degradation when blocks lack the index.
+- Live validation: `make test-builder` (99 query-shape checks) and
+  `make test-builder-ui` (headless-browser builder E2E, includes asserting
+  the `user_id` dropdown shows exactly ≤ 10 of ~3,400 live values and that
+  typing `user-04` narrows server-side).
+
+### Reproducing
+
+```bash
+cargo run --release -p parqtel-query --example bench_label_values
+```

@@ -124,6 +124,36 @@ impl MemoryBuffer {
         let s = self.spans.read().await.len();
         (m, l, s)
     }
+
+    /// Freshest label values for a label name, bounded and prefix-filtered.
+    ///
+    /// Builder autocomplete path: points append in ingest order (≈ time
+    /// order), so walking each series' points newest-first yields the most
+    /// recent values. Stops after `limit` distinct matches — never scans the
+    /// whole buffer when the answer is already complete.
+    pub async fn recent_label_values(
+        &self,
+        label: &str,
+        prefix: Option<&str>,
+        limit: usize,
+    ) -> Vec<String> {
+        let buf = self.metrics.read().await;
+        let mut out: Vec<String> = Vec::with_capacity(limit.min(16));
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for points in buf.values() {
+            for dp in points.iter().rev() {
+                if let Some(v) = dp.labels.get(label) {
+                    if prefix.is_none_or(|p| v.starts_with(p)) && seen.insert(v.to_string()) {
+                        out.push(v.to_string());
+                        if out.len() >= limit {
+                            return out;
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
 }
 
 impl Default for MemoryBuffer {
@@ -194,5 +224,55 @@ mod tests {
         buf.push_spans(&[test_span(1, 1, 2)]).await;
         let (m, l, s) = buf.stats().await;
         assert_eq!((m, l, s), (0, 0, 1));
+    }
+
+    fn test_dp(ts: i64, user: &str) -> DataPoint {
+        DataPoint::new(
+            ts + 1,
+            crate::models::metrics::MetricValue::Double(1.0),
+            crate::models::labels::LabelSet::try_from_iter(vec![("user_id", user)]).unwrap(),
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn recent_label_values_is_bounded_and_fresh() {
+        // High-cardinality: 30 distinct users, buffer must stop at limit.
+        let buf = MemoryBuffer::new();
+        let dps: Vec<_> = (0..30)
+            .map(|i| test_dp(i * 1000, &format!("user-{i:03}")))
+            .collect();
+        buf.push_metrics("user_sessions_active_0", &dps).await;
+
+        let top = buf.recent_label_values("user_id", None, 10).await;
+        assert_eq!(top.len(), 10);
+        // Points append chronologically → newest (user-029) comes first.
+        assert_eq!(top[0], "user-029");
+        // All distinct.
+        let set: std::collections::HashSet<_> = top.iter().cloned().collect();
+        assert_eq!(set.len(), top.len());
+    }
+
+    #[tokio::test]
+    async fn recent_label_values_prefix_filter() {
+        let buf = MemoryBuffer::new();
+        let dps: Vec<_> = (0..30)
+            .map(|i| test_dp(i * 1000, &format!("user-{i:03}")))
+            .collect();
+        buf.push_metrics("m", &dps).await;
+        // Only values starting with the typed prefix come back — the
+        // builder narrows high-cardinality labels as the user types.
+        let hits = buf
+            .recent_label_values("user_id", Some("user-02"), 10)
+            .await;
+        assert!(!hits.is_empty());
+        assert!(hits.iter().all(|v| v.starts_with("user-02")));
+        // Zero-length result for a prefix that matches nothing.
+        assert!(buf
+            .recent_label_values("user_id", Some("zzz"), 10)
+            .await
+            .is_empty());
+        // Missing label → empty, not an error.
+        assert!(buf.recent_label_values("nope", None, 10).await.is_empty());
     }
 }

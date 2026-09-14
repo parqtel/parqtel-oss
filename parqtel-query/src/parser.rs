@@ -644,13 +644,13 @@ impl<'a> Parser<'a> {
                 self.advance()?;
                 Ok(Expr::Number(n))
             }
-            Some(Tok::Str(_)) => {
+            Some(Tok::Str(s)) => {
                 // String literals are only valid as function/aggregation
-                // parameters (count_values("label"), label_replace args); in
-                // expression position they evaluate like a NaN scalar
-                // (PromQL has no string vectors).
+                // parameters (count_values("label"), label_replace args) —
+                // eval_string() reads them. PromQL has no string vectors;
+                // value-position strings error at evaluation time.
                 self.advance()?;
-                Ok(Expr::Number(f64::NAN))
+                Ok(Expr::Str(s))
             }
             Some(Tok::LParen) => {
                 self.advance()?;
@@ -878,12 +878,36 @@ impl<'a> Parser<'a> {
             args.pop()
                 .ok_or_else(|| Error::Validation(format!("{name}() missing expression")))?,
         );
+        // Trailing grouping modifier (PromQL allows both positions):
+        // `sum(x) by (job)` — parse AFTER the body when no leading
+        // `sum by (job) (x)` modifier was given.
+        let grouping = match grouping {
+            Grouping::None => self.parse_trailing_grouping(&name)?,
+            given => given,
+        };
         Ok(Expr::Aggregation(AggregationExpr {
             op,
             grouping,
             param,
             expr,
         }))
+    }
+
+    /// Parses a trailing `by (l1, l2)` / `without (l1, l2)` after an
+    /// aggregation's closing paren. Returns `Grouping::None` when absent.
+    fn parse_trailing_grouping(&mut self, _name: &str) -> Result<Grouping> {
+        if let Some(Tok::Ident(k)) = self.tok.clone() {
+            if k == "by" || k == "without" {
+                self.advance()?;
+                let labels = self.parse_label_list()?;
+                return if k == "by" {
+                    Ok(Grouping::By(labels))
+                } else {
+                    Ok(Grouping::Without(labels))
+                };
+            }
+        }
+        Ok(Grouping::None)
     }
 }
 
@@ -961,6 +985,60 @@ mod tests {
     fn nested_call_aggregation() {
         let e = assert_parses("sum by (job) (rate(http_requests_total[5m]))");
         assert!(matches!(e, Expr::Aggregation(_)));
+    }
+
+    #[test]
+    fn trailing_grouping_by() {
+        // `sum(x) by (job)` — grouping AFTER the aggregation body.
+        let e = assert_parses("sum(http_requests_total) by (job)");
+        match &e {
+            Expr::Aggregation(a) => {
+                assert!(matches!(&a.grouping, Grouping::By(ls) if ls == &vec!["job".to_string()]));
+            }
+            other => panic!("expected aggregation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn trailing_grouping_without_multi_label() {
+        let e = assert_parses("count(http_requests_total{a=\"b\"}) without (job, instance)");
+        match &e {
+            Expr::Aggregation(a) => {
+                assert!(matches!(
+                    &a.grouping,
+                    Grouping::Without(ls)
+                        if ls == &vec!["job".to_string(), "instance".to_string()]
+                ));
+            }
+            other => panic!("expected aggregation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn leading_grouping_still_wins_over_trailing() {
+        // `sum by (job) (x)` must keep the LEADING grouping; a stray trailing
+        // `by` after the body is a parse error in PromQL and must not silently
+        // override. (We accept the leading one and reject ambiguity by only
+        // parsing a trailing clause when no leading clause was present.)
+        let e = assert_parses("sum by (job) (http_requests_total)");
+        match &e {
+            Expr::Aggregation(a) => {
+                assert!(matches!(&a.grouping, Grouping::By(ls) if ls == &vec!["job".to_string()]));
+            }
+            other => panic!("expected aggregation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn trailing_grouping_with_nested_expr() {
+        let e = assert_parses("sum(rate(http_requests_total[5m])) by (job)");
+        match &e {
+            Expr::Aggregation(a) => {
+                assert!(matches!(&a.grouping, Grouping::By(ls) if ls == &vec!["job".to_string()]));
+                assert!(matches!(&*a.expr, Expr::Call(_)));
+            }
+            other => panic!("expected aggregation, got {other:?}"),
+        }
     }
 
     #[test]

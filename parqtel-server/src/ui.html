@@ -106,15 +106,31 @@ header{height:48px;flex-shrink:0;background:var(--bg-void);border-bottom:1px sol
 .sd-status.ok{color:#10b981;background:rgba(16,185,129,.1);border:1px solid rgba(16,185,129,.3);}
 .sd-status.error{color:var(--err);background:rgba(248,113,113,.1);border:1px solid rgba(248,113,113,.3);}
 .sd-status.unset{color:var(--text-muted);background:var(--bg-raised);border:1px solid var(--border-default);}
-#builder-bar{display:none;flex-shrink:0;background:var(--bg-void);border-bottom:1px solid var(--border-subtle);padding:6px 12px;gap:8px;align-items:center;font-size:11px;}
-#builder-bar.visible{display:flex;}
+#builder-bar{display:none;flex-shrink:0;background:var(--bg-void);border-bottom:1px solid var(--border-subtle);padding:6px 12px;gap:8px;align-items:flex-start;font-size:11px;}
+#builder-bar.visible{display:flex;flex-direction:column;gap:5px;}
 .blab{font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.05em;}
+.bld-row{display:flex;gap:6px;align-items:center;flex-wrap:wrap;}
 .bld-filter{display:flex;align-items:center;gap:4px;background:var(--bg-surface);border:1px solid var(--border-default);border-radius:4px;padding:1px 2px;}
 .bld-filter select,.bld-filter input{background:var(--bg-raised);border:none;color:var(--text-primary);font-size:11px;padding:2px 4px;font-family:var(--mono);outline:none;border-radius:3px;}
 .bld-filter select{max-width:110px;}
 .bld-filter input{width:90px;}
 .bld-filter .bld-x{background:none;border:none;color:var(--text-muted);cursor:pointer;font-size:12px;padding:0 4px;}
 .bld-filter .bld-x:hover{color:var(--err);}
+/* builder v2: function args + label-value autocomplete */
+.bld-arg{display:flex;align-items:center;gap:4px;background:var(--bg-surface);border:1px solid var(--border-default);border-radius:4px;padding:1px 2px;}
+.bld-arg .alab{font-size:9px;color:var(--text-muted);font-family:var(--sans);padding:0 2px;white-space:nowrap;}
+.bld-arg select,.bld-arg input{background:var(--bg-raised);border:none;color:var(--text-primary);font-size:11px;padding:2px 4px;font-family:var(--mono);outline:none;border-radius:3px;}
+.bld-arg select{max-width:130px;}
+.bld-arg input{width:78px;}
+.bld-arg input.arg-range{width:58px;}
+.bld-arg select.arg-fn{max-width:180px;font-weight:600;color:var(--accent);}
+.bld-ac{position:absolute;top:calc(100% + 2px);left:0;min-width:160px;max-width:320px;background:var(--bg-surface);border:1px solid var(--border-default);border-radius:5px;z-index:150;max-height:180px;overflow-y:auto;box-shadow:0 8px 24px rgba(0,0,0,.6);display:none;}
+.bld-ac.open{display:block;}
+.bld-ac .ac-hint{font-size:9px;color:var(--text-muted);padding:3px 8px;border-bottom:1px solid var(--border-subtle);font-family:var(--sans);}
+.bld-ac .ac-v{padding:3px 8px;font-family:var(--mono);font-size:11px;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.bld-ac .ac-v:hover,.bld-ac .ac-v.sel{background:rgba(0,245,212,.09);color:var(--accent);}
+.bld-arg{position:relative;}
+.bld-hc{font-size:9px;color:var(--text-muted);padding-left:4px;font-family:var(--sans);}
 /* LOG FACETS */
 #facets-panel{display:none;width:230px;flex-shrink:0;border-right:1px solid var(--border-default);background:var(--bg-surface);overflow-y:auto;position:relative;}
 #facets-panel.open{display:block;}
@@ -437,16 +453,22 @@ header{height:48px;flex-shrink:0;background:var(--bg-void);border-bottom:1px sol
   <button id="btn-run">RUN_QUERY</button>
 </div>
 <div id="builder-bar" aria-label="Guided query builder">
-  <div style="flex:1;display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
-    <span class="blab">Metric</span>
-    <select id="bld-metric" class="toolbar-select" style="min-width:200px;"></select>
-    <span class="blab" style="margin-left:8px;">Filters</span>
+  <div class="bld-row" style="flex:1;">
+    <span class="blab">Function</span>
+    <select id="bld-fn" class="toolbar-select" style="min-width:180px;" title="Apply a PromQL function or aggregation"></select>
+    <span class="blab" style="margin-left:6px;">Metric</span>
+    <select id="bld-metric" class="toolbar-select" style="min-width:170px;" title="Metric name"></select>
+    <span id="bld-fargs" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;"></span>
+    <span class="blab" style="margin-left:6px;">Filters</span>
     <span id="bld-filters" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;"></span>
     <button id="bld-add-filter" class="corr-btn" title="Add label filter">+ filter</button>
   </div>
-  <div style="display:flex;gap:6px;align-items:center;flex-shrink:0;">
-    <span class="blab">PromQL</span>
-    <code id="bld-preview" style="font-family:var(--mono);font-size:11px;color:var(--accent);background:rgba(0,245,212,.07);border:1px solid rgba(0,245,212,.18);padding:2px 8px;border-radius:3px;max-width:400px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"></code>
+  <div class="bld-row" style="justify-content:space-between;">
+    <span style="display:flex;gap:6px;align-items:center;">
+      <span class="blab">PromQL</span>
+      <code id="bld-preview" style="font-family:var(--mono);font-size:11px;color:var(--accent);background:rgba(0,245,212,.07);border:1px solid rgba(0,245,212,.18);padding:2px 8px;border-radius:3px;max-width:640px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"></code>
+    </span>
+    <span class="bld-hc" id="bld-hc-note"></span>
   </div>
 </div>
 <div id="severity-bar">
@@ -647,47 +669,309 @@ function updateUrl(){
 window.addEventListener('hashchange',()=>{const u=urlState();if(u.sig&&u.sig!==ST.sig){switchSig(u.sig,true);}});
 
 /* ═══ GUIDED QUERY BUILDER (metrics) ═══ */
-let _bld={filters:[{key:'service_name',op:'=',val:''}]};
+let _bld={filters:[],fn:'',metric:'',fargs:{},grouping:null};
+/* Function catalog: every engine-supported function with typed args.
+   kind: 'fn' = vector function, 'agg' = aggregation (supports grouping).
+   args: r=range  s=scalar  str=string  q=quantile(0..1)
+   wrap: how the metric selector is embedded. */
+const BLD_FNS=[
+  {id:'',label:'(raw selector)',kind:'none',args:[]},
+  // aggregations — support grouping by label
+  {id:'sum',label:'sum() — total',kind:'agg',args:[]},
+  {id:'avg',label:'avg() — mean',kind:'agg',args:[]},
+  {id:'min',label:'min() — minimum',kind:'agg',args:[]},
+  {id:'max',label:'max() — maximum',kind:'agg',args:[]},
+  {id:'count',label:'count() — series count',kind:'agg',args:[]},
+  {id:'group',label:'group() — label set',kind:'agg',args:[]},
+  {id:'stddev',label:'stddev() — std deviation',kind:'agg',args:[]},
+  {id:'stdvar',label:'stdvar() — variance',kind:'agg',args:[]},
+  {id:'topk',label:'topk(k, …) — largest k',kind:'agg',args:[['k','s','3']]},
+  {id:'bottomk',label:'bottomk(k, …) — smallest k',kind:'agg',args:[['k','s','3']]},
+  {id:'quantile',label:'quantile(φ, …) — φ-quantile',kind:'agg',args:[['φ','q','0.9']]},
+  {id:'count_values',label:'count_values(label, …) — value frequency',kind:'agg',args:[['label','str','val']]},
+  // rate family — need a range window
+  {id:'rate',label:'rate(m[r]) — per-second rate',kind:'fn',args:[['r','r','5m']],rangeFn:true},
+  {id:'irate',label:'irate(m[r]) — instant rate',kind:'fn',args:[['r','r','5m']],rangeFn:true},
+  {id:'increase',label:'increase(m[r]) — growth over r',kind:'fn',args:[['r','r','1h']],rangeFn:true},
+  {id:'delta',label:'delta(m[r]) — difference over r',kind:'fn',args:[['r','r','1h']],rangeFn:true},
+  {id:'idelta',label:'idelta(m[r]) — last-pair diff',kind:'fn',args:[['r','r','5m']],rangeFn:true},
+  // _over_time family
+  {id:'avg_over_time',label:'avg_over_time(m[r])',kind:'fn',args:[['r','r','5m']],rangeFn:true},
+  {id:'min_over_time',label:'min_over_time(m[r])',kind:'fn',args:[['r','r','5m']],rangeFn:true},
+  {id:'max_over_time',label:'max_over_time(m[r])',kind:'fn',args:[['r','r','5m']],rangeFn:true},
+  {id:'sum_over_time',label:'sum_over_time(m[r])',kind:'fn',args:[['r','r','5m']],rangeFn:true},
+  {id:'count_over_time',label:'count_over_time(m[r])',kind:'fn',args:[['r','r','5m']],rangeFn:true},
+  {id:'last_over_time',label:'last_over_time(m[r])',kind:'fn',args:[['r','r','5m']],rangeFn:true},
+  {id:'present_over_time',label:'present_over_time(m[r])',kind:'fn',args:[['r','r','5m']],rangeFn:true},
+  {id:'stddev_over_time',label:'stddev_over_time(m[r])',kind:'fn',args:[['r','r','5m']],rangeFn:true},
+  {id:'stdvar_over_time',label:'stdvar_over_time(m[r])',kind:'fn',args:[['r','r','5m']],rangeFn:true},
+  {id:'quantile_over_time',label:'quantile_over_time(φ, m[r])',kind:'fn',args:[['φ','q','0.9'],['r','r','5m']],rangeFn:true},
+  {id:'mad_over_time',label:'mad_over_time(m[r]) — median abs dev',kind:'fn',args:[['r','r','5m']],rangeFn:true},
+  {id:'changes',label:'changes(m[r]) — value changes',kind:'fn',args:[['r','r','5m']],rangeFn:true},
+  {id:'resets',label:'resets(m[r]) — counter resets',kind:'fn',args:[['r','r','5m']],rangeFn:true},
+  {id:'deriv',label:'deriv(m[r]) — per-second slope',kind:'fn',args:[['r','r','5m']],rangeFn:true},
+  {id:'predict_linear',label:'predict_linear(m[r], t) — forecast',kind:'fn',args:[['r','r','10m'],['t (s)','s','300']],rangeFn:true},
+  {id:'holt_winters',label:'holt_winters(m[r], sf, tf)',kind:'fn',args:[['r','r','10m'],['sf','s','0.1'],['tf','s','0.3']],rangeFn:true},
+  {id:'double_exponential_smoothing',label:'double_exponential_smoothing(m[r], sf, tf)',kind:'fn',args:[['r','r','10m'],['sf','s','0.1'],['tf','s','0.3']],rangeFn:true},
+  {id:'absent',label:'absent(m) — 1 if empty',kind:'fn',args:[]},
+  {id:'absent_over_time',label:'absent_over_time(m[r])',kind:'fn',args:[['r','r','5m']],rangeFn:true},
+  // instant transforms
+  {id:'abs',label:'abs(m)',kind:'fn',args:[]},
+  {id:'ceil',label:'ceil(m)',kind:'fn',args:[]},
+  {id:'floor',label:'floor(m)',kind:'fn',args:[]},
+  {id:'sqrt',label:'sqrt(m)',kind:'fn',args:[]},
+  {id:'exp',label:'exp(m)',kind:'fn',args:[]},
+  {id:'ln',label:'ln(m) — natural log',kind:'fn',args:[]},
+  {id:'log2',label:'log2(m)',kind:'fn',args:[]},
+  {id:'log10',label:'log10(m)',kind:'fn',args:[]},
+  {id:'sgn',label:'sgn(m) — sign',kind:'fn',args:[]},
+  {id:'round',label:'round(m, nearest)',kind:'fn',args:[['nearest','s','1']]},
+  {id:'clamp',label:'clamp(m, min, max)',kind:'fn',args:[['min','s','0'],['max','s','100']]},
+  {id:'clamp_min',label:'clamp_min(m, min)',kind:'fn',args:[['min','s','0']]},
+  {id:'clamp_max',label:'clamp_max(m, max)',kind:'fn',args:[['max','s','100']]},
+  // trig
+  {id:'sin',label:'sin(m) — radians',kind:'fn',args:[]},
+  {id:'cos',label:'cos(m)',kind:'fn',args:[]},
+  {id:'tan',label:'tan(m)',kind:'fn',args:[]},
+  {id:'asin',label:'asin(m)',kind:'fn',args:[]},
+  {id:'acos',label:'acos(m)',kind:'fn',args:[]},
+  {id:'atan',label:'atan(m)',kind:'fn',args:[]},
+  {id:'atan2',label:'atan2(m, x)',kind:'fn',args:[['x','s','2']]},
+  {id:'sinh',label:'sinh(m)',kind:'fn',args:[]},
+  {id:'cosh',label:'cosh(m)',kind:'fn',args:[]},
+  {id:'tanh',label:'tanh(m)',kind:'fn',args:[]},
+  {id:'asinh',label:'asinh(m)',kind:'fn',args:[]},
+  {id:'acosh',label:'acosh(m)',kind:'fn',args:[]},
+  {id:'atanh',label:'atanh(m)',kind:'fn',args:[]},
+  {id:'deg',label:'deg(m) — radians→degrees',kind:'fn',args:[]},
+  {id:'rad',label:'rad(m) — degrees→radians',kind:'fn',args:[]},
+  // label manipulation
+  {id:'label_replace',label:'label_replace(m, dst, repl, src, regex)',kind:'fn',args:[['dst','str','svc'],['repl','str','$1'],['src','str','service'],['regex','str','(.*)']]},
+  {id:'label_join',label:'label_join(m, dst, sep, srcs…)',kind:'fn',args:[['dst','str','combo'],['sep','str','-'],['srcs (,)','str','service,method']]},
+  {id:'label_del',label:'label_del(m, label)',kind:'fn',args:[['label','str','host']]},
+  // sorting
+  {id:'sort',label:'sort(m) — ascending',kind:'fn',args:[]},
+  {id:'sort_desc',label:'sort_desc(m) — descending',kind:'fn',args:[]},
+  {id:'sort_by_label',label:'sort_by_label(m, label)',kind:'fn',args:[['label','str','service']]},
+  {id:'sort_by_label_desc',label:'sort_by_label_desc(m, label)',kind:'fn',args:[['label','str','service']]},
+  // time / scalar
+  {id:'time',label:'time() — eval timestamp',kind:'fn',args:[],noMetric:true},
+  {id:'pi',label:'pi()',kind:'fn',args:[],noMetric:true},
+  {id:'minute',label:'minute() — of hour',kind:'fn',args:[],noMetric:true},
+  {id:'hour',label:'hour() — of day',kind:'fn',args:[],noMetric:true},
+  {id:'day_of_week',label:'day_of_week()',kind:'fn',args:[],noMetric:true},
+  {id:'day_of_month',label:'day_of_month()',kind:'fn',args:[],noMetric:true},
+  {id:'day_of_year',label:'day_of_year()',kind:'fn',args:[],noMetric:true},
+  {id:'days_in_month',label:'days_in_month()',kind:'fn',args:[],noMetric:true},
+  {id:'month',label:'month()',kind:'fn',args:[],noMetric:true},
+  {id:'year',label:'year()',kind:'fn',args:[],noMetric:true},
+  {id:'vector',label:'vector(x) — constant vector',kind:'fn',args:[['x','s','1']],noMetric:true},
+  {id:'scalar',label:'scalar(m) — single value',kind:'fn',args:[]},
+  {id:'timestamp',label:'timestamp(m) — sample ts',kind:'fn',args:[]},
+  // histogram family (native OTLP histograms)
+  {id:'histogram_quantile',label:'histogram_quantile(φ, m) — p-quantile',kind:'fn',args:[['φ','q','0.9']],harg:1},
+  {id:'histogram_count',label:'histogram_count(m) — observations',kind:'fn',args:[]},
+  {id:'histogram_sum',label:'histogram_sum(m) — total',kind:'fn',args:[]},
+  {id:'histogram_avg',label:'histogram_avg(m) — mean',kind:'fn',args:[]},
+  {id:'histogram_stddev',label:'histogram_stddev(m)',kind:'fn',args:[]},
+  {id:'histogram_stdvar',label:'histogram_stdvar(m)',kind:'fn',args:[]},
+  {id:'histogram_fraction',label:'histogram_fraction(lo, hi, m)',kind:'fn',args:[['lo','s','0'],['hi','s','1']],harg:2},
+];
+const BLD_RANGES=['1m','5m','10m','15m','30m','1h','3h','6h','12h','1d'];
+function bldFnDef(id){return BLD_FNS.find(f=>f.id===id)||BLD_FNS[0];}
 function bldVisible(){return ST.metrics.builder&&ST.sig==='metrics';}
+/* label-value autocomplete: top-10 recent by default; when the user types,
+   re-fetch with the typed prefix as server-side match. High-cardinality
+   labels never enumerate fully. Per-input state (multiple filter rows). */
+function bldACAttach(input,label){
+  input.autocomplete='off';
+  const drop=document.createElement('div');drop.className='bld-ac';
+  input.parentNode.appendChild(drop);
+  let items=[],idx=-1,timer=0;
+  const paint=()=>{[...drop.querySelectorAll('.ac-v')].forEach((el,i)=>el.classList.toggle('sel',i===idx));};
+  const pick=v=>{input.value=v;input.dispatchEvent(new Event('input',{bubbles:true}));drop.classList.remove('open');};
+  async function fetchVals(prefix){
+    const url=new URL('/api/v1/label/'+encodeURIComponent(label)+'/values',location.origin);
+    url.searchParams.set('limit','10');
+    if(prefix)url.searchParams.set('match',prefix);
+    let vals=[];
+    try{const r=await fetch(url);if(r.ok){const j=await r.json();vals=(j.data||[]).slice(0,10);}}catch{}
+    if(drop.isConnected===false)return;
+    items=vals;idx=-1;
+    drop.innerHTML='';
+    const hint=document.createElement('div');hint.className='ac-hint';
+    hint.textContent=prefix?`values starting with "${prefix}" — top 10 recent`:'top 10 recent values — type to narrow';
+    drop.appendChild(hint);
+    if(!vals.length){const e2=document.createElement('div');e2.className='ac-hint';e2.textContent='no matching values';drop.appendChild(e2);}
+    vals.forEach(v=>{
+      const it=document.createElement('div');it.className='ac-v';it.textContent=v;
+      it.onmousedown=e=>{e.preventDefault();pick(v);};
+      drop.appendChild(it);
+    });
+    drop.classList.add('open');
+  }
+  input.addEventListener('input',()=>{clearTimeout(timer);timer=setTimeout(()=>fetchVals(input.value.trim()),120);});
+  input.addEventListener('focus',()=>{if(!drop.classList.contains('open'))fetchVals(input.value.trim());});
+  input.addEventListener('keydown',e=>{
+    if(!drop.classList.contains('open'))return;
+    if(e.key==='ArrowDown'){e.preventDefault();idx=Math.min(idx+1,items.length-1);paint();}
+    else if(e.key==='ArrowUp'){e.preventDefault();idx=Math.max(idx-1,-1);paint();}
+    else if(e.key==='Enter'&&idx>=0){e.preventDefault();e.stopPropagation();pick(items[idx]);}
+    else if(e.key==='Escape'){drop.classList.remove('open');}
+  });
+  document.addEventListener('click',e=>{if(drop.classList.contains('open')&&!input.contains(e.target)&&!drop.contains(e.target))drop.classList.remove('open');},{capture:true});
+}
 function bldSync(){
   const bar=$('builder-bar'),btn=$('btn-build');
   bar.classList.toggle('visible',bldVisible());
   btn.style.display=ST.sig==='metrics'?'':'none';
   btn.classList.toggle('active',!!ST.metrics.builder);btn.setAttribute('aria-pressed',String(!!ST.metrics.builder));
   if(!bldVisible())return;
-  // metric options
+  // function select (once)
+  const fns=$('bld-fn');
+  if(!fns.options.length){
+    BLD_FNS.forEach(f=>{const o=document.createElement('option');o.value=f.id;o.textContent=f.label;fns.appendChild(o);});
+    fns.onchange=()=>{_bld.fn=fns.value;_bld.fargs={};bldRenderArgs();bldPreview();};
+  }
+  if(fns.value!==_bld.fn)fns.value=_bld.fn;
+  // metric options — searchable via native select + keyboard
   const sel=$('bld-metric');const cur=sel.value;
   const names=ST.server.names.length?ST.server.names:['(no metrics indexed)'];
   sel.innerHTML='';names.forEach(n=>{const o=document.createElement('option');o.value=n;o.textContent=n;sel.appendChild(o);});
-  if(cur&&names.includes(cur))sel.value=cur;else if(_bld.metric&&names.includes(_bld.metric))sel.value=_bld.metric;
+  if(_bld.metric&&names.includes(_bld.metric))sel.value=_bld.metric;
+  else if(cur&&names.includes(cur))sel.value=cur;
   _bld.metric=sel.value;
-  // filter rows
+  bldRenderArgs();
+  bldRenderFilters();
+  bldPreview();
+}
+function bldRenderArgs(){
+  const host=$('bld-fargs');host.innerHTML='';
+  const def=bldFnDef(_bld.fn);
+  if(def.kind==='none'||def.noMetric&&!def.args.length)return;
+  def.args.forEach(([nm,ty,dflt])=>{
+    const w=document.createElement('span');w.className='bld-arg';
+    const lab=document.createElement('span');lab.className='alab';lab.textContent=nm;w.appendChild(lab);
+    let inp;
+    if(ty==='r'){
+      inp=document.createElement('select');BLD_RANGES.forEach(r=>{const o=document.createElement('option');o.value=r;o.textContent=r;inp.appendChild(o);});
+      if(dflt)inp.value=dflt;
+      inp.className='arg-range';
+    }else{
+      inp=document.createElement('input');inp.type='text';inp.value=dflt;inp.placeholder=ty==='str'?'str':(ty==='q'?'0..1':'num');
+    }
+    const key=nm;
+    inp.oninput=()=>{_bld.fargs[key]=inp.value;bldPreview();};
+    inp.onchange=inp.oninput;
+    if(inp.tagName==='SELECT')_bld.fargs[key]=inp.value;
+    w.appendChild(inp);host.appendChild(w);
+  });
+  // aggregation grouping: by (labels) + optional window fn (rate-style)
+  if(def.kind==='agg'){
+    const w=document.createElement('span');w.className='bld-arg';
+    const lab=document.createElement('span');lab.className='alab';lab.textContent='by';w.appendChild(lab);
+    const inp=document.createElement('select');
+    const oNone=document.createElement('option');oNone.value='';oNone.textContent='(none)';inp.appendChild(oNone);
+    const oAll=document.createElement('option');oAll.value='*';oAll.textContent='(all labels)';inp.appendChild(oAll);
+    ST.server.labels.forEach(l=>{const o=document.createElement('option');o.value=l;o.textContent=l;inp.appendChild(o);});
+    inp.onchange=()=>{_bld.grouping=inp.value;bldPreview();};
+    if(_bld.grouping&&[...inp.options].some(o=>o.value===_bld.grouping))inp.value=_bld.grouping;
+    w.appendChild(inp);host.appendChild(w);
+    // Window fn: aggregations need an instant vector, so a range is only
+    // legal wrapped (sum(rate(m[5m]))), never sum(m[5m]).
+    const w2=document.createElement('span');w2.className='bld-arg';
+    const lab2=document.createElement('span');lab2.className='alab';lab2.textContent='window';w2.appendChild(lab2);
+    const wfn=document.createElement('select');
+    ['','rate','irate','increase','delta','avg_over_time','min_over_time','max_over_time','sum_over_time','count_over_time','last_over_time'].forEach(v=>{const o=document.createElement('option');o.value=v;o.textContent=v||'(none)';wfn.appendChild(o);});
+    wfn.onchange=()=>{_bld.fargs.__aggFn=wfn.value;rng.disabled=!wfn.value;bldPreview();};
+    if(_bld.fargs.__aggFn)wfn.value=_bld.fargs.__aggFn;
+    w2.appendChild(wfn);host.appendChild(w2);
+    const w3=document.createElement('span');w3.className='bld-arg';
+    const rng=document.createElement('select');rng.className='arg-range';
+    BLD_RANGES.forEach(r=>{const o=document.createElement('option');o.value=r;o.textContent=r;rng.appendChild(o);});rng.value='5m';rng.disabled=true;
+    rng.onchange=()=>{_bld.fargs.__aggRange=rng.value;bldPreview();};
+    _bld.fargs.__aggRange=rng.value;
+    w3.appendChild(rng);host.appendChild(w3);
+  }
+}
+function bldRenderFilters(){
   const fw=$('bld-filters');fw.innerHTML='';
+  if(!_bld.filters.length){const p=document.createElement('span');p.className='bld-hc';p.textContent='(no filters)';fw.appendChild(p);return;}
   _bld.filters.forEach((f,i)=>{
     const row=document.createElement('span');row.className='bld-filter';
     const key=document.createElement('select');
     ST.server.labels.forEach(l=>{const o=document.createElement('option');o.value=l;o.textContent=l;if(l===f.key)o.selected=true;key.appendChild(o);});
-    key.onchange=()=>{_bld.filters[i].key=key.value;_bld.filters[i].val='';bldSync();};
-    const op=document.createElement('select');['=','!=','=~'].forEach(o=>{const opt=document.createElement('option');opt.value=o;opt.textContent=o;if(o===f.op)opt.selected=true;op.appendChild(opt);});
+    key.onchange=()=>{_bld.filters[i].key=key.value;_bld.filters[i].val='';bldRenderFilters();bldPreview();};
+    const op=document.createElement('select');['=','!=','=~','!~'].forEach(o=>{const opt=document.createElement('option');opt.value=o;opt.textContent=o;if(o===f.op)opt.selected=true;op.appendChild(opt);});
     op.onchange=()=>{_bld.filters[i].op=op.value;bldPreview();};
     const val=document.createElement('input');val.placeholder='value';val.value=f.val;
     val.oninput=()=>{_bld.filters[i].val=val.value;bldPreview();};
     const x=document.createElement('button');x.className='bld-x';x.textContent='✕';x.title='Remove filter';
-    x.onclick=()=>{_bld.filters.splice(i,1);bldSync();};
+    x.onclick=()=>{_bld.filters.splice(i,1);bldRenderFilters();bldPreview();};
     row.append(key,op,val,x);fw.appendChild(row);
+    // Attach autocomplete AFTER the input is in the DOM (its .bld-ac
+    // dropdown is appended to the filter row container).
+    if(f.key)bldACAttach(val,f.key);
   });
-  bldPreview();
 }
 function bldPromQL(){
-  if(!_bld.metric||_bld.metric==='(no metrics indexed)')return'';
+  const def=bldFnDef(_bld.fn);
+  const m=_bld.metric;
+  const hasMetric=m&&m!=='(no metrics indexed)';
+  // selector with filters
   const active=_bld.filters.filter(f=>f.key&&f.val);
-  if(!active.length)return _bld.metric;
-  return _bld.metric+'{'+active.map(f=>`${f.key}${f.op}"${f.val}"`).join(', ')+'}';
+  const sel=hasMetric?m+(active.length?'{'+active.map(f=>`${f.key}${f.op}"${f.val}"`).join(', ')+'}':''):'';
+  const A=_bld.fargs;
+  const num=v=>v!==''&&v!==undefined&&!isNaN(+v)?String(+v):v;
+  if(def.kind==='none')return sel;
+  if(def.noMetric&&!def.args.length)return def.id+'()';
+  if(def.id==='vector')return 'vector('+(A['x']||'1')+')';
+  if(!sel)return '';
+  if(def.kind==='agg'){
+    const grp=_bld.grouping;
+    let inner=sel;
+    // A range is only legal wrapped in a window function: sum(rate(m[5m])).
+    if(_bld.fargs.__aggFn)inner=`${_bld.fargs.__aggFn}(${sel}[${_bld.fargs.__aggRange||'5m'}])`;
+    if(def.id==='topk'||def.id==='bottomk')return `${def.id}(${num(A['k']||'3')}, ${inner})`;
+    if(def.id==='quantile')return `quantile(${A['φ']||'0.9'}, ${inner})`;
+    if(def.id==='count_values')return `count_values("${A['label']||'val'}", ${inner})`;
+    if(grp==='*')return `${def.id} without () (${inner})`;
+    if(grp)return `${def.id} by (${grp}) (${inner})`;
+    return `${def.id} (${inner})`;
+  }
+  // fn kind
+  if(def.rangeFn){
+    const r=A['r']||'5m';const base=sel+'['+r+']';
+    if(def.id==='quantile_over_time')return `quantile_over_time(${A['φ']||'0.9'}, ${base})`;
+    if(def.id==='predict_linear')return `predict_linear(${base}, ${num(A['t (s)']||'300')})`;
+    if(def.id==='holt_winters'||def.id==='double_exponential_smoothing')return `${def.id}(${base}, ${num(A['sf']||'0.1')}, ${num(A['tf']||'0.3')})`;
+    return def.id+'('+base+')';
+  }
+  if(def.harg){
+    // histogram fns with scalar args BEFORE the selector
+    if(def.id==='histogram_quantile')return `histogram_quantile(${A['φ']||'0.9'}, ${sel})`;
+    if(def.id==='histogram_fraction')return `histogram_fraction(${num(A['lo']||'0')}, ${num(A['hi']||'1')}, ${sel})`;
+  }
+  if(def.id==='round')return `round(${sel}, ${num(A['nearest']||'1')})`;
+  if(def.id==='clamp')return `clamp(${sel}, ${num(A['min']||'0')}, ${num(A['max']||'100')})`;
+  if(def.id==='clamp_min')return `clamp_min(${sel}, ${num(A['min']||'0')})`;
+  if(def.id==='clamp_max')return `clamp_max(${sel}, ${num(A['max']||'100')})`;
+  if(def.id==='atan2')return `atan2(${sel}, ${num(A['x']||'2')})`;
+  if(def.id==='label_replace')return `label_replace(${sel}, "${A['dst']||'svc'}", "${A['repl']||'$1'}", "${A['src']||'service'}", "${A['regex']||'(.*)'}")`;
+  if(def.id==='label_join')return `label_join(${sel}, "${A['dst']||'combo'}", "${A['sep']||'-'}", ${(A['srcs (,)']||'service').split(',').map(s=>`"${s.trim()}"`).filter(s=>s!=='""').join(', ')})`;
+  if(def.id==='label_del')return `label_del(${sel}, "${A['label']||'host'}")`;
+  if(def.id==='sort_by_label')return `sort_by_label(${sel}, "${A['label']||'service'}")`;
+  if(def.id==='sort_by_label_desc')return `sort_by_label_desc(${sel}, "${A['label']||'service'}")`;
+  return def.id+'('+sel+')';
 }
-function bldPreview(){tx($('bld-preview'),bldPromQL()||'—');}
-$('btn-build').onclick=()=>{ST.metrics.builder=!ST.metrics.builder;if(ST.metrics.builder){const raw=(E.qIn.value||'').trim();if(raw)_bld.metric=null;}else{const q=bldPromQL();if(q){E.qIn.value=q;updateSearchClear();runQuery();}}bldSync();};
+function bldPreview(){
+  const q=bldPromQL();
+  tx($('bld-preview'),q||'—');
+  tx($('bld-hc-note'),q?'':'select metric + function');
+}
+$('btn-build').onclick=()=>{ST.metrics.builder=!ST.metrics.builder;if(ST.metrics.builder){const raw=(E.qIn.value||'').trim();if(raw){/* keep current query context */}/* If metric names/labels haven't arrived yet, fetch them now so the dropdowns aren't blank. */if(!ST.server.names.length||!ST.server.labels.length){prefetch().then(()=>bldSync()).catch(()=>{});}}else{const q=bldPromQL();if(q){E.qIn.value=q;updateSearchClear();runQuery();}}bldSync();};
 $('bld-metric').onchange=()=>{_bld.metric=$('bld-metric').value;bldPreview();};
-$('bld-add-filter').onclick=()=>{_bld.filters.push({key:ST.server.labels[0]||'service_name',op:'=',val:''});bldSync();};
+$('bld-add-filter').onclick=()=>{_bld.filters.push({key:ST.server.labels[0]||'service_name',op:'=',val:''});bldRenderFilters();bldPreview();};
 
 /* ═══ LOG FACETS ═══ */
 async function loadFacets(){

@@ -90,6 +90,14 @@ pub struct PrometheusData {
 #[derive(Serialize)]
 pub struct PrometheusResult {
     pub metric: serde_json::Value,
+    /// Instant-vector sample: `[timestamp, "value"]` — the Prometheus API
+    /// shape for resultType=vector. Present when the series carries exactly
+    /// one sample (instant queries).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<(f64, String)>,
+    /// Matrix sample list — the Prometheus API shape for resultType=matrix
+    /// (range queries). Also populated for instant results so the embedded
+    /// UI (which charts `values` from either query kind) keeps working.
     pub values: Vec<(f64, String)>,
 }
 
@@ -97,13 +105,18 @@ pub struct PrometheusResult {
 fn render_vector_result(result: parqtel_query::QueryResult) -> Response {
     let mut res = Vec::new();
     for ts in result.series {
-        let values = ts
+        let values: Vec<(f64, String)> = ts
             .samples
             .into_iter()
             .map(|s| (s.timestamp_ns as f64 / 1_000_000_000.0, s.value.to_string()))
             .collect();
+        // Instant vector: expose the (single) evaluation-timestamp sample in
+        // the spec-required `value` field. The AST path evaluates one step
+        // per series, so the last sample is the value at query time.
+        let value = values.last().cloned();
         res.push(PrometheusResult {
             metric: serde_json::to_value(&ts.labels).unwrap_or_default(),
+            value,
             values,
         });
     }
@@ -133,6 +146,7 @@ fn render_range_result(result: parqtel_query::QueryResult) -> Response {
             .collect();
         res.push(PrometheusResult {
             metric: serde_json::to_value(&ts.labels).unwrap_or_default(),
+            value: None,
             values,
         });
     }
@@ -171,25 +185,14 @@ pub async fn query_instant(
         .time
         .unwrap_or_else(|| chrono::Utc::now().timestamp() as f64);
 
-    let (
-        metric_name,
-        matchers,
-        aggregation,
-        quantile,
-        topk_n,
-        group_by,
-        group_without,
-        label_replace,
-        scalar_param,
-        clamp,
-        range_ns,
-    ) = match parse_query(&params.query) {
-        Ok(res) => res,
-        Err(e) => return map_error(e),
-    };
-
-    // Phase 1A: composed queries (nesting, binary ops, subqueries) go
-    // through the AST evaluator; simple shapes keep the legacy plan path.
+    // Phase 1A: composed queries (nesting, binary ops, subqueries, ALL
+    // aggregations) go through the AST evaluator; simple selector shapes
+    // keep the legacy plan path. The AST parse is attempted FIRST: the
+    // legacy parse_query() mis-handles nested braced selectors — e.g. for
+    // sum(rate(x{a="b"}[5m])) its strip_fn() hands
+    // `x{a="b"}[5m]` to parse_selector(), which rejects the `[5m]` with
+    // "Selector missing closing brace" — so a legacy-first order would
+    // return that error and never reach the AST engine that parses it fine.
     if parqtel_query::needs_ast(&params.query) {
         let expr = match parqtel_query::parser::parse_expr(&params.query) {
             Ok(e) => e,
@@ -222,6 +225,23 @@ pub async fn query_instant(
             }
         }
     }
+
+    let (
+        metric_name,
+        matchers,
+        aggregation,
+        quantile,
+        topk_n,
+        group_by,
+        group_without,
+        label_replace,
+        scalar_param,
+        clamp,
+        range_ns,
+    ) = match parse_query(&params.query) {
+        Ok(res) => res,
+        Err(e) => return map_error(e),
+    };
 
     let plan = match QueryPlan::new_full(
         metric_name,
@@ -259,7 +279,7 @@ pub async fn query_instant(
         Ok(result) => {
             let mut res = Vec::new();
             for ts in result.series {
-                let values = ts
+                let values: Vec<(f64, String)> = ts
                     .samples
                     .into_iter()
                     .map(|s| (s.timestamp_ns as f64 / 1_000_000_000.0, s.value.to_string()))
@@ -267,6 +287,7 @@ pub async fn query_instant(
 
                 res.push(PrometheusResult {
                     metric: serde_json::to_value(&ts.labels).unwrap_or_default(),
+                    value: values.last().cloned(),
                     values,
                 });
             }
@@ -312,27 +333,10 @@ pub async fn query_range(
         }
     };
 
-    let (
-        metric_name,
-        matchers,
-        aggregation,
-        quantile,
-        topk_n,
-        group_by,
-        group_without,
-        label_replace,
-        scalar_param,
-        clamp,
-        range_ns,
-    ) = match parse_query(&params.query) {
-        Ok(res) => res,
-        Err(e) => return map_error(e),
-    };
-
     let start_ns = (params.start * 1_000_000_000.0) as i64;
     let end_ns = (params.end * 1_000_000_000.0) as i64;
 
-    let step_ns = match parse_duration(&params.step) {
+    let step_ns = match parse_step_duration(&params.step) {
         Ok(d) => d,
         Err(_) => {
             return (
@@ -343,7 +347,10 @@ pub async fn query_range(
         }
     };
 
-    // Phase 1A: composed queries via the AST evaluator.
+    // Phase 1A: composed queries via the AST evaluator — attempted FIRST,
+    // before the legacy parse_query() (which rejects nested braced range
+    // selectors like sum(rate(x{a="b"}[5m])) with "Selector missing closing
+    // brace" even though the AST parser accepts them).
     if parqtel_query::needs_ast(&params.query) {
         let expr = match parqtel_query::parser::parse_expr(&params.query) {
             Ok(e) => e,
@@ -375,6 +382,23 @@ pub async fn query_range(
             }
         }
     }
+
+    let (
+        metric_name,
+        matchers,
+        aggregation,
+        quantile,
+        topk_n,
+        group_by,
+        group_without,
+        label_replace,
+        scalar_param,
+        clamp,
+        range_ns,
+    ) = match parse_query(&params.query) {
+        Ok(res) => res,
+        Err(e) => return map_error(e),
+    };
 
     let plan = match QueryPlan::new_full(
         metric_name,
@@ -420,6 +444,7 @@ pub async fn query_range(
 
                 res.push(PrometheusResult {
                     metric: serde_json::to_value(&ts.labels).unwrap_or_default(),
+                    value: None,
                     values,
                 });
             }
@@ -736,11 +761,59 @@ pub async fn list_label_names(State(state): State<AppState>) -> Response {
 }
 
 /// Handler for GET /api/v1/label/{name}/values.
+///
+/// Query params (builder autocomplete):
+/// - `limit`  — cap the number of values returned (default: all; clamped
+///   server-side to 100 when combined with a prefix/match filter or used
+///   alone by the UI, which always asks for a bounded top-N).
+/// - `match`  — prefix filter applied server-side so high-cardinality
+///   labels return only values the user is typing toward (e.g.
+///   `match=us-` while the user types `user_id="us-…"`).
+///
+/// Without any params this remains the full Prometheus-compatible listing.
+/// With `limit` it switches to the recency-bounded path (in-memory buffer
+/// first, then the newest blocks' flush-time label-value index) — safe for
+/// labels with tens of thousands of distinct values.
+#[derive(Deserialize)]
+pub struct LabelValuesQuery {
+    #[serde(default)]
+    limit: Option<usize>,
+    #[serde(default, rename = "match")]
+    match_prefix: Option<String>,
+}
+
 pub async fn list_label_values(
     State(state): State<AppState>,
     axum::extract::Path(name): axum::extract::Path<String>,
+    params: Result<Query<LabelValuesQuery>, QueryRejection>,
 ) -> Response {
-    let values = state.inner.query_executor.list_label_values(&name).await;
+    let Query(params) = match params {
+        Ok(q) => q,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"status": "error", "error": e.to_string()})),
+            )
+                .into_response()
+        }
+    };
+    // Full listing unless the caller explicitly bounds it.
+    let values: Vec<String> = match params.limit {
+        Some(limit) => {
+            state
+                .inner
+                .query_executor
+                .recent_label_values(&name, params.match_prefix.as_deref(), limit, 5)
+                .await
+        }
+        None => state
+            .inner
+            .query_executor
+            .list_label_values(&name)
+            .await
+            .into_iter()
+            .collect(),
+    };
     (
         StatusCode::OK,
         Json(PrometheusResponse {
@@ -927,6 +1000,33 @@ fn map_error(e: parqtel_core::Error) -> Response {
         .into_response()
 }
 
+/// Parse a `step` query parameter per the Prometheus HTTP API: a duration
+/// string (e.g. `1m`, `30s`, `1h30m`) or a float number of seconds
+/// (e.g. `15`, `0.5`). Grafana's Prometheus datasource sends plain float
+/// seconds for range panels, so rejecting them breaks every Grafana range
+/// query. Rejects non-positive values: the range evaluator advances sample
+/// timestamps with `ts += step_ns`, so `0` would loop forever.
+fn parse_step_duration(s: &str) -> Result<i64, ()> {
+    let s = s.trim();
+    if s.is_empty() {
+        return Err(());
+    }
+    // Float seconds first (spec: "duration format or float seconds").
+    if let Ok(secs) = s.parse::<f64>() {
+        let ns = (secs * 1_000_000_000.0) as i64;
+        if secs.is_finite() && ns > 0 {
+            return Ok(ns);
+        }
+        return Err(());
+    }
+    // Duration units — parse_duration itself accepts negative values
+    // (e.g. "-1m"), which would loop the range evaluator forever.
+    match parse_duration(s) {
+        Ok(ns) if ns > 0 => Ok(ns),
+        _ => Err(()),
+    }
+}
+
 fn parse_duration(s: &str) -> Result<i64, ()> {
     if s.is_empty() {
         return Err(());
@@ -1072,5 +1172,50 @@ pub async fn run_pipeline_search(
                 .into_response()
         }
         Err(e) => map_error(e),
+    }
+}
+
+#[cfg(test)]
+mod step_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+    use super::parse_step_duration;
+
+    #[test]
+    fn accepts_float_seconds() {
+        assert_eq!(parse_step_duration("60").unwrap(), 60_000_000_000);
+        assert_eq!(parse_step_duration("15").unwrap(), 15_000_000_000);
+        assert_eq!(parse_step_duration("0.5").unwrap(), 500_000_000);
+    }
+
+    #[test]
+    fn accepts_duration_units() {
+        assert_eq!(parse_step_duration("60s").unwrap(), 60_000_000_000);
+        assert_eq!(parse_step_duration("5m").unwrap(), 300_000_000_000);
+        assert_eq!(parse_step_duration("1h").unwrap(), 3_600_000_000_000);
+        assert_eq!(parse_step_duration("1d").unwrap(), 86_400_000_000_000);
+        assert_eq!(parse_step_duration("30m").unwrap(), 1_800_000_000_000);
+    }
+
+    #[test]
+    fn rejects_invalid_and_dangerous_values() {
+        // Zero / negative would make the range evaluator loop forever (ts += step_ns).
+        assert!(parse_step_duration("0").is_err());
+        assert!(parse_step_duration("-15").is_err());
+        assert!(parse_step_duration("-1m").is_err());
+        // Garbage and empty.
+        assert!(parse_step_duration("").is_err());
+        assert!(parse_step_duration("abc").is_err());
+        assert!(parse_step_duration("1x").is_err());
+        // NaN / Infinity must not reach the evaluator either.
+        assert!(parse_step_duration("NaN").is_err());
+        assert!(parse_step_duration("inf").is_err());
+        // Sub-nanosecond steps that truncate to 0 ns are rejected too.
+        assert!(parse_step_duration("1e-12").is_err());
+    }
+
+    #[test]
+    fn trims_whitespace() {
+        assert_eq!(parse_step_duration(" 60s ").unwrap(), 60_000_000_000);
+        assert_eq!(parse_step_duration(" 60 ").unwrap(), 60_000_000_000);
     }
 }

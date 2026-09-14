@@ -40,3 +40,9 @@ parqtel-server/data/
 .rtk/
 data/
 server.pid
+
+# buildx state dir redirected by the Makefile (see BUILDX_CONFIG)
+.buildx/
+# repo-local cargo home (Makefile CARGO_HOME fallback) and pinned tools
+.cargo-home/
+.tools/

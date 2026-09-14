@@ -138,7 +138,39 @@ def generate_otel_json(series_count, timestamp_ns):
             }
         })
 
-    # 4. Summaries
+    # 4. High-cardinality metric: thousands of distinct user_id values
+    # (exercises the builder's bounded top-10-recent label autocomplete).
+    hc_metrics = []
+    for m_idx in range(2):
+        name = f"user_sessions_active_{m_idx}"
+        data_points = []
+        series_per_metric = series_count // 20
+        for s_idx in range(max(1, series_per_metric)):
+            data_points.append({
+                "time_unix_nano": timestamp_ns,
+                "value": {"as_double": float(random.randint(0, 60))},
+                "attributes": [
+                    {"key": "user_id", "value": {"string_value": f"user-{random.randint(1, 5000):05d}"}},
+                    {"key": "session_id", "value": {"string_value": f"sess-{random.randint(1, 20000):06d}"}},
+                    {"key": "tier", "value": {"string_value": random.choice(["free", "pro", "enterprise"])}},
+                ],
+                "dropped_attributes_count": 0,
+                "exemplars": [],
+                "flags": 0,
+                "start_time_unix_nano": 0
+            })
+        hc_metrics.append({
+            "name": name,
+            "description": "Active sessions per user (high-cardinality)",
+            "unit": "1",
+            "sum": {
+                "data_points": data_points,
+                "aggregation_temporality": 1,
+                "is_monotonic": False
+            }
+        })
+
+    # 5. Summaries
     sum_metrics = []
     for m_idx in range(3):
         name = f"request_size_bytes_{m_idx}"
@@ -174,7 +206,7 @@ def generate_otel_json(series_count, timestamp_ns):
             },
             "scope_metrics": [{
                 "scope": {"name": "load-gen-scope", "version": "1.0", "attributes": [], "dropped_attributes_count": 0},
-                "metrics": counter_metrics + gauge_metrics + hist_metrics + sum_metrics,
+                "metrics": counter_metrics + gauge_metrics + hist_metrics + sum_metrics + hc_metrics,
                 "schema_url": ""
             }],
             "schema_url": ""
