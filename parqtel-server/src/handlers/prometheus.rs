@@ -1197,7 +1197,7 @@ mod step_tests {
     }
 
     #[test]
-    fn rejects_invalid_and_unsafe_values() {
+    fn rejects_invalid_and_dangerous_values() {
         // Zero / negative would make the range evaluator loop forever (ts += step_ns).
         assert!(parse_step_duration("0").is_err());
         assert!(parse_step_duration("-15").is_err());
