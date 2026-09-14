@@ -202,68 +202,93 @@ impl QueryExecutor {
         // Collect referenced metric names + their selectors' matchers.
         let mut refs: Vec<(String, Vec<crate::matcher::LabelMatcher>)> = Vec::new();
         collect_metric_refs(expr, &mut refs);
-        if refs.is_empty() {
-            return Ok(QueryResult {
-                series: Vec::new(),
-                execution_time: start_time.elapsed(),
-                points_scanned: 0,
-                total_series_count: 0,
-                volume_summary: vec![0; 60],
-            });
-        }
-
-        // Extend the scan range so range selectors reaching before `start`
-        // still see samples (window lookback).
-        let max_range = max_range_ns(expr);
-        let scan_start = start_ns.saturating_sub(max_range.max(60_000_000_000));
-
-        // Load series data for every referenced metric.
+        // Selector-free expressions (time(), pi(), vector(1), minute(), …)
+        // are still valid instant queries — evaluate them against an empty
+        // SeriesData instead of short-circuiting to an empty result.
         let mut data: crate::ast::SeriesData = Default::default();
+        // Native-histogram channel: OTLP explicit-bucket samples kept in
+        // structured form for the histogram_* function family.
+        let mut hist_data: crate::ast::HistData = Default::default();
         let mut points_scanned: u64 = 0;
         let mut total_series = 0usize;
-        for (name, matchers) in &refs {
-            // Blocks
-            let blocks = {
-                let idx = self.index.read().await;
-                idx.query(scan_start, end_ns, Some(name))
-            };
-            let mut raw = if blocks.is_empty() {
-                Vec::new()
-            } else {
-                Scanner::scan(blocks, name.clone(), scan_start, end_ns).await?
-            };
-            // Buffer
-            raw.extend(self.buffer.scan_metrics(name, scan_start, end_ns).await);
-            points_scanned += raw.len() as u64;
 
-            // Group by series fingerprint -> labels
-            use std::collections::BTreeMap;
-            let mut series_map: BTreeMap<u64, (parqtel_core::LabelSet, Vec<(i64, MetricValue)>)> =
-                BTreeMap::new();
-            for dp in raw {
-                if !crate::matcher::evaluate_matchers(matchers, &dp.labels, name) {
-                    continue;
+        if !refs.is_empty() {
+            // Extend the scan range so range selectors reaching before `start`
+            // still see samples (window lookback).
+            let max_range = max_range_ns(expr);
+            let scan_start = start_ns.saturating_sub(max_range.max(60_000_000_000));
+            for (name, matchers) in &refs {
+                // Blocks
+                let blocks = {
+                    let idx = self.index.read().await;
+                    idx.query(scan_start, end_ns, Some(name))
+                };
+                let mut raw = if blocks.is_empty() {
+                    Vec::new()
+                } else {
+                    Scanner::scan(blocks, name.clone(), scan_start, end_ns).await?
+                };
+                // Buffer
+                raw.extend(self.buffer.scan_metrics(name, scan_start, end_ns).await);
+                points_scanned += raw.len() as u64;
+
+                // Group by series fingerprint -> labels
+                use std::collections::BTreeMap;
+                let mut series_map: BTreeMap<
+                    u64,
+                    (parqtel_core::LabelSet, Vec<(i64, MetricValue)>),
+                > = BTreeMap::new();
+                for dp in raw {
+                    if !crate::matcher::evaluate_matchers(matchers, &dp.labels, name) {
+                        continue;
+                    }
+                    let fp = dp.labels.fingerprint();
+                    total_series += 1;
+                    let entry = series_map
+                        .entry(fp)
+                        .or_insert_with(|| (dp.labels.clone(), Vec::new()));
+                    entry.1.push((dp.timestamp_ns, dp.value));
                 }
-                let fp = dp.labels.fingerprint();
-                total_series += 1;
-                let entry = series_map
-                    .entry(fp)
-                    .or_insert_with(|| (dp.labels.clone(), Vec::new()));
-                entry.1.push((dp.timestamp_ns, dp.value));
+                let entry = data.entry(name.clone()).or_default();
+                let hist_entry = hist_data.entry(name.clone()).or_default();
+                for (_fp, (labels, mut pts)) in series_map {
+                    pts.sort_by_key(|(t, _)| *t);
+                    // Split histogram-valued samples into the structured
+                    // channel; numeric series keep the plain path.
+                    let mut hist_pts: Vec<crate::ast::HistSample> = Vec::new();
+                    let mut num_pts: Vec<(i64, f64)> = Vec::with_capacity(pts.len());
+                    for (t, v) in pts {
+                        match v {
+                            MetricValue::Histogram {
+                                count,
+                                sum,
+                                boundaries,
+                                counts,
+                                ..
+                            } => hist_pts.push(crate::ast::HistSample {
+                                timestamp_ns: t,
+                                count,
+                                sum,
+                                boundaries,
+                                counts,
+                            }),
+                            other => num_pts.push((t, v_to_f64(&other))),
+                        }
+                    }
+                    if !hist_pts.is_empty() {
+                        hist_entry.push((labels.clone(), hist_pts));
+                    }
+                    if !num_pts.is_empty() {
+                        entry.push((labels, num_pts));
+                    }
+                }
             }
-            let entry = data.entry(name.clone()).or_default();
-            for (_fp, (labels, mut pts)) in series_map {
-                pts.sort_by_key(|(t, _)| *t);
-                entry.push((
-                    labels,
-                    pts.into_iter().map(|(t, v)| (t, v_to_f64(&v))).collect(),
-                ));
-            }
-        }
+        } // refs non-empty
 
         // Evaluate per step.
         let step = step_ns.unwrap_or((end_ns - start_ns).max(1));
-        let eval = crate::eval::Evaluator::with_lookback(&data, self.lookback_ns);
+        let eval = crate::eval::Evaluator::with_lookback(&data, self.lookback_ns)
+            .with_hist_data(&hist_data);
         let steps = eval.eval_steps(expr, start_ns, end_ns, step)?;
 
         // Convert per-step instant vectors into TimeSeries.
@@ -1402,6 +1427,70 @@ impl QueryExecutor {
         values
     }
 
+    /// The in-memory buffer (freshest, pre-flush data source).
+    pub fn buffer(&self) -> &MemoryBuffer {
+        &self.buffer
+    }
+
+    /// Recent label values, most-recent-first, bounded and prefix-filtered.
+    ///
+    /// Builder autocomplete path: for high-cardinality labels (thousands of
+    /// distinct values) returning the full set is useless and expensive.
+    /// This walks the flush-time `label_values` index of the most recent
+    /// blocks (recency = block order; blocks are appended in time order)
+    /// plus the in-memory buffer, newest first, applies the optional
+    /// `prefix` filter server-side, and stops once `limit` values are
+    /// collected. Worst case inspects the last `max_blocks` blocks —
+    /// no full-history scan.
+    pub async fn recent_label_values(
+        &self,
+        label: &str,
+        prefix: Option<&str>,
+        limit: usize,
+        max_blocks: usize,
+    ) -> Vec<String> {
+        let limit = limit.clamp(1, 100);
+        let max_blocks = max_blocks.clamp(1, 10);
+        let mut out: Vec<String> = Vec::with_capacity(limit);
+        let mut seen: HashSet<String> = HashSet::new();
+
+        // In-memory buffer is always the freshest source.
+        for v in self.buffer.recent_label_values(label, prefix, limit).await {
+            if seen.insert(v.clone()) {
+                out.push(v);
+            }
+        }
+        if out.len() >= limit {
+            out.truncate(limit);
+            return out;
+        }
+
+        // Newest blocks first (blocks are stored in ascending time order).
+        let blocks: Vec<_> = {
+            let idx = self.index.read().await;
+            let len = idx.blocks.len();
+            let start = len.saturating_sub(max_blocks);
+            idx.blocks[start..].to_vec()
+        };
+        // Iterate newest → oldest so recency maps to insertion order.
+        for block in blocks.iter().rev() {
+            if let Some(vs) = block.label_values.get(label) {
+                // BTreeSet iterates ascending; the flush-time index has no
+                // recency order, but a stable order keeps results
+                // deterministic across calls.
+                for v in vs {
+                    if prefix.is_none_or(|p| v.starts_with(p)) && seen.insert(v.clone()) {
+                        out.push(v.clone());
+                        if out.len() >= limit {
+                            return out;
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
+
     /// Performs a cross-signal correlation query.
     pub async fn correlate(
         &self,
@@ -1678,7 +1767,7 @@ fn collect_metric_refs(
             collect_metric_refs(&b.lhs, out);
             collect_metric_refs(&b.rhs, out);
         }
-        Expr::Number(_) => {}
+        Expr::Number(_) | Expr::Str(_) => {}
     }
 }
 
@@ -1694,7 +1783,7 @@ fn max_range_ns(expr: &crate::ast::Expr) -> i64 {
             from_param.max(max_range_ns(&a.expr))
         }
         Expr::Binary(b) => max_range_ns(&b.lhs).max(max_range_ns(&b.rhs)),
-        Expr::Number(_) | Expr::Selector(_) => 0,
+        Expr::Number(_) | Expr::Str(_) | Expr::Selector(_) => 0,
     }
 }
 
@@ -1954,6 +2043,76 @@ mod tests {
         let values = exec.list_label_values("host").await;
         assert!(values.contains("h1"));
         assert!(values.contains("h2"));
+    }
+
+    #[tokio::test]
+    async fn test_recent_label_values_bounded() {
+        // High-cardinality scenario: a label with far more distinct values
+        // than the builder's top-N — the bounded path must return exactly
+        // `limit` values, newest-first from the buffer.
+        let (exec, _dir) = setup_with_data().await;
+        // Seed the in-memory buffer with 50 distinct users.
+        let dps: Vec<_> = (0..50)
+            .map(|i| {
+                parqtel_core::DataPoint::new(
+                    10_000 + i,
+                    parqtel_core::MetricValue::Double(i as f64),
+                    LabelSet::try_from_iter(vec![("user_id", format!("user-{i:04}"))]).unwrap(),
+                )
+                .unwrap()
+            })
+            .collect();
+        exec.buffer()
+            .push_metrics("user_sessions_active_0", &dps)
+            .await;
+
+        let top = exec.recent_label_values("user_id", None, 10, 5).await;
+        assert_eq!(top.len(), 10, "bounded to limit");
+        // Newest-first: the buffer's last point carries user-0049.
+        assert_eq!(top[0], "user-0049", "freshest value first");
+        assert!(
+            top.iter().all(|v| v.starts_with("user-")),
+            "all match label"
+        );
+
+        // Prefix filter narrows server-side.
+        let pref = exec
+            .recent_label_values("user_id", Some("user-004"), 10, 5)
+            .await;
+        assert!(
+            pref.iter().all(|v| v.starts_with("user-004")),
+            "prefix applied"
+        );
+        assert!(!pref.is_empty(), "prefix found matches");
+
+        // No matches for an absent prefix.
+        let none = exec
+            .recent_label_values("user_id", Some("zzz"), 10, 5)
+            .await;
+        assert!(none.is_empty(), "no spurious matches");
+    }
+
+    #[tokio::test]
+    async fn test_recent_label_values_flushed_blocks() {
+        // Blocks written by the plain storage engine carry no flush-time
+        // label_values index (only the ingest writer builds one); the
+        // bounded path must degrade gracefully — no panic, empty-from-blocks,
+        // buffer values still visible.
+        let (exec, _dir) = setup_with_data().await;
+        let dps: Vec<_> = (0..5)
+            .map(|i| {
+                parqtel_core::DataPoint::new(
+                    10_000 + i,
+                    parqtel_core::MetricValue::Double(i as f64),
+                    LabelSet::try_from_iter(vec![("host", format!("h{i}"))]).unwrap(),
+                )
+                .unwrap()
+            })
+            .collect();
+        exec.buffer().push_metrics("m", &dps).await;
+        let top = exec.recent_label_values("host", None, 10, 5).await;
+        assert!(!top.is_empty(), "buffer values visible");
+        assert_eq!(top[0], "h4", "freshest first");
     }
 
     #[tokio::test]

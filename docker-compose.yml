@@ -89,6 +89,10 @@ services:
       parqtel:
         condition: service_healthy
     networks:
+      # 'backend' reaches parqtel for scraping; 'frontend' is required for the
+      # published PROMETHEUS_PORT (9091) — Docker sets up no proxy path for
+      # containers attached only to an internal network.
+      - frontend
       - backend
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:9090/-/healthy || exit 1"]

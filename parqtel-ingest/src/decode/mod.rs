@@ -174,4 +174,77 @@ mod tests {
         assert_eq!(logs.len(), 1);
         assert_eq!(logs[0].body, "hello");
     }
+
+    #[test]
+    fn test_decode_metrics_json_histogram() {
+        // OTLP/JSON histogram data points must decode into the structured
+        // MetricValue::Histogram (count/sum/bucket_counts/explicit_bounds)
+        // — previously they collapsed to Double(0.0), losing the buckets.
+        let json = serde_json::json!({
+            "resourceMetrics": [{
+                "resource": {"attributes": []},
+                "scopeMetrics": [{"metrics": [{
+                    "name": "latency_ms",
+                    "histogram": {"dataPoints": [{
+                        "timeUnixNano": "1000",
+                        "count": 10,
+                        "sum": 4.2,
+                        "bucketCounts": [4, 5, 1],
+                        "explicitBounds": [0.5, 2.5],
+                        "attributes": [{"key": "service", "value": {"stringValue": "svc-0"}}]
+                    }]}
+                }]}]
+            }]
+        });
+        let metrics = OtlpDecoder::decode_metrics_json(json).unwrap();
+        assert_eq!(metrics.len(), 1);
+        assert_eq!(metrics[0].name, "latency_ms");
+        assert_eq!(metrics[0].kind, parqtel_core::MetricKind::Histogram);
+        assert_eq!(metrics[0].data_points.len(), 1);
+        match &metrics[0].data_points[0].value {
+            parqtel_core::MetricValue::Histogram {
+                count,
+                sum,
+                boundaries,
+                counts,
+                ..
+            } => {
+                assert_eq!(*count, 10, "histogram count");
+                assert!((sum - 4.2).abs() < 1e-9, "histogram sum");
+                assert_eq!(boundaries, &vec![0.5, 2.5], "explicit bounds");
+                assert_eq!(counts, &vec![4, 5, 1], "bucket counts");
+            }
+            other => panic!("expected Histogram value, got {other:?}"),
+        }
+        // snake_case (spec-conformant) variant as well.
+        let json_snake = serde_json::json!({
+            "resourceMetrics": [{
+                "resource": {"attributes": []},
+                "scopeMetrics": [{"metrics": [{
+                    "name": "latency_ms",
+                    "histogram": {"dataPoints": [{
+                        "timeUnixNano": "1000",
+                        "count": 3,
+                        "sum": 1.0,
+                        "bucket_counts": [1, 2],
+                        "explicit_bounds": [1.0]
+                    }]}
+                }]}]
+            }]
+        });
+        let metrics = OtlpDecoder::decode_metrics_json(json_snake).unwrap();
+        match &metrics[0].data_points[0].value {
+            parqtel_core::MetricValue::Histogram {
+                count,
+                boundaries,
+                counts,
+                ..
+            } => {
+                assert_eq!(*count, 3);
+                assert_eq!(boundaries, &vec![1.0]);
+                assert_eq!(counts, &vec![1, 2]);
+            }
+            other => panic!("expected Histogram value, got {other:?}"),
+        }
+    }
 }

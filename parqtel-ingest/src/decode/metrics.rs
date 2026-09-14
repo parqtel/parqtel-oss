@@ -218,27 +218,77 @@ fn convert_summary_data_points(protos: Vec<ProtoSummaryDataPoint>) -> Result<Vec
 
 fn json_dp_to_point(dp: &serde_json::Value) -> Result<DataPoint> {
     let ts = parse_json_timestamp(dp.get("time_unix_nano").or(dp.get("timeUnixNano")))?;
-    let source = dp.get("value").unwrap_or(dp);
-    let val_fields = ["as_double", "asDouble", "as_int", "asInt"];
-    let mut value = MetricValue::Double(0.0);
-    for field in val_fields {
-        if let Some(v) = source.get(field) {
-            if field.contains("int") || field.contains("Int") {
-                value = MetricValue::Int(
-                    v.as_i64()
-                        .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
-                        .unwrap_or(0),
-                );
-            } else if let Some(f) = v.as_f64() {
-                value = MetricValue::Double(f);
+    // Histogram data points carry count/sum/bucket_counts/explicit_bounds
+    // (snake or camel keys); number points carry as_double/as_int.
+    let value = if dp.get("bucket_counts").is_some() || dp.get("bucketCounts").is_some() {
+        json_hist_value(dp)
+    } else {
+        let source = dp.get("value").unwrap_or(dp);
+        let val_fields = ["as_double", "asDouble", "as_int", "asInt"];
+        let mut value = MetricValue::Double(0.0);
+        for field in val_fields {
+            if let Some(v) = source.get(field) {
+                if field.contains("int") || field.contains("Int") {
+                    value = MetricValue::Int(
+                        v.as_i64()
+                            .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+                            .unwrap_or(0),
+                    );
+                } else if let Some(f) = v.as_f64() {
+                    value = MetricValue::Double(f);
+                }
+                break;
             }
-            break;
         }
-    }
+        value
+    };
     let labels = if let Some(attrs) = dp.get("attributes").and_then(|a| a.as_array()) {
         json_attrs_to_labels(attrs)?
     } else {
         LabelSet::default()
     };
     DataPoint::new(ts, value, labels)
+}
+
+/// Builds a Histogram value from an OTLP/JSON histogram data point
+/// (accepts snake_case and camelCase field names).
+fn json_hist_value(dp: &serde_json::Value) -> MetricValue {
+    let num_f64 = |v: &serde_json::Value| -> Option<f64> {
+        v.as_f64()
+            .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+    };
+    let counts: Vec<u64> = dp
+        .get("bucket_counts")
+        .or(dp.get("bucketCounts"))
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .map(|c| {
+                    c.as_u64()
+                        .or_else(|| c.as_str().and_then(|s| s.parse().ok()))
+                        .unwrap_or(0)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let boundaries: Vec<f64> = dp
+        .get("explicit_bounds")
+        .or(dp.get("explicitBounds"))
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(num_f64).collect())
+        .unwrap_or_default();
+    MetricValue::Histogram {
+        count: dp
+            .get("count")
+            .and_then(|c| {
+                c.as_u64()
+                    .or_else(|| c.as_str().and_then(|s| s.parse().ok()))
+            })
+            .unwrap_or_else(|| counts.iter().sum::<u64>()),
+        sum: dp.get("sum").and_then(num_f64).unwrap_or(0.0),
+        min: dp.get("min").and_then(num_f64),
+        max: dp.get("max").and_then(num_f64),
+        boundaries,
+        counts,
+    }
 }

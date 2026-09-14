@@ -498,12 +498,18 @@ fn ast_is_complex(expr: &crate::ast::Expr) -> bool {
                 _ => true,
             })
         }
-        Expr::Aggregation(a) => {
-            // `sum(selector)` is legacy-compatible; `sum(rate(...))` is not.
-            !matches!(&*a.expr, Expr::Selector(_) | Expr::Range(_)) || a.param.is_some()
+        Expr::Aggregation(_) => {
+            // Aggregations always take the AST path: the legacy plan engine
+            // treats the op as a per-series *downsampler* and never collapses
+            // the cross-series set (sum(x) returned N un-aggregated series),
+            // and its suffix grouping `sum(x) by (l)` mis-parses via
+            // strip_fn (the final ')' belongs to the grouping clause, not
+            // the aggregation). The AST evaluator implements correct PromQL
+            // aggregation semantics for both grouping positions.
+            true
         }
         Expr::Range(r) => ast_is_complex(&r.expr),
-        Expr::Selector(_) | Expr::Number(_) => false,
+        Expr::Selector(_) | Expr::Number(_) | Expr::Str(_) => false,
     }
 }
 
@@ -785,6 +791,41 @@ fn parse_label_list(s: &str) -> Vec<String> {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
+
+    #[test]
+    fn new_function_families_route_to_ast() {
+        // Every function the legacy plan engine doesn't know must take
+        // the AST path — needs_ast() true.
+        for q in [
+            "pi()",
+            "time()",
+            "minute()",
+            "hour()",
+            "sin(x)",
+            "atan2(x, 1)",
+            "deg(x)",
+            "rad(x)",
+            "idelta(x[5m])",
+            "quantile_over_time(0.9, x[5m])",
+            "mad_over_time(x[5m])",
+            "timestamp(x)",
+            r#"label_del(x, "a")"#,
+            r#"sort_by_label(x, "a")"#,
+            r#"sort_by_label_desc(x, "a")"#,
+            "histogram_count(x)",
+            "histogram_sum(x)",
+            "histogram_avg(x)",
+            "histogram_stddev(x)",
+            "histogram_stdvar(x)",
+            "histogram_fraction(0, 1, x)",
+            "histogram_quantile(0.9, x)",
+        ] {
+            assert!(needs_ast(q), "AST routing expected for: {q}");
+        }
+        // Legacy-compatible shapes still use the plan engine.
+        assert!(!needs_ast("x"));
+        assert!(!needs_ast(r#"x{a="b"}"#));
+    }
 
     #[test]
     fn test_label_matching() {

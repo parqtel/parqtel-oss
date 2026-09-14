@@ -408,8 +408,43 @@ pub fn full_corpus() -> Vec<Case> {
             tol: 0.0, // value unchecked for family breadth; existence + no-error
         });
     }
+    // idelta / quantile_over_time / mad_over_time breadth (param-first
+    // arg order for quantile_over_time).
+    push(Case {
+        name: "idelta_counter",
+        query: "idelta(requests[10m])",
+        ts_ns: 2 * H,
+        expect: vec![("api", 1.0), ("web", 3.0)],
+        tol: 0.0,
+    });
+    push(Case {
+        name: "quantile_over_time_median",
+        query: "quantile_over_time(0.5, cpu[10m])",
+        ts_ns: 2 * H,
+        expect: vec![
+            ("api/core=0", 0.0),
+            ("api/core=1", 0.0),
+            ("web/core=0", 0.0),
+        ],
+        tol: 0.0,
+    });
+    push(Case {
+        name: "mad_over_time_gauge",
+        query: "mad_over_time(cpu[10m])",
+        ts_ns: 2 * H,
+        expect: vec![
+            ("api/core=0", 0.0),
+            ("api/core=1", 0.0),
+            ("web/core=0", 0.0),
+        ],
+        tol: 0.0,
+    });
     // Instant transforms breadth.
-    for f in ["abs", "ceil", "floor", "sqrt", "exp", "ln", "sgn", "round"] {
+    for f in [
+        "abs", "ceil", "floor", "sqrt", "exp", "ln", "sgn", "round",
+        // Trig family (radians).
+        "sin", "cos", "tan", "atan", "sinh", "cosh", "tanh", "asinh", "deg", "rad",
+    ] {
         push(Case {
             name: "instant_transforms",
             query: Box::leak(format!("{f}(cpu)").into_boxed_str()),
@@ -524,6 +559,66 @@ pub fn full_corpus() -> Vec<Case> {
         });
     }
 
+    // ── G11 function-family breadth: string params, scalar/no-selector,
+    // label helpers, timestamp — existence + no-error coverage.
+    for q in [
+        // Scalar/no-selector functions evaluate without a metric.
+        "pi()",
+        "time()",
+        "minute()",
+        "vector(1)",
+        "scalar(sum(requests))",
+        // timestamp() per-series over a selector.
+        "timestamp(cpu)",
+        // Label functions with string params.
+        r#"label_replace(cpu, "svc", "$1", "service", "(.*)")"#,
+        r#"label_join(cpu, "combo", "-", "service", "core")"#,
+        r#"label_del(cpu, "core")"#,
+        r#"sort_by_label(cpu, "service")"#,
+        r#"sort_by_label_desc(cpu, "core")"#,
+        // sort family.
+        "sort(cpu)",
+        "sort_desc(cpu)",
+        // Two-arg math.
+        "atan2(cpu, 2)",
+        "round(cpu, 5)",
+        "clamp(cpu, 0, 100)",
+        "clamp_min(cpu, 0)",
+        "clamp_max(cpu, 100)",
+    ] {
+        push(Case {
+            name: "fn_breadth_g11",
+            query: q,
+            ts_ns: 2 * H,
+            expect: vec![("", 0.0)],
+            tol: 0.0,
+        });
+    }
+    // pi() has a known value — assert it exactly.
+    push(Case {
+        name: "pi_exact",
+        query: "pi()",
+        ts_ns: 2 * H,
+        expect: vec![("", std::f64::consts::PI)],
+        tol: 1e-12,
+    });
+    // time() at a fixed eval step is exactly the step timestamp.
+    push(Case {
+        name: "time_exact",
+        query: "time()",
+        ts_ns: 2 * H,
+        expect: vec![("", (2 * H) as f64 / 1e9)],
+        tol: 1e-6,
+    });
+    // vector(1) has a known value.
+    push(Case {
+        name: "vector_exact",
+        query: "vector(1)",
+        ts_ns: 2 * H,
+        expect: vec![("", 1.0)],
+        tol: 0.0,
+    });
+
     // Nested composition depth: existence checks (>=1 series, values
     // intentionally unchecked — each shape returns different cardinality).
     for q in [
@@ -554,7 +649,11 @@ fn is_empty_case(query: &str) -> bool {
 fn is_existence_case(name: &str) -> bool {
     matches!(
         name,
-        "composition_exists" | "over_time_family" | "instant_transforms" | "window_unit"
+        "composition_exists"
+            | "over_time_family"
+            | "instant_transforms"
+            | "window_unit"
+            | "fn_breadth_g11"
     )
 }
 
