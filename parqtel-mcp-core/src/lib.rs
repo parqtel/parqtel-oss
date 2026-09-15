@@ -13,4 +13,4 @@ pub mod tool;
 
 pub use error::{McpError, McpResult};
 pub use server::{McpServer, ServerConfig};
-pub use tool::{sanitize_params, McpTool};
+pub use tool::{sanitize_params, McpTool, ToolHandler};

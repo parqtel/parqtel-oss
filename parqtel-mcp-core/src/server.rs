@@ -18,7 +18,7 @@ use uuid::Uuid;
 
 use crate::{
     error::McpError,
-    tool::{sanitize_params, McpTool},
+    tool::{sanitize_params, McpTool, ToolHandler},
 };
 
 /// Configuration for the MCP server
@@ -93,6 +93,9 @@ struct AuditLogEntry {
 pub struct McpServer {
     config: ServerConfig,
     tools: Vec<McpTool>,
+    /// Live executors keyed by tool name. Tools registered without a
+    /// handler keep the legacy echo contract (see `execute_tool`).
+    handlers: HashMap<String, ToolHandler>,
     rate_limiter: Arc<std::sync::Mutex<RateLimiter>>,
 }
 
@@ -102,6 +105,7 @@ impl McpServer {
         Self {
             config: config.clone(),
             tools: Vec::new(),
+            handlers: HashMap::new(),
             rate_limiter: Arc::new(std::sync::Mutex::new(RateLimiter::new(
                 config.rate_limit_requests_per_minute,
             ))),
@@ -113,9 +117,20 @@ impl McpServer {
         self.tools.push(tool);
     }
 
+    /// Register a tool together with its live async executor.
+    pub fn register_tool_with_handler(&mut self, tool: McpTool, handler: ToolHandler) {
+        self.handlers.insert(tool.name.clone(), handler);
+        self.tools.push(tool);
+    }
+
     /// Get the list of registered tools
     pub fn get_tools(&self) -> &[McpTool] {
         &self.tools
+    }
+
+    /// Look up the live executor registered for a tool, if any.
+    pub fn get_handler(&self, tool_name: &str) -> Option<&ToolHandler> {
+        self.handlers.get(tool_name)
     }
 
     /// Build the Axum router
@@ -269,7 +284,7 @@ async fn tools_call_handler(
     let request_id = Uuid::new_v4().to_string();
     let start_time = Utc::now();
 
-    let result = match execute_tool(server.get_tools(), tool_name, &params) {
+    let result = match execute_tool(&server, tool_name, &params).await {
         Ok(value) => {
             let _duration = (Utc::now() - start_time).num_milliseconds();
             log_audit(
@@ -313,17 +328,30 @@ async fn tools_call_handler(
     )
 }
 
-/// Execute a tool by name
-fn execute_tool(tools: &[McpTool], tool_name: &str, params: &Value) -> Result<Value, McpError> {
-    let _tool = tools
-        .iter()
-        .find(|t| t.name == tool_name)
-        .ok_or_else(|| McpError::MethodNotFound(format!("Tool not found: {}", tool_name)))?;
+/// Execute a tool by name. Dispatches to the tool's registered live
+/// handler when one exists; tools registered without an executor fall
+/// back to the legacy echo contract (params round-trip) so external
+/// integrators keep their existing behaviour.
+async fn execute_tool(
+    server: &McpServer,
+    tool_name: &str,
+    params: &Value,
+) -> Result<Value, McpError> {
+    if !server.get_tools().iter().any(|t| t.name == tool_name) {
+        return Err(McpError::MethodNotFound(format!(
+            "Tool not found: {}",
+            tool_name
+        )));
+    }
 
     let mut tool_params = params.clone();
     if let Some(obj) = tool_params.as_object_mut() {
         obj.remove("name");
         obj.remove("client_id");
+    }
+
+    if let Some(handler) = server.get_handler(tool_name) {
+        return handler(tool_params).await;
     }
 
     Ok(serde_json::json!({
@@ -353,5 +381,118 @@ fn log_audit(
 
     if let Ok(line) = serde_json::to_string(&entry) {
         info!(audit_log = line);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use super::*;
+    use serde_json::json;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    fn test_server() -> McpServer {
+        McpServer::new(ServerConfig::default())
+    }
+
+    fn counting_handler(counter: Arc<AtomicU64>) -> ToolHandler {
+        Arc::new(move |params: Value| {
+            let counter = counter.clone();
+            Box::pin(async move {
+                counter.fetch_add(1, Ordering::Relaxed);
+                let q = params.get("query").and_then(|v| v.as_str()).unwrap_or("");
+                Ok(json!({ "query": q, "executed": true }))
+            })
+        })
+    }
+
+    #[tokio::test]
+    async fn dispatches_to_registered_handler() {
+        let counter = Arc::new(AtomicU64::new(0));
+        let mut server = test_server();
+        server.register_tool_with_handler(
+            McpTool {
+                name: "query_metrics".into(),
+                description: "test".into(),
+                input_schema: json!({}),
+            },
+            counting_handler(counter.clone()),
+        );
+
+        let result = execute_tool(
+            &server,
+            "query_metrics",
+            &json!({ "name": "query_metrics", "query": "up" }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result["query"], "up");
+        assert_eq!(result["executed"], true);
+        assert_eq!(counter.load(Ordering::Relaxed), 1);
+
+        // Control fields (name/client_id) never reach the handler.
+        let result = execute_tool(
+            &server,
+            "query_metrics",
+            &json!({ "name": "query_metrics", "client_id": "agent-1", "query": "down" }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result["query"], "down");
+        assert_eq!(counter.load(Ordering::Relaxed), 2);
+    }
+
+    #[tokio::test]
+    async fn falls_back_to_echo_without_handler() {
+        let mut server = test_server();
+        server.register_tool(McpTool {
+            name: "legacy_tool".into(),
+            description: "no live executor".into(),
+            input_schema: json!({}),
+        });
+
+        let result = execute_tool(
+            &server,
+            "legacy_tool",
+            &json!({ "name": "legacy_tool", "filter": "{}" }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result["status"], "success");
+        assert_eq!(result["tool"], "legacy_tool");
+        assert_eq!(result["params"]["filter"], "{}");
+    }
+
+    #[tokio::test]
+    async fn unknown_tool_is_method_not_found() {
+        let server = test_server();
+        let err = execute_tool(&server, "nope", &json!({ "name": "nope" }))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, McpError::MethodNotFound(_)));
+        assert_eq!(err.to_code(), crate::error::ERROR_METHOD_NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn handler_errors_propagate() {
+        let mut server = test_server();
+        let failing: ToolHandler = Arc::new(|_params: Value| {
+            Box::pin(async { Err(McpError::ApplicationError("parqtel unreachable".into())) })
+        });
+        server.register_tool_with_handler(
+            McpTool {
+                name: "failing".into(),
+                description: "test".into(),
+                input_schema: json!({}),
+            },
+            failing,
+        );
+
+        let err = execute_tool(&server, "failing", &json!({ "name": "failing" }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.to_code(), crate::error::ERROR_APPLICATION_START);
     }
 }
