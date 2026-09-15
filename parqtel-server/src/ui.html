@@ -779,6 +779,104 @@ const BLD_FNS=[
 ];
 const BLD_RANGES=['1m','5m','10m','15m','30m','1h','3h','6h','12h','1d'];
 function bldFnDef(id){return BLD_FNS.find(f=>f.id===id)||BLD_FNS[0];}
+/* Parse the PromQL shapes the builder can emit back into builder state, so
+   opening the builder keeps the typed query's metric + label filters (they
+   were silently dropped before). Covers: raw selector, fn(...), fn(m[r]),
+   fn(φ, m[r]), fn(m, args…), aggregations incl. by/without + window wrap,
+   and scalar-only forms (vector(1)). Unknown shapes leave state untouched. */
+function bldParse(raw){
+  const q=(raw||'').trim();
+  if(!q)return false;
+  const unq=s=>s.replace(/^"(.*)"$/s,'$1').replace(/\\(?=["\\])/g,'');
+  const splitArgs=(s)=>{ // top-level comma split, quote/bracket aware
+    const out=[];let d=0,cur='',str=false;
+    for(const ch of s){
+      if(str){cur+=ch;if(ch==='"')str=false;continue;}
+      if(ch==='"'){str=true;cur+=ch;continue;}
+      if(ch==='('||ch==='[')d++;
+      if(ch===')'||ch===']')d--;
+      if(ch===','&&d===0){out.push(cur.trim());cur='';continue;}
+      cur+=ch;
+    }
+    if(cur.trim())out.push(cur.trim());
+    return out;
+  };
+  const parseSel=(s)=>{ // metric{filters} -> {metric, filters[]}
+    const mm=s.match(/^([a-z_][a-z0-9_]*)\{([\s\S]*)\}$/);
+    if(!mm)return null;
+    const filters=[];
+    if(mm[2])mm[2].split(',').forEach(pair=>{
+      const fm=pair.trim().match(/^([a-z_][a-z0-9_]*)\s*(=~|!~|!=|=)\s*"((?:[^"\\]|\\.)*)"$/);
+      if(fm)filters.push({key:fm[1],op:fm[2],val:unq(fm[3])});
+    });
+    return {metric:mm[1]||'',filters};
+  };
+  // top-level call, optionally with a grouping modifier: sum by (…) ( … )
+  const topM=q.match(/^([a-z_][a-z0-9_]*)(?:\s+(by|without)\s*\(([^)]*)\))?\s*\(([\s\S]*)\)$/);
+  let topGrp=null;
+  if(topM&&topM[2])topGrp=topM[3].trim()||'*';
+  // Raw selector (no top-level call)
+  if(!topM){
+    const sel=parseSel(q.includes('{')?q:(q+'{}'));
+    if(!sel||!sel.metric)return false;
+    _bld.fn='';_bld.metric=sel.metric;_bld.filters=sel.filters;_bld.grouping=null;
+    return true;
+  }
+  const fn=topM[1];
+  const def=bldFnDef(fn);
+  if(!def||def.id==='')return false; // not a builder-known fn
+  const args=splitArgs(topM[4]);
+  // scalar-only fns (no metric): vector(1), time(), pi()
+  if(def.noMetric){
+    const A={};def.args.forEach(([nm,ty,dft],i)=>{A[nm]=args[i]!==undefined?unq(args[i]):dft;});
+    _bld.fn=fn;_bld.fargs=A;return true;
+  }
+  // find the selector-looking arg (metric, optionally {filtered} and/or [r])
+  let selArg=null,rest=[];
+  args.forEach(a=>{
+    if(!selArg&&/^([a-z_][a-z0-9_]*)(\{[\s\S]*\})?(\[[0-9]+[mhd]\])?$/.test(a)&&!/^[0-9.]+$/.test(a)&&!/^"/.test(a))selArg=a;
+    else rest.push(a);
+  });
+  if(!selArg)return false;
+  let range=null;const rm=selArg.match(/\[([0-9]+[mhd])\]$/);
+  if(rm)range=rm[1];
+  let selBody=selArg.replace(/\[[0-9]+[mhd]\]$/,'');
+  const sel=parseSel(selBody.includes('{')?selBody:(selBody+'{}'));
+  if(!sel||!sel.metric)return false;
+  const A={};
+  if(def.kind==='agg'){
+    // grouping: by (...) / without (...)
+    const grp=topGrp;
+    // window wrap inside an aggregation: sum(rate(m{...}[5m]))
+    let wf=null;
+    const wm=selBody.match(/^([a-z_][a-z0-9_]*)\s*\(([\s\S]*)\)\s*$/);
+    if(wm){
+      const wfDef=bldFnDef(wm[1]);
+      if(wfDef&&wfDef.id&&wfDef.id!==''&&wfDef.rangeFn){
+        wf=wm[1];
+        const innerBody=wm[2].replace(/\[[0-9]+[mhd]\]$/,'');
+        const sel2=parseSel(innerBody.includes('{')?innerBody:(innerBody+'{}'));
+        if(sel2&&sel2.metric){sel.metric=sel2.metric;sel.filters=sel2.filters;}
+        const rr=wm[2].match(/\[([0-9]+[mhd])\]$/);
+        if(rr)A.__aggRange=rr[1];
+      }
+    }
+    if(wf)A.__aggFn=wf;else if(range)A.__aggRange=range;
+    _bld.fn=fn;_bld.metric=sel.metric;_bld.filters=sel.filters;_bld.grouping=grp;
+    // scalar arg (k / phi / label) for topk/bottomk/quantile/count_values
+    def.args.forEach(([nm,ty,dft],i)=>{A[nm]=rest[i]!==undefined?unq(rest[i]):dft;});
+    _bld.fargs=A;
+    return true;
+  }
+  // fn kind
+  _bld.fn=fn;_bld.metric=sel.metric;_bld.filters=sel.filters;
+  const scalarDefs=def.rangeFn?def.args.filter(a=>a[0]!=='r'):def.args;
+  if(def.rangeFn)A['r']=range||'5m';
+  scalarDefs.forEach(([nm,ty,dft],i)=>{A[nm]=rest[i]!==undefined?unq(rest[i]):dft;});
+  _bld.fargs=A;
+  return true;
+}
+
 function bldVisible(){return ST.metrics.builder&&ST.sig==='metrics';}
 /* label-value autocomplete: top-10 recent by default; when the user types,
    re-fetch with the typed prefix as server-side match. High-cardinality
@@ -840,6 +938,7 @@ function bldSync(){
   sel.innerHTML='';names.forEach(n=>{const o=document.createElement('option');o.value=n;o.textContent=n;sel.appendChild(o);});
   if(_bld.metric&&names.includes(_bld.metric))sel.value=_bld.metric;
   else if(cur&&names.includes(cur))sel.value=cur;
+  else if(_bld.metric&&_bld.metric!=='(no metrics indexed)'){const o=document.createElement('option');o.value=_bld.metric;o.textContent=_bld.metric;sel.appendChild(o);sel.value=_bld.metric;}
   _bld.metric=sel.value;
   bldRenderArgs();
   bldRenderFilters();
@@ -861,6 +960,8 @@ function bldRenderArgs(){
       inp=document.createElement('input');inp.type='text';inp.value=dflt;inp.placeholder=ty==='str'?'str':(ty==='q'?'0..1':'num');
     }
     const key=nm;
+    // Restore a parsed/typed value if present; else the catalog default.
+    if(_bld.fargs[key]!==undefined)inp.value=_bld.fargs[key];
     inp.oninput=()=>{_bld.fargs[key]=inp.value;bldPreview();};
     inp.onchange=inp.oninput;
     if(inp.tagName==='SELECT')_bld.fargs[key]=inp.value;
@@ -873,7 +974,8 @@ function bldRenderArgs(){
     const inp=document.createElement('select');
     const oNone=document.createElement('option');oNone.value='';oNone.textContent='(none)';inp.appendChild(oNone);
     const oAll=document.createElement('option');oAll.value='*';oAll.textContent='(all labels)';inp.appendChild(oAll);
-    ST.server.labels.forEach(l=>{const o=document.createElement('option');o.value=l;o.textContent=l;inp.appendChild(o);});
+    const grpOpts=[...new Set([...ST.server.labels,_bld.grouping].filter(Boolean))];
+    grpOpts.forEach(l=>{const o=document.createElement('option');o.value=l;o.textContent=l;inp.appendChild(o);});
     inp.onchange=()=>{_bld.grouping=inp.value;bldPreview();};
     if(_bld.grouping&&[...inp.options].some(o=>o.value===_bld.grouping))inp.value=_bld.grouping;
     w.appendChild(inp);host.appendChild(w);
@@ -882,13 +984,15 @@ function bldRenderArgs(){
     const w2=document.createElement('span');w2.className='bld-arg';
     const lab2=document.createElement('span');lab2.className='alab';lab2.textContent='window';w2.appendChild(lab2);
     const wfn=document.createElement('select');
-    ['','rate','irate','increase','delta','avg_over_time','min_over_time','max_over_time','sum_over_time','count_over_time','last_over_time'].forEach(v=>{const o=document.createElement('option');o.value=v;o.textContent=v||'(none)';wfn.appendChild(o);});
+    // Any range function from the catalog can wrap the aggregation input.
+    [''].concat(BLD_FNS.filter(f=>f.rangeFn).map(f=>f.id)).forEach(v=>{const o=document.createElement('option');o.value=v;o.textContent=v||'(none)';wfn.appendChild(o);});
     wfn.onchange=()=>{_bld.fargs.__aggFn=wfn.value;rng.disabled=!wfn.value;bldPreview();};
     if(_bld.fargs.__aggFn)wfn.value=_bld.fargs.__aggFn;
     w2.appendChild(wfn);host.appendChild(w2);
     const w3=document.createElement('span');w3.className='bld-arg';
     const rng=document.createElement('select');rng.className='arg-range';
-    BLD_RANGES.forEach(r=>{const o=document.createElement('option');o.value=r;o.textContent=r;rng.appendChild(o);});rng.value='5m';rng.disabled=true;
+    BLD_RANGES.forEach(r=>{const o=document.createElement('option');o.value=r;o.textContent=r;rng.appendChild(o);});
+    rng.value=_bld.fargs.__aggRange||'5m';rng.disabled=!wfn.value;
     rng.onchange=()=>{_bld.fargs.__aggRange=rng.value;bldPreview();};
     _bld.fargs.__aggRange=rng.value;
     w3.appendChild(rng);host.appendChild(w3);
@@ -900,7 +1004,10 @@ function bldRenderFilters(){
   _bld.filters.forEach((f,i)=>{
     const row=document.createElement('span');row.className='bld-filter';
     const key=document.createElement('select');
-    ST.server.labels.forEach(l=>{const o=document.createElement('option');o.value=l;o.textContent=l;if(l===f.key)o.selected=true;key.appendChild(o);});
+    // Keep the filter's key selectable even if the label list hasn't
+    // arrived yet (a parsed key must not render as a blank select).
+    const keyOpts=[...new Set([...ST.server.labels,f.key].filter(Boolean))];
+    keyOpts.forEach(l=>{const o=document.createElement('option');o.value=l;o.textContent=l;if(l===f.key)o.selected=true;key.appendChild(o);});
     key.onchange=()=>{_bld.filters[i].key=key.value;_bld.filters[i].val='';bldRenderFilters();bldPreview();};
     const op=document.createElement('select');['=','!=','=~','!~'].forEach(o=>{const opt=document.createElement('option');opt.value=o;opt.textContent=o;if(o===f.op)opt.selected=true;op.appendChild(opt);});
     op.onchange=()=>{_bld.filters[i].op=op.value;bldPreview();};
@@ -969,7 +1076,7 @@ function bldPreview(){
   tx($('bld-preview'),q||'—');
   tx($('bld-hc-note'),q?'':'select metric + function');
 }
-$('btn-build').onclick=()=>{ST.metrics.builder=!ST.metrics.builder;if(ST.metrics.builder){const raw=(E.qIn.value||'').trim();if(raw){/* keep current query context */}/* If metric names/labels haven't arrived yet, fetch them now so the dropdowns aren't blank. */if(!ST.server.names.length||!ST.server.labels.length){prefetch().then(()=>bldSync()).catch(()=>{});}}else{const q=bldPromQL();if(q){E.qIn.value=q;updateSearchClear();runQuery();}}bldSync();};
+$('btn-build').onclick=()=>{ST.metrics.builder=!ST.metrics.builder;if(ST.metrics.builder){/* Reverse-parse the typed query so its metric + label filters survive into the builder (they were dropped before). */bldParse((E.qIn.value||'').trim());/* If metric names/labels haven't arrived yet, fetch them now so the dropdowns aren't blank. */if(!ST.server.names.length||!ST.server.labels.length){prefetch().then(()=>bldSync()).catch(()=>{});}}else{const q=bldPromQL();if(q){E.qIn.value=q;updateSearchClear();runQuery();}}bldSync();};
 $('bld-metric').onchange=()=>{_bld.metric=$('bld-metric').value;bldPreview();};
 $('bld-add-filter').onclick=()=>{_bld.filters.push({key:ST.server.labels[0]||'service_name',op:'=',val:''});bldRenderFilters();bldPreview();};
 
