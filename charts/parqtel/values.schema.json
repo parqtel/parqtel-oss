@@ -379,7 +379,7 @@
           "properties": {
             "blockDurationSecs": {
               "type": "integer",
-              "minimum": 60
+              "minimum": 10
             },
             "maxRowsPerBlock": {
               "type": "integer",
@@ -396,7 +396,7 @@
             },
             "retentionDays": {
               "type": "integer",
-              "minimum": 1
+              "minimum": 0
             },
             "compactionIntervalSecs": {
               "type": "integer",
@@ -418,6 +418,9 @@
             },
             "walEnabled": {
               "type": "boolean"
+            },
+            "logWalEnabled": {
+              "type": "boolean"
             }
           }
         },
@@ -436,6 +439,48 @@
             "timeoutSecs": {
               "type": "integer",
               "minimum": 1
+            },
+            "lookbackDeltaNs": {
+              "type": "integer",
+              "minimum": 1000000000
+            }
+          }
+        },
+        "logs": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "dataDir": {
+              "type": "string"
+            },
+            "blockDurationSecs": {
+              "type": "integer",
+              "minimum": 10
+            },
+            "maxRowsPerBlock": {
+              "type": "integer",
+              "minimum": 1000
+            },
+            "compression": {
+              "type": "string",
+              "enum": [
+                "zstd",
+                "snappy",
+                "lz4",
+                "none"
+              ]
+            },
+            "retentionDays": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "compactionIntervalSecs": {
+              "type": "integer",
+              "minimum": 60
+            },
+            "rowGroupSize": {
+              "type": "integer",
+              "minimum": 100
             }
           }
         },
@@ -475,6 +520,100 @@
           "type": "integer",
           "minimum": 1,
           "maximum": 64
+        },
+        "alerts": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "rulesDir": {
+              "type": "string"
+            },
+            "noiseWindowFirings": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "refinementEnabled": {
+              "type": "boolean"
+            },
+            "noiseSuppressionThreshold": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "postmortem": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "enabled": {
+                  "type": "boolean"
+                },
+                "autoDraft": {
+                  "type": "boolean"
+                },
+                "postmortemDelayMinutes": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "templatePath": {
+                  "type": "string"
+                },
+                "autoPublishNotion": {
+                  "type": "boolean"
+                },
+                "autoPublishGdocs": {
+                  "type": "boolean"
+                },
+                "autoPublishSlack": {
+                  "type": "boolean"
+                },
+                "autoCreateJiraActions": {
+                  "type": "boolean"
+                },
+                "minDurationMinutes": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "minSeverity": {
+                  "type": "string",
+                  "enum": [
+                    "critical",
+                    "warning",
+                    "info"
+                  ]
+                },
+                "maxKnowledgeEntries": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            },
+            "notifications": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "dedupFlushIntervalSecs": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "maxConcurrentSends": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "sendTimeoutSecs": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "selfMonitoringFailureThreshold": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 1
+                },
+                "routes": {
+                  "type": "array"
+                }
+              }
+            }
+          }
         }
       }
     },

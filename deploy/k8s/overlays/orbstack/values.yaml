@@ -1,6 +1,6 @@
 image:
-  repository: parqtel
-  tag: orbstack
+  repository: ghcr.io/parqtel/parqtel-oss
+  tag: "0.2.0"
   pullPolicy: IfNotPresent
 
 resources:
@@ -24,3 +24,6 @@ parqtel:
   telemetry:
     logLevel: "debug"
     logFormat: "json"
+
+provider:
+  enabled: false

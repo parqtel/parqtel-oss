@@ -1,6 +1,6 @@
 image:
-  repository: registry.localhost:5050/parqtel
-  tag: dev
+  repository: ghcr.io/parqtel/parqtel-oss
+  tag: "0.2.0"
   pullPolicy: Always
 
 resources:
@@ -22,3 +22,6 @@ parqtel:
 
 ingress:
   enabled: false
+
+service:
+  port: 8080

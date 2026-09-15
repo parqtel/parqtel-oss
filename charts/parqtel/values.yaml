@@ -147,11 +147,28 @@ parqtel:
     compactionIntervalSecs: 3600
     # -- Parquet row group size.
     rowGroupSize: 100000
+  logs:
+    # -- Log data directory (relative to PVC mount).
+    dataDir: "/data/logs"
+    # -- Log block duration in seconds (default 30m).
+    blockDurationSecs: 1800
+    # -- Max rows per log block.
+    maxRowsPerBlock: 200000
+    # -- Log compression codec: zstd, snappy, lz4, none.
+    compression: "zstd"
+    # -- Log data retention in days.
+    retentionDays: 3
+    # -- Log compaction interval in seconds.
+    compactionIntervalSecs: 3600
+    # -- Log Parquet row group size.
+    rowGroupSize: 20000
   ingest:
     # -- Max request body size in bytes (10MB).
     maxBodySize: 10485760
-    # -- Enable write-ahead log.
+    # -- Enable write-ahead log for metrics.
     walEnabled: false
+    # -- Enable write-ahead log for logs.
+    logWalEnabled: true
   query:
     # -- Max series returned per query.
     maxSeries: 1000
@@ -159,6 +176,8 @@ parqtel:
     maxSamplesPerSeries: 10000
     # -- Query timeout in seconds.
     timeoutSecs: 30
+    # -- Instant-query lookback window in nanoseconds (default 5m = 300000000000).
+    lookbackDeltaNs: 300000000000
   ui:
     # -- Enable built-in web UI.
     enabled: true
@@ -167,6 +186,35 @@ parqtel:
     logLevel: "info"
     # -- Log format: text or json.
     logFormat: "json"
+  alerts:
+    # -- Directory containing alert rule YAML files.
+    rulesDir: "/etc/parqtel/rules"
+    # -- Number of firings in window to calculate noise score.
+    noiseWindowFirings: 30
+    # -- Enable automatic alert refinement.
+    refinementEnabled: true
+    # -- Threshold for noise suppression (0.0-1.0).
+    noiseSuppressionThreshold: 0.7
+    # -- Postmortem engine configuration.
+    postmortem:
+      enabled: true
+      autoDraft: true
+      postmortemDelayMinutes: 5
+      templatePath: ""
+      autoPublishNotion: false
+      autoPublishGdocs: false
+      autoPublishSlack: true
+      autoCreateJiraActions: false
+      minDurationMinutes: 5
+      minSeverity: "warning"
+      maxKnowledgeEntries: 1000
+    # -- Notification router configuration.
+    notifications:
+      dedupFlushIntervalSecs: 300
+      maxConcurrentSends: 10
+      sendTimeoutSecs: 30
+      selfMonitoringFailureThreshold: 0.5
+      # routes: []  # Add route configs here if needed
   # -- glibc malloc arena cap (MALLOC_ARENA_MAX). Tokio workers + the
   # blocking scan pool each default to their own 64MB arena (8×ncores,
   # up to 32 on 4-CPU nodes); bounding them caps retained-but-unused

@@ -16,16 +16,6 @@ grpc_bind_address = "0.0.0.0:4317"   # OTLP gRPC; "" disables
 max_connections = 1024
 shutdown_timeout_secs = 30
 
-[ingest.tail_sampling]
-keep_errors = true                   # always keep traces with ERROR spans
-# slow_trace_ms = 1000               # keep traces slower than this (ms)
-sampling_ratio = 1.0                 # fraction of remaining traces kept
-
-# Per-service overrides fully replace the global policy for that service:
-# [ingest.tail_sampling.per_service.noisy-service]
-# keep_errors = false
-# sampling_ratio = 0.05
-
 [storage]
 backend = "parquet"
 data_dir = "data"
@@ -49,11 +39,21 @@ row_group_size = 20000
 max_body_size = 10485760          # 10 MB
 wal_enabled = false
 log_wal_enabled = true
+[ingest.tail_sampling]
+keep_errors = true                   # always keep traces with ERROR spans
+# slow_trace_ms = 1000               # keep traces slower than this (ms)
+sampling_ratio = 1.0                 # fraction of remaining traces kept
+
+# Per-service overrides fully replace the global policy for that service:
+# [ingest.tail_sampling.per_service.noisy-service]
+# keep_errors = false
+# sampling_ratio = 0.05
 
 [query]
 max_series = 1000
 max_samples_per_series = 10000
 timeout_secs = 30
+lookback_delta_ns = 300000000000   # 5 minutes (Prometheus default)
 
 [ui]
 enabled = true
@@ -66,11 +66,39 @@ log_format = "text"               # text | json
 rules_dir = "rules"
 noise_window_firings = 30
 refinement_enabled = true
+noise_suppression_threshold = 0.7
+[alerts.postmortem]
+enabled = true
+auto_draft = true
+postmortem_delay_minutes = 5
+template_path = ""
+auto_publish_notion = false
+auto_publish_gdocs = false
+auto_publish_slack = true
+auto_create_jira_actions = false
+min_duration_minutes = 5
+min_severity = "warning"
+max_knowledge_entries = 1000
+
+[alerts.notifications]
+dedup_flush_interval_secs = 300
+max_concurrent_sends = 10
+send_timeout_secs = 30
+self_monitoring_failure_threshold = 0.5
+# [[alerts.notifications.routes]]
+# name = "slack-critical"
+# match_severity = "critical"
+# match_labels = { team = "platform" }
+# webhook_url = "https://hooks.slack.com/services/..."
+# repeat_minutes = 240
 
 [k8s_provider]
 enabled = false
 bind_address = "0.0.0.0:6443"
 cache_expiry_secs = 30
+query_timeout_secs = 10
+max_concurrent = 10
+tls_secret_name = "parqtel-provider-tls"
 ```
 
 ## Section Reference
@@ -80,6 +108,7 @@ cache_expiry_secs = 30
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `bind_address` | String | `"0.0.0.0:8080"` | TCP address to listen on |
+| `grpc_bind_address` | String | `"0.0.0.0:4317"` | TCP address for OTLP gRPC; empty string disables |
 | `max_connections` | Integer | `1024` | Maximum simultaneous TCP connections |
 | `shutdown_timeout_secs` | Integer | `30` | Seconds to wait for in-flight requests during graceful shutdown |
 
@@ -116,6 +145,18 @@ cache_expiry_secs = 30
 | `wal_enabled` | Boolean | `false` | Enable write-ahead log for metrics |
 | `log_wal_enabled` | Boolean | `true` | Enable write-ahead log for logs |
 
+### `[ingest.tail_sampling]`
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `keep_errors` | Boolean | `true` | Keep traces containing ERROR-status spans |
+| `slow_trace_ms` | Integer (optional) | `null` | Keep traces whose server spans exceed this duration (ms) |
+| `sampling_ratio` | Float | `1.0` | Fraction of remaining traces to keep (0.0–1.0) |
+
+### `[ingest.tail_sampling.per_service]`
+
+Per-service overrides; each entry fully replaces the global policy for that service.
+
 ### `[query]`
 
 | Key | Type | Default | Description |
@@ -123,6 +164,7 @@ cache_expiry_secs = 30
 | `max_series` | Integer | `1000` | Maximum time series returned per query |
 | `max_samples_per_series` | Integer | `10000` | Maximum samples per series |
 | `timeout_secs` | Integer | `30` | Query execution timeout |
+| `lookback_delta_ns` | Integer | `300000000000` | Instant-query lookback window in nanoseconds (5 minutes default) |
 
 ### `[ui]`
 
@@ -144,6 +186,43 @@ cache_expiry_secs = 30
 | `rules_dir` | String | `"rules"` | Directory containing alert rule YAML files |
 | `noise_window_firings` | Integer | `30` | Number of firings in window to calculate noise score |
 | `refinement_enabled` | Boolean | `true` | Enable automatic alert refinement |
+| `noise_suppression_threshold` | Float | `0.7` | Threshold for noise suppression (0.0-1.0) |
+
+### `[alerts.postmortem]`
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `enabled` | Boolean | `true` | Enable the postmortem engine |
+| `auto_draft` | Boolean | `true` | Auto-generate drafts when alerts resolve |
+| `postmortem_delay_minutes` | Integer | `5` | Minutes to wait after resolution before generating draft |
+| `template_path` | String (optional) | `""` | Path to custom template directory |
+| `auto_publish_notion` | Boolean | `false` | Auto-publish to Notion |
+| `auto_publish_gdocs` | Boolean | `false` | Auto-publish to Google Docs |
+| `auto_publish_slack` | Boolean | `true` | Auto-publish to Slack |
+| `auto_create_jira_actions` | Boolean | `false` | Auto-create Jira action items |
+| `min_duration_minutes` | Integer | `5` | Minimum incident duration to trigger postmortem |
+| `min_severity` | String | `"warning"` | Minimum severity level to trigger postmortem |
+| `max_knowledge_entries` | Integer | `1000` | Maximum entries in knowledge base |
+
+### `[alerts.notifications]`
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `dedup_flush_interval_secs` | Integer | `300` | Deduplication flush interval |
+| `max_concurrent_sends` | Integer | `10` | Max concurrent webhook sends |
+| `send_timeout_secs` | Integer | `30` | Webhook send timeout |
+| `self_monitoring_failure_threshold` | Float | `0.5` | Self-monitoring failure threshold |
+| `routes` | Array | `[]` | Alert routing rules (see RouteConfig) |
+
+### `[alerts.notifications.routes]` (array of tables)
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `name` | String | required | Route name |
+| `match_severity` | String | `"info"` | Minimum severity: critical, page, warning, info |
+| `match_labels` | Map | `{}` | Exact label matches required |
+| `webhook_url` | String | required | Webhook URL for delivery |
+| `repeat_minutes` | Integer | `240` | Re-notification interval (0 = no repeat) |
 
 ### `[k8s_provider]`
 
@@ -152,6 +231,9 @@ cache_expiry_secs = 30
 | `enabled` | Boolean | `false` | Enable Kubernetes custom metrics API server |
 | `bind_address` | String | `"0.0.0.0:6443"` | Address for the K8s API service |
 | `cache_expiry_secs` | Integer | `30` | Cache TTL for metric values |
+| `query_timeout_secs` | Integer | `10` | Query timeout to parqtel storage |
+| `max_concurrent` | Integer | `10` | Max concurrent queries |
+| `tls_secret_name` | String | `"parqtel-provider-tls"` | TLS certificate secret name |
 
 ## Environment Variables
 
@@ -161,6 +243,7 @@ Environment variables use the `PARQTEL__` prefix with `__` as the section separa
 # Server
 export PARQTEL__SERVER__BIND_ADDRESS="0.0.0.0:9090"
 export PARQTEL__SERVER__MAX_CONNECTIONS=2048
+export PARQTEL__SERVER__GRPC_BIND_ADDRESS="0.0.0.0:4317"
 
 # Storage
 export PARQTEL__STORAGE__DATA_DIR="/var/lib/parqtel/data"
@@ -171,13 +254,19 @@ export PARQTEL__STORAGE__BLOCK_DURATION_SECS=3600
 # Logs
 export PARQTEL__LOGS__DATA_DIR="/var/lib/parqtel/logs"
 export PARQTEL__LOGS__RETENTION_DAYS=7
+export PARQTEL__LOGS__BLOCK_DURATION_SECS=1800
 
 # Ingest
 export PARQTEL__INGEST__MAX_BODY_SIZE=20971520
+export PARQTEL__INGEST__WAL_ENABLED=true
+export PARQTEL__INGEST__LOG_WAL_ENABLED=true
+export PARQTEL__INGEST__TAIL_SAMPLING__KEEP_ERRORS=true
+export PARQTEL__INGEST__TAIL_SAMPLING__SAMPLING_RATIO=0.5
 
 # Query
 export PARQTEL__QUERY__TIMEOUT_SECS=60
 export PARQTEL__QUERY__MAX_SERIES=5000
+export PARQTEL__QUERY__LOOKBACK_DELTA_NS=300000000000
 
 # Telemetry
 export PARQTEL__TELEMETRY__LOG_LEVEL="debug"
@@ -185,6 +274,13 @@ export PARQTEL__TELEMETRY__LOG_FORMAT="json"
 
 # Alerts
 export PARQTEL__ALERTS__RULES_DIR="/etc/parqtel/rules"
+export PARQTEL__ALERTS__NOISE_SUPPRESSION_THRESHOLD=0.8
+export PARQTEL__ALERTS__POSTMORTEM__ENABLED=true
+export PARQTEL__ALERTS__NOTIFICATIONS__MAX_CONCURRENT_SENDS=20
+
+# K8s Provider
+export PARQTEL__K8S_PROVIDER__ENABLED=true
+export PARQTEL__K8S_PROVIDER__BIND_ADDRESS="0.0.0.0:6443"
 ```
 
 ## CLI Flags
