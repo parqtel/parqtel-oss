@@ -2,11 +2,16 @@
 
 use std::env;
 
-use axum::{routing::get, Router};
 use parqtel_mcp_core::{server::ServerConfig, McpServer};
+use parqtel_mcp_parqtel::handlers::{
+    make_get_alert_history_handler, make_get_noise_statistics_handler, make_get_topology_handler,
+    make_ingest_rates_handler, make_query_logs_handler, make_query_metrics_handler,
+    make_query_metrics_labels_handler,
+};
 use parqtel_mcp_parqtel::{
     make_get_alert_history_tool, make_get_noise_statistics_tool, make_get_topology_tool,
-    make_query_logs_tool, make_query_metrics_tool,
+    make_ingest_rates_tool, make_query_logs_tool, make_query_metrics_labels_tool,
+    make_query_metrics_tool, ParqtelClient,
 };
 use tracing_subscriber::EnvFilter;
 
@@ -34,30 +39,56 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let addr = format!("{}:{}", config.host, config.port);
+
+    // One shared client for every tool handler; fails fast if the
+    // PARQTEL_API_URL is malformed so misconfiguration surfaces at boot.
+    let client = ParqtelClient::from_env()?;
+    tracing::info!(
+        parqtel_api = client.base_url(),
+        "MCP tools wired to Parqtel"
+    );
+
     let mut server = McpServer::new(config);
+    server.register_tool_with_handler(
+        make_query_metrics_tool(),
+        make_query_metrics_handler(client.clone()),
+    );
+    server.register_tool_with_handler(
+        make_query_metrics_labels_tool(),
+        make_query_metrics_labels_handler(client.clone()),
+    );
+    server.register_tool_with_handler(
+        make_query_logs_tool(),
+        make_query_logs_handler(client.clone()),
+    );
+    server.register_tool_with_handler(
+        make_ingest_rates_tool(),
+        make_ingest_rates_handler(client.clone()),
+    );
+    server.register_tool_with_handler(
+        make_get_alert_history_tool(),
+        make_get_alert_history_handler(client.clone()),
+    );
+    server.register_tool_with_handler(
+        make_get_noise_statistics_tool(),
+        make_get_noise_statistics_handler(client.clone()),
+    );
+    server.register_tool_with_handler(make_get_topology_tool(), make_get_topology_handler(client));
+    let tool_count = server.get_tools().len();
 
-    server.register_tool(make_query_metrics_tool());
-    server.register_tool(make_query_logs_tool());
-    server.register_tool(make_get_alert_history_tool());
-    server.register_tool(make_get_topology_tool());
-    server.register_tool(make_get_noise_statistics_tool());
+    // `/health` is owned by the framework router (it reports this tool
+    // count); adding another route here panics at boot with
+    // "Overlapping method route".
+    let app = server.build_router();
 
-    let app = Router::new()
-        .merge(server.build_router())
-        .route("/health", get(health_handler));
-
-    tracing::info!("Starting Parqtel self-MCP server on {}", addr);
+    tracing::info!(
+        "Starting Parqtel self-MCP server on {} ({} tools)",
+        addr,
+        tool_count
+    );
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     axum::serve(listener, app).await?;
 
     Ok(())
-}
-
-async fn health_handler() -> axum::response::Json<serde_json::Value> {
-    axum::response::Json(serde_json::json!({
-        "status": "ok",
-        "tools": 5,
-        "timestamp": chrono::Utc::now().to_rfc3339()
-    }))
 }

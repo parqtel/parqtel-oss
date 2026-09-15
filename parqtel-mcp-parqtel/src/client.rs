@@ -11,8 +11,50 @@ use std::time::Duration;
 
 use parqtel_mcp_core::McpError;
 
+/// Translate a severity name into the numeric OTLP `severity_number` floor
+/// that the server's `/api/v1/logs` endpoint expects.
+///
+/// OTLP groups severities into bands of four (`ERROR` = 17..=20), so the
+/// threshold is the low end of the requested band. A bare number is accepted
+/// verbatim so callers that already speak OTLP numbers keep working.
+fn severity_threshold(name: &str) -> Result<i32, McpError> {
+    let key = name.trim().to_ascii_uppercase();
+    match key.as_str() {
+        "TRACE" | "TRACE1" => Ok(1),
+        "DEBUG" => Ok(5),
+        "INFO" | "INFORMATION" => Ok(9),
+        "WARN" | "WARNING" => Ok(13),
+        "ERROR" | "ERR" => Ok(17),
+        "FATAL" | "CRITICAL" => Ok(21),
+        "" => Err(McpError::InvalidRequest(
+            "'severity_min' must not be empty".to_string(),
+        )),
+        other => other
+            .parse::<i32>()
+            .map_err(|_| {
+                McpError::InvalidRequest(format!(
+                    "unknown severity_min {other:?} (expected TRACE, DEBUG, INFO, WARN, ERROR, \
+                     FATAL or a numeric OTLP severity 1-24)"
+                ))
+            })
+            .and_then(|n| {
+                if (1..=24).contains(&n) {
+                    Ok(n)
+                } else {
+                    Err(McpError::InvalidRequest(format!(
+                        "severity_min {n} out of range (expected 1-24)"
+                    )))
+                }
+            }),
+    }
+}
+
 /// Live HTTP client for Parqtel's Prometheus-compatible query API and
 /// operational endpoints (stats, ingest rates, alerts, rules).
+///
+/// Cheap to clone: the reqwest pool and base URL are shared behind an
+/// `Arc`, so every tool handler can own one handle.
+#[derive(Clone)]
 pub struct ParqtelClient {
     http: reqwest::Client,
     base_url: String,
@@ -112,6 +154,11 @@ impl ParqtelClient {
 
     /// Log search (`/api/v1/logs`) with an optional severity floor.
     #[allow(clippy::too_many_arguments)]
+    /// Query logs.
+    ///
+    /// `severity_min` is a *string* severity name here; it is translated to
+    /// the numeric OTLP threshold the server expects (see
+    /// [`severity_threshold`]).
     pub async fn logs(
         &self,
         query: &str,
@@ -121,6 +168,8 @@ impl ParqtelClient {
         order: Option<&str>,
         severity_min: Option<&str>,
     ) -> Result<Value, McpError> {
+        // `query`, `start` and `end` are non-optional in the server's
+        // LogQuery extractor — omitting any of them is a 400.
         let mut params: Vec<(&str, String)> = vec![
             ("query", query.to_string()),
             ("start", format!("{start}")),
@@ -131,7 +180,7 @@ impl ParqtelClient {
             params.push(("order", o.to_string()));
         }
         if let Some(s) = severity_min {
-            params.push(("severity_min", s.to_string()));
+            params.push(("severity_min", severity_threshold(s)?.to_string()));
         }
         self.get("/api/v1/logs", &params).await
     }
@@ -168,13 +217,21 @@ fn parse_envelope(status: reqwest::StatusCode, body: Value) -> Result<Value, Mcp
     let server_error = body.get("error").and_then(|v| v.as_str());
     if !status.is_success() {
         let msg = server_error.unwrap_or("unknown error");
-        return Err(McpError::ApplicationError(format!(
-            "parqtel {status}: {msg}"
-        )));
+        // A 4xx from Parqtel means it rejected *our* request (bad params,
+        // unknown route); that is the caller's to fix, so surface it as an
+        // invalid request rather than a 500. Genuine 5xx stays application.
+        return Err(if status.is_client_error() {
+            McpError::InvalidRequest(format!("parqtel {status}: {msg}"))
+        } else {
+            McpError::ApplicationError(format!("parqtel {status}: {msg}"))
+        });
     }
     if body.get("status").and_then(|v| v.as_str()) == Some("error") {
+        // HTTP 200 with `status:"error"` is how the Prometheus-compatible API
+        // reports a rejected query (parse failure, unknown function) — the
+        // query itself is what needs fixing.
         let msg = server_error.unwrap_or("unknown error");
-        return Err(McpError::ApplicationError(format!(
+        return Err(McpError::InvalidRequest(format!(
             "parqtel query failed: {msg}"
         )));
     }
@@ -204,6 +261,17 @@ mod tests {
         let body = json!({"status": "error", "error": "parse error: unexpected }"});
         let err = parse_envelope(reqwest::StatusCode::BAD_REQUEST, body).unwrap_err();
         assert!(err.to_string().contains("parse error: unexpected }"));
+        // A 4xx from Parqtel is our request's fault, not a server failure.
+        assert_eq!(
+            err.to_code(),
+            parqtel_mcp_core::error::ERROR_INVALID_REQUEST
+        );
+    }
+
+    #[test]
+    fn envelope_upstream_5xx_is_application_error() {
+        let body = json!({"status": "error", "error": "internal boo-boo"});
+        let err = parse_envelope(reqwest::StatusCode::INTERNAL_SERVER_ERROR, body).unwrap_err();
         assert_eq!(
             err.to_code(),
             parqtel_mcp_core::error::ERROR_APPLICATION_START
@@ -212,10 +280,15 @@ mod tests {
 
     #[test]
     fn envelope_query_error_with_http_200() {
-        // Parqtel reports bad queries as HTTP 200 + status:"error".
+        // Parqtel reports bad queries as HTTP 200 + status:"error"; the query
+        // is what needs fixing, so this must be an invalid request (-32600).
         let body = json!({"status": "error", "error": "unknown function nope()"});
         let err = parse_envelope(reqwest::StatusCode::OK, body).unwrap_err();
         assert!(err.to_string().contains("unknown function nope()"));
+        assert_eq!(
+            err.to_code(),
+            parqtel_mcp_core::error::ERROR_INVALID_REQUEST
+        );
     }
 
     #[test]
@@ -241,6 +314,14 @@ mod tests {
             )
             .route(
                 "/api/v1/ingest_rates",
+                get(
+                    |AxumQuery(q): AxumQuery<HashMap<String, String>>| async move {
+                        Json(json!({"status": "success", "data": {"received": q}}))
+                    },
+                ),
+            )
+            .route(
+                "/api/v1/logs",
                 get(
                     |AxumQuery(q): AxumQuery<HashMap<String, String>>| async move {
                         Json(json!({"status": "success", "data": {"received": q}}))
@@ -303,5 +384,55 @@ mod tests {
 
         let without = client.ingest_rates(None).await.unwrap();
         assert!(without["data"]["received"].get("history_secs").is_none());
+    }
+
+    /// Regression: severity names must be translated to the numeric OTLP
+    /// threshold the server's `severity_min: Option<i32>` expects — sending
+    /// "ERROR" verbatim made the query-string extractor 400.
+    #[test]
+    fn severity_names_map_to_otlp_band_floors() {
+        for (name, want) in [
+            ("TRACE", 1),
+            ("debug", 5),
+            ("Info", 9),
+            ("warn", 13),
+            ("WARNING", 13),
+            ("ERROR", 17),
+            ("error", 17),
+            ("FATAL", 21),
+            ("critical", 21),
+            ("  error  ", 17),
+        ] {
+            assert_eq!(severity_threshold(name).unwrap(), want, "name={name}");
+        }
+        // Bare OTLP numbers pass through.
+        assert_eq!(severity_threshold("17").unwrap(), 17);
+        for bad in ["", "nope", "0", "25", "-1"] {
+            assert!(severity_threshold(bad).is_err(), "{bad} should be rejected");
+        }
+    }
+
+    #[tokio::test]
+    async fn logs_sends_required_params_and_numeric_severity() {
+        let base = spawn_stub().await;
+        let client = ParqtelClient::new(&base).unwrap();
+
+        let out = client
+            .logs("{}", 100.0, 200.0, 50, None, Some("ERROR"))
+            .await
+            .unwrap();
+        let got = &out["data"]["received"];
+        // query/start/end are non-optional server-side; all must be present.
+        assert_eq!(got["query"], "{}");
+        assert_eq!(got["start"], "100");
+        assert_eq!(got["end"], "200");
+        assert_eq!(got["limit"], "50");
+        assert_eq!(got["severity_min"], "17");
+
+        let err = client
+            .logs("{}", 100.0, 200.0, 50, None, Some("bogus"))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("unknown severity_min"));
     }
 }
