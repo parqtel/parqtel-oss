@@ -1,8 +1,12 @@
 //! Parqtel self-MCP server library
 
+pub mod client;
+
 use serde_json::json;
 
 use parqtel_mcp_core::tool::McpTool;
+
+pub use client::ParqtelClient;
 
 /// Create a parqtel query metrics tool
 pub fn make_query_metrics_tool() -> McpTool {
