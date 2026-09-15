@@ -270,30 +270,40 @@ services:
   #     retries: 3
   #     start_period: 5s
 
-  # mcp-parqtel:
-  #   <<: *common
-  #   build:
-  #     context: .
-  #     dockerfile: compose/mcp/Dockerfile.parqtel
-  #   container_name: mcp-parqtel
-  #   ports:
-  #     - "3007:3000"
-  #   environment:
-  #     MCP_HOST: "0.0.0.0"
-  #     MCP_PORT: "3000"
-  #     MCP_RATE_LIMIT: "60"
-  #     PARQTEL_API_URL: http://parqtel:9090
-  #   depends_on:
-  #     parqtel:
-  #       condition: service_healthy
-  #   networks:
-  #     - backend
-  #   healthcheck:
-  #     test: ["CMD-SHELL", "wget -qO- http://localhost:3000/health || exit 1"]
-  #     interval: 30s
-  #     timeout: 5s
-  #     retries: 3
-  #     start_period: 5s
+  # ── Parqtel self-MCP (live observability data for agents) ──────────────────
+  # Serves Parqtel's own metrics/logs/alerts to MCP clients on :3007.
+  mcp-parqtel:
+    <<: *common
+    build:
+      context: .
+      dockerfile: compose/mcp/Dockerfile.parqtel
+    image: parqtel-mcp-parqtel:local
+    container_name: mcp-parqtel
+    ports:
+      - "${MCP_PARQTEL_PORT:-3007}:3000"
+    environment:
+      MCP_HOST: "0.0.0.0"
+      MCP_PORT: "3000"
+      MCP_RATE_LIMIT: "${MCP_RATE_LIMIT:-600}"
+      # Reach the Parqtel service over the compose network. Override with
+      # host.docker.internal:9090 to point at a Parqtel running outside compose.
+      PARQTEL_API_URL: "${PARQTEL_API_URL:-http://parqtel:9090}"
+    depends_on:
+      parqtel:
+        condition: service_healthy
+    networks:
+      # `backend` is internal, and Docker cannot publish ports for a container
+      # attached only to an internal network — the mapping is silently dropped
+      # and the host gets "connection refused". The `frontend` attachment is
+      # what makes the published port below reachable.
+      - backend
+      - frontend
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
 
 # ── Networks ───────────────────────────────────────────────────────────────────
 networks:

@@ -2,7 +2,6 @@
 
 use std::env;
 
-use axum::{routing::get, Router};
 use parqtel_mcp_core::{server::ServerConfig, McpServer};
 use parqtel_mcp_discord::{
     make_resolve_alert_tool, make_send_alert_embed_tool, make_send_rca_update_tool,
@@ -39,22 +38,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     server.register_tool(make_send_rca_update_tool());
     server.register_tool(make_resolve_alert_tool());
 
-    let app = Router::new()
-        .merge(server.build_router())
-        .route("/health", get(health_handler));
+    let tool_count = server.get_tools().len();
 
-    tracing::info!("Starting MCP server on {}", addr);
+    // `/health` is owned by the framework router (it reports this count);
+    // registering a second `/health` here panics at boot with
+    // "Overlapping method route".
+    let app = server.build_router();
+
+    tracing::info!("Starting MCP server on {} ({} tools)", addr, tool_count);
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     axum::serve(listener, app).await?;
 
     Ok(())
-}
-
-async fn health_handler() -> axum::response::Json<serde_json::Value> {
-    axum::response::Json(serde_json::json!({
-        "status": "ok",
-        "tools": 3,
-        "timestamp": chrono::Utc::now().to_rfc3339()
-    }))
 }

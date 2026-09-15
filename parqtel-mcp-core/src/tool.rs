@@ -1,6 +1,21 @@
 //! Tool definitions for MCP
 
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
+
 use serde_json::Value;
+
+use super::error::McpError;
+
+/// Pinned, boxed future returned by a tool handler.
+pub type BoxToolFuture = Pin<Box<dyn Future<Output = Result<Value, McpError>> + Send>>;
+
+/// Asynchronous tool executor. Receives the sanitized tool params and
+/// returns the tool result payload. Handlers capture their own context
+/// (HTTP clients, base URLs, credentials) at registration time, so the
+/// server itself stays transport-agnostic.
+pub type ToolHandler = Arc<dyn Fn(Value) -> BoxToolFuture + Send + Sync>;
 
 /// Represents a tool that can be called via MCP
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

@@ -1,20 +1,37 @@
-FROM rust:1.86-slim AS builder
+# Standalone image for the Parqtel self-MCP server.
+#
+# Builds only parqtel-mcp-core + parqtel-mcp-parqtel against a minimal
+# throwaway workspace so the image does not pull the whole repo's dependency
+# graph. Point PARQTEL_API_URL at a running Parqtel to serve live observability
+# data to MCP clients (Claude Desktop, IDEs, agents).
+#
+#   docker build -f compose/mcp/Dockerfile.parqtel -t parqtel-mcp-parqtel:local .
+#   docker run --rm -p 3007:3000 \
+#     -e PARQTEL_API_URL=http://host.docker.internal:9090 \
+#     parqtel-mcp-parqtel:local
+#
+# rustls keeps this image OpenSSL-free, so the builder needs no libssl-dev.
+# g++/make are required to compile ring's C/asm sources.
+FROM rust:1.87-slim AS builder
 WORKDIR /build
-RUN apt-get update && apt-get install -y pkg-config libssl-dev g++ make && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y g++ make && rm -rf /var/lib/apt/lists/*
 
 COPY parqtel-mcp-core/ parqtel-mcp-core/
 COPY parqtel-mcp-parqtel/ parqtel-mcp-parqtel/
 COPY Cargo.lock ./
 
-# Minimal workspace Cargo.toml — only the two needed members
+# Minimal workspace Cargo.toml — only the two needed members.
+# Must list every `workspace = true` dependency those crates declare,
+# including dev-dependencies, or cargo cannot resolve them.
 RUN cat > Cargo.toml << 'EOF'
 [workspace]
 members = ["parqtel-mcp-core", "parqtel-mcp-parqtel"]
 resolver = "2"
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
+rust-version = "1.87"
 authors = ["parqtel team"]
 license = "Apache-2.0"
 
@@ -35,6 +52,7 @@ thiserror = "1"
 anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tower = "0.4"
 tower-http = { version = "0.5", features = ["cors", "trace", "limit", "timeout"] }
 uuid = { version = "1", features = ["v4", "fast-rng"] }
 bytes = "1"
@@ -43,6 +61,7 @@ regex = "1"
 async-trait = "0.1"
 futures = "0.3"
 schemars = "0.8"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 parqtel-mcp-core = { path = "parqtel-mcp-core" }
 
 [profile.release]
@@ -56,7 +75,20 @@ EOF
 RUN cargo build --release --bin parqtel-mcp-parqtel
 
 FROM debian:bookworm-slim
-RUN apt-get update && apt-get install -y ca-certificates curl && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y ca-certificates curl && rm -rf /var/lib/apt/lists/* \
+    && useradd --system --uid 65532 --no-create-home mcp
+
 COPY --from=builder /build/target/release/parqtel-mcp-parqtel /app/parqtel-mcp-parqtel
+
+USER 65532
+# PARQTEL_API_URL is the only required configuration; it points at the
+# Parqtel HTTP API (compose: http://parqtel:9090).
+ENV MCP_HOST=0.0.0.0 \
+    MCP_PORT=3000 \
+    PARQTEL_API_URL=http://127.0.0.1:9090
+
 EXPOSE 3000
+HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
+    CMD curl -fsS http://localhost:3000/health || exit 1
+
 CMD ["/app/parqtel-mcp-parqtel"]

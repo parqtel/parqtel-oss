@@ -27,10 +27,31 @@ The Model Context Protocol enables AI agents (Claude, GPT, etc.) to interact wit
 ```
 
 Each MCP server:
+
+- Exposes `POST /mcp` — MCP Streamable HTTP (spec `2025-06-18`), the endpoint
+  every agent/SDK speaks (`initialize` → `notifications/initialized` →
+  `tools/list` / `tools/call` / `ping`; `GET /mcp` SSE keepalive,
+  `DELETE /mcp` session close). Stateless: no session required; one is
+  minted on `initialize` for stateful clients.
 - Exposes `/health` for liveness probes
 - Implements rate limiting (token bucket, configurable per-minute)
 - Registers tools with typed JSON Schema inputs
 - Sanitizes parameters before forwarding to external APIs
+
+### Connecting from Cline / Claude Desktop / any agent
+
+```json
+{
+  "mcpServers": {
+    "parqtel": { "type": "streamableHttp", "url": "http://localhost:3007/mcp" }
+  }
+}
+```
+
+> Host port is `3007` (`MCP_PARQTEL_PORT:-3007` in `docker-compose.yml`);
+> `3000` inside the container is Grafana on the host. The legacy
+> `GET /tools/list` / `POST /tools/call` aliases still work but are
+> deprecated — point agents at `/mcp`.
 
 ## Shared Configuration
 
