@@ -3,7 +3,6 @@
 // Usage: node .tools/probe_server.js [upstreamURL]   (default :9090)
 const http = require('http');
 const zlib = require('zlib');
-const fs = require('fs');
 
 const UPSTREAM = process.argv[2] || 'http://localhost:9090';
 const LISTEN = process.argv[3] ? Number(process.argv[3]) : 9099;
@@ -15,9 +14,8 @@ http.get(UPSTREAM + '/ui', { headers: { 'Accept-Encoding': 'gzip' } }, (res) => 
     let buf = Buffer.concat(chunks);
     if (res.headers['content-encoding'] === 'gzip') buf = zlib.gunzipSync(buf);
     const html = buf.toString();
-    // NOTE: no script injection — the CDP test (.tools/cdp_builder_test.js)
-    // drives the page itself; a parallel injected probe caused races.
-    fs.writeFileSync('.tools/probe_served.html', html);
+    // NOTE: no script injection — the CDP test drives the page itself;
+    // a parallel injected probe caused races in early development.
 
     http
       .createServer((req, res2) => {
