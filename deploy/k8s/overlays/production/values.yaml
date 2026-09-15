@@ -1,6 +1,6 @@
 # Production-like values for SRE validation on k3d
 image:
-  repository: ghcr.io/parqtel/parqtel
+  repository: ghcr.io/parqtel/parqtel-oss
   tag: "0.2.0"
   pullPolicy: IfNotPresent
 
