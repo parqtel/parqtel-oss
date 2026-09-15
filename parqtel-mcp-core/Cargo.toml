@@ -19,3 +19,8 @@ tower-http = { workspace = true }
 uuid = { workspace = true }
 regex = { workspace = true }
 async-trait = { workspace = true }
+
+[dev-dependencies]
+# oneshot() lets the health-route regression test drive the real router
+# instead of calling the handler directly.
+tower = { workspace = true, features = ["util"] }

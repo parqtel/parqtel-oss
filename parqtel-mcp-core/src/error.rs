@@ -65,6 +65,24 @@ impl McpError {
         }
     }
 
+    /// HTTP status the MCP transport should use for this error.
+    ///
+    /// Caller-caused failures must not surface as `500`: agent SDKs treat a
+    /// 5xx as a server fault and retry with backoff, so a typo like a string
+    /// `start` would look like an outage instead of a request to fix.
+    pub fn to_http_status(&self) -> axum::http::StatusCode {
+        use axum::http::StatusCode;
+        match self {
+            McpError::ParseError(_) | McpError::InvalidRequest(_) => StatusCode::BAD_REQUEST,
+            McpError::MethodNotFound(_) => StatusCode::NOT_FOUND,
+            McpError::InternalError(_)
+            | McpError::ApplicationError(_)
+            | McpError::HttpError(_)
+            | McpError::SerializationError(_)
+            | McpError::IoError(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        }
+    }
+
     /// Get additional error data
     pub fn to_data(&self) -> Option<serde_json::Value> {
         match self {

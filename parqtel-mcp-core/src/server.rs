@@ -39,11 +39,19 @@ impl Default for ServerConfig {
     }
 }
 
-/// Rate limiter using token bucket algorithm
+/// Rate limiter using a per-client token bucket.
+///
+/// The bucket holds one minute's worth of requests (`requests_per_minute`)
+/// and starts full, so a client may burst up to its whole configured quota —
+/// agents routinely fire several tool calls in parallel. Tokens refill
+/// continuously on a millisecond clock; the previous implementation used a
+/// whole-second clock and started the bucket at `requests_per_minute / 60`
+/// tokens, so it could not refill inside a second and throttled callers far
+/// below the configured rate.
 struct RateLimiter {
     requests_per_minute: u32,
     tokens: HashMap<String, f64>,
-    last_update: HashMap<String, u64>,
+    last_update_ms: HashMap<String, u64>,
 }
 
 impl RateLimiter {
@@ -51,23 +59,24 @@ impl RateLimiter {
         Self {
             requests_per_minute,
             tokens: HashMap::new(),
-            last_update: HashMap::new(),
+            last_update_ms: HashMap::new(),
         }
     }
 
     fn allow(&mut self, client_id: &str) -> bool {
-        let now = Utc::now().timestamp() as u64;
-        let tokens_per_second = self.requests_per_minute as f64 / 60.0;
+        let now_ms = Utc::now().timestamp_millis().max(0) as u64;
+        let capacity = self.requests_per_minute as f64;
+        let refill_per_ms = capacity / 60_000.0;
 
-        let entry = self
-            .tokens
+        let entry = self.tokens.entry(client_id.to_string()).or_insert(capacity);
+        let last = self
+            .last_update_ms
             .entry(client_id.to_string())
-            .or_insert(tokens_per_second);
-        let last = self.last_update.entry(client_id.to_string()).or_insert(now);
+            .or_insert(now_ms);
 
-        let elapsed = (now - *last) as f64;
-        *entry = (*entry + elapsed * tokens_per_second).min(tokens_per_second * 60.0);
-        *last = now;
+        let elapsed_ms = now_ms.saturating_sub(*last) as f64;
+        *entry = (*entry + elapsed_ms * refill_per_ms).min(capacity);
+        *last = now_ms;
 
         if *entry >= 1.0 {
             *entry -= 1.0;
@@ -156,9 +165,16 @@ impl McpServer {
 }
 
 /// Health check handler
-async fn health_handler() -> Json<Value> {
+/// Liveness/readiness probe.
+///
+/// Owned by the framework router so every MCP server reports the same shape
+/// and an accurate tool count — servers previously registered their own
+/// `/health` on top of `build_router()`, which made axum panic at boot with
+/// "Overlapping method route".
+async fn health_handler(State(server): State<Arc<McpServer>>) -> Json<Value> {
     Json(serde_json::json!({
         "status": "ok",
+        "tools": server.get_tools().len(),
         "timestamp": Utc::now().to_rfc3339()
     }))
 }
@@ -308,7 +324,7 @@ async fn tools_call_handler(
                 _duration,
             );
             return (
-                StatusCode::INTERNAL_SERVER_ERROR,
+                e.to_http_status(),
                 Json(serde_json::json!({
                     "jsonrpc": "2.0",
                     "error": e.to_json_rpc_error(),
@@ -393,6 +409,33 @@ mod tests {
 
     fn test_server() -> McpServer {
         McpServer::new(ServerConfig::default())
+    }
+
+    /// Regression: the bucket must start full so a client can burst its whole
+    /// configured per-minute quota (agents fire parallel tool calls), and must
+    /// reject only once the quota is genuinely exhausted.
+    #[test]
+    fn rate_limiter_allows_full_quota_burst_then_blocks() {
+        let mut limiter = RateLimiter::new(600);
+        for i in 0..600 {
+            assert!(limiter.allow("agent"), "burst call {i} should be allowed");
+        }
+        assert!(!limiter.allow("agent"), "601st call must be throttled");
+        // Quotas are per client.
+        assert!(limiter.allow("other-agent"));
+    }
+
+    /// Regression: an unconfigured client id must not be starved by
+    /// whole-second clock granularity — many calls inside one second succeed.
+    #[test]
+    fn rate_limiter_allows_burst_within_single_second() {
+        let mut limiter = RateLimiter::new(60);
+        let allowed = (0..60).filter(|_| limiter.allow("agent")).count();
+        assert_eq!(
+            allowed, 60,
+            "all 60 per-minute calls must fit in one second"
+        );
+        assert!(!limiter.allow("agent"));
     }
 
     fn counting_handler(counter: Arc<AtomicU64>) -> ToolHandler {
@@ -494,5 +537,70 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err.to_code(), crate::error::ERROR_APPLICATION_START);
+    }
+
+    /// Regression: caller-caused errors must map to 4xx so agent SDKs don't
+    /// retry a fixable request as if the server were down.
+    #[test]
+    fn error_http_status_mapping() {
+        use axum::http::StatusCode;
+        assert_eq!(
+            McpError::InvalidRequest("bad".into()).to_http_status(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            McpError::ParseError("bad".into()).to_http_status(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            McpError::MethodNotFound("nope".into()).to_http_status(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            McpError::ApplicationError("upstream".into()).to_http_status(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+        assert_eq!(
+            McpError::InternalError("boom".into()).to_http_status(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+    }
+
+    /// Regression: `build_router()` owns `/health` (with an accurate tool
+    /// count). Servers must NOT add a second `/health` route on top of the
+    /// merged router — axum panics at boot with "Overlapping method route".
+    #[tokio::test]
+    async fn router_serves_health_with_accurate_tool_count() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        let mut server = test_server();
+        for name in ["one", "two"] {
+            server.register_tool(McpTool {
+                name: name.into(),
+                description: "test".into(),
+                input_schema: json!({}),
+            });
+        }
+
+        let res = server
+            .build_router()
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(res.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["status"], "ok");
+        assert_eq!(body["tools"], 2);
     }
 }
