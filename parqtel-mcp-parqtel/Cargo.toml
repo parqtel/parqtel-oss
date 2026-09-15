@@ -20,8 +20,7 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 chrono = { workspace = true }
 schemars = { workspace = true }
-# rustls-tls keeps the standalone MCP images OpenSSL-free (matches the
-# workspace-wide linkage story; see compose/mcp/Dockerfile.parqtel).
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
-tokio-rustls = { version = "0.26", features = ["ring"] }
-rustls = { version = "0.23", features = ["ring"] }
+# rustls-tls keeps this crate (and its standalone image) OpenSSL-free; the
+# feature flags live in the workspace dependency so the image build resolves
+# the same way as a local build.
+reqwest = { workspace = true }

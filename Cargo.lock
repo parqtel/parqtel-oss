@@ -1986,13 +1986,11 @@ dependencies = [
  "chrono",
  "parqtel-mcp-core",
  "reqwest",
- "rustls",
  "schemars",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
  "tokio",
- "tokio-rustls",
  "tracing",
  "tracing-subscriber",
 ]

@@ -1,4 +1,5 @@
 .PHONY: help dev-setup build release test lint bench docker docker-smoke \
+        mcp-image mcp-up mcp-smoke \
         local-up local-down local-purge local-logs local-ps local-rebuild \
         local-verify test-api test-aggregations test-functions test-builder \
         test-builder-ui tools \
@@ -121,6 +122,29 @@ docker-smoke: ## Run built image and verify HEALTHCHECK reaches 'healthy'
 	  sleep 2; \
 	done; \
 	echo "FAILED: timed out waiting for healthy"; $(DOCKER) logs --tail 20 parqtel-smoke; exit 1
+
+# ─── MCP image (Parqtel self-MCP server) ───────────────────────────────────────
+mcp-image: ## Build the standalone Parqtel MCP image (parqtel-mcp-parqtel:local)
+	$(DOCKER) build -f compose/mcp/Dockerfile.parqtel -t parqtel-mcp-parqtel:local .
+	@echo "Image size:"
+	@$(DOCKER) images parqtel-mcp-parqtel:local --format "{{.Size}}"
+
+mcp-up: ## Start Parqtel + MCP server (compose) and wait until healthy
+	$(COMPOSE) up -d --build parqtel mcp-parqtel
+	@echo "Waiting for mcp-parqtel to become healthy..."
+	@for i in $$(seq 1 30); do \
+	  st=$$($(DOCKER) inspect -f '{{.State.Health.Status}}' mcp-parqtel 2>/dev/null); \
+	  if [ "$$st" = "healthy" ]; then echo "OK: mcp-parqtel healthy"; \
+	    echo "  MCP endpoint: http://localhost:$${MCP_PARQTEL_PORT:-3007}/tools/list"; exit 0; fi; \
+	  sleep 2; \
+	done; \
+	echo "FAILED: mcp-parqtel did not become healthy"; $(DOCKER) logs --tail 30 mcp-parqtel; exit 1
+
+mcp-smoke: ## List the MCP server's tools (needs mcp-up)
+	@curl -fsS "http://localhost:$${MCP_PARQTEL_PORT:-3007}/health" | head -c 200; echo; \
+	curl -fsS "http://localhost:$${MCP_PARQTEL_PORT:-3007}/tools/list" \
+	  | python3 -c 'import json,sys; t=json.load(sys.stdin)["tools"]; print(f"tools: {len(t)}"); [print(" -", x["name"]) for x in t]'
+
 
 # ─── Local dev (Docker Compose) ────────────────────────────────────────────────
 local-up: ## Start full local stack and wait until healthy (Parqtel + Grafana + Prometheus + load-generator)

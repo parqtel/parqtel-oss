@@ -1,6 +1,8 @@
-FROM rust:1.86-slim AS builder
+# rustls keeps this image OpenSSL-free, so the builder needs no libssl-dev.
+# g++/make are required to compile ring's C/asm sources.
+FROM rust:1.87-slim AS builder
 WORKDIR /build
-RUN apt-get update && apt-get install -y pkg-config libssl-dev g++ make && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y g++ make && rm -rf /var/lib/apt/lists/*
 
 COPY parqtel-mcp-core/ parqtel-mcp-core/
 COPY parqtel-mcp-discord/ parqtel-mcp-discord/
@@ -13,8 +15,9 @@ members = ["parqtel-mcp-core", "parqtel-mcp-discord"]
 resolver = "2"
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
+rust-version = "1.87"
 authors = ["parqtel team"]
 license = "Apache-2.0"
 
@@ -35,6 +38,9 @@ thiserror = "1"
 anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+# parqtel-mcp-core has tower as a dev-dependency; the minimal workspace must
+# declare it for cargo to resolve the manifest.
+tower = "0.4"
 tower-http = { version = "0.5", features = ["cors", "trace", "limit", "timeout"] }
 uuid = { version = "1", features = ["v4", "fast-rng"] }
 bytes = "1"
