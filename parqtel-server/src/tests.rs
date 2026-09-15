@@ -1548,6 +1548,71 @@ async fn test_pipeline_fetch_metrics_and_traces() {
 }
 
 #[tokio::test]
+async fn test_ingest_rates_history_secs_param() {
+    let app = setup_test_app().await;
+
+    // Default window: 180s of per-second history.
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/v1/ingest_rates")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["data"]["history_secs"], 180);
+    assert_eq!(
+        json["data"]["history"]["logs"].as_array().unwrap().len(),
+        180,
+        "history arrays must match the default history_secs"
+    );
+
+    // Requesting the full 15-minute wheel returns 900 one-second buckets.
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/v1/ingest_rates?history_secs=900")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["data"]["history_secs"], 900);
+    assert_eq!(
+        json["data"]["history"]["metrics"].as_array().unwrap().len(),
+        900,
+        "history arrays must match the requested history_secs"
+    );
+
+    // Over-large requests clamp to the 900-slot in-memory wheel.
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/v1/ingest_rates?history_secs=99999")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["data"]["history_secs"], 900);
+}
+
+#[tokio::test]
 async fn test_ingest_rates_endpoint_reflects_ingest() {
     let app = setup_test_app().await;
 
