@@ -87,7 +87,7 @@ Layered via Figment (priority: CLI > env > TOML > defaults):
 - **Correlation**: `/v1/correlate`
 - **Pipelines**: `/api/v1/recording_rules`, `/api/v1/pipelines`
 - **Grafana SimpleJSON**: `/search`, `/query`, `/annotations`, `/tag-keys`, `/tag-values`
-- **Ops**: `/health`, `/metrics`, `/oas`, `/ui`, `/api/v1/stats` (storage/buffer/config snapshot), `/api/v1/ingest_rates` (live per-signal rates: current + 60s/5m/15m averages, gap_secs spike/gap detection, 180s per-second sparkline history)
+- **Ops**: `/health`, `/metrics`, `/oas`, `/ui`, `/api/v1/stats` (storage/buffer/config snapshot), `/api/v1/ingest_rates` (live per-signal rates: current + 60s/5m/15m averages, gap_secs spike/gap detection, per-second sparkline history via `history_secs` param — default 180s, max 900s in-memory wheel)
 
 ## CI Pipeline
 

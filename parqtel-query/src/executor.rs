@@ -212,6 +212,13 @@ impl QueryExecutor {
         let mut points_scanned: u64 = 0;
         let mut total_series = 0usize;
 
+        // Volume histogram: 60 buckets over the visible timeline
+        // [start_ns, end_ns], counting EVERY matched point — not just the
+        // samples that survive series truncation — so the UI volume bars
+        // show complete event counts for any timeline, exactly like the
+        // legacy plan path does.
+        let window_ns = (end_ns - start_ns) / 60;
+        let mut volume_summary = vec![0u64; 60];
         if !refs.is_empty() {
             // Extend the scan range so range selectors reaching before `start`
             // still see samples (window lookback).
@@ -241,6 +248,15 @@ impl QueryExecutor {
                 for dp in raw {
                     if !crate::matcher::evaluate_matchers(matchers, &dp.labels, name) {
                         continue;
+                    }
+                    // Count into the volume histogram regardless of series
+                    // truncation. Lookback samples timestamped before
+                    // `start_ns` feed range-selector windows, not the visible
+                    // timeline, so they are excluded.
+                    if window_ns > 0 && dp.timestamp_ns >= start_ns {
+                        let bucket =
+                            ((dp.timestamp_ns - start_ns) / window_ns).clamp(0, 59) as usize;
+                        volume_summary[bucket] += 1;
                     }
                     let fp = dp.labels.fingerprint();
                     total_series += 1;
@@ -314,7 +330,7 @@ impl QueryExecutor {
             execution_time: start_time.elapsed(),
             points_scanned,
             total_series_count: total_series,
-            volume_summary: vec![0; 60],
+            volume_summary,
         })
     }
 
@@ -1893,6 +1909,41 @@ mod tests {
         std::fs::create_dir_all(&trace_data_dir).ok();
         let exec = QueryExecutor::with_engine(storage, index, log_index, trace_data_dir);
         (exec, dir)
+    }
+
+    #[tokio::test]
+    async fn test_ast_volume_summary_counts_all_matched_points() {
+        // The AST path must return a volume_summary counting EVERY matched
+        // point in the visible timeline — not only the samples that survive
+        // series truncation — so the UI volume bars stay complete (same
+        // contract as the legacy plan path).
+        let (exec, _dir) = setup_with_data().await;
+        // `cpu` has points at ts 1000 (h1), 2000 (h1), 3000 (h2); host="h1"
+        // matches 2 of them. Timeline [0, 4000] ns covers all three.
+        let expr = crate::parser::parse_expr("avg_over_time(cpu{host=\"h1\"}[5m])").unwrap();
+        let res = exec.execute_ast(&expr, 0, 4000, Some(1000)).await.unwrap();
+        assert_eq!(
+            res.volume_summary.iter().sum::<u64>(),
+            2,
+            "AST volume summary must count all matched points pre-truncation"
+        );
+
+        // Without the label matcher all 3 `cpu` points count.
+        let expr = crate::parser::parse_expr("avg_over_time(cpu[5m])").unwrap();
+        let res = exec.execute_ast(&expr, 0, 4000, Some(1000)).await.unwrap();
+        assert_eq!(res.volume_summary.iter().sum::<u64>(), 3);
+
+        // Points timestamped before the timeline start (lookback) must not
+        // be bucketed into the visible range.
+        let res = exec
+            .execute_ast(&expr, 2500, 4000, Some(1000))
+            .await
+            .unwrap();
+        assert_eq!(
+            res.volume_summary.iter().sum::<u64>(),
+            1,
+            "only the ts=3000 point lies within [2500, 4000]"
+        );
     }
 
     #[tokio::test]

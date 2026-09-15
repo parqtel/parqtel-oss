@@ -1,10 +1,11 @@
 use crate::state::AppState;
 use axum::{
-    extract::State,
+    extract::{Query, State},
     http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     Json,
 };
+use serde::Deserialize;
 
 /// Handler for GET /health.
 pub async fn health() -> impl IntoResponse {
@@ -78,19 +79,33 @@ pub async fn stats(State(state): State<AppState>) -> Response {
 /// Handler for GET /api/v1/ingest_rates — live per-signal ingestion rates
 /// for the UI overview. Returns current/60s/5m/15m rates, the seconds since
 /// the last item (gap), and the last `history_secs` seconds of per-second
-/// counts for sparklines. Reads in-memory counters only — no locks, no
-/// Parquet access — so it stays cheap at any ingest volume.
-pub async fn ingest_rates(State(state): State<AppState>) -> Response {
-    const HISTORY_SECS: usize = 180;
+/// counts for sparklines. `history_secs` defaults to 180 and may be raised
+/// up to the full 15-minute in-memory wheel (`RATE_WINDOW_BUCKETS` = 900).
+/// Reads in-memory counters only — no locks, no Parquet access — so it
+/// stays cheap at any ingest volume.
+#[derive(Debug, Deserialize)]
+pub struct RateHistoryParams {
+    history_secs: Option<usize>,
+}
+
+pub async fn ingest_rates(
+    State(state): State<AppState>,
+    Query(params): Query<RateHistoryParams>,
+) -> Response {
+    const DEFAULT_HISTORY_SECS: usize = 180;
+    let history_secs = params
+        .history_secs
+        .unwrap_or(DEFAULT_HISTORY_SECS)
+        .clamp(1, crate::metrics::RATE_WINDOW_BUCKETS);
     let now = crate::metrics::now_secs();
     let [metrics, logs, spans] = state.inner.metrics.rates.snapshot(now);
-    let [h_metrics, h_logs, h_spans] = state.inner.metrics.rates.history(HISTORY_SECS, now);
+    let [h_metrics, h_logs, h_spans] = state.inner.metrics.rates.history(history_secs, now);
 
     Json(serde_json::json!({
         "status": "success",
         "data": {
             "now": now,
-            "history_secs": HISTORY_SECS,
+            "history_secs": history_secs,
             "metrics": metrics,
             "logs": logs,
             "traces": spans,

@@ -502,11 +502,24 @@ paths:
       description: >
         Current per-second rate, 60s/5m/15m averages, seconds since the
         last ingested item (gap), and lifetime totals for metrics, logs,
-        and traces, plus per-second counts for the last 3 minutes
-        (sparkline history). Sourced from lock-free in-memory counters —
-        no Parquet access. Powers the UI overview live-rate cards and
-        spike/gap detection.
+        and traces, plus per-second counts for a trailing window (default
+        180s, up to the full 15-minute in-memory wheel via `history_secs`).
+        Sourced from lock-free in-memory counters — no Parquet access.
+        Powers the UI overview live-rate cards and spike/gap detection.
       operationId: getIngestRates
+      parameters:
+        - name: history_secs
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 900
+            default: 180
+          description: >
+            Length of the per-second sparkline history arrays. Clamped to
+            the 900-slot (15 min) in-memory rate wheel; older history is
+            not retained in memory.
       responses:
         "200":
           description: Rate snapshot
@@ -521,7 +534,7 @@ paths:
                     type: object
                     properties:
                       now: { type: integer, description: Current epoch second }
-                      history_secs: { type: integer, description: Length of the per-second history arrays (180) }
+                      history_secs: { type: integer, description: Length of the per-second history arrays (requested window, default 180, max 900) }
                       metrics: { $ref: "#/components/schemas/SignalRates" }
                       logs: { $ref: "#/components/schemas/SignalRates" }
                       traces: { $ref: "#/components/schemas/SignalRates" }
