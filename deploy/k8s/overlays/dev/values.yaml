@@ -1,12 +1,11 @@
 image:
-  repository: parqtel
-  tag: dev
+  repository: ghcr.io/parqtel/parqtel
+  tag: "0.2.0"
   pullPolicy: IfNotPresent
 
 provider:
   enabled: true
-  externalMetrics:
-    enabled: false
+  externalMetrics: false
 
 resources:
   requests:
@@ -34,6 +33,9 @@ storage:
 parqtel:
   storage:
     blockDurationSecs: 30
+    retentionDays: 1
+  logs:
+    blockDurationSecs: 10
     retentionDays: 1
   telemetry:
     logLevel: "debug"

@@ -1,7 +1,7 @@
 # Production-like values for SRE validation on k3d
 image:
-  repository: registry.localhost:5050/parqtel
-  tag: dev
+  repository: ghcr.io/parqtel/parqtel
+  tag: "0.2.0"
   pullPolicy: IfNotPresent
 
 resources:
@@ -25,6 +25,9 @@ parqtel:
   storage:
     blockDurationSecs: 60
     retentionDays: 1
+  logs:
+    blockDurationSecs: 30
+    retentionDays: 1
   telemetry:
     logLevel: "info"
     logFormat: "json"
@@ -32,3 +35,7 @@ parqtel:
 service:
   type: LoadBalancer
   port: 9090
+
+provider:
+  enabled: true
+  port: 6443

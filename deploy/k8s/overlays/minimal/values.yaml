@@ -1,7 +1,7 @@
 # Minimal resource configuration for parqtel
 image:
-  repository: parqtel
-  tag: local
+  repository: ghcr.io/parqtel/parqtel
+  tag: "0.2.0"
   pullPolicy: IfNotPresent
 
 resources:
@@ -18,10 +18,12 @@ storage:
 
 provider:
   enabled: true
-  externalMetrics:
-    enabled: false
+  externalMetrics: false
   port: 6443
 
 parqtel:
   telemetry:
     logLevel: "debug"
+
+service:
+  port: 8080

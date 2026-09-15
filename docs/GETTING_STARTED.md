@@ -10,6 +10,7 @@ The fastest way to get started is using Docker. If you don't have Docker, you ca
 docker run -d \
   --name parqtel \
   -p 8080:8080 \
+  -p 4317:4317 \
   -v parqtel_data:/var/lib/parqtel \
   ghcr.io/parqtel/parqtel-oss:latest
 ```
@@ -69,7 +70,7 @@ Now, let's query it back using the Prometheus-compatible API.
 curl "http://localhost:8080/api/v1/query?query=http_requests_total"
 ```
 
-> Instant queries look back **1 minute**. Points older than that become visible via `/api/v1/query_range` once flushed to a Parquet block (default block duration: 2h, checked every 5s).
+> Instant queries look back **5 minutes** (Prometheus default, configurable via `query.lookback_delta_ns`). Points older than that become visible via `/api/v1/query_range` once flushed to a Parquet block (default block duration: 2h, checked every 5s).
 
 ## 3. Your First Log
 
