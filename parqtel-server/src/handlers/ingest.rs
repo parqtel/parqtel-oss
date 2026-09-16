@@ -36,6 +36,7 @@ pub async fn ingest_proto(State(state): State<AppState>, body: Bytes) -> Respons
                 .ingested_points
                 .fetch_add(count, std::sync::atomic::Ordering::Relaxed);
             state.inner.metrics.rates.record_metrics(count, wire_bytes);
+            crate::otel_sli::record_ingest("metrics", count);
             (StatusCode::OK, Json(json!({ "ingested": count }))).into_response()
         }
         Err(e) => {
@@ -77,6 +78,7 @@ pub async fn ingest_json(State(state): State<AppState>, body: Bytes) -> Response
                 .ingested_points
                 .fetch_add(count, std::sync::atomic::Ordering::Relaxed);
             state.inner.metrics.rates.record_metrics(count, wire_bytes);
+            crate::otel_sli::record_ingest("metrics", count);
             (StatusCode::OK, Json(json!({ "ingested": count }))).into_response()
         }
         Err(e) => {
@@ -118,6 +120,7 @@ pub async fn ingest_logs_proto(State(state): State<AppState>, body: Bytes) -> Re
                 .ingested_points
                 .fetch_add(count, std::sync::atomic::Ordering::Relaxed);
             state.inner.metrics.rates.record_logs(count, wire_bytes);
+            crate::otel_sli::record_ingest("logs", count);
             (StatusCode::OK, Json(json!({ "ingested": count }))).into_response()
         }
         Err(e) => {
@@ -159,6 +162,7 @@ pub async fn ingest_logs_json(State(state): State<AppState>, body: Bytes) -> Res
                 .ingested_points
                 .fetch_add(count, std::sync::atomic::Ordering::Relaxed);
             state.inner.metrics.rates.record_logs(count, wire_bytes);
+            crate::otel_sli::record_ingest("logs", count);
             (StatusCode::OK, Json(json!({ "ingested": count }))).into_response()
         }
         Err(e) => {
@@ -200,6 +204,7 @@ pub async fn ingest_traces_json(State(state): State<AppState>, body: Bytes) -> R
                 .ingested_points
                 .fetch_add(count, std::sync::atomic::Ordering::Relaxed);
             state.inner.metrics.rates.record_spans(count, wire_bytes);
+            crate::otel_sli::record_ingest("traces", count);
             (StatusCode::OK, Json(json!({ "ingested": count }))).into_response()
         }
         Err(e) => {

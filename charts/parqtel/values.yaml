@@ -186,6 +186,17 @@ parqtel:
     logLevel: "info"
     # -- Log format: text or json.
     logFormat: "json"
+    # -- Export Parqtel's own traces + SLI metrics over OTLP/gRPC.
+    otlpEnabled: false
+    # -- OTLP/gRPC endpoint of the collector to export to. The `http://`
+    # scheme selects plaintext gRPC; use `https://` for TLS.
+    otlpEndpoint: "http://127.0.0.1:4317"
+    # -- SLI metric push interval (seconds).
+    exportIntervalSecs: 30
+    # -- Opt-in CPU profiling; restrict debug endpoints with a network policy.
+    profilingEnabled: false
+    # -- CPU sampling frequency (Hz) for the profiler.
+    profilingFrequency: 99
   alerts:
     # -- Directory containing alert rule YAML files.
     rulesDir: "/etc/parqtel/rules"

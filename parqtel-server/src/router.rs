@@ -32,6 +32,14 @@ pub fn build_router(state: AppState) -> Router {
         .route("/", get(|| async { Redirect::to("/ui") }))
         .route("/ui", get(handlers::misc::ui))
         .route("/oas", get(handlers::misc::openapi_spec))
+        // Self-profiling (CPU bottleneck analysis; 404s when disabled)
+        .route("/debug/pprof/profile", get(crate::otel_sli::pprof_profile))
+        .route(
+            "/debug/pprof/flamegraph",
+            get(crate::otel_sli::pprof_flamegraph),
+        )
+        .route("/debug/pprof/summary", get(crate::otel_sli::pprof_summary))
+        .route("/debug/pprof/memory", get(crate::otel_sli::pprof_memory))
         // OTLP Ingestion
         .route("/v1/metrics", post(handlers::ingest::ingest_otlp_metrics))
         .route("/v1/metrics/json", post(handlers::ingest::ingest_json))
@@ -156,5 +164,10 @@ pub fn build_router(state: AppState) -> Router {
             query_config.timeout_secs,
         )))
         .layer(RequestBodyLimitLayer::new(ingest_config.max_body_size))
+        // Outermost layer: records the golden signals (count + latency
+        // histogram) for the whole request, including any inner middleware.
+        .layer(axum::middleware::from_fn(
+            crate::otel_sli::http_sli_middleware,
+        ))
         .with_state(state)
 }

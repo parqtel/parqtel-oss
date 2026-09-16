@@ -19,6 +19,7 @@ use tokio::sync::mpsc;
 mod grpc;
 mod handlers;
 mod metrics;
+mod otel_sli;
 mod router;
 mod saved_searches;
 mod state;
@@ -106,13 +107,29 @@ async fn main() -> anyhow::Result<()> {
     config.validate()?;
 
     // 2. Initialize Telemetry
-    telemetry::init(&config.telemetry.log_level, &config.telemetry.log_format);
+    // Self-observability: leveled console logs, plus OTLP traces + SLI metrics
+    // when `telemetry.otlp_enabled` (flushed on graceful shutdown below).
+    let telemetry_guard = telemetry::init(&config.telemetry);
+    if config.telemetry.otlp_enabled && !telemetry_guard.is_enabled() {
+        eprintln!(
+            "parqtel: telemetry.otlp_enabled=true but the OTLP SDK failed to \
+             initialise — continuing with console logs only"
+        );
+    }
+    otel_sli::configure_profiling(
+        config.telemetry.profiling_enabled,
+        config.telemetry.profiling_frequency,
+    );
 
     tracing::info!(
         version = env!("CARGO_PKG_VERSION"),
         bind = config.server.bind_address,
         data_dir = ?config.storage.data_dir,
         logs_dir = ?config.logs.data_dir,
+        otlp_enabled = config.telemetry.otlp_enabled,
+        otlp_endpoint = %config.telemetry.otlp_endpoint,
+        self_telemetry_active = telemetry_guard.is_enabled(),
+        profiling_enabled = config.telemetry.profiling_enabled,
         "parqtel starting"
     );
 
@@ -130,7 +147,7 @@ async fn main() -> anyhow::Result<()> {
 
     // 4. Handle Subcommands
     match cli.command.unwrap_or(Commands::Serve) {
-        Commands::Serve => run_server(config, index, log_index).await?,
+        Commands::Serve => run_server(config, index, log_index, telemetry_guard).await?,
         Commands::Compact => run_compact(config, index, log_index).await?,
         Commands::Inspect => run_inspect(index, log_index).await?,
         Commands::Export {
@@ -148,6 +165,7 @@ async fn run_server(
     config: Config,
     index: Arc<tokio::sync::RwLock<BlockIndex>>,
     log_index: Arc<tokio::sync::RwLock<BlockIndex>>,
+    telemetry_guard: telemetry::TelemetryGuard,
 ) -> anyhow::Result<()> {
     // Prepare UI assets
     let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
@@ -298,23 +316,81 @@ async fn run_server(
         }
     });
 
-    // Background flush task
+    // Background flush task. Each tick also publishes the SLI saturation
+    // gauges (buffer occupancy, RSS) so memory pressure is visible *before* the
+    // OOM killer arrives rather than only in a post-mortem.
     let state_clone = state.clone();
     let flush_task = tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
         loop {
             interval.tick().await;
-            let _ = state_clone.inner.ingestion_service.check_and_flush().await;
-            let _ = state_clone
+
+            let buffer = state_clone.inner.query_executor.memory_buffer();
+            let (before_metrics, before_logs, before_spans) = buffer.stats().await;
+
+            let started = std::time::Instant::now();
+            match state_clone.inner.ingestion_service.check_and_flush().await {
+                Ok(flushed) => {
+                    otel_sli::record_flush("metrics", started.elapsed().as_secs_f64(), Ok(flushed));
+                    if flushed {
+                        let (now, _, _) = buffer.stats().await;
+                        otel_sli::record_flush_rows(
+                            "metrics",
+                            before_metrics.saturating_sub(now) as u64,
+                        );
+                    }
+                }
+                Err(e) => {
+                    otel_sli::record_flush("metrics", started.elapsed().as_secs_f64(), Err(()));
+                    tracing::error!(signal = "metrics", error = %e, "buffer flush failed");
+                }
+            }
+
+            let started = std::time::Instant::now();
+            match state_clone
                 .inner
                 .log_ingestion_service
                 .check_and_flush()
-                .await;
-            let _ = state_clone
+                .await
+            {
+                Ok(flushed) => {
+                    otel_sli::record_flush("logs", started.elapsed().as_secs_f64(), Ok(flushed));
+                    if flushed {
+                        let (_, now, _) = buffer.stats().await;
+                        otel_sli::record_flush_rows("logs", before_logs.saturating_sub(now) as u64);
+                    }
+                }
+                Err(e) => {
+                    otel_sli::record_flush("logs", started.elapsed().as_secs_f64(), Err(()));
+                    tracing::error!(signal = "logs", error = %e, "buffer flush failed");
+                }
+            }
+
+            let started = std::time::Instant::now();
+            match state_clone
                 .inner
                 .trace_ingestion_service
                 .check_and_flush()
-                .await;
+                .await
+            {
+                Ok(flushed) => {
+                    otel_sli::record_flush("traces", started.elapsed().as_secs_f64(), Ok(flushed));
+                    if flushed {
+                        let (_, _, now) = buffer.stats().await;
+                        otel_sli::record_flush_rows(
+                            "traces",
+                            before_spans.saturating_sub(now) as u64,
+                        );
+                    }
+                }
+                Err(e) => {
+                    otel_sli::record_flush("traces", started.elapsed().as_secs_f64(), Err(()));
+                    tracing::error!(signal = "traces", error = %e, "buffer flush failed");
+                }
+            }
+
+            let (metrics, logs, spans) = buffer.stats().await;
+            otel_sli::record_gauges(metrics as u64, logs as u64, spans as u64);
         }
     });
 
@@ -451,6 +527,10 @@ async fn run_server(
     index.read().await.save()?;
     log_index.read().await.save()?;
     trace_index.read().await.save()?;
+
+    // Flush any buffered OTLP spans/metrics before the process exits so the
+    // final self-telemetry batch is not silently dropped.
+    telemetry_guard.shutdown();
     tracing::info!("Shutdown complete");
 
     Ok(())

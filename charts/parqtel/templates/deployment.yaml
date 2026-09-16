@@ -74,6 +74,22 @@ spec:
             # chart-only deploys.
             - name: MALLOC_ARENA_MAX
               value: {{ .Values.parqtel.mallocArenaMax | default 2 | quote }}
+            # Downward-API identity, stamped onto exported OTLP telemetry as
+            # `k8s.pod.name` / `k8s.namespace.name` / `k8s.node.name` resource
+            # attributes (see parqtel-server/src/telemetry.rs). Also gives the
+            # JSON logs a stable pod identity without a log shipper sidecar.
+            - name: K8S_POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: K8S_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: K8S_NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
             {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
