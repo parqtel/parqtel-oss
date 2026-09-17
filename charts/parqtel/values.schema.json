@@ -513,6 +513,25 @@
                 "text",
                 "json"
               ]
+            },
+            "otlpEnabled": {
+              "type": "boolean"
+            },
+            "otlpEndpoint": {
+              "type": "string",
+              "minLength": 1
+            },
+            "exportIntervalSecs": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "profilingEnabled": {
+              "type": "boolean"
+            },
+            "profilingFrequency": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000
             }
           }
         },

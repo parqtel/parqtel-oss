@@ -68,6 +68,11 @@ data:
     [telemetry]
     log_level = {{ .Values.parqtel.telemetry.logLevel | quote }}
     log_format = {{ .Values.parqtel.telemetry.logFormat | quote }}
+    otlp_enabled = {{ .Values.parqtel.telemetry.otlpEnabled }}
+    otlp_endpoint = {{ .Values.parqtel.telemetry.otlpEndpoint | quote }}
+    export_interval_secs = {{ .Values.parqtel.telemetry.exportIntervalSecs | int }}
+    profiling_enabled = {{ .Values.parqtel.telemetry.profilingEnabled }}
+    profiling_frequency = {{ .Values.parqtel.telemetry.profilingFrequency | int }}
 
     [alerts]
     rules_dir = {{ .Values.parqtel.alerts.rulesDir | quote }}

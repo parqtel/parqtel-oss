@@ -59,6 +59,26 @@ chrono = { version = "0.4", features = ["serde"] }
 ulid = { version = "1", features = ["serde"] }
 notify = { version = "6", features = ["macos_fsevent"] }
 async-trait = "0.1"
+# OpenTelemetry SDK for self-instrumentation (traces + SLI metrics over OTLP/gRPC).
+# grpc-tonic keeps the exporter on the same stack as the ingest server.
+opentelemetry = "0.30"
+opentelemetry_sdk = { version = "0.30", features = ["rt-tokio"] }
+# `default-features = false` drops the OTLP `trace`/`metrics` signals along with
+# the default HTTP client — they must be re-enabled explicitly or the
+# `SpanExporter`/`MetricExporter` types do not exist.
+opentelemetry-otlp = { version = "0.30", default-features = false, features = [
+    "grpc-tonic",
+    "trace",
+    "metrics",
+] }
+tracing-opentelemetry = "0.31"
+# On-demand CPU profiling. `prost-codec` serves the Google pprof protobuf
+# profile consumed by `go tool pprof` (which renders flamegraphs itself, e.g.
+# `go tool pprof -http=:8081 .../debug/pprof/profile?seconds=30`). The shipped
+# build.rs uses a pre-generated prost file, so no protoc is needed. Deliberately
+# NOT using `protobuf-codec` (pulls vulnerable protobuf 2.x — RUSTSEC-2024-0437)
+# or `flamegraph` (pulls inferno/quick-xml 0.26 — RUSTSEC-2026-0194/0195).
+pprof = { version = "0.14", features = ["prost-codec"] }
 futures = "0.3"
 regex = "1"
 reqwest = { version = "0.12.28", features = ["json", "rustls-tls"], default-features = false }

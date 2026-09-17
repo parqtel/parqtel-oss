@@ -166,6 +166,7 @@ fn render_range_result(result: parqtel_query::QueryResult) -> Response {
 }
 
 /// Handler for GET /api/v1/query (Instant).
+/// Handler for GET /api/v1/query (instant).
 pub async fn query_instant(
     State(state): State<AppState>,
     params: Result<Query<InstantQuery>, QueryRejection>,

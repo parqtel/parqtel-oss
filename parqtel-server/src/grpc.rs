@@ -84,6 +84,7 @@ impl MetricsService for OtlpGrpcService {
                     .metrics
                     .rates
                     .record_metrics(count, wire_bytes);
+                crate::otel_sli::record_ingest("metrics", count);
                 Ok(Response::new(ExportMetricsServiceResponse {
                     partial_success: None,
                 }))
@@ -128,6 +129,7 @@ impl LogsService for OtlpGrpcService {
                     .metrics
                     .rates
                     .record_logs(count, wire_bytes);
+                crate::otel_sli::record_ingest("logs", count);
                 Ok(Response::new(ExportLogsServiceResponse {
                     partial_success: None,
                 }))
@@ -172,6 +174,7 @@ impl TraceService for OtlpGrpcService {
                     .metrics
                     .rates
                     .record_spans(count, wire_bytes);
+                crate::otel_sli::record_ingest("traces", count);
                 Ok(Response::new(ExportTraceServiceResponse {
                     partial_success: None,
                 }))
