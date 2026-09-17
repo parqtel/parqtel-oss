@@ -393,6 +393,7 @@ async fn capture(seconds: u64) -> Result<pprof::Report, (StatusCode, String)> {
 
 /// GET /debug/pprof/profile — Google pprof protobuf, consumable directly by
 /// `go tool pprof` (e.g. `go tool pprof -http=:8081 'http://host/debug/pprof/profile?seconds=30'`).
+/// Flamegraph/flame views are rendered client-side by pprof itself.
 pub async fn pprof_profile(Query(params): Query<ProfileParams>) -> Response {
     use pprof::protos::Message as _;
 
@@ -410,49 +411,17 @@ pub async fn pprof_profile(Query(params): Query<ProfileParams>) -> Response {
                 .into_response()
         }
     };
-    match profile.write_to_bytes() {
-        Ok(bytes) => (
-            [
-                (header::CONTENT_TYPE, "application/octet-stream"),
-                (
-                    header::CONTENT_DISPOSITION,
-                    "attachment; filename=\"parqtel-cpu.pb\"",
-                ),
-            ],
-            bytes,
-        )
-            .into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("failed to serialise pprof profile: {e}"),
-        )
-            .into_response(),
-    }
-}
-
-/// GET /debug/pprof/flamegraph — folded-stack SVG flamegraph of the window.
-pub async fn pprof_flamegraph(Query(params): Query<ProfileParams>) -> Response {
-    let report = match capture(params.seconds.unwrap_or(DEFAULT_PROFILE_SECS)).await {
-        Ok(r) => r,
-        Err((status, msg)) => return (status, msg).into_response(),
-    };
-    let mut svg: Vec<u8> = Vec::new();
-    if let Err(e) = report.flamegraph(&mut svg) {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("failed to render flamegraph: {e}"),
-        )
-            .into_response();
-    }
+    // prost `Message`: serialises to the Google pprof protobuf wire format
+    // (infallible — `encode_to_vec` cannot fail).
     (
         [
-            (header::CONTENT_TYPE, "image/svg+xml; charset=utf-8"),
+            (header::CONTENT_TYPE, "application/octet-stream"),
             (
                 header::CONTENT_DISPOSITION,
-                "inline; filename=\"parqtel-flamegraph.svg\"",
+                "attachment; filename=\"parqtel-cpu.pb\"",
             ),
         ],
-        svg,
+        profile.encode_to_vec(),
     )
         .into_response()
 }

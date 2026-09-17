@@ -32,12 +32,9 @@ pub fn build_router(state: AppState) -> Router {
         .route("/", get(|| async { Redirect::to("/ui") }))
         .route("/ui", get(handlers::misc::ui))
         .route("/oas", get(handlers::misc::openapi_spec))
-        // Self-profiling (CPU bottleneck analysis; 404s when disabled)
+        // Self-profiling (CPU bottleneck analysis; 404s when disabled).
+        // Flamegraph views: `go tool pprof -http=:0` on the protobuf profile.
         .route("/debug/pprof/profile", get(crate::otel_sli::pprof_profile))
-        .route(
-            "/debug/pprof/flamegraph",
-            get(crate::otel_sli::pprof_flamegraph),
-        )
         .route("/debug/pprof/summary", get(crate::otel_sli::pprof_summary))
         .route("/debug/pprof/memory", get(crate::otel_sli::pprof_memory))
         // OTLP Ingestion

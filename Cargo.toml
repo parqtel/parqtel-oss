@@ -72,10 +72,13 @@ opentelemetry-otlp = { version = "0.30", default-features = false, features = [
     "metrics",
 ] }
 tracing-opentelemetry = "0.31"
-# On-demand CPU profiling: `flamegraph` renders SVG, `protobuf-codec` emits the
-# Google pprof profile consumed by `go tool pprof` (pure-Rust codegen, so this
-# does not add a protoc build dependency).
-pprof = { version = "0.14", features = ["flamegraph", "protobuf-codec"] }
+# On-demand CPU profiling. `prost-codec` serves the Google pprof protobuf
+# profile consumed by `go tool pprof` (which renders flamegraphs itself, e.g.
+# `go tool pprof -http=:8081 .../debug/pprof/profile?seconds=30`). The shipped
+# build.rs uses a pre-generated prost file, so no protoc is needed. Deliberately
+# NOT using `protobuf-codec` (pulls vulnerable protobuf 2.x — RUSTSEC-2024-0437)
+# or `flamegraph` (pulls inferno/quick-xml 0.26 — RUSTSEC-2026-0194/0195).
+pprof = { version = "0.14", features = ["prost-codec"] }
 futures = "0.3"
 regex = "1"
 reqwest = { version = "0.12.28", features = ["json", "rustls-tls"], default-features = false }
