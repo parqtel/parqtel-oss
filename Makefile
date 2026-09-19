@@ -2,7 +2,7 @@
         mcp-image mcp-up mcp-smoke \
         local-up local-down local-purge local-logs local-ps local-rebuild \
         local-verify test-api test-aggregations test-functions test-builder \
-        test-builder-ui tools \
+        test-builder-ui test-presets-static test-alert-presets tools \
         run inspect load load-test perf-audit clean \
         k8s-install k8s-validate k8s-sre-validate k8s-undeploy \
         local-k3d-up local-k3d-down local-k3d-status
@@ -211,6 +211,12 @@ test-builder: ## E2E validation of every UI query-builder PromQL shape (requires
 
 test-builder-ui: ## Headless-browser E2E of the builder UI incl. high-card autocomplete (requires local-up, node, google-chrome)
 	@./scripts/test_builder_ui.sh http://localhost:$(PARQTEL_PORT)
+
+test-presets-static: ## Validate every preset alert rule parses + its query is executable (CI-safe, no server)
+	@cargo test -p parqtel-alert --test preset_rules
+
+test-alert-presets: ## End-to-end: preset rules fire on threshold crossings and recover (builds binary if needed; curl, jq, python3)
+	@./scripts/test_alert_presets.sh
 
 # ─── Load testing ──────────────────────────────────────────────────────────────
 load: ## Send 10,000 synthetic data points to localhost:9090

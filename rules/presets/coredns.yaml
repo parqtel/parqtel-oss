@@ -1,0 +1,131 @@
+# Preset alert pack: CoreDNS (cluster DNS)
+#
+# Source metrics: CoreDNS's prometheus exporter (:9153), scraped by the
+# OpenTelemetry Collector's prometheus receiver and exported to Parqtel
+# over OTLP. Required metric families:
+#   coredns_dns_responses_total{rcode=...}   (counter)
+#   coredns_dns_requests_total{proto=...}    (counter)
+#   coredns_cache_hits_total / coredns_cache_misses_total (counters)
+#   coredns_panics_total                     (counter)
+#
+# rcode values: NOERROR, NXDOMAIN, SERVFAIL, REFUSED. SERVFAIL means the
+# server failed to answer; REFUSED means a policy deny; NXDOMAIN is a client
+# typo, so it is intentionally not alerted here.
+
+---
+id: coredns-servfail-responses
+name: CoreDNS SERVFAIL responses
+signal: metrics
+query: 'increase(coredns_dns_responses_total{rcode="SERVFAIL"}[5m])'
+condition:
+  type: threshold
+  operator: ">"
+  value: 0
+  for_duration_secs: 300
+severity: critical
+labels:
+  component: coredns
+  category: availability
+annotations:
+  summary: "CoreDNS returned SERVFAIL in the last 5 minutes"
+  description: >-
+    coredns_dns_responses_total{rcode="SERVFAIL"} increased. The DNS server
+    itself failed to resolve — upstream connectivity, zone file errors, or
+    an overloaded cache are the usual causes. NXDOMAIN is excluded: it means
+    the name genuinely does not exist.
+  runbook: "https://coredns.io/plugins/errors/"
+enabled: true
+
+---
+id: coredns-refused-rate-high
+name: CoreDNS REFUSED rate high
+signal: metrics
+query: 'increase(coredns_dns_responses_total{rcode="REFUSED"}[5m])'
+condition:
+  type: threshold
+  operator: ">"
+  value: 100
+  for_duration_secs: 300
+severity: warning
+labels:
+  component: coredns
+  category: security
+annotations:
+  summary: "CoreDNS refused more than 100 queries in 5 minutes"
+  description: >-
+    REFUSED means a policy deny (ACL, view, or a blocked domain). A sudden
+    spike often indicates a misconfigured client namespace or an application
+    querying an internal zone it should not. Tune the count to your traffic.
+  runbook: "https://coredns.io/plugins/acl/"
+enabled: true
+
+---
+id: coredns-panic
+name: CoreDNS panic
+signal: metrics
+query: 'increase(coredns_panics_total[5m])'
+condition:
+  type: threshold
+  operator: ">"
+  value: 0
+  for_duration_secs: 0
+severity: critical
+labels:
+  component: coredns
+  category: availability
+annotations:
+  summary: "CoreDNS panicked"
+  description: >-
+    A Go panic occurred inside CoreDNS. The process recovers but the request
+    was dropped — check CoreDNS logs for the stack trace and the offending
+    plugin.
+  runbook: "https://coredns.io/manual/toc/"
+enabled: true
+
+---
+id: coredns-cache-miss-rate-high
+name: CoreDNS cache miss rate high
+signal: metrics
+query: 'rate(coredns_cache_misses_total[5m])'
+condition:
+  type: threshold
+  operator: ">"
+  value: 20
+  for_duration_secs: 300
+severity: warning
+labels:
+  component: coredns
+  category: performance
+annotations:
+  summary: "CoreDNS cache misses above 20/sec for 5 minutes"
+  description: >-
+    Sustained cache misses raise upstream query load and DNS latency. Verify
+    the cache plugin's TTL settings and that upstream resolvers are healthy.
+    The threshold is absolute misses/sec (a ratio cannot be expressed in a
+    single-selector rule) — tune to your query volume.
+  runbook: "https://coredns.io/plugins/cache/"
+enabled: true
+
+---
+id: coredns-traffic-drop
+name: CoreDNS query traffic dropped
+signal: metrics
+query: 'rate(coredns_dns_requests_total[5m])'
+condition:
+  type: threshold
+  operator: "<"
+  value: 1
+  for_duration_secs: 600
+severity: warning
+labels:
+  component: coredns
+  category: availability
+annotations:
+  summary: "CoreDNS serving fewer than 1 query/sec for 10 minutes"
+  description: >-
+    DNS traffic has gone quiet. This may be legitimate off-hours lull, so it
+    is a warning, not a page. Note the limitation: if CoreDNS stops being
+    scraped entirely (collector or target down), no series exist and this
+    rule cannot fire — monitor the collector's own uptime separately.
+  runbook: "https://coredns.io/manual/toc/"
+enabled: true

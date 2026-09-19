@@ -1,0 +1,156 @@
+# Preset alert pack: Parqtel self-monitoring
+#
+# Source metrics: Parqtel's own OpenTelemetry self-telemetry (enabled with
+# telemetry.otlp_enabled, endpoint telemetry.otlp_endpoint). All metrics
+# below are exported by parqtel itself and need no external collector:
+#   parqtel_ingest_gap_secs        (gauge — seconds since last ingested point)
+#   parqtel_ingested_points_total  (counter)
+#   parqtel_query_errors_total     (counter)
+#   parqtel_query_duration_seconds (histogram, _sum usable via rate)
+#   parqtel_process_rss_bytes      (gauge)
+#   parqtel_buffer_points          (gauge — points waiting for flush)
+#   parqtel_storage_blocks         (gauge)
+#
+# Point this pack at a second Parqtel instance (or a loopback collector) so
+# an instance monitors itself or a peer.
+
+---
+id: parqtel-ingest-stalled
+name: Parqtel ingest stalled
+signal: metrics
+query: 'parqtel_ingest_gap_secs'
+condition:
+  type: threshold
+  operator: ">"
+  value: 120
+  for_duration_secs: 120
+severity: critical
+labels:
+  component: parqtel
+  category: ingestion
+annotations:
+  summary: "No data ingested for more than 2 minutes"
+  description: >-
+    parqtel_ingest_gap_secs (seconds since the last ingested point) is above
+    120. Either every producer stopped shipping, or the collector in front of
+    this instance is down. This is the canonical "observability black hole"
+    alert — fire it before you lose visibility into everything else.
+  runbook: "https://github.com/parqtel/parqtel-oss/blob/main/docs/TROUBLESHOOTING.md"
+enabled: true
+
+---
+id: parqtel-query-error-rate
+name: Parqtel query errors
+signal: metrics
+query: 'rate(parqtel_query_errors_total[5m])'
+condition:
+  type: threshold
+  operator: ">"
+  value: 0.05
+  for_duration_secs: 300
+severity: warning
+labels:
+  component: parqtel
+  category: query
+annotations:
+  summary: "Query error rate above 0.05/sec for 5 minutes"
+  description: >-
+    Queries are failing repeatedly. Check /api/v1/stats for storage health and
+    look for malformed queries from dashboards or recording rules hammering
+    the API.
+  runbook: "https://github.com/parqtel/parqtel-oss/blob/main/docs/TROUBLESHOOTING.md"
+enabled: true
+
+---
+id: parqtel-memory-high
+name: Parqtel RSS high
+signal: metrics
+query: 'parqtel_process_rss_bytes'
+condition:
+  type: threshold
+  operator: ">"
+  value: 900000000
+  for_duration_secs: 300
+severity: warning
+labels:
+  component: parqtel
+  category: capacity
+annotations:
+  summary: "Parqtel RSS above 900MB for 5 minutes"
+  description: >-
+    Resident set is approaching the container memory limit. Set the threshold
+    to ~90% of the pod's memory request (chart value resources.requests.memory
+    / the container limit). Sustained growth without an ingest spike suggests
+    a buffer-drain or compaction problem.
+  runbook: "https://github.com/parqtel/parqtel-oss/blob/main/docs/TROUBLESHOOTING.md"
+enabled: true
+
+---
+id: parqtel-buffer-backlog
+name: Parqtel buffer backlog growing
+signal: metrics
+query: 'parqtel_buffer_points'
+condition:
+  type: threshold
+  operator: ">"
+  value: 100000
+  for_duration_secs: 300
+severity: warning
+labels:
+  component: parqtel
+  category: ingestion
+annotations:
+  summary: "More than 100k points buffered awaiting flush for 5 minutes"
+  description: >-
+    The in-memory buffer is not draining. Flush throughput is below ingest
+    rate — check disk latency/IOPS on the data volume and whether
+    storage.block_duration_secs / max_rows_per_block are wildly undersized
+    for the load.
+  runbook: "https://github.com/parqtel/parqtel-oss/blob/main/docs/PERFORMANCE_SIZING.md"
+enabled: true
+
+---
+id: parqtel-flush-oversubscribed
+name: Parqtel spending too long flushing
+signal: metrics
+query: 'rate(parqtel_flush_duration_seconds_sum[5m])'
+condition:
+  type: threshold
+  operator: ">"
+  value: 0.5
+  for_duration_secs: 300
+severity: warning
+labels:
+  component: parqtel
+  category: ingestion
+annotations:
+  summary: "Parqtel spending more than half its time flushing"
+  description: >-
+    rate() of the flush duration sum yields seconds-of-flush per second —
+    above 0.5 means flushing consumes over half of wall-clock time. The
+    encoder/disk is the bottleneck; enlarge blocks, faster disk, or shard.
+  runbook: "https://github.com/parqtel/parqtel-oss/blob/main/docs/PERFORMANCE_SIZING.md"
+enabled: true
+
+---
+id: parqtel-compaction-lag
+name: Parqtel block count high
+signal: metrics
+query: 'parqtel_storage_blocks'
+condition:
+  type: threshold
+  operator: ">"
+  value: 150
+  for_duration_secs: 600
+severity: warning
+labels:
+  component: parqtel
+  category: storage
+annotations:
+  summary: "More than 150 un-compacted blocks for 10 minutes"
+  description: >-
+    Blocks are accumulating faster than compaction can merge them, which
+    degrades range-query performance. Check storage.compaction_interval_secs
+    and whether the compaction task is erroring in the logs.
+  runbook: "https://github.com/parqtel/parqtel-oss/blob/main/docs/STORAGE_BLOCK_COMPACTION_PLAN.md"
+enabled: true

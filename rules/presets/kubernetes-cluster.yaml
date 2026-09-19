@@ -1,0 +1,267 @@
+# Preset alert pack: Kubernetes cluster & node health
+#
+# Source metrics: kube-state-metrics + kubelet, scraped by the OpenTelemetry
+# Collector's prometheus receiver and exported to Parqtel over OTLP.
+# Required metric families:
+#   kube_pod_container_status_waiting_reason   (kube-state-metrics)
+#   kube_pod_container_status_restarts_total   (kube-state-metrics)
+#   kube_pod_status_phase                      (kube-state-metrics)
+#   kube_node_status_condition                 (kube-state-metrics)
+#   kube_deployment_status_replicas_unavailable (kube-state-metrics)
+#   kubelet_volume_stats_utilization           (kubelet)
+#   k8s.node.cpu.utilization                   (OTel k8sclusterreceiver, 0-1 ratio)
+#   k8s.node.memory.utilization                (OTel k8sclusterreceiver, 0-1 ratio)
+#
+# Tune thresholds to your capacity. CPU/memory utilization metrics are ratios
+# (0.0-1.0); the byte-based fallbacks are noted in each rule's description.
+
+---
+id: k8s-node-cpu-saturation-warning
+name: K8s node CPU utilization high
+signal: metrics
+query: 'k8s.node.cpu.utilization'
+condition:
+  type: threshold
+  operator: ">"
+  value: 0.80
+  for_duration_secs: 600
+severity: warning
+labels:
+  component: kubernetes
+  category: capacity
+annotations:
+  summary: "Node CPU utilization above 80% for 10 minutes"
+  description: >-
+    k8s.node.cpu.utilization (0-1 ratio) has exceeded 0.80 for 10 minutes.
+    If your nodes are autoscaled, verify the cluster autoscaler is making
+    progress. Fallback when only byte/cores metrics are collected:
+    alert on k8s.node.cpu.usage (cores) against node capacity.
+  runbook: "https://kubernetes.io/docs/concepts/architecture/nodes/"
+enabled: true
+
+---
+id: k8s-node-cpu-saturation-critical
+name: K8s node CPU utilization critical
+signal: metrics
+query: 'k8s.node.cpu.utilization'
+condition:
+  type: threshold
+  operator: ">"
+  value: 0.92
+  for_duration_secs: 120
+severity: critical
+labels:
+  component: kubernetes
+  category: capacity
+annotations:
+  summary: "Node CPU utilization above 92% for 2 minutes"
+  description: >-
+    Sustained CPU saturation. Latency-sensitive workloads are at risk of
+    throttling; check for runaway pods (topk by CPU) and consider cordoning
+    the node or raising the instance class.
+  runbook: "https://kubernetes.io/docs/concepts/architecture/nodes/"
+enabled: true
+
+---
+id: k8s-node-memory-saturation-warning
+name: K8s node memory utilization high
+signal: metrics
+query: 'k8s.node.memory.utilization'
+condition:
+  type: threshold
+  operator: ">"
+  value: 0.75
+  for_duration_secs: 600
+severity: warning
+labels:
+  component: kubernetes
+  category: capacity
+annotations:
+  summary: "Node memory utilization above 75% for 10 minutes"
+  description: >-
+    k8s.node.memory.utilization (0-1 ratio) exceeded 0.75. If your collector
+    only exports byte gauges, switch this query to k8s.node.memory.working_set
+    and set value to ~75% of the node's memory in bytes.
+  runbook: "https://kubernetes.io/docs/concepts/architecture/nodes/"
+enabled: true
+
+---
+id: k8s-node-memory-saturation-critical
+name: K8s node memory utilization critical
+signal: metrics
+query: 'k8s.node.memory.utilization'
+condition:
+  type: threshold
+  operator: ">"
+  value: 0.88
+  for_duration_secs: 120
+severity: critical
+labels:
+  component: kubernetes
+  category: capacity
+annotations:
+  summary: "Node memory utilization above 88% for 2 minutes"
+  description: >-
+    Approaching OOM-eviction territory. The kubelet may start evicting pods;
+    identify the top memory consumers before it does.
+  runbook: "https://kubernetes.io/docs/concepts/architecture/nodes/"
+enabled: true
+
+---
+id: k8s-node-not-ready
+name: K8s node not Ready
+signal: metrics
+query: 'kube_node_status_condition{condition="Ready",status="true"}'
+condition:
+  type: threshold
+  operator: "=="
+  value: 0
+  for_duration_secs: 180
+severity: critical
+labels:
+  component: kubernetes
+  category: availability
+annotations:
+  summary: "Node has been NotReady for 3 minutes"
+  description: >-
+    kube_node_status_condition{condition="Ready",status="true"} is 0. The node
+    stopped passing the Ready check — check kubelet logs, network plugin, and
+    container runtime on the affected node. The label set carries node and
+    k8s_node_name for routing.
+  runbook: "https://kubernetes.io/docs/reference/node/#status"
+enabled: true
+
+---
+id: k8s-pod-crashloopbackoff
+name: Pod in CrashLoopBackOff
+signal: metrics
+query: 'kube_pod_container_status_waiting_reason{reason="CrashLoopBackOff"}'
+condition:
+  type: threshold
+  operator: ">"
+  value: 0
+  for_duration_secs: 300
+severity: critical
+labels:
+  component: kubernetes
+  category: availability
+annotations:
+  summary: "Container stuck in CrashLoopBackOff for 5 minutes"
+  description: >-
+    The container is failing and restarting repeatedly. Inspect the pod's
+    logs and events; common causes are bad config, missing secrets, failed
+    migrations, or an unreadiness probe pointed at the wrong port.
+  runbook: "https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle/#restartpolicy"
+enabled: true
+
+---
+id: k8s-pod-high-restart-rate
+name: Pod restarting repeatedly
+signal: metrics
+query: 'increase(kube_pod_container_status_restarts_total[15m])'
+condition:
+  type: threshold
+  operator: ">"
+  value: 3
+  for_duration_secs: 0
+severity: warning
+labels:
+  component: kubernetes
+  category: availability
+annotations:
+  summary: "Container restarted more than 3 times in 15 minutes"
+  description: >-
+    Count of container restarts over the trailing 15 minutes. Short-lived
+    restart loops that self-heal are often noisy; this rule uses a window
+    count rather than a rate so occasional churn does not page.
+  runbook: "https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle/#restartpolicy"
+enabled: true
+
+---
+id: k8s-deployment-replicas-unavailable
+name: Deployment replicas unavailable
+signal: metrics
+query: 'kube_deployment_status_replicas_unavailable'
+condition:
+  type: threshold
+  operator: ">"
+  value: 0
+  for_duration_secs: 300
+severity: warning
+labels:
+  component: kubernetes
+  category: availability
+annotations:
+  summary: "Deployment has unavailable replicas for 5 minutes"
+  description: >-
+    kube_deployment_status_replicas_unavailable > 0 means desired != available
+    (rollout stuck, quota exhausted, or pods pending). Check rollout status
+    and cluster resource quota.
+  runbook: "https://kubernetes.io/docs/concepts/workloads/controllers/deployment/"
+enabled: true
+
+---
+id: k8s-pod-stuck-pending
+name: Pod stuck in Pending
+signal: metrics
+query: 'kube_pod_status_phase{phase="Pending"}'
+condition:
+  type: threshold
+  operator: ">"
+  value: 0
+  for_duration_secs: 600
+severity: warning
+labels:
+  component: kubernetes
+  category: availability
+annotations:
+  summary: "Pod Pending for 10 minutes"
+  description: >-
+    Unschedulable or waiting on a dependency (PVC, configmap, secret, or an
+    absent node). Review pod events with kubectl describe.
+  runbook: "https://kubernetes.io/docs/concepts/scheduling-eviction/pod-scheduling/"
+enabled: true
+
+---
+id: k8s-pvc-usage-warning
+name: Persistent volume nearly full
+signal: metrics
+query: 'kubelet_volume_stats_utilization'
+condition:
+  type: threshold
+  operator: ">"
+  value: 0.85
+  for_duration_secs: 600
+severity: warning
+labels:
+  component: kubernetes
+  category: capacity
+annotations:
+  summary: "Volume usage above 85% for 10 minutes"
+  description: >-
+    kubelet_volume_stats_utilization is a 0-1 ratio of used/capacity. Plan
+    volume expansion or cleanup before the volume fills.
+  runbook: "https://kubernetes.io/docs/concepts/storage/persistent-volumes/"
+enabled: true
+
+---
+id: k8s-pvc-usage-critical
+name: Persistent volume critical
+signal: metrics
+query: 'kubelet_volume_stats_utilization'
+condition:
+  type: threshold
+  operator: ">"
+  value: 0.95
+  for_duration_secs: 120
+severity: critical
+labels:
+  component: kubernetes
+  category: capacity
+annotations:
+  summary: "Volume usage above 95% for 2 minutes"
+  description: >-
+    The volume is about to fill. Writes will start failing. Expand the PVC or
+    delete data now.
+  runbook: "https://kubernetes.io/docs/concepts/storage/persistent-volumes/"
+enabled: true

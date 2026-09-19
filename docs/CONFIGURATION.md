@@ -320,24 +320,50 @@ Commands:
 
 ## Alert Rule YAML Schema
 
-Alert rules are defined in YAML files under the `rules_dir`:
+Alert rules are defined in YAML files under the `rules_dir` (one rule per
+`---` document; files are loaded non-recursively at startup):
 
 ```yaml
-name: http-error-rate
-type: static                    # static | anomaly
-severity: warning               # critical | warning | info
-interval_secs: 60
-for_secs: 300                   # Duration before transitioning to Firing
-expression: "rate(http_errors_total[5m]) / rate(http_requests_total[5m])"
-threshold:
-  operator: ">"
-  value: 0.05
+id: http-error-rate-high          # unique, stable — used as the alert instance prefix
+name: HTTP error rate high
+signal: metrics                   # metrics | logs | traces (default: metrics)
+query: "rate(http_errors_total[5m])"   # PromQL selector + optional aggregation
+condition:
+  type: threshold                 # only "threshold" is implemented
+  operator: ">"                  # > >= < <= == !=
+  value: 0.5                     # errors/sec — see tuning note below
+  for_duration_secs: 300         # must hold this long before Pending → Firing
+severity: critical               # critical | warning | info
 labels:
   team: platform
 annotations:
-  summary: "HTTP error rate above 5%"
+  summary: "HTTP error rate above 0.5/sec"
+  description: "Tune to your traffic profile."
   runbook: "https://wiki.example.com/runbooks/http-errors"
+enabled: true
+noise_suppression_threshold: 0.7  # 0.0-1.0, higher = more suppression
 ```
+
+The evaluation loop parses each enabled rule's `query` every 15s, executes it
+over a trailing 5-minute window, and thresholds the **last sample of every
+result series** — one alert instance per series, fingerprinted by `id` + the
+series' labels. Two consequences for the queries you can write:
+
+1. **No cross-metric arithmetic** — a rule query is a single selector with an
+   optional aggregation (`rate`, `increase`, `avg`/`sum`/`min`/`max`/`count`
+   with `by`/`without`, `topk`/`bottomk`, `irate`, `delta`, `round`,
+   `abs`/`ceil`/`floor`, `clamp_min`/`clamp_max`, `label_replace`). Ratios
+   such as `errors / requests` cannot be expressed — threshold absolute rates
+   or window counts instead.
+2. **`histogram_quantile` is unavailable in alert rules** — the alert loop
+   uses the query plan path, not the AST engine that powers interactive
+   queries. Use `_sum` rate proxies (e.g. seconds-of-flush per second) for
+   latency-style rules.
+
+**Presets.** `rules/presets/` ships ready-made packs for Kubernetes cluster
+health, CoreDNS, external-secrets, service RED health, and Parqtel
+self-monitoring — see [its README](../rules/presets/README.md). The presets
+directory is not scanned by default; copy the packs you want into `rules_dir`.
 
 ## Recording Rule YAML Schema
 
