@@ -138,7 +138,7 @@ curl http://localhost:8080/metrics | grep parqtel_ingest
 
 The console includes:
 - **Deep-linkable URLs** — the query, time range, and view are encoded in the page URL; share it to restore the exact state
-- **Metrics Builder** — toggle between guided query building (metric + label filters with live PromQL preview) and raw Code mode
+- **Metrics Builder** — a 92-function catalog covering the full engine surface, with typed argument editors, `by`/`without` grouping, window-function wrapping, and a live PromQL preview; label filters use bounded high-cardinality autocomplete (top-10 recent values with server-side prefix match). Toggle to Code mode to edit the PromQL directly — opening the builder from a typed query reverse-parses it, preserving the metric and its filters
 - **Log facets** — click "Fields" in the Logs view to browse field values and inject filters
 - **Trace browse list** — grouped by trace with root service, duration, and error counts; click a trace for the waterfall
 - **Alerts** — stream with severity/status filters, Evidence tab (metric chart + correlated logs), and an inline rule editor

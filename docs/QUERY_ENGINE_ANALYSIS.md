@@ -3,6 +3,9 @@
 **Author:** Observability Specialist
 **Status:** Analysis + Gap-Closure Plan
 **Date:** September 2026
+
+> **Status note:** this analysis reflects the query engine as of September 2026. Several gaps it identifies have since been closed — binary operators with `on()`/`ignoring()`/`group_left()`/`group_right()` vector matching, `offset`, subqueries, `absent`/`changes`/`deriv`/`predict_linear`, the time/date function family, and the 16 `_over_time` functions are all implemented now, and the instant-query lookback is the configurable Prometheus-default 5 minutes (`query.lookback_delta_ns`). Treat the "not supported" lists below as the historical baseline; see [QUERY_FUNCTIONS.md](QUERY_FUNCTIONS.md) for the current function surface and its short "Not Yet Supported" section.
+
 **Scope:** Metrics (PromQL), logs, and traces search across `parqtel-query` (~2,750 LOC), benchmarked against Prometheus (PromQL), ClickHouse (ClickStack), Elasticsearch (Lucene/KQL/DSL), and Dynatrace Grail (DQL).
 
 ---

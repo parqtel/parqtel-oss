@@ -21,10 +21,11 @@ Our E2E tests are written in Go and reside in the `e2e/` directory. They validat
 3. Query the data via the Prometheus API.
 4. Verify results match the input.
 
-Run E2E tests:
+Run E2E tests (the Go suite carries a `//go:build e2e` tag, so it must be enabled or nothing compiles):
 ```bash
-cd e2e && go test ./...
+cd e2e && go test -tags e2e ./...
 ```
+The PromQL functional suite needs no cluster — `make e2e-promql` runs it against the local compose stack. The Kubernetes suite (`-tags e2e`) requires a running cluster (Go + client-go).
 
 ## 3. Performance & Load Testing
 
@@ -32,19 +33,30 @@ We use Python-based load generators to stress-test the system:
 - **`scripts/load_gen.py`**: Generates high-volume metrics and traces.
 - **`scripts/run_perf_audit.sh`**: A comprehensive script that runs a load test, monitors CPU/RSS memory, and generates a `perf_report.md`.
 
+Canonical entry points (see the Makefile):
+- `make load` — send 10k synthetic points to the running instance
+- `make load-test LOAD_RATE=1000 LOAD_TIME=60 TARGET_URL=http://localhost:9090 LOAD_TYPE=metrics` — full configurable load test
+- `make perf-audit` — release build + full performance audit report
+- Query conformance suites against a running instance: `make test-api`, `make test-aggregations`, `make test-functions`, `make test-builder`, `make test-builder-ui` (builder E2E via headless Chrome)
+
 ## 4. Resiliency Testing
 
 We perform "Chaos" style testing to ensure Parqtel handles failures gracefully:
-- **Crash Recovery**: We kill the process during high-load ingestion and verify that the WAL (Write-Ahead Log) restores all data.
+- **Crash Recovery**: We kill the process during high-load ingestion and verify that the WAL (Write-Ahead Log) restores unflushed data. Note the defaults: the metrics WAL is off (`ingest.wal_enabled = false`) and the logs WAL is on (`ingest.log_wal_enabled = true`), so coverage depends on which WAL was enabled for the run.
 - **Disk Full**: We simulate a full disk and verify that Parqtel stops ingestion without corrupting existing Parquet blocks.
 
 ## 5. Automated Validation (CI)
 
-Our GitHub Actions workflows run on every PR to ensure:
-- Code builds on Linux and macOS.
-- All tests pass.
-- `cargo clippy` and `cargo fmt` checks pass.
-- No `unsafe` code has been introduced.
+Our GitHub Actions workflows gate every PR:
+- **Detect Changes** — path filtering gates the expensive jobs (docs-only PRs finish in ~10 s)
+- **Lint** — `cargo fmt --check` + `cargo clippy --workspace --all-targets --locked -- -D warnings` (also forbids `unsafe` code workspace-wide)
+- **Test** — `cargo test --workspace` plus doc tests, all `--locked`
+- **MSRV** — checks the pinned minimum Rust version (1.87)
+- **Security Audit** — `cargo audit --deny warnings` + Trivy filesystem scan
+- **Helm Lint** — validates `charts/parqtel` against `ci/minimal-values.yaml`, `ci/default-values.yaml`, and `ci/full-values.yaml`
+- **Docker Build & Smoke Test** — builds the image and probes `/health` and `/metrics`
+
+PR CI runs on Linux (`ubuntu-latest`) only; the multi-platform binaries (linux amd64/arm64, macOS) are built by `release.yml` on tags.
 
 ## 6. How to Add a Test
 

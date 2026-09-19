@@ -88,3 +88,9 @@ parqtel:
   telemetry:
     logLevel: debug
     logFormat: json
+    otlpEnabled: true
+    otlpEndpoint: "http://otel-collector.opentelemetry.svc:4317"
+    otlpTraceLevel: info
+    exportIntervalSecs: 15
+    profilingEnabled: true
+    profilingFrequency: 99

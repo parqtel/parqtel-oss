@@ -53,6 +53,14 @@ Refer to [values.yaml](values.yaml) for a full list of configuration options.
 | `provider.tlsSecretName` | string | `parqtel-provider-tls` | Name of the Secret to store/load provider TLS certificates |
 | `parqtel.telemetry.logLevel` | string | `info` | Server log level |
 | `parqtel.telemetry.logFormat` | string | `json` | Log format (text or json) |
+| `parqtel.telemetry.otlpEnabled` | bool | `false` | Export Parqtel's own traces + SLI metrics over OTLP/gRPC |
+| `parqtel.telemetry.otlpEndpoint` | string | `http://127.0.0.1:4317` | OTLP collector endpoint (`http://` = plaintext, `https://` = TLS) |
+| `parqtel.telemetry.otlpTraceLevel` | string | `info` | Minimum span level exported (independent of `logLevel`) |
+| `parqtel.telemetry.exportIntervalSecs` | int | `30` | SLI metric push interval |
+| `parqtel.telemetry.profilingEnabled` | bool | `false` | Enable `/debug/pprof/*` endpoints (404 while disabled — restrict with a NetworkPolicy) |
+| `parqtel.telemetry.profilingFrequency` | int | `99` | CPU sampling frequency (Hz) |
+| `parqtel.ingest.walEnabled` | bool | `false` | Enable WAL for metrics |
+| `parqtel.ingest.logWalEnabled` | bool | `true` | Enable WAL for logs |
 
 ### Parqtel Engine Configuration (under `parqtel.`)
 

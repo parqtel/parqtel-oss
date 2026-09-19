@@ -19,8 +19,9 @@ PARQTEL__TELEMETRY__LOG_LEVEL=debug parqtel serve
 ```
 
 ### Time Range and Flush Behaviour
-- **Instant queries** (`/api/v1/query`) look back only **1 minute**. Older buffered data won't appear there — query it via `/api/v1/query_range` instead.
+- **Instant queries** (`/api/v1/query`) look back **5 minutes** (the Prometheus default, via `query.lookback_delta_ns`). Older buffered data won't appear there — query it via `/api/v1/query_range` instead.
 - **Metrics, logs, and traces** are all queryable immediately after ingest via the in-memory buffer (buffer drains on flush — no double-counting).
+- **Live ingestion health**: `curl localhost:8080/api/v1/ingest_rates` shows per-signal current + 60s/5m/15m averages and a `gap_secs` field that counts how long since the last sample — a growing gap means data stopped arriving (see the UI's rate cards for the same data as a sparkline).
 - If the `timeUnixNano` in your OTLP payload is outside the query range (or in the distant past/future), the data will be ignored.
 - **Tip:** Ensure your system clocks are synchronized via NTP.
 
@@ -60,6 +61,22 @@ After the arrow2 → arrow 59 migration, Parquet blocks written by older builds 
 
 ### Stale Docker image
 If the compose stack behaves oddly after a source change (panics referencing `arrow2`, missing endpoints), the image is stale. Run `make local-rebuild` — `make local-up` alone reuses the previously built image.
+
+## 4. Self-Observability
+
+### Traces / SLI metrics not exported
+`telemetry.otlp_enabled = true` exports Parqtel's own traces and SLI metrics over OTLP/gRPC to `telemetry.otlp_endpoint`.
+- **Check startup logs** — if the OTLP SDK failed to initialise, the server logs `telemetry.otlp_enabled=true but the OTLP SDK failed to initialise — continuing with console logs only` and continues with console logs only.
+- **Trace level**: `otlp_trace_level` is independent of the console `log_level`, so trace export still works when console logs are raised to `warn`.
+- **SLI push interval**: `export_interval_secs` (default 30).
+
+### Profiling endpoints 404
+`/debug/pprof/{profile,summary,memory}` return 404 unless `telemetry.profiling_enabled = true`. Enable it, then capture a profile and view the flamegraph:
+```bash
+curl -o profile.pb.gz http://localhost:8080/debug/pprof/profile?seconds=30
+go tool pprof -http=:0 profile.pb.gz
+```
+Restrict these endpoints with a NetworkPolicy in Kubernetes — they expose runtime internals.
 
 ## 4. MCP Connectivity
 

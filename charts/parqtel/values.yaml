@@ -191,6 +191,9 @@ parqtel:
     # -- OTLP/gRPC endpoint of the collector to export to. The `http://`
     # scheme selects plaintext gRPC; use `https://` for TLS.
     otlpEndpoint: "http://127.0.0.1:4317"
+    # -- Minimum span level exported over OTLP, independent of `logLevel`.
+    # Keeps trace export working when the console level is raised to `warn`.
+    otlpTraceLevel: "info"
     # -- SLI metric push interval (seconds).
     exportIntervalSecs: 30
     # -- Opt-in CPU profiling; restrict debug endpoints with a network policy.

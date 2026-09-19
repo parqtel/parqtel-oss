@@ -7,33 +7,63 @@ This guide provides step-by-step tutorials for common SRE and DevOps scenarios u
 In this scenario, we will ingest Nginx access logs into Parqtel and extract metrics (Request Rate and Error Rate).
 
 ### Step 1: Define the Pipeline
-Create a file named `rules/pipelines/nginx.yaml`:
+Create a file named `rules/pipelines/nginx-access-logs.yaml` (the repo ships a complete example at that path — adapt it rather than writing from scratch):
 
 ```yaml
-name: nginx-access-logs
-enabled: true
-stages:
-  - name: parse
-    type: preprocessor
-    config:
-      # Common Nginx Log Format
-      pattern: '$remote_addr - $remote_user [$time_local] "$request" $status $body_bytes_sent'
-  - name: extract_metrics
-    type: metric_extractor
-    config:
-      metrics:
-        - name: nginx_requests_total
-          type: counter
-          value_field: status
-        - name: nginx_errors_total
-          type: counter
-          value_field: status
-          # Only count statuses starting with 4 or 5
-          filter: "status >= 400"
+pipelines:
+  - name: nginx-access-logs
+    description: "Parse Nginx access logs, extract request counter, mask client IPs"
+    match:
+      signal: logs
+      conditions:
+        - field: service_name
+          op: "="
+          value: "nginx"
+
+    stages:
+      # Stage 1: Extract fields from the Nginx combined log format
+      - type: processor
+        name: parse_nginx_log
+        processor: regex_extract
+        source_field: body
+        pattern: |
+          (?P<client_ip>\d+\.\d+\.\d+\.\d+) - (?P<user>[^ ]*) \[(?P<timestamp>[^\]]+)\] "(?P<method>[A-Z]+) (?P<path>[^ ]*) HTTP/[\d.]+" (?P<status>\d+) (?P<bytes>\d+) "[^"]*" "[^"]*" (?P<duration_ms>[\d.]+)
+        target_fields:
+          http.method: method
+          http.status_code: status
+          http.duration_ms: duration_ms
+        on_parse_failure: keep_original
+
+      # Stage 2: Extract a request counter metric
+      - type: metric_extract
+        name: extract_request_count
+        metric_name: nginx_requests_total
+        metric_type: counter
+        value_field: "constant:1"
+        dimensions: [http.method, http.status_code, service_name]
+
+      # Stage 3: Mask client IP addresses before storage
+      - type: masker
+        name: mask_client_ips
+        rules:
+          - field: body
+            pattern: '\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}'
+            replacement: "[IP_MASKED]"
+
+      # Stage 4: Drop health-check noise
+      - type: router
+        name: drop_health_checks
+        conditions:
+          - field: http.target
+            op: "=~"
+            value: "^/(health|ready|live)"
+        action: drop
 ```
 
+Valid stage `type` values are `preprocessor`, `processor`, `metric_extract`, `masker`, and `router`; metric stages take `metric_name`/`metric_type`/`value_field`/`dimensions`/`condition`, and filtering uses `condition:` (`field`/`op`/`value`) — not a `filter:` expression. See [docs/CONFIGURATION.md](CONFIGURATION.md#pipeline-yaml-schema) for the full schema.
+
 ### Step 2: Stream Logs to Parqtel
-Use an OTLP-compatible collector (like OpenTelemetry Collector) to tail Nginx logs and send them to `http://parqtel:8080/v1/logs`.
+Use an OTLP-compatible collector (like the OpenTelemetry Collector) to tail Nginx logs and send them to `http://parqtel:9090/v1/logs` (port 9090 in the compose stack; 8080 for a bare `parqtel serve`).
 
 ### Step 3: Visualize in the UI
 Go to the Parqtel UI and search for the `nginx_requests_total` metric. You can now build a Grafana dashboard using these extracted metrics.
@@ -53,24 +83,48 @@ SLACK_BOT_TOKEN=xoxb-your-token
 ```
 
 ### Step 2: Define the Alert Rule
-Create `rules/latency-high.yaml`:
+Create `rules/latency-high.yaml`. The rule schema splits the PromQL selector (`query`) from the threshold (`condition`) — there is no single `expression` field:
 
 ```yaml
-name: api-latency-high
+id: api-latency-high
+name: API Latency High
+signal: metrics
+query: 'http_request_duration_seconds'
+condition:
+  type: threshold
+  operator: ">"
+  value: 0.5
+  for_duration_secs: 120
 severity: critical
-interval_secs: 60
-for_secs: 120
-expression: "avg(http_request_duration_seconds[5m]) > 0.5"
 labels:
   team: backend
-  channel: #ops-alerts
 annotations:
   summary: "API Latency is > 500ms"
-  description: "Average latency for the last 5 minutes is {{ $value }}s."
+  description: "Average latency for the last 5 minutes exceeded the threshold."
+enabled: true
 ```
 
-### Step 3: Verify the Alert
-Once latency exceeds 500ms for 2 minutes, Parqtel will transition the alert to `Firing`. If configured, the MCP server will pick up this state change and post a message to the Slack channel specified in the labels.
+Rules are evaluated by the global 15s loop (there is no per-rule `interval_secs`); `for_duration_secs` is the sustain window before the alert fires.
+
+### Step 3: Route the Notification
+Alert-to-channel routing is defined in separate route files under `rules/notifications/`, not by labels on the rule. A route matches on severity/labels and targets an MCP tool:
+
+```yaml
+# rules/notifications/latency-slack.yaml
+name: latency-to-slack
+match:
+  severity: critical
+  labels:
+    team: backend
+channels:
+  - type: slack
+    server: parqtel-mcp-slack
+    tool: send_alert_message
+    params:
+      channel: "#ops-alerts"
+```
+
+Once latency exceeds 500ms for 2 minutes, Parqtel transitions the alert to `Firing` and the route dispatches it to Slack via the MCP server.
 
 ---
 

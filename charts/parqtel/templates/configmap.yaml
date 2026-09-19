@@ -70,6 +70,7 @@ data:
     log_format = {{ .Values.parqtel.telemetry.logFormat | quote }}
     otlp_enabled = {{ .Values.parqtel.telemetry.otlpEnabled }}
     otlp_endpoint = {{ .Values.parqtel.telemetry.otlpEndpoint | quote }}
+    otlp_trace_level = {{ .Values.parqtel.telemetry.otlpTraceLevel | quote }}
     export_interval_secs = {{ .Values.parqtel.telemetry.exportIntervalSecs | int }}
     profiling_enabled = {{ .Values.parqtel.telemetry.profilingEnabled }}
     profiling_frequency = {{ .Values.parqtel.telemetry.profilingFrequency | int }}

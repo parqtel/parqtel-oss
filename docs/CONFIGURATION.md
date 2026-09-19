@@ -61,6 +61,13 @@ enabled = true
 [telemetry]
 log_level = "info"
 log_format = "text"               # text | json
+# Self-observability: export Parqtel's own traces + SLI metrics over OTLP/gRPC.
+otlp_enabled = false
+otlp_endpoint = "http://127.0.0.1:4317"  # http:// = plaintext gRPC; https:// = TLS
+otlp_trace_level = "info"          # span level exported; independent of log_level
+export_interval_secs = 30          # SLI metric push interval
+profiling_enabled = false          # /debug/pprof/* endpoints; 404 while disabled
+profiling_frequency = 99           # CPU sampling frequency (Hz)
 
 [alerts]
 rules_dir = "rules"
@@ -178,6 +185,14 @@ Per-service overrides; each entry fully replaces the global policy for that serv
 |-----|------|---------|-------------|
 | `log_level` | String | `"info"` | Log level filter (trace, debug, info, warn, error) |
 | `log_format` | String | `"text"` | Log output format: `text` or `json` |
+| `otlp_enabled` | Boolean | `false` | Export Parqtel's own traces + SLI metrics over OTLP/gRPC |
+| `otlp_endpoint` | String | `"http://127.0.0.1:4317"` | OTLP/gRPC collector endpoint (`http://` = plaintext, `https://` = TLS) |
+| `otlp_trace_level` | String | `"info"` | Minimum span level exported over OTLP — independent of `log_level`, so trace export survives a raised console level |
+| `export_interval_secs` | Integer | `30` | SLI metric push interval (seconds) |
+| `profiling_enabled` | Boolean | `false` | Enable the `/debug/pprof/{profile,summary,memory}` endpoints (they 404 while disabled) |
+| `profiling_frequency` | Integer | `99` | CPU sampling frequency in Hz (1–1000) |
+
+> **Operational note**: when `otlp_enabled = true` but the OTLP SDK fails to initialise (e.g. an unreachable collector), the server logs a warning and continues with console logs only — ingestion is never blocked by self-telemetry.
 
 ### `[alerts]`
 

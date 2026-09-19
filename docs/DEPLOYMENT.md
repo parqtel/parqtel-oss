@@ -10,9 +10,10 @@ Parqtel supports multiple deployment methods, from a single Docker container to 
 docker build -t parqtel:local .
 ```
 
-The Dockerfile uses a multi-stage build:
-- **Builder**: `rust:1.87-slim` with build dependencies
-- **Runtime**: `gcr.io/distroless/cc-debian12:nonroot` (~15 MB final image)
+The Dockerfile uses a multi-stage cargo-chef build:
+- **Builder**: `rust:1.87-slim` (chef → planner → builder) with pkg-config, cmake, g++, and protobuf-compiler
+- **Probe**: a std-only Rust `healthcheck` binary used by the image `HEALTHCHECK`
+- **Runtime**: a `runtime-libs` stage collects only the glibc/libgcc the binary needs, then `FROM scratch` ships that minimal rootfs (~15 MB final image, no shell)
 
 ### Run
 
@@ -20,6 +21,7 @@ The Dockerfile uses a multi-stage build:
 docker run -d \
   --name parqtel \
   -p 8080:8080 \
+  -p 4317:4317 \
   -v parqtel_data:/var/lib/parqtel \
   -e PARQTEL__STORAGE__DATA_DIR=/var/lib/parqtel/data \
   -e PARQTEL__LOGS__DATA_DIR=/var/lib/parqtel/logs \
@@ -27,15 +29,20 @@ docker run -d \
   parqtel:local
 ```
 
+Publish `4317` if you ingest over OTLP gRPC (the default; set `server.grpc_bind_address = ""` to disable it). The container runs as a non-root UID with a read-only rootfs and no shell — there is nothing to `docker exec` into.
+
 ### Health Check
 
+The image defines its own `HEALTHCHECK` (the bundled probe hitting `/health`), so inspect the reported status instead of exec-ing a curl that the scratch image doesn't have:
 ```bash
-docker exec parqtel curl -f http://localhost:8080/health
+docker inspect --format '{{.State.Health.Status}}' parqtel
+# or, from the host:
+curl -f http://localhost:8080/health
 ```
 
 ## Docker Compose (Full Stack)
 
-The Compose setup includes Parqtel, Grafana, Prometheus, and a load generator. MCP servers are defined but commented out by default — uncomment the ones you need after setting the corresponding env vars in `.env`.
+The Compose setup includes Parqtel, Grafana, Prometheus, and a load generator. The Parqtel self-MCP server (`mcp-parqtel`, port 3007) is **enabled by default** so AI agents can query the stack out of the box; the third-party MCP servers (Slack, PagerDuty, Jira, Notion, Discord, Google Docs — ports 3001–3006) are commented out — uncomment the ones you need after setting the corresponding env vars in `.env`.
 
 ### Setup
 
@@ -60,7 +67,8 @@ make dev-setup
 | `grafana` | 3000 | Dashboards (auto-provisioned) |
 | `prometheus` | 9091 | Self-monitoring scraper |
 | `load-generator` | — | Synthetic data generator |
-| `mcp-*` | 3001–3007 | MCP servers (opt-in — uncomment in `docker-compose.yml`) |
+| `mcp-parqtel` | 3007 | Parqtel self-MCP (enabled by default — queries metrics/logs/alerts/topology) |
+| `mcp-{slack,pagerduty,jira,notion,discord,gdocs}` | 3001–3006 | Third-party MCP servers (opt-in — uncomment in `docker-compose.yml`) |
 
 ### Environment Variables (`.env`)
 
@@ -132,6 +140,7 @@ Pre-configured value files for different environments:
 | `deploy/k8s/overlays/production/values.yaml` | Production with HPA, PDB, NetworkPolicy |
 | `deploy/k8s/overlays/load-test/values.yaml` | High-resource for load testing |
 | `deploy/k8s/overlays/ci/values.yaml` | CI/CD pipeline testing |
+| `deploy/k8s/overlays/orbstack/values.yaml` | OrbStack local development |
 
 ### Helm Chart Features
 
@@ -146,7 +155,7 @@ The chart (`charts/parqtel`) includes:
 - **Ingress** — optional with TLS support
 - **PersistentVolumeClaim** — for data persistence
 - **RBAC** — ServiceAccount, Role, RoleBinding
-- **MCP Deployments** — optional sidecar MCP servers
+- **MCP Deployments** — each enabled MCP server (`mcp.<name>.enabled`) renders as its own Deployment + Service, not a sidecar
 
 ### Custom Values Example
 
@@ -257,6 +266,10 @@ LimitNOFILE=65536
 Environment=RUST_LOG=info
 Environment=PARQTEL__STORAGE__DATA_DIR=/var/lib/parqtel/data
 Environment=PARQTEL__LOGS__DATA_DIR=/var/lib/parqtel/logs
+# Optional: export Parqtel's own traces + SLI metrics to an OTLP collector
+#Environment=PARQTEL__TELEMETRY__OTLP_ENABLED=true
+#Environment=PARQTEL__TELEMETRY__OTLP_ENDPOINT=http://collector:4317
+#Environment=PARQTEL__TELEMETRY__OTLP_TRACE_LEVEL=info
 
 [Install]
 WantedBy=multi-user.target
@@ -297,12 +310,16 @@ sudo journalctl -u parqtel -f
 
 ### Monitoring
 
-- Parqtel exposes Prometheus metrics at `/metrics`
+- Parqtel exposes Prometheus metrics at `/metrics` and live ingestion health at `/api/v1/ingest_rates` (per-signal current + 60s/5m/15m averages, wire bytes/sec, and `gap_secs` — alert on a growing gap to catch a stalled pipeline; sparkline history via the `history_secs` param, default 180s, max 900s)
 - Key metrics to watch:
-  - `parqtel_ingest_total` — ingestion throughput
+  - `parqtel_batches_received_total` — batches accepted
+  - `parqtel_ingested_points_total` — ingestion throughput
   - `parqtel_query_duration_seconds` — query latency
-  - `parqtel_blocks_total` — number of active blocks
+  - `parqtel_query_errors_total` — query failures
   - `parqtel_storage_blocks` / `parqtel_storage_bytes` — compaction keeping up (unbounded growth = lagging compaction)
+  - `parqtel_process_rss_bytes` — memory footprint vs. your request limit
+- **Self-telemetry**: set `telemetry.otlp_enabled = true` (with `otlp_endpoint`, `export_interval_secs`, `otlp_trace_level`) and Parqtel exports its own traces and SLI metrics over OTLP/gRPC to your collector, exactly like the services it ingests from — useful when the `/metrics` scrape path isn't wired into your pipeline.
+- **Profiling**: `telemetry.profiling_enabled = true` enables the `/debug/pprof/{profile,summary,memory}` endpoints (404 while disabled) for CPU/memory analysis during tuning. Restrict them with a NetworkPolicy in Kubernetes — they expose runtime internals.
 
 ### Backup
 

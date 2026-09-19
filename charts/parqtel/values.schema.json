@@ -521,6 +521,16 @@
               "type": "string",
               "minLength": 1
             },
+            "otlpTraceLevel": {
+              "type": "string",
+              "enum": [
+                "trace",
+                "debug",
+                "info",
+                "warn",
+                "error"
+              ]
+            },
             "exportIntervalSecs": {
               "type": "integer",
               "minimum": 1

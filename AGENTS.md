@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-Parqtel is an ultra-lightweight SRE observability engine written in Rust. It ingests OpenTelemetry (OTLP) metrics, logs, and traces and stores them as compressed Apache Parquet files. Single binary, ~15 MB distroless Docker image.
+Parqtel is an ultra-lightweight SRE observability engine written in Rust. It ingests OpenTelemetry (OTLP) metrics, logs, and traces and stores them as compressed Apache Parquet files. Single binary, ~15 MB Docker image (scratch-based, no shell).
 
 ## Workspace Layout (14 crates)
 
@@ -38,7 +38,7 @@ make docker        # Build Docker image
 - **Arrow stack**: `arrow`/`parquet` 59.x (migrated from arrow2/parquet2 — RUSTSEC-2025-0038). Old arrow2-era Parquet blocks are unreadable by the current reader; wipe the data dir when upgrading across that boundary.
 - **Binary name**: `parqtel` (not `parqtel-server`) — the crate is `parqtel-server` but `[[bin]] name = "parqtel"`.
 - **Block index**: persisted as `index.json` (JSON sidecar, atomic tmp+rename), not bincode/`index.bin`.
-- **Instant queries** (`/api/v1/query`) use a **1-minute lookback window** — data older than ~60s won't appear until flushed to a block and queried via `query_range`.
+- **Instant queries** (`/api/v1/query`) use a **5-minute lookback window** (`query.lookback_delta_ns`, default 300000000000 — the Prometheus default) — data older than that won't appear until flushed to a block and queried via `query_range`.
 - **In-memory buffer**: metrics, logs, and traces are all queryable immediately after ingest via `MemoryBuffer`; the buffer is drained on every flush so buffered + flushed data never double-counts.
 - **service.name label**: the scanner and ingest buffer both inject the dedicated `service_name` Parquet column back as the `service.name` label, so PromQL matchers like `http_requests_total{service.name="api"}` work for both buffered and flushed data. Trace decode merges resource attributes into span attributes (span attrs win).
 - **OTLP gRPC**: `:4317` by default (`ServerConfig.grpc_bind_address`; empty string disables). tonic server implements all three collector services and routes through the same `ingest_proto` path as HTTP protobuf.
@@ -94,7 +94,7 @@ Layered via Figment (priority: CLI > env > TOML > defaults):
 - **Lint**: fmt + clippy with `-D warnings`
 - **Test**: All workspace tests + doc tests
 - **MSRV**: Checks minimum supported Rust version (1.87 matrix — see Key Facts)
-- **Security**: rustsec/audit-check + Trivy filesystem scan
+- **Security**: `cargo-audit` (installed via `taiki-e/install-action`, `--deny warnings`) + Trivy filesystem scan
 - **Helm**: Lint chart with multiple value files
 - **Docker**: Build + smoke test (health check + metrics endpoint)
 
@@ -110,4 +110,4 @@ Layered via Figment (priority: CLI > env > TOML > defaults):
 - `rg` may be broken locally (missing `libpcre2-8.0.dylib`) — use `grep -n` via bash
 - Node may be broken locally (missing `libllhttp`) — validate UI JS via headless Chrome instead
 - Headless Chrome: `"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --headless=new --disable-gpu --enable-logging=stderr --virtual-time-budget=15000 URL` to catch console errors
-- Seeding demo data: OTLP JSON `attributes` must be **arrays of {key, value:{stringValue}}** (not plain objects); metric instant queries need points stamped within the last 60s
+- Seeding demo data: OTLP JSON `attributes` must be **arrays of {key, value:{stringValue}}** (not plain objects); metric instant queries need points stamped within the last 5 minutes (`query.lookback_delta_ns`)

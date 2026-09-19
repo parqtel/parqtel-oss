@@ -16,18 +16,18 @@
 | `lint` | Rust sources / manifests changed | ~4–6 min |
 | `test` | Rust sources changed | ~5–7 min |
 | `msrv` | Rust sources changed | ~4 min |
-| `security` | always | ~2 min |
-| `helm-lint` | `deploy/charts/**` or `compose/**` changed | <1 min |
+| `security` | Rust sources changed, or push to `main` | ~2 min |
+| `helm-lint` | `charts/**` or `compose/**` changed | <1 min |
 | `docker` + smoke test | Dockerfile/sources/deps changed **and** lint+test pass | ~10–15 min |
 
-Typical docs-only PR: ~2 min (security only).
+Typical docs-only PR: ~10 s (changes-detection only — `security` is gated on Rust sources, so it is skipped too).
 Typical code PR: ~15–20 min wall clock, ~35–45 worker-minutes.
 
 Key mechanics:
 
 - **Concurrency**: `cancel-in-progress` kills superseded runs on the same branch — pushing five commits in a row bills once.
 - **Path gating** (`dorny/paths-filter`): Helm lint doesn't run because you edited a README; Docker doesn't build because you touched a chart.
-- **Docker smoke test**: after building the image, the job boots it, waits for `/health`, and checks `/metrics`. A distroless image that compiles but doesn't serve fails the PR.
+- **Docker smoke test**: after building the image, the job boots it, waits for `/health`, and checks `/metrics`. A scratch-based image that compiles but doesn't serve fails the PR.
 - **`--locked` everywhere**: CI builds exactly what's pinned in `Cargo.lock`; dependency drift fails loudly instead of silently changing the tested surface.
 - **`-D warnings` scoped to clippy only**: setting it globally via `RUSTFLAGS` also compiles *dependencies* with warnings-as-errors and breaks spuriously when new rustc lints land upstream.
 - **Least privilege**: workflow-level `permissions: contents: read`; no write tokens in the PR lane.
@@ -73,7 +73,7 @@ Supply chain guarantees retained: build provenance attestation, SBOM, cosign sig
 make lint        # fmt --check + clippy -D warnings
 cargo test --workspace   # same suite CI runs
 make docker      # same multi-stage build CI validates
-helm lint deploy/charts/parqtel   # note: charts live under deploy/, not charts/
+helm lint charts/parqtel   # chart lives under charts/, not deploy/charts/
 ```
 
 Local builds of `parqtel-ingest` need `protoc` (prost-build compiles the OTLP schema in `build.rs`): `sudo apt-get install protobuf-compiler`. CI installs it via the shared composite action `.github/actions/setup-rust`, which also owns toolchain setup and cache keys — change toolchain/cache config there, not per-job.
@@ -81,5 +81,5 @@ Local builds of `parqtel-ingest` need `protoc` (prost-build compiles the OTLP sc
 ## Maintenance notes
 
 - **MSRV is 1.87** and lives in three places that must move together: `ci.yml` (`MSRV` env + toolchain matrix), `Cargo.toml` `[workspace.package].rust-version`, and `Dockerfile` `RUST_VERSION`. It's pinned by the lockfile: comfy-table 7.2+ (via arrow 59) uses let-chains that require rustc 1.87, so lowering it needs precise dependency pins.
-- `rustsec/audit-check` reads `Cargo.lock` only; run `cargo update` deliberately and review the audit diff.
+- CI installs `cargo-audit` via `taiki-e/install-action` and runs `cargo audit --deny warnings` plus a Trivy filesystem scan (CRITICAL/HIGH). Both read `Cargo.lock`/the tree only — run `cargo update` deliberately and review the audit diff. (The old `rustsec/audit-check` action was dropped: its embedded cargo exited 101 under the Node 24 runner migration.)
 - If runner minutes ever matter less than latency again, the Docker job is safe to promote back to always-on via the `changes.outputs.docker` condition.
