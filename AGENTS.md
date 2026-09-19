@@ -66,7 +66,7 @@ make docker        # Build Docker image
 - `parqtel-ingest/src/` — OTLP decoding, Parquet writing
 - `parqtel-query/src/` — PromQL query execution
 - `parqtel-alert/src/` — Alert rules, evaluation, state machine
-- `rules/` — Example alert rules, recording rules, pipelines (YAML)
+- `rules/` — Example alert rules, recording rules, pipelines (YAML). `rules/presets/` holds ready-made alert packs (k8s / coredns / external-secrets / service-RED / self-monitoring) that stay inert until copied into the rules dir — validated by `make test-presets-static` and `make test-alert-presets`.
 
 ## Configuration
 

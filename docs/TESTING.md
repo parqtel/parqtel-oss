@@ -38,6 +38,7 @@ Canonical entry points (see the Makefile):
 - `make load-test LOAD_RATE=1000 LOAD_TIME=60 TARGET_URL=http://localhost:9090 LOAD_TYPE=metrics` — full configurable load test
 - `make perf-audit` — release build + full performance audit report
 - Query conformance suites against a running instance: `make test-api`, `make test-aggregations`, `make test-functions`, `make test-builder`, `make test-builder-ui` (builder E2E via headless Chrome)
+- Preset alert rules: `make test-presets-static` (schema + query plan validation, CI-safe) and `make test-alert-presets` (end-to-end — boots an instance, loads the packs, and proves rules fire on threshold crossings and recover when they clear; needs `curl`, `jq`, `python3`)
 
 ## 4. Resiliency Testing
 

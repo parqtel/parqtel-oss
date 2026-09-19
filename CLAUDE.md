@@ -67,7 +67,7 @@ Rust workspace with 14 crates:
 - `parqtel-server/src/handlers/` — HTTP handlers (ingest, prometheus, alerts, simplejson, pipeline)
 - `parqtel-core/src/` — Storage engine, block index, config structs
 - `parqtel-ingest/proto/` — OTLP protobuf definitions (compiled via build.rs)
-- `rules/` — Example alert rules, recording rules, pipelines (YAML)
+- `rules/` — Example alert rules, recording rules, pipelines (YAML). `rules/presets/` holds ready-made alert packs (k8s / coredns / external-secrets / service-RED / self-monitoring), inert until copied into the rules dir; validated by `make test-presets-static` + `make test-alert-presets`.
 
 ## Embedded Web UI (`/ui`)
 

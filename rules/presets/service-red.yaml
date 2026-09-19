@@ -1,0 +1,84 @@
+# Preset alert pack: service RED health (span-metrics)
+#
+# Source metrics: Parqtel's span-metrics RED bridge. Every server-kind span
+# ingested over OTLP automatically derives these counters, so this pack works
+# for ANY traced service (including CoreDNS and external-secrets if they emit
+# traces) with no extra instrumentation:
+#   traces_service_requests_total   {service, operation, service.name}
+#   traces_service_errors_total     {service, operation, service.name}
+#   traces_service_duration_ms_total{service, operation, service.name}
+#
+# Rates are per-second. Thresholds are expressed on absolute rates/counts
+# rather than ratios because a ratio of two counters is not expressible in a
+# single-selector rule — tune the numbers to your traffic profile.
+
+---
+id: service-error-rate-high
+name: Service error rate high
+signal: metrics
+query: 'rate(traces_service_errors_total[5m])'
+condition:
+  type: threshold
+  operator: ">"
+  value: 0.5
+  for_duration_secs: 120
+severity: critical
+labels:
+  component: service
+  category: errors
+annotations:
+  summary: "Service producing more than 0.5 errors/sec for 2 minutes"
+  description: >-
+    Sustained error rate from the span-metrics RED bridge. The firing series'
+    labels identify the service and operation. 0.5 errors/sec is a default
+    for mid-traffic services — raise it for high-volume endpoints or lower
+    it for low-volume critical paths.
+  runbook: "https://opentelemetry.io/docs/specs/semconv/registry/attributes/spans/"
+enabled: true
+
+---
+id: service-error-burst
+name: Service error burst
+signal: metrics
+query: 'increase(traces_service_errors_total[5m])'
+condition:
+  type: threshold
+  operator: ">"
+  value: 50
+  for_duration_secs: 0
+severity: warning
+labels:
+  component: service
+  category: errors
+annotations:
+  summary: "More than 50 service errors in 5 minutes"
+  description: >-
+    Absolute error count over the trailing 5 minutes — catches short bursts
+    that a sustained-rate rule would miss. Correlate with the trace search
+    endpoint (/v1/traces/search) using the firing service label.
+  runbook: "https://opentelemetry.io/docs/specs/semconv/registry/attributes/spans/"
+enabled: true
+
+---
+id: service-traffic-drop
+name: Service traffic dropped
+signal: metrics
+query: 'rate(traces_service_requests_total[5m])'
+condition:
+  type: threshold
+  operator: "<"
+  value: 0.05
+  for_duration_secs: 600
+severity: warning
+labels:
+  component: service
+  category: availability
+annotations:
+  summary: "Service receiving fewer than 0.05 requests/sec for 10 minutes"
+  description: >-
+    A service that was taking traffic has gone quiet. May be an off-hours
+    lull, or the service stopped being traced (agent/collector side). If the
+    collector is down there are no series and this rule cannot fire — pair it
+    with the parqtel ingest-gap rule in the self-monitoring pack.
+  runbook: "https://opentelemetry.io/docs/specs/semconv/registry/attributes/spans/"
+enabled: true

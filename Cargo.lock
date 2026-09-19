@@ -1990,6 +1990,7 @@ dependencies = [
  "chrono",
  "notify",
  "parqtel-core",
+ "parqtel-query",
  "reqwest",
  "serde",
  "serde_json",
