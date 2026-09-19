@@ -205,12 +205,14 @@ Currently ships with the `"parquet"` backend (`ParquetStorageEngine`). The regis
 
 Parqtel uses [Figment](https://github.com/SergioBenitez/Figment) for layered configuration with this priority (highest wins):
 
-1. CLI flags (`--bind`, `--data-dir`, `--log-level`)
+1. CLI flags (`--config`, `--bind`, `--data-dir`, `--log-level`)
 2. Environment variables (`PARQTEL__STORAGE__COMPRESSION`)
-3. TOML config file (`config/default.toml`)
+3. TOML config file (`config/default.toml`, or the path given by `--config`/`PARQTEL_CONFIG`)
 4. Built-in defaults
 
 All configuration is validated at startup via `Config::validate()`.
+
+Configuration sections map 1:1 to the structs in `parqtel-core/src/config/` (`server`, `storage`, `logs`, `ingest`, `query`, `ui`, `telemetry`, `alerts`, `k8s_provider`) — see [CONFIGURATION.md](CONFIGURATION.md) for the full key reference. The `[telemetry]` section also drives self-observability: `otlp_enabled` exports Parqtel's own traces + SLI metrics to `otlp_endpoint` (at `export_interval_secs`, span level `otlp_trace_level`), and `profiling_enabled` gates the `/debug/pprof/{profile,summary,memory}` endpoints (they return 404 while disabled).
 
 ## Embedded Web UI
 
@@ -219,7 +221,7 @@ The console at `/ui` is a single-file vanilla-JS app (`parqtel-server/src/ui.htm
 - **Serving**: pre-gzipped at startup with a content-hash ETag; `Cache-Control: public, max-age=3600` + 304 responses — zero per-request server cost
 - **Zero external requests**: no CDNs, no fonts, no frameworks; system font stacks only — works air-gapped
 - **Budget**: ≤1000 KB gzipped (soft, keep lean)
-- **Features**: Overview landing pane with per-signal stat cards, hash-based deep-linkable URLs, guided metrics Builder⇄Code query toggle, log facets sidebar, trace-grouped browse list + waterfall, alert stream with Evidence tab (metric chart + correlated logs), form-based rule editor with YAML escape hatch, saved views (localStorage), keyboard shortcuts with `?` help modal, WCAG AA contrast, reduced-motion support
+- **Features**: Overview pane is a three-row dashboard — per-signal stat cards, storage + a 6-hour ingest-volume chart, and live ingestion-rate cards (one per signal: 60s average, per-second spike/gap sparkline, status dot, wire bytes/sec) backed by `/api/v1/ingest_rates`. The metrics query builder is a 92-function catalog covering the entire engine function surface, with typed argument editors, `by`/`without` grouping, window-function wrapping, a live PromQL preview, and label filters backed by bounded high-cardinality autocomplete (top-10 recent values with server-side prefix match). The Builder⇄Code toggle reverse-parses a typed query on open, preserving the metric and its filters. Also: hash-based deep-linkable URLs, log facets sidebar, trace-grouped browse list + waterfall, alert stream with Evidence tab (metric chart + correlated logs), form-based rule editor with YAML escape hatch, saved views (localStorage), keyboard shortcuts with `?` help modal, WCAG AA contrast, reduced-motion support
 
 See [UI_UX_IMPROVEMENT_PLAN.md](UI_UX_IMPROVEMENT_PLAN.md) for the design audit and phased plan that produced the current console.
 
@@ -268,7 +270,7 @@ Each MCP server:
 | `panic` | `"abort"` | No unwinding overhead |
 | `opt-level` | `3` | Maximum runtime performance |
 
-The Docker image uses a multi-stage build: Rust builder → distroless runtime (~15 MB final image). Requires Rust 1.87+ (`ARG RUST_VERSION=1.87`).
+The Docker image uses a multi-stage build: Rust builder → minimal glibc rootfs assembled in a `runtime-libs` stage → `FROM scratch` runtime (~15 MB final image). Requires Rust 1.87+ (`ARG RUST_VERSION=1.87`).
 
 ## Data Compatibility
 

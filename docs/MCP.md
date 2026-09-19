@@ -379,7 +379,7 @@ Share the document with specific emails.
 
 ### parqtel-mcp-parqtel (Port 3007)
 
-Query Parqtel's own metrics, logs, alerts, and topology data for AI-driven analysis.
+Query Parqtel's own metrics, logs, alerts, and topology data for AI-driven analysis. It registers **seven** tools.
 
 **Environment Variables:**
 
@@ -390,25 +390,43 @@ Query Parqtel's own metrics, logs, alerts, and topology data for AI-driven analy
 **Tools:**
 
 #### `query_metrics`
-Execute a Prometheus range query.
+Execute a PromQL expression. Only `query` is required; the mode is chosen by the other parameters:
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `query` | string | ✓ | PromQL expression |
-| `start_ns` | number | ✓ | Start time (nanoseconds) |
-| `end_ns` | number | ✓ | End time (nanoseconds) |
-| `step_secs` | number | ✓ | Step interval (seconds) |
+| `query` | string | ✓ | PromQL expression, e.g. `sum(rate(http_requests_total[5m])) by (service.name)` |
+| `start` | number | | Range start, **epoch seconds** (range mode) |
+| `end` | number | | Range end, **epoch seconds** (range mode) |
+| `step_secs` | number | | Range step interval in seconds (default 60, range mode only) |
+| `window_secs` | number | | Convenience trailing-N-seconds range (used when `start`/`end` omitted) |
+| `start_ns` / `end_ns` | number | | Legacy aliases: same instants in nanoseconds (converted) |
+
+With only `query`, the tool evaluates the expression instantly at the current time.
+
+#### `query_metrics_labels`
+Discover metric/label metadata — call this before `query_metrics` to build selectors.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `label` | string | | Label name (`__name__` for metric names, `service_name`, `service.name`, `host`, …). Dotted names are accepted and URL-encoded automatically. Omit to list all indexed label names. |
 
 #### `query_logs`
-Query log records.
+Search stored log records. Defaults to the last hour, newest first; returns matched records plus the true match count and a 60-bucket volume summary.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `filter` | string | ✓ | Log filter expression |
-| `start_ns` | number | ✓ | Start time (nanoseconds) |
-| `end_ns` | number | ✓ | End time (nanoseconds) |
-| `limit` | number | ✓ | Maximum results |
-| `severity_min` | string | | Minimum severity filter |
+| `query` | string | | Label selector, e.g. `{}` (all) or `{service_name="api"}` (default `{}`) |
+| `start` / `end` | number | | Range bounds, **epoch seconds** (default now-1h … now) |
+| `limit` | number | | Max records returned, capped at 2000 (default 100) |
+| `order` | string | | `asc` or `desc` by timestamp (default `desc` = newest first) |
+| `severity_min` | string | | Minimum severity: `TRACE`…`FATAL`, or a numeric OTLP severity 1–24 |
+
+#### `ingest_rates`
+Live per-signal ingestion rates (metrics/logs/traces): current + 60s/5m/15m averages, wire bytes/sec, seconds since the last ingested item (gap), lifetime totals, and per-second event counts. Use to detect ingestion spikes, stalls, or gaps.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `history_secs` | number | | Length of the per-second history arrays, 1–900 (default 180; the server keeps a 15-minute wheel) |
 
 #### `get_alert_history`
 Return alert history for a service or pod.

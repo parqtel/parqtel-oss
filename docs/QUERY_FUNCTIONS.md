@@ -21,7 +21,7 @@ Special label `__name__` matches the metric name: `{__name__="cpu_usage"}`.
 
 **Resource-attribute labels**: `service.name`, `service.version`, and `k8s.*` resource attributes are stored in dedicated Parquet columns and injected back as labels, so matchers like `http_requests_total{service.name="api"}` work on both freshly-buffered and flushed data.
 
-**Instant-query lookback**: `/api/v1/query` evaluates a 1-minute window ending at `time`. Use `/api/v1/query_range` for older data.
+**Instant-query lookback**: `/api/v1/query` evaluates a **5-minute** window ending at `time` (Prometheus default, configurable via `query.lookback_delta_ns` — default 300000000000). Use `/api/v1/query_range` for older data.
 
 ---
 
@@ -110,7 +110,7 @@ rate(metric_name[range])
 rate(http_requests_total{service="api"}[5m])
 ```
 
-> The range selector `[5m]` is parsed but the actual window is controlled by the query `step`. It is included for Prometheus syntax compatibility.
+> The range selector `[5m]` defines the lookback window evaluated at each step (Prometheus semantics): `rate(x[1m])` and `rate(x[5m])` return different values at the same timestamp.
 
 ```bash
 curl "http://localhost:9090/api/v1/query_range?query=rate(http_requests_total%5B5m%5D)&start=1700000000&end=1700003600&step=60s"
@@ -342,8 +342,8 @@ curl "http://localhost:9090/api/v1/query?query=label_replace(cpu_usage,%20%22sho
 | Constraint | Value |
 |-----------|-------|
 | Max time range | 30 days |
-| Max series returned | 500 (dev) — configurable via `query.max_series` |
-| Max samples per series | 5000 (dev) — configurable via `query.max_samples_per_series` |
+| Max series returned | 1000 — configurable via `query.max_series` |
+| Max samples per series | 10000 — configurable via `query.max_samples_per_series` |
 | Quantile range | Open interval `(0.0, 1.0)` |
 | `rate` / `irate` / `increase` minimum data | ≥ 2 samples in window |
 | Step durations | `s` (seconds), `m` (minutes), `h` (hours), `d` (days) |
@@ -352,11 +352,7 @@ curl "http://localhost:9090/api/v1/query?query=label_replace(cpu_usage,%20%22sho
 
 ## Not Yet Supported
 
-The following standard PromQL features are not currently implemented:
+- The `@` modifier (`metric @ 100`) — the parser rejects it; use an explicit `time`/`start`/`end` on the query API instead
+- `timestamp()` is implemented but returns the evaluation timestamp for present series rather than each series' last-sample time
 
-- Binary operators between two metrics (`metric_a / metric_b`)
-- `predict_linear`, `deriv`, `idelta`, `absent`, `changes`, `resets`
-- Time functions: `time()`, `timestamp()`, `year()`, `month()`, etc.
-- Subqueries (`metric[5m:1m]`)
-- `offset` modifier (`metric offset 5m`)
-- `label_join`
+Everything else from the standard PromQL surface is implemented: binary operators between metrics with `on()`/`ignoring()`/`group_left()`/`group_right()` vector matching, `predict_linear`, `deriv`, `idelta`, `absent`, `changes`, `resets`, the time/date function family, subqueries (`metric[5m:1m]`), the `offset` modifier, and `label_join`.

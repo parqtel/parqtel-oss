@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-Parqtel is an ultra-lightweight SRE observability engine written in Rust. It ingests OpenTelemetry (OTLP) metrics, logs, and traces and stores them as compressed Apache Parquet files. Single binary, ~15 MB Docker image (distroless).
+Parqtel is an ultra-lightweight SRE observability engine written in Rust. It ingests OpenTelemetry (OTLP) metrics, logs, and traces and stores them as compressed Apache Parquet files. Single binary, ~15 MB Docker image (scratch-based, no shell).
 
 ## Build & Development Commands
 
@@ -34,15 +34,15 @@ docker compose down
 ### E2E Tests (Go)
 
 ```bash
-cd e2e && go test -v ./...
+cd e2e && go test -v -tags e2e ./...
 ```
 
 ### Helm Chart
 
 ```bash
-helm lint deploy/charts/parqtel
-helm template test deploy/charts/parqtel
-helm install parqtel deploy/charts/parqtel -n parqtel --create-namespace
+helm lint charts/parqtel
+helm template test charts/parqtel
+helm install parqtel charts/parqtel -n parqtel --create-namespace
 ```
 
 ## Architecture
@@ -79,18 +79,18 @@ Features: Overview pane, deep-linkable hash URLs, Builder⇄Code metrics query b
 
 ### Docker
 
-- **Dockerfile** — 4-stage build: cargo-chef planner → dependency cook → binary build → distroless runtime
-- **Image**: `gcr.io/distroless/cc-debian12:nonroot`, ~15MB, no shell
+- **Dockerfile** — Multi-stage cargo-chef build (planner → builder) plus a std-only Rust `healthcheck` probe and a `runtime-libs` stage that collects only the glibc/libgcc the binary needs; final `FROM scratch` runtime ships that minimal rootfs (~15MB, no shell)
+- **Image**: `scratch`-based with a minimal glibc rootfs, non-root, ~15MB, no shell
 - **Layer caching**: cargo-chef ensures dependency changes don't rebuild source
 
 ### Docker Compose (`compose/`)
 
 - Network isolation: `frontend` (user-facing), `backend` (internal, no external access)
 - YAML anchors (`x-common`) for DRY service config
-- Resource limits, healthchecks (wget-based for distroless compatibility)
+- Resource limits, healthchecks (probe binary — no shell in the image)
 - Configurable ports via `.env`
 
-### Helm Chart (`deploy/charts/parqtel/`)
+### Helm Chart (`charts/parqtel/`)
 
 - **values.schema.json** — Full JSON Schema validation, passes `helm lint`
 - **CI test values** — `ci/minimal-values.yaml`, `ci/default-values.yaml`, `ci/full-values.yaml`
@@ -155,7 +155,7 @@ Key env vars: `PARQTEL_BIND`, `PARQTEL_DATA_DIR`, `PARQTEL__STORAGE__COMPRESSION
 - Automatic compaction (hourly), configurable retention (default: 7d metrics, 3d logs)
 - Each block is a self-contained Parquet file (arrow/parquet 59; arrow2-era blocks unreadable — wipe data dir across that upgrade)
 - **In-memory buffer**: metrics, logs, AND traces are immediately queryable via `MemoryBuffer` (metrics HashMap-indexed by name); buffer drains on every flush — no double-counting
-- **Instant queries** (`/api/v1/query`) use a 1-minute lookback window
+- **Instant queries** (`/api/v1/query`) use a 5-minute lookback window (`query.lookback_delta_ns`, default 300000000000 — the Prometheus default)
 - **service.name**: scanner + ingest buffer inject the dedicated `service_name` column back as the `service.name` label, so `{service.name="x"}` matchers work on both buffered and flushed data
 - **OTLP gRPC**: tonic server on `:4317` (`server.grpc_bind_address`, "" disables) — all three collector services via the same `ingest_proto` path
 - **Span-metrics RED**: server spans auto-derive `traces_service_{requests,errors,duration_ms}_total` (labels service/operation/service.name) fed through the normal metrics path

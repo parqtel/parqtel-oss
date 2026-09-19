@@ -1,6 +1,6 @@
 # Parqtel Query Language (PQL) — End-User Guide
 
-**Version:** 0.1.0 · **Applies to:** Parqtel 0.1.0
+**Version:** 0.2.0 · **Applies to:** Parqtel 0.2.0
 
 PQL is the umbrella name for Parqtel's three query surfaces:
 
@@ -82,7 +82,7 @@ count_values("value", up)                # series count per distinct value
 ### 1.5 Composition — the reason the AST engine exists
 
 ```promql
-# THE canonical RED query (was impossible before Parqtel 0.1.0):
+# THE canonical RED query (was impossible before Parqtel 0.2.0):
 sum by (service.name) (rate(http_requests_total[5m]))
 
 # Error ratio:

@@ -38,7 +38,7 @@
 Parqtel is a single-binary observability backend written in Rust that ingests OpenTelemetry (OTLP) signals and stores them as compressed Apache Parquet files. It exposes a Prometheus-compatible query API, a Grafana SimpleJSON datasource, and a built-in alerting engine — all with minimal resource footprint.
 
 **Key design goals:**
-- **Minimal footprint** — single static binary, ~15 MB Docker image (distroless)
+- **Minimal footprint** — single static binary, ~15 MB Docker image (scratch-based, no shell)
 - **Columnar storage** — Parquet + Zstd compression for 10-20x storage reduction
 - **Drop-in compatibility** — works with existing Prometheus/Grafana dashboards
 - **AI-native** — Model Context Protocol (MCP) servers for LLM-driven incident response
@@ -95,7 +95,7 @@ Parqtel ships with a zero-dependency embedded web console at `/ui` — no CDNs, 
 |---------------------|-------------|
 | ![Alerts View](docs/screenshots/ui-alerts.png) | ![Rules View](docs/screenshots/ui-alerts-rules.png) |
 
-**Features:** Overview landing pane with per-signal stat cards, deep-linkable URLs (share the exact query + time range), guided metrics Builder⇄Code query toggle with live PromQL preview, log field facets, trace-grouped browse list + waterfall, alert stream with Evidence tab (incident-window metric chart + correlated logs), form-based rule editor with YAML escape hatch, saved views, keyboard shortcuts (`?` for the reference), WCAG AA contrast and reduced-motion support.
+**Features:** Overview pane with live per-signal ingestion-rate cards (60s average, spike/gap sparkline, status dot — backed by `/api/v1/ingest_rates`), deep-linkable URLs (share the exact query + time range), a metrics query builder with a **92-function catalog** covering the full engine surface — typed argument editors, `by`/`without` grouping, window-function wrapping, live PromQL preview, and label filters with bounded high-cardinality autocomplete — plus a Builder⇄Code toggle that reverse-parses a typed query, log field facets, trace-grouped browse list + waterfall, alert stream with Evidence tab (incident-window metric chart + correlated logs), form-based rule editor with YAML escape hatch, saved views, keyboard shortcuts (`?` for the reference), WCAG AA contrast and reduced-motion support.
 
 The design system and phased modernization plan live in [docs/UI_UX_IMPROVEMENT_PLAN.md](docs/UI_UX_IMPROVEMENT_PLAN.md).
 
@@ -211,16 +211,17 @@ This starts Parqtel (port 9090), Grafana (port 3000), Prometheus (port 9091), an
 # Health check (compose stack runs on port 9090; raw docker run uses 8080)
 curl http://localhost:9090/health
 
-# Send a metric via OTLP JSON
+# Send a metric via OTLP JSON (stamp it "now" — instant queries look back 5 minutes)
+TS=$(date +%s)000000000
 curl -X POST http://localhost:9090/v1/metrics/json \
   -H "Content-Type: application/json" \
-  -d '{"resourceMetrics":[{"resource":{"attributes":[{"key":"service.name","value":{"stringValue":"demo"}}]},"scopeMetrics":[{"metrics":[{"name":"http_requests_total","gauge":{"dataPoints":[{"asDouble":42,"timeUnixNano":"1700000000000000000","attributes":[{"key":"method","value":{"stringValue":"GET"}}]}]}}]}]}]}'
+  -d '{"resourceMetrics":[{"resource":{"attributes":[{"key":"service.name","value":{"stringValue":"demo"}}]},"scopeMetrics":[{"metrics":[{"name":"http_requests_total","gauge":{"dataPoints":[{"asDouble":42,"timeUnixNano":"'$TS'","attributes":[{"key":"method","value":{"stringValue":"GET"}}]}]}}]}]}]}'
 
 # Query it back (Prometheus API)
 curl "http://localhost:9090/api/v1/query?query=http_requests_total"
 ```
 
-Instant queries look back 1 minute; older points become queryable via `/api/v1/query_range` after the block flush (default 2h blocks, checked every 5s). See [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md) for the full walkthrough.
+Instant queries look back 5 minutes (`query.lookback_delta_ns`); older points become queryable via `/api/v1/query_range` after the block flush (default 2h blocks, checked every 5s). See [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md) for the full walkthrough.
 
 ## API Reference
 
@@ -255,6 +256,8 @@ OTel SDKs can export directly via **gRPC** at `:4317` (all three collector servi
 | `/v1/logs/count` | GET | Count matching logs |
 | `/v1/logs/fields` | GET | List available log fields |
 | `/v1/logs/field_values` | GET | List values for a log field |
+| `/v1/traces/search` | GET | Search spans (per-span `trace_id` for client-side grouping) |
+| `/v1/correlate` | GET | Cross-signal correlation for a time window |
 
 ### Alerts
 
@@ -264,6 +267,11 @@ OTel SDKs can export directly via **gRPC** at `:4317` (all three collector servi
 | `/api/v1/alerts/:id` | GET | Get alert details |
 | `/api/v1/alerts/:id/acknowledge` | POST | Acknowledge an alert |
 | `/api/v1/alerts/:id/resolve` | POST | Resolve an alert |
+| `/api/v1/alerts/routes` | GET | List notification routes |
+| `/api/v1/alerts/silences` | GET/POST | List or create silences |
+| `/api/v1/alerts/silences/:name` | DELETE | Delete a silence |
+| `/api/v1/saved_searches` | GET/POST | List or save a search |
+| `/api/v1/saved_searches/:id` | DELETE | Delete a saved search |
 | `/api/v1/rules` | GET/POST | List or create alert rules |
 | `/api/v1/rules/:id` | PUT/DELETE | Update or delete a rule |
 
@@ -292,6 +300,9 @@ OTel SDKs can export directly via **gRPC** at `:4317` (all three collector servi
 |----------|--------|-------------|
 | `/health` | GET | Health check |
 | `/metrics` | GET | Prometheus metrics (self-monitoring) |
+| `/api/v1/stats` | GET | Storage/buffer/config snapshot |
+| `/api/v1/ingest_rates` | GET | Live per-signal rates (current + 60s/5m/15m averages, `gap_secs`, sparkline via `history_secs`) |
+| `/debug/pprof/{profile,summary,memory}` | GET | CPU/memory profiles (404 unless `telemetry.profiling_enabled`) |
 | `/oas` | GET | OpenAPI 3.0 specification |
 | `/ui` | GET | Built-in web UI |
 

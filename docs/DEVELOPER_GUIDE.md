@@ -51,23 +51,36 @@ The web console (`parqtel-server/src/ui.html`) is a single-file vanilla-JS app w
 
 Parqtel's AI-native capabilities come from its MCP servers. To add a new tool (e.g., a "GitHub" tool):
 
-1. **Navigate to `parqtel-mcp-core`**: This crate provides the shared framework.
-2. **Define the Tool**: Create a struct that implements the `McpTool` trait.
+1. **Navigate to `parqtel-mcp-core`**: This crate provides the shared framework. An `McpTool` is a plain struct with `name`, `description`, and `input_schema` fields — not a trait.
+2. **Define the Tool**: Construct an `McpTool` and pair it with a `ToolHandler` closure.
    ```rust
-   pub struct GitHubTool;
-   impl McpTool for GitHubTool {
-       fn name(&self) -> &str { "create_issue" }
-       fn schema(&self) -> Value { /* JSON Schema for inputs */ }
-       async fn call(&self, args: Value) -> Result<Value>;
-   }
+   use parqtel_mcp_core::{McpTool, ToolHandler};
+   use serde_json::{json, Value};
+
+   let github_tool = McpTool {
+       name: "create_issue".to_string(),
+       description: "Open a GitHub issue".to_string(),
+       input_schema: json!({
+           "type": "object",
+           "properties": {"title": {"type": "string"}},
+           "required": ["title"]
+       }),
+   };
+
+   let handler: ToolHandler = Arc::new(|params: Value| {
+       Box::pin(async move {
+           // call the GitHub API, then return a JSON Value
+           Ok(json!({"issue": 42}))
+       })
+   });
    ```
-3. **Add to Registry**: Register the tool in the relevant MCP server binary.
+3. **Register it**: `server.register_tool_with_handler(github_tool, handler)` in the relevant MCP server binary. See `parqtel-mcp-parqtel/src/lib.rs` (tool definitions) and `src/main.rs` (registration) for a complete example.
 
 ## 5. Development Workflow
 
 ### Prerequisites
-- Rust 1.87+ (MSRV; CI also checks 1.86)
-- `protoc` (for OTLP protobuf compilation)
+- Rust 1.87 (MSRV — CI pins and checks exactly 1.87; the workspace `Cargo.toml`, `Dockerfile`, and `ci.yml` move together)
+- `protoc` (for OTLP protobuf compilation; `make build`/`make test` auto-fetch it via the `tools` target, or install `protobuf-compiler`)
 
 ### Build Commands
 - `cargo build`: Standard debug build.
@@ -85,11 +98,11 @@ Parqtel's AI-native capabilities come from its MCP servers. To add a new tool (e
 
 - **Unit Tests**: Found in `src/` of each crate.
 - **Integration Tests**: Found in the `tests/` directory of each crate.
-- **E2E Tests**: Found in the root `e2e/` directory. These require a running Kubernetes environment (Go + client-go).
+- **E2E Tests**: The Kubernetes suite in the root `e2e/` directory requires a running cluster and is built with the `e2e` build tag (`cd e2e && go test -tags e2e ./...`; Go + client-go). The PromQL functional suite needs no cluster — `make e2e-promql` runs it against the local compose stack.
 
 ## 8. Performance Profiling
 
-We use `criterion` for micro-benchmarking and `run_perf_audit.sh` for system-level audits.
-- To run benchmarks: `cargo bench`
-- To run system audit: `./scripts/run_perf_audit.sh`
-- Hot-path micro-benchmarks: `cargo run --release -p parqtel-server --example perf_bench`
+We use the `perf_bench` example for hot-path micro-benchmarking (hand-rolled timing, no `criterion` dependency) and `run_perf_audit.sh` for system-level audits.
+- To run micro-benchmarks: `cargo run --release -p parqtel-server --example perf_bench`
+- To run a system audit: `make perf-audit` (release build + `scripts/run_perf_audit.sh`)
+- To drive synthetic load: `make load` (10k points) or `make load-test LOAD_RATE=... LOAD_TIME=...`
