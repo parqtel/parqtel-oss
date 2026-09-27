@@ -133,7 +133,12 @@ impl ParquetStorageEngine {
         let final_path = self.config.data_dir.join(&filename);
         let tmp_path = self.config.data_dir.join(format!(".tmp_{}", filename));
 
-        write_parquet(&tmp_path, chunk, &self.config.compression)?;
+        write_parquet(
+            &tmp_path,
+            chunk,
+            &self.config.compression,
+            self.config.row_group_size,
+        )?;
         fs::rename(&tmp_path, &final_path)?;
         let size_bytes = fs::metadata(&final_path)?.len();
 
@@ -185,7 +190,12 @@ impl ParquetStorageEngine {
         let final_path = self.log_config.data_dir.join(&filename);
         let tmp_path = self.log_config.data_dir.join(format!(".tmp_{}", filename));
 
-        write_parquet(&tmp_path, chunk, &self.log_config.compression)?;
+        write_parquet(
+            &tmp_path,
+            chunk,
+            &self.log_config.compression,
+            self.log_config.row_group_size,
+        )?;
         fs::rename(&tmp_path, &final_path)?;
         let size_bytes = fs::metadata(&final_path)?.len();
 
@@ -381,6 +391,7 @@ fn write_parquet(
     path: &std::path::Path,
     record_batch: arrow::record_batch::RecordBatch,
     compression: &str,
+    row_group_size: usize,
 ) -> Result<()> {
     let file = File::create(path)?;
 
@@ -392,6 +403,9 @@ fn write_parquet(
             _ => Compression::UNCOMPRESSED,
         })
         .set_writer_version(WriterVersion::PARQUET_2_0)
+        // Same row-group sizing as the ingest writer so every writer produces
+        // blocks the scanner can prune equally well.
+        .set_max_row_group_row_count(Some(row_group_size.max(1)))
         .build();
 
     let mut writer = ArrowWriter::try_new(file, record_batch.schema(), Some(writer_props))

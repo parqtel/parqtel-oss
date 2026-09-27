@@ -5,6 +5,8 @@ use crate::models::storage::{BlockMetadata, StorageModel};
 use crate::models::traces::Span;
 use arrow_array::{Array, TimestampNanosecondArray};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+use parquet::file::metadata::ParquetMetaData;
+use parquet::file::statistics::Statistics;
 use std::collections::HashMap;
 use std::fs::File;
 use std::sync::Arc;
@@ -88,7 +90,20 @@ impl Scanner {
         let reader_builder = ParquetRecordBatchReaderBuilder::try_new(file)
             .map_err(|e| Error::Parquet(e.to_string()))?;
 
-        // Read all row groups (skip statistics filtering for simplicity with new parquet API)
+        // Skip row groups whose timestamp statistics cannot overlap the query
+        // window: on a multi-row-group block this turns "decode the block" into
+        // "decode the slice in range".
+        let reader_builder = match row_groups_in_range(
+            reader_builder.metadata(),
+            "timestamp_ns",
+            start_ns,
+            end_ns,
+        ) {
+            Some(groups) if groups.is_empty() => return Ok(Vec::new()),
+            Some(groups) => reader_builder.with_row_groups(groups),
+            None => reader_builder,
+        };
+
         let reader = reader_builder
             .build()
             .map_err(|e| Error::Parquet(e.to_string()))?;
@@ -302,7 +317,20 @@ impl Scanner {
         let reader_builder = ParquetRecordBatchReaderBuilder::try_new(file)
             .map_err(|e| Error::Parquet(e.to_string()))?;
 
-        // Read all row groups
+        // Prune row groups by timestamp statistics before decoding anything.
+        let reader_builder = match row_groups_in_range(
+            reader_builder.metadata(),
+            "timestamp_ns",
+            start_ns,
+            end_ns,
+        ) {
+            Some(groups) if groups.is_empty() => {
+                return Ok((Vec::new(), 0, vec![0; 60]));
+            }
+            Some(groups) => reader_builder.with_row_groups(groups),
+            None => reader_builder,
+        };
+
         let reader = reader_builder
             .build()
             .map_err(|e| Error::Parquet(e.to_string()))?;
@@ -316,12 +344,20 @@ impl Scanner {
             // Cache keys borrow from this chunk — recreate per chunk.
             let mut attr_cache: HashMap<&str, crate::LabelSet> = HashMap::new();
             let mut res_cache: HashMap<&str, crate::LabelSet> = HashMap::new();
+            // Cheap reject first: pulling a row out of the batch costs a JSON
+            // attribute parse, so rows outside the window must never get there.
+            let ts_arr = record_batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<TimestampNanosecondArray>()
+                .ok_or_else(|| Error::Arrow("Invalid timestamp column".into()))?;
             for row in 0..record_batch.num_rows() {
-                let log =
-                    StorageModel::row_to_log(&record_batch, row, &mut attr_cache, &mut res_cache)?;
-                if log.timestamp_ns < start_ns || log.timestamp_ns > end_ns {
+                let timestamp_ns = ts_arr.value(row);
+                if timestamp_ns < start_ns || timestamp_ns > end_ns {
                     continue;
                 }
+                let log =
+                    StorageModel::row_to_log(&record_batch, row, &mut attr_cache, &mut res_cache)?;
                 if let Some(f) = &filter {
                     if !f(&log) {
                         continue;
@@ -410,7 +446,16 @@ impl Scanner {
         let reader_builder = ParquetRecordBatchReaderBuilder::try_new(file)
             .map_err(|e| Error::Parquet(e.to_string()))?;
 
-        // Read all row groups
+        // Prune by the column the caller filters on (`start_time_ns`, index 4 of
+        // traces_schema) rather than the block's own timestamp column.
+        let reader_builder =
+            match row_groups_in_range(reader_builder.metadata(), "start_time_ns", start_ns, end_ns)
+            {
+                Some(groups) if groups.is_empty() => return Ok(Vec::new()),
+                Some(groups) => reader_builder.with_row_groups(groups),
+                None => reader_builder,
+            };
+
         let reader = reader_builder
             .build()
             .map_err(|e| Error::Parquet(e.to_string()))?;
@@ -426,15 +471,26 @@ impl Scanner {
                 }
             };
 
+            // Cheap reject first: `row_to_span` parses JSON attributes, events
+            // and links, so rows outside the window must never reach it.
+            let ts_arr = record_batch
+                .column(4)
+                .as_any()
+                .downcast_ref::<TimestampNanosecondArray>()
+                .ok_or_else(|| Error::Arrow("Invalid start_time_ns column".into()))?;
+
             for row in 0..record_batch.num_rows() {
+                let start_time_ns = ts_arr.value(row);
+                if start_time_ns < start_ns || start_time_ns > end_ns {
+                    continue;
+                }
                 match StorageModel::row_to_span(&record_batch, row) {
-                    Ok(span) if span.start_time_ns >= start_ns && span.start_time_ns <= end_ns => {
+                    Ok(span) => {
                         spans.push(span);
                         if spans.len() >= limit {
                             return Ok(spans);
                         }
                     }
-                    Ok(_) => {}
                     Err(e) => {
                         tracing::debug!("Skipping malformed span row in {:?}: {}", meta.path, e);
                     }
@@ -443,6 +499,62 @@ impl Scanner {
         }
         Ok(spans)
     }
+}
+
+/// Row-group indices whose `ts_column` statistics can overlap `[start_ns, end_ns]`.
+///
+/// Skipping a row group is always *sound*: a row group's min/max bound every
+/// row it contains, so a group entirely outside the window cannot hold a
+/// matching row — and that holds whether or not the rows are sorted. It is
+/// only *useful* when rows are roughly time-ordered, which they are here:
+/// both flush and compaction sort before writing, so a block's row groups
+/// cover disjoint time slices.
+///
+/// Returns `None` when the timestamp column cannot be located, in which case
+/// the caller must read every row group. Row groups with unusable statistics
+/// are kept rather than skipped, so the worst case is reading more than
+/// needed, never returning fewer rows.
+pub(crate) fn row_groups_in_range(
+    metadata: &ParquetMetaData,
+    ts_column: &str,
+    start_ns: i64,
+    end_ns: i64,
+) -> Option<Vec<usize>> {
+    let col_idx = metadata
+        .file_metadata()
+        .schema_descr()
+        .columns()
+        .iter()
+        .position(|c| c.name() == ts_column)?;
+
+    let mut keep = Vec::with_capacity(metadata.num_row_groups());
+    for rg_idx in 0..metadata.num_row_groups() {
+        let statistics = metadata
+            .row_group(rg_idx)
+            .columns()
+            .get(col_idx)
+            .and_then(|c| c.statistics());
+        match statistics {
+            // Timestamps are stored as INT64 nanoseconds, so their statistics
+            // arrive as `Int64` regardless of the logical timestamp type.
+            Some(Statistics::Int64(s)) => {
+                // min/max cover non-null values only: with nulls present we
+                // cannot prove an out-of-range group holds no matching row.
+                let nulls = s.null_count_opt().unwrap_or(0);
+                match (s.min_opt(), s.max_opt()) {
+                    (Some(min), Some(max)) if nulls == 0 => {
+                        if *max >= start_ns && *min <= end_ns {
+                            keep.push(rg_idx);
+                        }
+                    }
+                    _ => keep.push(rg_idx),
+                }
+            }
+            // Statistics disabled, or a non-INT64 column: keep the group.
+            _ => keep.push(rg_idx),
+        }
+    }
+    Some(keep)
 }
 
 /// Decodes a MetricValue from the three value columns without re-downcasting.

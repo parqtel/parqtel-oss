@@ -129,7 +129,12 @@ impl BlockWriter {
         let tmp_path = self.config.data_dir.join(format!(".tmp_{}", filename));
 
         fs::create_dir_all(&self.config.data_dir)?;
-        write_parquet_file(&tmp_path, chunk, &self.config.compression)?;
+        write_parquet_file(
+            &tmp_path,
+            chunk,
+            &self.config.compression,
+            self.config.row_group_size,
+        )?;
         fs::rename(&tmp_path, &final_path)?;
         let size_bytes = fs::metadata(&final_path)?.len();
         self.buffer.clear();
@@ -262,7 +267,12 @@ impl LogWriter {
         let tmp_path = self.config.data_dir.join(format!(".tmp_{}", filename));
 
         fs::create_dir_all(&self.config.data_dir)?;
-        write_parquet_file(&tmp_path, chunk, &self.config.compression)?;
+        write_parquet_file(
+            &tmp_path,
+            chunk,
+            &self.config.compression,
+            self.config.row_group_size,
+        )?;
         fs::rename(&tmp_path, &final_path)?;
         let size_bytes = fs::metadata(&final_path)?.len();
         self.buffer.clear();
@@ -348,7 +358,12 @@ impl TraceWriter {
         let tmp_path = self.config.data_dir.join(format!(".tmp_{}", filename));
 
         fs::create_dir_all(&self.config.data_dir)?;
-        write_parquet_file(&tmp_path, chunk, &self.config.compression)?;
+        write_parquet_file(
+            &tmp_path,
+            chunk,
+            &self.config.compression,
+            self.config.row_group_size,
+        )?;
         fs::rename(&tmp_path, &final_path)?;
         let size_bytes = fs::metadata(&final_path)?.len();
         self.buffer.clear();
@@ -367,17 +382,18 @@ impl TraceWriter {
     }
 }
 
-/// Rows per Parquet row group when flushing blocks.
-/// Multiple row groups let readers skip groups via timestamp statistics on
-/// narrow-range queries. ponytail: fixed size — expose in BlockConfig if
-/// workloads need different pruning/compression trade-offs.
-#[allow(dead_code)]
-const ROW_GROUP_ROWS: usize = 25_000;
-
+/// Writes one block to Parquet, splitting it into `row_group_size`-row groups.
+///
+/// `row_group_size` is not cosmetic: the scanner skips whole row groups whose
+/// timestamp statistics fall outside a query window, so this is what decides
+/// whether a narrow query decodes a slice of the block or all of it. It comes
+/// from `BlockConfig::row_group_size` (100k for metrics, 20k for logs by
+/// default). A zero would be rejected by Parquet itself, so it is clamped.
 fn write_parquet_file(
     path: &Path,
     record_batch: arrow::record_batch::RecordBatch,
     compression: &str,
+    row_group_size: usize,
 ) -> Result<()> {
     let file = File::create(path)?;
 
@@ -389,6 +405,7 @@ fn write_parquet_file(
             _ => Compression::UNCOMPRESSED,
         })
         .set_writer_version(WriterVersion::PARQUET_2_0)
+        .set_max_row_group_row_count(Some(row_group_size.max(1)))
         .build();
 
     let mut writer = ArrowWriter::try_new(file, record_batch.schema(), Some(writer_props))
@@ -405,7 +422,7 @@ fn write_parquet_file(
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
-    use parqtel_core::{DataPoint, LabelSet, Metric, MetricValue};
+    use parqtel_core::{DataPoint, LabelSet, Metric, MetricKind, MetricValue};
     use tempfile::tempdir;
 
     #[test]
@@ -436,5 +453,44 @@ mod tests {
         let meta = writer.flush().unwrap();
         assert!(meta.path.exists());
         assert_eq!(meta.row_count, 1);
+    }
+
+    /// `BlockConfig::row_group_size` has to reach the Parquet writer, because
+    /// the scanner prunes whole row groups by timestamp statistics: a block
+    /// written as a single row group can never be narrowed down, and readers
+    /// silently fall back to decoding it in full.
+    #[test]
+    fn test_flush_honours_configured_row_group_size() {
+        let dir = tempdir().unwrap();
+        let config = BlockConfig {
+            data_dir: dir.path().to_path_buf(),
+            row_group_size: 100,
+            ..Default::default()
+        };
+        let mut writer = BlockWriter::new(config);
+        writer
+            .push(Metric {
+                name: "rg.cpu".into(),
+                kind: MetricKind::Gauge,
+                data_points: (0..250)
+                    .map(|i| {
+                        DataPoint::new(i + 1, MetricValue::Double(i as f64), LabelSet::default())
+                            .unwrap()
+                    })
+                    .collect(),
+                ..Default::default()
+            })
+            .unwrap();
+        let meta = writer.flush().unwrap();
+        assert_eq!(meta.row_count, 250);
+
+        let file = std::fs::File::open(&meta.path).unwrap();
+        let builder =
+            parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(file).unwrap();
+        assert_eq!(
+            builder.metadata().num_row_groups(),
+            3,
+            "250 rows at 100 rows/group must produce 3 row groups"
+        );
     }
 }
