@@ -1,6 +1,6 @@
 # Built-in Alert Presets — Design & Backlog Plan
 
-Status: **DRAFT for review** (Phase 0 — no implementation started)
+Status: **APPROVED** (Phase 0 complete — execution started; decisions in §8)
 
 ## 1. Problem / Goal
 
@@ -19,7 +19,7 @@ binary** for:
 | Kubernetes | `kubernetes` | yes (`kubernetes-cluster.yaml`, 11 rules) |
 | Kafka | `kafka` | no |
 | Redis | `redis` | no |
-| PostgreSQL | `postgresql` | no |
+| PostgreSQL | `postgres` | no |
 | Java (JVM) | `java` | no |
 | Golang (runtime) | `golang` | no |
 | Parqtel | `parqtel` | yes (`parqtel-self.yaml`, 6 rules) |
@@ -96,17 +96,17 @@ exporter vs `kafka_exporter` vs Redpanda emit different metric names).
 
 ```toml
 [alerts.presets]
-mode = "off"        # "off" | "auto" | "all"
+mode = "auto"       # "off" | "auto" | "all"   (default: auto)
 include = []        # include-only list of pack keys (wins over exclude)
 exclude = []        # skip these pack keys
 ```
 
-- `off` (default) — nothing built-in loads; **zero behavior change** for
-  existing deployments.
-- `auto` — candidate packs activate when any canary metric is present.
+- `auto` (**default**) — candidate packs activate when any canary metric is
+  present; packs whose metrics never appear stay dormant.
 - `all` — candidate packs activate at startup regardless of metrics (a rule
   whose metric is absent simply never evaluates — existing, documented
   behavior).
+- `off` — nothing built-in loads (opt-out; zero built-in behavior).
 - Selection: non-empty `include` ⇒ include-only (if `exclude` is also set,
   `include` wins and a warning is logged). Otherwise `exclude` is subtracted.
   Unknown pack keys are logged as warnings and ignored (lenient under layered
@@ -172,7 +172,7 @@ Existing packs (already written; gain manifest entries + canaries only):
 | `parqtel` | `parqtel_ingested_points_total`, `parqtel_ingest_gap_secs` | 6 |
 | `coredns` | `coredns_dns_requests_total` | 5 |
 | `external-secrets` | `externalsecret_status_condition` (KSM CR metric) | 4 |
-| `service-red` | `traces_service_requests_total_total` | 3 |
+| `service-red` | `traces_service_requests_total` | 3 |
 
 New packs (~50 rules total):
 
@@ -200,7 +200,7 @@ New packs (~50 rules total):
 
 ### Phase 1 — Engine & config (PR 1)
 - `AlertConfig` gains `presets: PresetConfig { mode, include, exclude }`
-  (defaults `off/[]/[]`), env comma-string/array helper, config tests.
+  (defaults `auto/[]/[]` per §8), env comma-string/array helper, config tests.
 - `parqtel-alert/src/builtin.rs`: `BuiltinPack` manifest embedding the **5
   existing** packs; manifest unit tests (unique names, canaries, global rule-id
   uniqueness across pack files).
@@ -217,8 +217,8 @@ New packs (~50 rules total):
 `kafka`, `redis`, `postgresql` (~20 rules) + manifest entries + README row.
 
 ### Phase 3 — Pack batch B: runtimes (PR 3)
-`java`, `golang` (~11 rules) + manifest entries (+ decision on a `process`
-pack, see open questions).
+`java`, `golang`, plus the cross-runtime **`process`** pack (CPU / RSS / FD
+saturation; canary `process_cpu_seconds_total`) — ~15 rules + manifest entries.
 
 ### Phase 4 — Pack batch C: platform (PR 4)
 `argocd`, `etcd`, `opentelemetry`, `kyverno` (~19 rules) + manifest entries.
@@ -245,30 +245,26 @@ pack, see open questions).
 
 | Risk | Mitigation |
 |---|---|
-| Canary false positives (`go_goroutines` exists wherever any Go app is scraped) | default `mode = "off"`; include/exclude control; docs call it out |
+| Canary false positives (`go_goroutines` exists wherever any Go app is scraped) | default `mode = "auto"` only activates packs whose metrics really exist; `off` / include / exclude give full control; docs call it out |
 | Exporter metric-name variance across versions | canary ANY-of lists; per-rule description fallbacks (existing house style) |
 | Rule id collisions across packs | new global-uniqueness static assertion |
 | Auto-activation overriding a user's API disable | one-shot activation + insert-if-absent (D4 invariants 1–3) |
 | Figment env array parsing | `deserialize_with` accepting comma-string or array + tests |
 | Alert engine query limits (no ratios / `histogram_quantile`) | rule sketches use allowed shapes only; static test is the gate |
 
-## 8. Open questions for review
+## 8. Decisions (resolved — 2026-09-28)
 
-1. **Default mode:** `off` (proposed — zero behavior change) vs `auto`
-   (opinionated greenfield, but surprising for users who already scrape
-   `go_*`/`jvm_*` metrics)?
-2. **`include` + `exclude` both set:** include wins + warn (proposed) vs hard
-   config error?
-3. **New `process` pack** (canary `process_cpu_seconds_total`): CPU / RSS /
-   FD saturation rules are cross-runtime — give them their own pack (proposed)
-   rather than duplicating ids/queries across `java` and `golang`?
-4. **Auto-detector interval:** startup + every 5 min until all pending packs
-   activate; never deactivate — OK?
-5. **Pack keys & naming** (table in §1) — e.g. `postgresql` vs `postgres`?
-6. **Rule budget** of 4–7 per pack OK for v1 (extensible later)?
-7. `service-red` auto-activates for anyone tracing services when `mode=auto` —
-   intended? (proposed: yes, that is what `auto` means; use `exclude` to opt
-   out.)
+1. **Default mode:** **`auto`** (greenfield installs activate packs as their
+   metrics appear; `off` remains available to opt out).
+2. **`include` + `exclude` both set:** **include wins + warn**.
+3. **New `process` pack:** **yes** — cross-runtime CPU / RSS / FD rules ship
+   as their own pack (Phase 3), not duplicated across `java`/`golang`.
+4. **Auto-detector:** approved — startup + every 5 min until all pending packs
+   activate; never deactivate.
+5. **Pack keys:** approved as listed in §1, with `postgres` (not `postgresql`).
+6. **Rule budget:** approved — 4–7 rules per pack for v1.
+7. **`service-red` under `auto`:** approved — it activates for anyone tracing
+   services; `exclude` is the opt-out.
 
 ## 9. Effort estimate
 
