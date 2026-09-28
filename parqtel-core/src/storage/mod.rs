@@ -202,6 +202,131 @@ mod tests {
         assert_eq!(index.all_labels().len(), 1);
     }
 
+    /// Helper: write a real parquet metrics file with an explicit row-group
+    /// size, so tests can create blocks that span several row groups.
+    fn write_metrics_parquet_rg(path: &std::path::Path, metrics: &[Metric], rg_rows: usize) {
+        let chunk = StorageModel::metrics_to_chunk(metrics).unwrap();
+        let file = fs::File::create(path).unwrap();
+
+        let writer_props = WriterProperties::builder()
+            .set_compression(Compression::UNCOMPRESSED)
+            .set_writer_version(WriterVersion::PARQUET_2_0)
+            .set_max_row_group_row_count(Some(rg_rows))
+            .build();
+
+        let mut writer = ArrowWriter::try_new(file, chunk.schema(), Some(writer_props)).unwrap();
+        writer.write(&chunk).unwrap();
+        writer.close().unwrap();
+    }
+
+    /// Builds a metrics block of `rows` points, 1 ns apart, in 10 series.
+    fn prune_test_metrics(rows: usize) -> Vec<Metric> {
+        vec![Metric {
+            name: "prune.cpu".into(),
+            kind: MetricKind::Gauge,
+            data_points: (0..rows)
+                .map(|i| {
+                    DataPoint::new(
+                        i as i64 + 1,
+                        MetricValue::Double(i as f64),
+                        LabelSet::try_from_iter(vec![("host", format!("h{}", i % 10))]).unwrap(),
+                    )
+                    .unwrap()
+                })
+                .collect(),
+            ..Default::default()
+        }]
+    }
+
+    /// The pruning helper must select exactly the row groups that can hold a
+    /// row in range, and must fail open (never prune) when it cannot tell.
+    #[test]
+    fn test_row_groups_in_range_selects_only_overlapping_groups() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("prune.parquet");
+        // 1000 rows over 10 row groups of 100, timestamps 1..=1000.
+        write_metrics_parquet_rg(&path, &prune_test_metrics(1000), 100);
+
+        let file = fs::File::open(&path).unwrap();
+        let builder =
+            parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(file).unwrap();
+        let md = builder.metadata().clone();
+
+        assert_eq!(md.num_row_groups(), 10, "test file should have 10 groups");
+
+        // Rows 301..=400 live entirely in the 4th row group (0-based index 3).
+        let groups = scanner::row_groups_in_range(&md, "timestamp_ns", 301, 400).unwrap();
+        assert_eq!(groups, vec![3]);
+
+        // A single row on a boundary must still keep its own group.
+        assert_eq!(
+            scanner::row_groups_in_range(&md, "timestamp_ns", 100, 100).unwrap(),
+            vec![0]
+        );
+        assert_eq!(
+            scanner::row_groups_in_range(&md, "timestamp_ns", 101, 101).unwrap(),
+            vec![1]
+        );
+
+        // A window covering everything keeps every group.
+        assert_eq!(
+            scanner::row_groups_in_range(&md, "timestamp_ns", 0, i64::MAX)
+                .unwrap()
+                .len(),
+            10
+        );
+
+        // A window past the end prunes everything.
+        assert!(
+            scanner::row_groups_in_range(&md, "timestamp_ns", 5_000, 6_000)
+                .unwrap()
+                .is_empty()
+        );
+
+        // Unknown column: caller must fall back to reading every row group.
+        assert!(scanner::row_groups_in_range(&md, "not_a_column", 0, 10).is_none());
+    }
+
+    /// Pruning must not change results: a narrow scan has to return exactly the
+    /// rows a full scan filtered by hand would.
+    #[tokio::test]
+    async fn test_pruned_scan_matches_full_scan() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("prune_scan.parquet");
+        write_metrics_parquet_rg(&path, &prune_test_metrics(1000), 100);
+
+        let meta = BlockMetadata {
+            path,
+            start_timestamp_ns: 1,
+            end_timestamp_ns: 1000,
+            row_count: 1000,
+            size_bytes: 0,
+            metric_names: HashSet::from(["prune.cpu".into()]),
+            label_names: HashSet::from(["host".into()]),
+            label_values: Default::default(),
+            signal_type: SignalType::Metrics,
+        };
+
+        let all = Scanner::scan(vec![meta.clone()], "prune.cpu".into(), 0, i64::MAX)
+            .await
+            .unwrap();
+        assert_eq!(all.len(), 1000);
+
+        let expected: Vec<i64> = all
+            .iter()
+            .map(|p| p.timestamp_ns)
+            .filter(|t| (301..=400).contains(t))
+            .collect();
+
+        // Picks row group 3 only, and must agree row for row.
+        let pruned = Scanner::scan(vec![meta], "prune.cpu".into(), 301, 400)
+            .await
+            .unwrap();
+        let got: Vec<i64> = pruned.iter().map(|p| p.timestamp_ns).collect();
+        assert_eq!(got, expected);
+        assert_eq!(got.len(), 100);
+    }
+
     #[tokio::test]
     async fn test_scanner_reads_real_metrics() {
         let dir = tempdir().unwrap();

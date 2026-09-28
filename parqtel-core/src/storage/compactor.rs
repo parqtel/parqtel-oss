@@ -324,6 +324,10 @@ impl Compactor {
                 _ => Compression::UNCOMPRESSED,
             })
             .set_writer_version(WriterVersion::PARQUET_2_0)
+            // Compaction rewrites blocks, so it must preserve the row-group
+            // layout the scanner prunes on — otherwise compacted blocks quietly
+            // lose the narrow-query speedup that flushed blocks have.
+            .set_max_row_group_row_count(Some(config.row_group_size.max(1)))
             .build();
 
         let mut writer = ArrowWriter::try_new(

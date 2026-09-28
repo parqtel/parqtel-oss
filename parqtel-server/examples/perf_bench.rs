@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use parqtel_core::{BlockConfig, BlockIndex, MemoryBuffer, Scanner};
 use parqtel_ingest::decode::OtlpDecoder;
-use parqtel_ingest::writer::BlockWriter;
+use parqtel_ingest::writer::{BlockWriter, LogWriter, TraceWriter};
 use parqtel_query::executor::QueryExecutor;
 use parqtel_query::plan::{AggregationOp, QueryPlan};
 use tokio::sync::RwLock;
@@ -76,6 +76,96 @@ fn report(name: &str, d: Duration, ops: u64) -> f64 {
         ops as f64 / d.as_secs_f64(),
     );
     ops as f64 / d.as_secs_f64()
+}
+
+// ── Logs / traces phases ─────────────────────────────────────────────────
+//
+// The metrics phases above seed blocks smaller than the configured
+// `row_group_size`, so each block holds a single Parquet row group and a
+// narrow query has nothing to skip. These phases seed blocks that span
+// several row groups (SIG_ROWS / SIG_RG = 10 per block) — the shape of a
+// real "last 15 minutes" query against a multi-hour block — so row-group
+// timestamp statistics become the difference between decoding a whole
+// block and decoding a tenth of one.
+const SIG_BLOCKS: usize = 4;
+const SIG_ROWS: usize = 100_000;
+const SIG_RG: usize = 10_000;
+const SIG_SERIES: usize = 50;
+
+fn sig_config(dir: &Path) -> BlockConfig {
+    BlockConfig {
+        data_dir: dir.to_path_buf(),
+        max_rows_per_block: SIG_ROWS,
+        row_group_size: SIG_RG,
+        ..Default::default()
+    }
+}
+
+fn sig_log_config(dir: &Path) -> parqtel_core::config::LogBlockConfig {
+    parqtel_core::config::LogBlockConfig {
+        data_dir: dir.to_path_buf(),
+        max_rows_per_block: SIG_ROWS,
+        row_group_size: SIG_RG,
+        ..Default::default()
+    }
+}
+
+/// Deterministic OTLP JSON logs payload with `n` records.
+fn gen_logs_batch(base_ts: i64, n: usize) -> String {
+    let mut s = String::with_capacity(n * 200);
+    s.push_str(
+        r#"{"resourceLogs":[{"resource":{"attributes":[{"key":"service.name","value":{"stringValue":"bench-svc"}}]},"scopeLogs":[{"scope":{"name":"bench"},"logRecords":["#,
+    );
+    for i in 0..n {
+        if i > 0 {
+            s.push(',');
+        }
+        s.push_str(&format!(
+            r#"{{"timeUnixNano":{},"severityNumber":9,"severityText":"INFO","body":{{"stringValue":"log line {}"}},"traceId":"{:032x}","spanId":"{:016x}","attributes":[{{"key":"host","value":{{"stringValue":"h{}"}}}},{{"key":"env","value":{{"stringValue":"prod"}}}}]}}"#,
+            base_ts + i as i64 * 1_000_000,
+            i % 1000,
+            i,
+            i,
+            i % SIG_SERIES,
+        ));
+    }
+    s.push_str("]}]}]}");
+    s
+}
+
+/// Deterministic OTLP JSON traces payload with `n` server spans.
+fn gen_traces_batch(base_ts: i64, n: usize) -> String {
+    let mut s = String::with_capacity(n * 240);
+    s.push_str(
+        r#"{"resourceSpans":[{"resource":{"attributes":[{"key":"service.name","value":{"stringValue":"bench-svc"}}]},"scopeSpans":[{"scope":{"name":"bench"},"spans":["#,
+    );
+    for i in 0..n {
+        if i > 0 {
+            s.push(',');
+        }
+        let start = base_ts + i as i64 * 1_000_000;
+        s.push_str(&format!(
+            r#"{{"traceId":"{:032x}","spanId":"{:016x}","name":"op-{}","kind":2,"startTimeUnixNano":{},"endTimeUnixNano":{},"status":{{"code":1}},"attributes":[{{"key":"http.status_code","value":{{"intValue":"200"}}}},{{"key":"host","value":{{"stringValue":"h{}"}}}}]}}"#,
+            i,
+            i,
+            i % SIG_SERIES,
+            start,
+            start + 2_000_000,
+            i % SIG_SERIES,
+        ));
+    }
+    s.push_str("]}]}]}");
+    s
+}
+
+fn decode_logs(json: &str) -> Vec<parqtel_core::LogRecord> {
+    let v: serde_json::Value = serde_json::from_slice(json.as_bytes()).unwrap();
+    OtlpDecoder::decode_logs_json(v).unwrap()
+}
+
+fn decode_traces(json: &str) -> Vec<parqtel_core::Span> {
+    let v: serde_json::Value = serde_json::from_slice(json.as_bytes()).unwrap();
+    OtlpDecoder::decode_traces_json(v).unwrap()
 }
 
 #[tokio::main(flavor = "multi_thread")]
@@ -301,4 +391,262 @@ async fn main() {
     println!("scan   : {:.0}", rate_scan);
     println!("query  : {:.0}", rate_query);
     println!("q-narr : {:.0}", rate_query_narrow);
+
+    // ── 5. Logs: ingest → flush → full scan → narrow scan ─────────────────
+    bench_logs(dir.path()).await;
+
+    // ── 6. Traces: ingest → flush → full scan → narrow scan ───────────────
+    bench_traces(dir.path()).await;
+}
+
+/// Base timestamp of seeded block `b` — rows are 1 ms apart, so each block
+/// spans `SIG_ROWS` milliseconds and the blocks are laid out back to back.
+fn sig_base(b: usize) -> i64 {
+    1_700_000_000_000_000_000i64 + (b as i64) * SIG_ROWS as i64 * 1_000_000
+}
+
+/// The narrow window the scan phases measure: the middle tenth of block 0 —
+/// rows 40 000..=49 999 (10 000 rows) of a 100 000-row block. Scanner bounds
+/// are inclusive at both ends, hence the `- 1` on the upper bound.
+fn sig_narrow() -> (i64, i64) {
+    let base = sig_base(0);
+    (base + 40_000 * 1_000_000, base + 49_999 * 1_000_000)
+}
+
+async fn bench_logs(dir: &Path) {
+    let data_dir = dir.join("sig-logs");
+    std::fs::create_dir_all(&data_dir).unwrap();
+    println!(
+        "\n=== logs: ingest / flush / scan ({} blocks x {} rows, row_group_size={}) ===",
+        SIG_BLOCKS, SIG_ROWS, SIG_RG
+    );
+
+    let batches: Vec<String> = (0..SIG_BLOCKS)
+        .map(|b| gen_logs_batch(sig_base(b), SIG_ROWS))
+        .collect();
+
+    // ── ingest: OTLP JSON decode + writer push ────────────────────────────
+    let mut times = Vec::new();
+    for _ in 0..ITERS {
+        let mut w = LogWriter::new(sig_log_config(&data_dir));
+        let t0 = Instant::now();
+        for log in decode_logs(&batches[0]) {
+            w.push(log).unwrap();
+        }
+        times.push(t0.elapsed());
+    }
+    report("log-ingest", median(times), SIG_ROWS as u64);
+
+    // ── flush: buffer → Parquet ───────────────────────────────────────────
+    let mut times = Vec::new();
+    for _ in 0..ITERS {
+        let mut w = LogWriter::new(sig_log_config(&data_dir));
+        for log in decode_logs(&batches[0]) {
+            w.push(log).unwrap();
+        }
+        let t0 = Instant::now();
+        w.flush().unwrap();
+        times.push(t0.elapsed());
+    }
+    let sig_d = median(times);
+    report("log-flush", sig_d, SIG_ROWS as u64);
+
+    // Write-side cost of the layout that makes pruning possible: the same rows
+    // written as one row group per block (the effective pre-fix behavior, since
+    // Parquet's 1M-row default made a 100k-row block a single group) versus the
+    // configured 10k. More groups mean more footers and per-group statistics.
+    let wide_config = parqtel_core::config::LogBlockConfig {
+        data_dir: data_dir.clone(),
+        max_rows_per_block: SIG_ROWS,
+        row_group_size: SIG_ROWS,
+        ..Default::default()
+    };
+    let mut times = Vec::new();
+    for _ in 0..ITERS {
+        let mut w = LogWriter::new(wide_config.clone());
+        for log in decode_logs(&batches[0]) {
+            w.push(log).unwrap();
+        }
+        let t0 = Instant::now();
+        w.flush().unwrap();
+        times.push(t0.elapsed());
+    }
+    let wide_d = median(times);
+    report("log-flush-1rg", wide_d, SIG_ROWS as u64);
+    println!(
+        "  ({} row groups costs {:.2}x the write time of one row group)",
+        SIG_ROWS / SIG_RG,
+        sig_d.as_secs_f64() / wide_d.as_secs_f64()
+    );
+
+    // ── seed blocks for the scan phases ───────────────────────────────────
+    let mut index = BlockIndex::new(&data_dir);
+    let mut w = LogWriter::new(sig_log_config(&data_dir));
+    for json in &batches {
+        for log in decode_logs(json) {
+            w.push(log).unwrap();
+        }
+        index.add(w.flush().unwrap()).unwrap();
+    }
+    let all = index.query(0, i64::MAX, None);
+    let (n_start, n_end) = sig_narrow();
+    let narrowed = index.query(n_start, n_end, None);
+    println!(
+        "  {} blocks seeded, {} block(s) overlap the narrow window",
+        all.len(),
+        narrowed.len()
+    );
+
+    // ── scan: full range ──────────────────────────────────────────────────
+    let mut times = Vec::new();
+    for _ in 0..ITERS {
+        let t0 = Instant::now();
+        let logs = Scanner::scan_logs(all.clone(), 0, i64::MAX).await.unwrap();
+        assert_eq!(logs.len(), SIG_BLOCKS * SIG_ROWS);
+        times.push(t0.elapsed());
+    }
+    let full_d = median(times);
+    report("log-scan", full_d, (SIG_BLOCKS * SIG_ROWS) as u64);
+
+    // ── scan: narrow window through the production block-index path ───────
+    let mut times = Vec::new();
+    for _ in 0..ITERS {
+        let t0 = Instant::now();
+        let logs = Scanner::scan_logs(narrowed.clone(), n_start, n_end)
+            .await
+            .unwrap();
+        assert_eq!(logs.len(), SIG_ROWS / 10);
+        times.push(t0.elapsed());
+    }
+    let narrow_d = median(times);
+    report("log-scan-narrow", narrow_d, (SIG_ROWS / 10) as u64);
+
+    // ── scan: narrow window with every block handed in (worst case) ───────
+    let mut times = Vec::new();
+    for _ in 0..ITERS {
+        let t0 = Instant::now();
+        let logs = Scanner::scan_logs(all.clone(), n_start, n_end)
+            .await
+            .unwrap();
+        assert_eq!(logs.len(), SIG_ROWS / 10);
+        times.push(t0.elapsed());
+    }
+    let worst_d = median(times);
+    report("log-scan-worst", worst_d, (SIG_ROWS / 10) as u64);
+
+    // The number that matters: a narrow query returns 2.5% of the rows, so on
+    // a pruned scan it should cost a similar fraction of the full scan. A
+    // per-row cost of ~1x means the query only read what it returned.
+    let full_rows = (SIG_BLOCKS * SIG_ROWS) as f64;
+    let narrow_rows = (SIG_ROWS / 10) as f64;
+    let full_per_row = full_d.as_secs_f64() * 1e6 / full_rows;
+    let worst_per_row = worst_d.as_secs_f64() * 1e6 / narrow_rows;
+    println!(
+        "  narrow window = {:.1}% of rows, {:.0}% of full-scan latency, {:.1}x per-row cost",
+        narrow_rows * 100.0 / full_rows,
+        narrow_d.as_secs_f64() * 100.0 / full_d.as_secs_f64(),
+        worst_per_row / full_per_row,
+    );
+}
+
+async fn bench_traces(dir: &Path) {
+    let data_dir = dir.join("sig-traces");
+    std::fs::create_dir_all(&data_dir).unwrap();
+    println!(
+        "\n=== traces: ingest / flush / scan ({} blocks x {} spans, row_group_size={}) ===",
+        SIG_BLOCKS, SIG_ROWS, SIG_RG
+    );
+
+    let batches: Vec<String> = (0..SIG_BLOCKS)
+        .map(|b| gen_traces_batch(sig_base(b), SIG_ROWS))
+        .collect();
+
+    // ── ingest: OTLP JSON decode + writer push ────────────────────────────
+    let mut times = Vec::new();
+    for _ in 0..ITERS {
+        let mut w = TraceWriter::new(sig_config(&data_dir));
+        let t0 = Instant::now();
+        for span in decode_traces(&batches[0]) {
+            w.push(span).unwrap();
+        }
+        times.push(t0.elapsed());
+    }
+    report("span-ingest", median(times), SIG_ROWS as u64);
+
+    // ── flush: buffer → Parquet ───────────────────────────────────────────
+    let mut times = Vec::new();
+    for _ in 0..ITERS {
+        let mut w = TraceWriter::new(sig_config(&data_dir));
+        for span in decode_traces(&batches[0]) {
+            w.push(span).unwrap();
+        }
+        let t0 = Instant::now();
+        w.flush().unwrap();
+        times.push(t0.elapsed());
+    }
+    report("span-flush", median(times), SIG_ROWS as u64);
+
+    // ── seed blocks for the scan phases ───────────────────────────────────
+    let mut index = BlockIndex::new(&data_dir);
+    let mut w = TraceWriter::new(sig_config(&data_dir));
+    for json in &batches {
+        for span in decode_traces(json) {
+            w.push(span).unwrap();
+        }
+        index.add(w.flush().unwrap()).unwrap();
+    }
+    let all = index.query(0, i64::MAX, None);
+    let (n_start, n_end) = sig_narrow();
+    let narrowed = index.query(n_start, n_end, None);
+    let total = SIG_BLOCKS * SIG_ROWS;
+
+    // ── scan: full range ──────────────────────────────────────────────────
+    let mut times = Vec::new();
+    for _ in 0..ITERS {
+        let t0 = Instant::now();
+        let spans = Scanner::scan_traces(all.clone(), 0, i64::MAX, total)
+            .await
+            .unwrap();
+        assert_eq!(spans.len(), total);
+        times.push(t0.elapsed());
+    }
+    let full_d = median(times);
+    report("span-scan", full_d, total as u64);
+
+    // ── scan: narrow window through the production block-index path ───────
+    let mut times = Vec::new();
+    for _ in 0..ITERS {
+        let t0 = Instant::now();
+        let spans = Scanner::scan_traces(narrowed.clone(), n_start, n_end, SIG_ROWS / 10)
+            .await
+            .unwrap();
+        assert_eq!(spans.len(), SIG_ROWS / 10);
+        times.push(t0.elapsed());
+    }
+    let narrow_d = median(times);
+    report("span-scan-narrow", narrow_d, (SIG_ROWS / 10) as u64);
+
+    // ── scan: narrow window with every block handed in (worst case) ───────
+    let mut times = Vec::new();
+    for _ in 0..ITERS {
+        let t0 = Instant::now();
+        let spans = Scanner::scan_traces(all.clone(), n_start, n_end, SIG_ROWS / 10)
+            .await
+            .unwrap();
+        assert_eq!(spans.len(), SIG_ROWS / 10);
+        times.push(t0.elapsed());
+    }
+    let worst_d = median(times);
+    report("span-scan-worst", worst_d, (SIG_ROWS / 10) as u64);
+
+    let full_rows = total as f64;
+    let narrow_rows = (SIG_ROWS / 10) as f64;
+    let full_per_row = full_d.as_secs_f64() * 1e6 / full_rows;
+    let worst_per_row = worst_d.as_secs_f64() * 1e6 / narrow_rows;
+    println!(
+        "  narrow window = {:.1}% of rows, {:.0}% of full-scan latency, {:.1}x per-row cost",
+        narrow_rows * 100.0 / full_rows,
+        narrow_d.as_secs_f64() * 100.0 / full_d.as_secs_f64(),
+        worst_per_row / full_per_row,
+    );
 }
