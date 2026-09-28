@@ -173,7 +173,6 @@ header{height:48px;flex-shrink:0;background:var(--bg-void);border-bottom:1px sol
 .ovw-val{font-family:var(--mono);font-size:22px;font-weight:700;color:var(--text-primary);}
 .ovw-lbl{font-size:11px;color:var(--text-muted);}
 #ovw-storage .ovw-lbl{font-size:12px;}
-.ovw-sub{font-size:13px;color:var(--text-primary);font-family:var(--mono);line-height:1.45;}
 .ovw-sec-title{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--text-muted);margin:16px 0 8px;}
 #ovw-mid{grid-template-columns:minmax(260px,1fr) minmax(0,2fr);align-items:stretch;}
 .ovw-vol{background:var(--bg-surface);border:1px solid var(--border-subtle);border-radius:var(--radius-md);padding:12px 16px 8px;display:flex;flex-direction:column;min-width:0;overflow:hidden;}
@@ -189,6 +188,37 @@ header{height:48px;flex-shrink:0;background:var(--bg-void);border-bottom:1px sol
 .rate-bytes{font-size:11px;color:var(--text-secondary);font-family:var(--mono);margin:6px 0 10px;}
 .rate-spark{width:100%;height:56px;display:block;}
 #ovw-spark{width:100%;height:150px;display:block;}
+.ovw-note{font-size:10px;color:var(--text-secondary);font-family:var(--mono);margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.ovw-val.hot{color:var(--err);}
+.ovw-val.warm{color:var(--warn);}
+.ovw-win{font-weight:400;text-transform:none;letter-spacing:0;font-size:10px;color:var(--text-muted);margin-left:6px;}
+#ovw-vol-win,#ovw-alerts-win{margin-left:6px;}
+.ovw-vol-meta{margin-left:auto;font-weight:400;text-transform:none;letter-spacing:0;font-size:10px;color:var(--text-secondary);font-family:var(--mono);}
+.ovw-store{display:flex;flex-direction:column;gap:3px;}
+.ovw-srow{display:grid;grid-template-columns:58px 1fr 1fr 1fr;gap:8px;font-family:var(--mono);font-size:11px;color:var(--text-primary);}
+.ovw-srow b{font-weight:700;}
+.ovw-srow.head{color:var(--text-muted);font-size:9px;text-transform:uppercase;letter-spacing:.05em;border-bottom:1px solid var(--border-subtle);padding-bottom:3px;}
+.ovw-srow .k{text-transform:capitalize;color:var(--text-secondary);}
+.ovw-srow .n{text-align:right;}
+.ovw-srow.total{border-top:1px solid var(--border-subtle);margin-top:3px;padding-top:4px;color:var(--accent);}
+.ovw-buffer{font-family:var(--mono);font-size:11px;color:var(--text-primary);}
+.ovw-legend{display:flex;gap:12px;align-items:center;font-size:10px;color:var(--text-muted);margin-top:4px;flex-wrap:wrap;}
+.ovw-lg{display:flex;align-items:center;gap:4px;}
+.ovw-sw{width:8px;height:8px;border-radius:2px;display:inline-block;flex-shrink:0;}
+.ovw-chips{display:flex;flex-wrap:wrap;gap:6px;min-height:22px;margin-bottom:12px;}
+.ovw-chip{background:var(--bg-raised);border:1px solid var(--border-default);border-radius:20px;padding:2px 10px;font-size:11px;font-family:var(--mono);color:var(--text-secondary);cursor:pointer;}
+.ovw-chip:hover{border-color:var(--accent);color:var(--accent);}
+.ovw-chip.dim{cursor:default;opacity:.7;}
+.ovw-chip.dim:hover{border-color:var(--border-default);color:var(--text-secondary);}
+.ovw-alerts{display:flex;flex-direction:column;gap:5px;margin-bottom:12px;}
+.ovw-alert-row{display:flex;align-items:center;gap:10px;background:var(--bg-surface);border:1px solid var(--border-subtle);border-left:2px solid var(--border-default);border-radius:var(--radius-md);padding:6px 12px;cursor:pointer;font-size:12px;min-width:0;}
+.ovw-alert-row:hover{border-color:var(--border-default);}
+.ovw-alert-row .sev{font-family:var(--mono);font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;padding:1px 6px;border-radius:3px;border:1px solid;flex-shrink:0;}
+.ovw-alert-row .nm{color:var(--text-primary);font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;}
+.ovw-alert-row .st{margin-left:auto;font-family:var(--mono);font-size:10px;color:var(--text-muted);flex-shrink:0;}
+.ovw-onboard{display:none;background:var(--bg-surface);border:1px dashed var(--border-default);border-radius:var(--radius-md);padding:14px 16px;margin-bottom:14px;}
+.ovw-onboard.show{display:block;}
+.ovw-onboard .ovw-sec-title{margin:0 0 8px;}
 /* RESPONSIVE */
 @media(max-width:1024px){#metrics-inspector{width:280px;}#alert-detail{width:45%;}.slide-over{width:100%;max-width:400px;}#ovw-mid{grid-template-columns:1fr;}}
 @media(max-width:768px){header{padding:0 8px;gap:6px;}#kb-hints{display:none!important;}#facets-panel{position:absolute;inset:0;width:100%;z-index:30;}.nav-tab{padding:3px 6px;font-size:9px;}#builder-bar{flex-wrap:wrap;}#alert-detail{width:100%;}#search-wrap{max-width:200px;}.nav-tab{padding:3px 6px;font-size:10px;}#toolbar{flex-wrap:wrap;height:auto;padding:6px 8px;}#quick-ranges{flex-wrap:wrap;}#alert-detail{position:absolute;inset:0;width:100%;z-index:30;}.slide-over{width:100%;}#metrics-inspector{width:100%;position:absolute;inset:0;z-index:30;}.ovw-wrap{padding:16px 12px 24px;}}
@@ -486,20 +516,42 @@ header{height:48px;flex-shrink:0;background:var(--bg-void);border-bottom:1px sol
       <div class="ovw-wrap">
         <div class="ovw-hdr">
           <div class="ovw-title">Overview</div>
-          <div class="ovw-subtitle">Cluster health, storage and live ingestion</div>
+          <div class="ovw-subtitle" id="ovw-subtitle">Cluster health, storage and live ingestion</div>
         </div>
-        <div class="ovw-grid">
-          <div class="ovw-card" id="ovw-metrics" data-sig="metrics"><div class="ovw-ic"><svg class="tab-ic"><use href="#i-activity"/></svg></div><div class="ovw-body"><div class="ovw-val" id="ovw-metrics-val">—</div><div class="ovw-lbl">Metric series indexed</div></div></div>
-          <div class="ovw-card" id="ovw-logs" data-sig="logs"><div class="ovw-ic"><svg class="tab-ic"><use href="#i-logs"/></svg></div><div class="ovw-body"><div class="ovw-val" id="ovw-logs-val">—</div><div class="ovw-lbl">Log records (6h)</div></div></div>
-          <div class="ovw-card" id="ovw-traces" data-sig="traces"><div class="ovw-ic"><svg class="tab-ic"><use href="#i-traces"/></svg></div><div class="ovw-body"><div class="ovw-val" id="ovw-traces-val">—</div><div class="ovw-lbl">Trace spans (6h)</div></div></div>
-          <div class="ovw-card" id="ovw-alerts" data-sig="alerts"><div class="ovw-ic"><svg class="tab-ic"><use href="#i-bell"/></svg></div><div class="ovw-body"><div class="ovw-val" id="ovw-alerts-val">—</div><div class="ovw-lbl">Alerts firing</div></div></div>
+        <div class="ovw-onboard" id="ovw-onboard">
+          <div class="ovw-sec-title">Nothing ingested yet</div>
+          <div class="onboard-snippet">curl -sXPOST localhost:8080/v1/logs/json \
+  -H 'Content-Type: application/json' \
+  -d '{"resourceLogs":[{"scopeLogs":[{"logRecords":[{
+        "timeUnixNano":"1700000000000000000",
+        "severityNumber":9,
+        "body":{"stringValue":"hello parqtel"}}]}]}]}'</div>
+        </div>
+        <div class="ovw-grid" id="ovw-cards">
+          <div class="ovw-card" id="ovw-metrics" data-sig="metrics" tabindex="0" role="link" aria-label="Open metrics explorer"><div class="ovw-ic"><svg class="tab-ic"><use href="#i-activity"/></svg></div><div class="ovw-body"><div class="ovw-val" id="ovw-metrics-val">—</div><div class="ovw-lbl">Metric names indexed</div><div class="ovw-note" id="ovw-metrics-sub">loading…</div></div></div>
+          <div class="ovw-card" id="ovw-logs" data-sig="logs" tabindex="0" role="link" aria-label="Open log explorer"><div class="ovw-ic"><svg class="tab-ic"><use href="#i-logs"/></svg></div><div class="ovw-body"><div class="ovw-val" id="ovw-logs-val">—</div><div class="ovw-lbl">Log records <span id="ovw-logs-win">in range</span></div><div class="ovw-note" id="ovw-logs-sub">loading…</div></div></div>
+          <div class="ovw-card" id="ovw-traces" data-sig="traces" tabindex="0" role="link" aria-label="Open trace explorer"><div class="ovw-ic"><svg class="tab-ic"><use href="#i-traces"/></svg></div><div class="ovw-body"><div class="ovw-val" id="ovw-traces-val">—</div><div class="ovw-lbl">Trace spans <span id="ovw-traces-win">in range</span></div><div class="ovw-note" id="ovw-traces-sub">loading…</div></div></div>
+          <div class="ovw-card" id="ovw-alerts" data-sig="alerts" tabindex="0" role="link" aria-label="Open alerts"><div class="ovw-ic"><svg class="tab-ic"><use href="#i-bell"/></svg></div><div class="ovw-body"><div class="ovw-val" id="ovw-alerts-val">—</div><div class="ovw-lbl">Alerts firing</div><div class="ovw-note" id="ovw-alerts-sub">loading…</div></div></div>
         </div>
         <div class="ovw-grid" id="ovw-mid">
-          <div class="ovw-card ovw-span1" id="ovw-storage"><div class="ovw-ic"><svg class="tab-ic"><use href="#i-cpu"/></svg></div><div class="ovw-body"><div class="ovw-sub" id="ovw-store">—</div><div class="ovw-lbl">Storage (blocks · rows · disk)</div></div></div>
-          <div class="ovw-vol"><div class="ovw-sec-title">Ingest volume — last 6h</div><canvas id="ovw-spark"></canvas></div>
+          <div class="ovw-vol" id="ovw-storage-card">
+            <div class="ovw-sec-title">Storage on disk</div>
+            <div class="ovw-store" id="ovw-store"></div>
+            <div class="ovw-sec-title">Live buffer · unflushed</div>
+            <div class="ovw-buffer" id="ovw-buffer">—</div>
+          </div>
+          <div class="ovw-vol">
+            <div class="ovw-sec-title">Log volume<span class="ovw-win" id="ovw-vol-win"></span><span class="ovw-vol-meta" id="ovw-vol-meta"></span></div>
+            <canvas id="ovw-spark"></canvas>
+            <div class="ovw-legend"><span class="ovw-lg"><i class="ovw-sw" style="background:#00F5D4"></i>all logs</span><span class="ovw-lg"><i class="ovw-sw" style="background:#f87171"></i>errors</span><span class="ovw-lg" id="ovw-vol-peak"></span></div>
+          </div>
         </div>
-        <div class="ovw-sec-title">Live ingestion rate</div>
+        <div class="ovw-sec-title">Live ingestion rate<span class="ovw-win">5s poll · 1s bars over 15 min</span></div>
         <div id="ovw-rates"></div>
+        <div class="ovw-sec-title">Top services<span class="ovw-win">service.name from logs + metric labels · click to filter logs</span></div>
+        <div class="ovw-chips" id="ovw-services"></div>
+        <div class="ovw-sec-title">Active alerts<span class="ovw-win" id="ovw-alerts-win"></span></div>
+        <div class="ovw-alerts" id="ovw-alerts-list"></div>
       </div>
     </div>
     <div id="view-metrics" class="viewer-pane active" role="tabpanel" aria-label="Metrics">
@@ -1137,7 +1189,13 @@ function showError(msg){tx(E.bannerTxt,msg);E.banner.classList.add('visible');E.
 async function runQuery(){if(ST.sig==='alerts'||ST.sig==='overview')return;E.lb.classList.add('on');closeBanner();showSkeleton(ST.sig);updateUrl();if(E.tFrom.value&&E.tTo.value){ST.range.startNs=new Date(E.tFrom.value).getTime()*1e6;ST.range.endNs=new Date(E.tTo.value).getTime()*1e6;}const step=computeStep();const raw=(E.qIn.value||'').trim();try{if(ST.sig==='metrics')await queryMetrics(raw,step);else if(ST.sig==='logs')await queryLogs(raw);else if(ST.sig==='traces')await queryTraces(raw);renderHistogram();}catch(e){if(e.name==='AbortError')return;if(!raw){setStatus(true);renderMetrics();return;}showError(e.message);}finally{E.lb.classList.remove('on');}}
 function showSkeleton(sig){if(sig==='metrics'){E.chartArea.innerHTML='<div class="skel skel-chart"></div>';E.legend.innerHTML='';E.tblCanvas.innerHTML='';}else if(sig==='logs'){E.logsScroll.innerHTML='<div style="padding:12px"><div class="skel skel-row"></div><div class="skel skel-row" style="width:92%"></div><div class="skel skel-row" style="width:97%"></div><div class="skel skel-row" style="width:88%"></div><div class="skel skel-row" style="width:95%"></div><div class="skel skel-row" style="width:90%"></div><div class="skel skel-row" style="width:93%"></div></div>';}else if(sig==='traces'){$('trace-chart').innerHTML='<div style="padding:12px"><div class="skel skel-row"></div><div class="skel skel-row" style="width:85%"></div><div class="skel skel-row" style="width:95%"></div><div class="skel skel-row" style="width:80%"></div><div class="skel skel-row" style="width:90%"></div></div>';}}
 async function queryMetrics(raw,step){const start=ST.range.startNs/1e9,end=ST.range.endNs/1e9;let q=raw;if(q&&!q.includes('{')&&!q.includes('(')&&q!=='{}')q=q+'{}';if(!q||q==='{}'){if(ST.server.names.length>0){q=ST.server.names[0];if(!raw)E.qIn.value=q;}else{await prefetch();if(ST.server.names.length>0){q=ST.server.names[0];if(!raw)E.qIn.value=q;}else{ST.metrics.result=[];renderMetrics();return;}}}const url=`/api/v1/query_range?query=${encodeURIComponent(q)}&start=${start}&end=${end}&step=${Math.max(1,Math.floor(step))}s`;const res=await apiFetch(url);if(res.status!=='success'){throw new Error(res.error||'Query failed');}const data=res.data||{};ST.metrics.result=data.result||[];ST.metrics.total=data.totalSeriesCount||ST.metrics.result.length;ST.metrics.volSummary=data.volumeSummary||null;setStatus(true);renderMetrics();}
-async function queryLogs(raw){const start=ST.range.startNs/1e9,end=ST.range.endNs/1e9;const q=raw||'{}';const url=`/api/v1/logs?query=${encodeURIComponent(q)}&start=${start}&end=${end}&limit=2000&order=desc`;try{const r=await apiFetch(url);const d=r.data||r;ST.logs.result=d.logs||d||[];ST.logs.total=d.total_matched||ST.logs.result.length;ST.logs.vol=(d.volume_summary||[]).length?d.volume_summary:null;}catch(e){ST.logs.result=[];ST.logs.total=0;if(e.name!=='AbortError')showWarn('Logs: '+e.message);}setStatus(true);renderLogs();}
+async function queryLogs(raw){const start=ST.range.startNs/1e9,end=ST.range.endNs/1e9;const q=(raw||'{}').trim();let url=`/api/v1/logs?query=${encodeURIComponent(q)}&start=${start}&end=${end}&limit=2000&order=desc`;
+  /* Selector-shaped filters (`key="v"` / `{...}`) take a legacy path that skips field
+     predicates for buffered (not yet flushed) logs and silently returns everything.
+     Any severity_min switches the server to the predicate path, which honors them —
+     and 0 keeps every severity, so nothing is filtered out that should survive. */
+  if(q&&q!=='{}'&&!/^[{}]*$/.test(q))url+='&severity_min=0';
+  try{const r=await apiFetch(url);const d=r.data||r;ST.logs.result=d.logs||d||[];ST.logs.total=d.total_matched||ST.logs.result.length;ST.logs.vol=(d.volume_summary||[]).length?d.volume_summary:null;}catch(e){ST.logs.result=[];ST.logs.total=0;if(e.name!=='AbortError')showWarn('Logs: '+e.message);}setStatus(true);renderLogs();}
 /* HISTOGRAM */
 function renderHistogram(){const svg=E.histSvg;const W=svg.parentElement.clientWidth||800;const H=68;svg.setAttribute('viewBox',`0 0 ${W} ${H}`);svg.setAttribute('width',W);svg.setAttribute('height',H);while(svg.firstChild)svg.removeChild(svg.firstChild);let buckets=null,serverVol=false;if(ST.sig==='metrics'&&ST.metrics.volSummary&&ST.metrics.volSummary.length>0){buckets=ST.metrics.volSummary;serverVol=true;}else if(ST.sig==='logs'&&ST.logs.vol&&ST.logs.vol.length>0){buckets=ST.logs.vol;serverVol=true;}else{const res=ST.sig==='metrics'?ST.metrics.result:ST.logs.result;if(!res||!res.length)return;const N=Math.min(120,Math.max(20,Math.floor(W/8)));buckets=new Array(N).fill(0);const sNs=ST.range.startNs,rNs=ST.range.endNs-ST.range.startNs||1;if(ST.sig==='metrics'){res.forEach(s=>(s.values||[]).forEach(([t])=>{const idx=Math.min(N-1,Math.floor(((t*1e9-sNs)/rNs)*N));if(idx>=0)buckets[idx]++;}));}else{res.forEach(r=>{const idx=Math.min(N-1,Math.floor((((r.timestamp_ns||0)-sNs)/rNs)*N));if(idx>=0)buckets[idx]++;});}}if(!buckets||!buckets.length)return;const totalEvts=buckets.reduce((a,b)=>a+b,0);if(!totalEvts&&serverVol){const t=document.createElementNS('http://www.w3.org/2000/svg','text');t.setAttribute('x',10);t.setAttribute('y',H/2);t.setAttribute('fill','#74889f');t.setAttribute('font-size','11');t.setAttribute('font-family','monospace');t.textContent='No events in the selected range';svg.appendChild(t);return;}const max=Math.max(...buckets,1),N=buckets.length,bW=W/N,avH=H-6;buckets.forEach((c,i)=>{if(!c)return;const bH=Math.max(2,Math.floor((c/max)*avH));const r=document.createElementNS('http://www.w3.org/2000/svg','rect');r.setAttribute('x',(i*bW+.5).toFixed(1));r.setAttribute('y',(H-bH).toFixed(1));r.setAttribute('width',Math.max(1,bW-1.5).toFixed(1));r.setAttribute('height',bH.toFixed(1));r.setAttribute('fill',c===max?'var(--accent)':c>max*0.6?'rgba(0,245,212,.7)':'rgba(0,245,212,.4)');r.setAttribute('rx','1');r.dataset.c=c;r.dataset.i=i;r.dataset.n=N;svg.appendChild(r);});updateHistSpan();}
 E.histSvg.addEventListener('mousemove',e=>{const t=e.target;if(t.tagName!=='rect'){E.histTip.style.display='none';return;}const N=+t.dataset.n||60,rNs=ST.range.endNs-ST.range.startNs,bW=rNs/N;const i=+t.dataset.i,c=+t.dataset.c;const s=new Date((ST.range.startNs+i*bW)/1e6).toLocaleTimeString();const en=new Date((ST.range.startNs+(i+1)*bW)/1e6).toLocaleTimeString();tx(E.histTip,`${c.toLocaleString()} events  ${s}–${en}`);E.histTip.style.display='block';const br=E.histSvg.getBoundingClientRect();let lft=e.clientX-br.left+8;if(lft+220>br.width)lft=e.clientX-br.left-228;E.histTip.style.left=lft+'px';});
@@ -1484,8 +1542,11 @@ async function renderEvidence(a,body){
   lPanel.appendChild(lList);
   try{
     const svc=(a.labels||{})['service.name']||'';
-    const q=svc?`service="${svc}"`:'{}';
-    const r=await fetch(`/api/v1/logs?query=${encodeURIComponent(q)}&start=${s}&end=${e}&limit=50&order=desc`);
+    // The log field is `service.name` — plain `service` only exists on the derived RED
+    // metrics, so this filter silently matched nothing before. severity_min=0 is a no-op
+    // filter that switches the server onto the predicate path which honors field matchers.
+    const q=svc?`service.name="${svc}"`:'{}';
+    const r=await fetch(`/api/v1/logs?query=${encodeURIComponent(q)}&start=${s}&end=${e}&limit=50&order=desc${svc?'&severity_min=0':''}`);
     const j=await r.json();const logs=Array.isArray(j.data)?j.data:(j.data||{}).logs||[];
     if(logs.length){
       logs.forEach(l=>{
@@ -1786,22 +1847,115 @@ const _origSettings=$('btn-settings').onclick;
 $('btn-settings').onclick=()=>{const p=$('settings-panel');const wasOpen=p.classList.contains('open');_origSettings();if(!wasOpen&&p.classList.contains('open'))trapFocus(p);else releaseFocus(p);};
 
 /* ═══ OVERVIEW ═══ */
+/* Window follows the active quick-range preset (default 6h). Every card reads
+   server-side totals, so result pages stay at limit=1 — total_matched and
+   volume_summary are exact regardless of the result cap. */
+let ovwTmr=null,ovwRun=0;
+const OVW_DEF_MIN=360;
+function ovwWindow(){
+  const min=ST.range.presetMin>0?ST.range.presetMin:OVW_DEF_MIN;
+  const end=Date.now(),start=end-min*60000;
+  const label=min>=60?(min%60?`${Math.floor(min/60)}h${min%60}m`:`${min/60}h`):`${min}m`;
+  return{min,start:start/1000,end:end/1000,label};
+}
+function fmtBytesDisk(b){return b>=1073741824?(b/1073741824).toFixed(1)+' GB':b>=1048576?(b/1048576).toFixed(1)+' MB':b>=1024?(b/1024).toFixed(1)+' KB':(b||0)+' B';}
+/* True when all three signal indexes report zero rows. */
+/* Storage breakdown (per-signal blocks · rows · on-disk bytes) + live buffer.
+   Also feeds the Settings panel, which reads the same stats snapshot. */
+function renderOvwStorage(fb,buf,cfg){
+  const el=$('ovw-store');
+  if(!el)return;
+  const SIG=['metrics','logs','traces'];
+  if(!fb){el.innerHTML='<div class="ovw-note">storage stats unavailable</div>';tx($('ovw-buffer'),'—');return;}
+  const g=(k,p)=>(fb[k]&&fb[k][p])||0;
+  const sum=p=>SIG.reduce((a,k)=>a+g(k,p),0);
+  el.innerHTML=`<div class="ovw-srow head"><span>signal</span><span class="n">blocks</span><span class="n">rows</span><span class="n">disk</span></div>`
+    +SIG.map(k=>`<div class="ovw-srow"><span class="k">${k}</span><span class="n">${g(k,'blocks').toLocaleString()}</span><span class="n">${g(k,'rows').toLocaleString()}</span><span class="n">${fmtBytesDisk(g(k,'bytes'))}</span></div>`).join('')
+    +`<div class="ovw-srow total"><span>total</span><span class="n">${sum('blocks').toLocaleString()}</span><span class="n">${sum('rows').toLocaleString()}</span><span class="n">${fmtBytesDisk(sum('bytes'))}</span></div>`;
+  const b=buf||{};
+  tx($('ovw-buffer'),`metrics ${(+b.metrics_points||0).toLocaleString()} · logs ${(+b.logs||0).toLocaleString()} · spans ${(+b.spans||0).toLocaleString()}`);
+  const sc=$('set-config');
+  if(sc&&cfg)sc.innerHTML=[['storage','data_dir'],['storage','retention_days'],['storage','block_duration_secs'],['storage','max_rows_per_block'],['storage','compression'],['logs','retention_days'],['ingest','max_body_size']].map(([s,k])=>cfg[s]&&cfg[s][k]!==undefined?`<div class="set-row"><span class="set-lbl">${k.replace(/_/g,' ')}</span><span class="set-val">${cfg[s][k]}</span></div>`:'').join('');
+}
+/* Top active alerts, most actionable first. Rows jump to the alerts view. */
+function renderOvwAlerts(list){
+  const el=$('ovw-alerts-list');
+  if(!el)return;
+  if(!list.length){el.innerHTML='<div class="ovw-note">no active alerts — the alert store is quiet</div>';return;}
+  const rank={firing:0,pending:1,acknowledged:2,noise_flagged:3,suppressed:4,resolved:5};
+  const sev={page:0,critical:0,warning:1,info:2};
+  const top=[...list].sort((a,b)=>{
+    const d=(rank[String(a.state||'').toLowerCase()]??9)-(rank[String(b.state||'').toLowerCase()]??9);
+    return d!==0?d:(sev[String(a.severity||'').toLowerCase()]??3)-(sev[String(b.severity||'').toLowerCase()]??3);
+  }).slice(0,8);
+  const col=st=>st==='FIRING'?'var(--err)':st==='PENDING'?'var(--warn)':st==='ACKNOWLEDGED'?'var(--info)':'var(--text-muted)';
+  el.innerHTML=top.map(a=>{
+    const st=String(a.state||'firing').toUpperCase(),sv=String(a.severity||'info').toUpperCase(),c=col(st);
+    const nm=a.rule_name||a.rule_id||'alert';
+    const svc=(a.labels&&(a.labels['service.name']||a.labels.service||a.labels.service_name))||'';
+    return `<div class="ovw-alert-row" style="border-left-color:${c}" title="${esc(nm)} — open alerts"><span class="sev" style="border-color:${c};color:${c}">${esc(sv)}</span><span class="nm">${esc(nm)}${svc?` <span style="color:var(--text-muted)">· ${esc(svc)}</span>`:''}</span><span class="st">${esc(st)}${a.started_at?` · ${esc(timeAgo(a.started_at))}`:''}</span></div>`;
+  }).join('');
+  const more=list.length-top.length;
+  if(more>0)el.insertAdjacentHTML('beforeend',`<div class="ovw-note">+${more} more active — open the alerts view</div>`);
+}
+
+
+function ovwStorageEmpty(fb){return['metrics','logs','traces'].every(k=>!fb||!fb[k]||!fb[k].rows);}
 async function loadOverview(){
-  const now=Math.floor(Date.now()/1000),s=now-21600;
-  // Metrics count (already prefetched)
-  tx($('ovw-metrics-val'),ST.server.names.length?ST.server.names.length.toLocaleString():'—');
-  // Fire parallel loads
-  const logsP=fetch(`/api/v1/logs?query=${encodeURIComponent('{}')}&start=${s}&end=${now}&limit=2000&order=desc`).then(r=>r.ok?r.json():null).catch(()=>null);
-  const tracesP=fetch(`/v1/traces/search?start=${s}&end=${now}`).then(r=>r.ok?r.json():null).catch(()=>null);
-  const alertsP=fetch('/api/v1/alerts').then(r=>r.ok?r.json():null).catch(()=>null);
-  const statsP=fetch('/api/v1/stats').then(r=>r.ok?r.json():null).catch(()=>null);
-  const [logsJ,tracesJ,alertsJ,statsJ]=await Promise.all([logsP,tracesP,alertsP,statsP]);
-  // True stored volume, not the capped result-page length.
-  if(logsJ){const d=logsJ.data||{};const t=d.total_matched||((Array.isArray(d)?d:d.logs||[]).length);tx($('ovw-logs-val'),t?t.toLocaleString():'0');}
-  if(tracesJ){const d=tracesJ.data||{};const t=Math.max(d.total_spans_in_range||0,d.spans_matched||(d.spans||[]).length);tx($('ovw-traces-val'),t?t.toLocaleString():'0');}
-  if(alertsJ){const list=alertsJ.data||[];const firing=list.filter(a=>['Firing','firing','FIRING'].includes(a.state)).length;tx($('ovw-alerts-val'),String(firing));}
-  if(statsJ&&statsJ.data){const st=statsJ.data,fb=st.storage||{};const fmtB=b=>b>=1073741824?(b/1073741824).toFixed(1)+' GB':b>=1048576?(b/1048576).toFixed(1)+' MB':b>=1024?(b/1024).toFixed(1)+' KB':b+' B';const g=(o,k)=>(o||{})[k]||0;$('ovw-store').innerHTML=(fb.logs&&fb.traces)?[`${g(fb.metrics,'blocks')+g(fb.logs,'blocks')+g(fb.traces,'blocks')} blocks`,`${(g(fb.metrics,'rows')+g(fb.logs,'rows')+g(fb.traces,'rows')).toLocaleString()} rows`,fmtB(g(fb.metrics,'bytes')+g(fb.logs,'bytes')+g(fb.traces,'bytes'))].map(x=>`<div class="ovw-sub">${x}</div>`).join(''):'—';const cfg=st.config||{};$('set-config').innerHTML=[['storage','data_dir'],['storage','retention_days'],['storage','block_duration_secs'],['storage','max_rows_per_block'],['storage','compression'],['logs','retention_days'],['ingest','max_body_size']].map(([s2,k])=>cfg[s2]&&cfg[s2][k]!==undefined?`<div class="set-row"><span class="set-lbl">${k.replace(/_/g,' ')}</span><span class="set-val">${cfg[s2][k]}</span></div>`:'').join('');}
-  drawSpark(logsJ);
+  const run=++ovwRun,w=ovwWindow();
+  ['ovw-logs-win','ovw-traces-win','ovw-vol-win','ovw-alerts-win'].forEach(id=>tx($(id),`· last ${w.label}`));
+  const j=u=>fetch(u).then(r=>r.ok?r.json():null).catch(()=>null);
+  const lg=`/api/v1/logs?query=%7B%7D&start=${w.start}&end=${w.end}&limit=1&order=desc`;
+  const [logsJ,errJ,tracesJ,alertsJ,statsJ,svcJ,svcLblJ,lblJ]=await Promise.all([
+    j(lg),j(`${lg}&severity_min=17`),
+    j(`/v1/traces/search?start=${w.start}&end=${w.end}&limit=1`),
+    j('/api/v1/alerts'),j('/api/v1/stats'),
+    j('/v1/logs/field_values?field_name=service_name&limit=10'),
+    j('/api/v1/label/service.name/values'),
+    j('/api/v1/labels')
+  ]);
+  if(run!==ovwRun)return; // a newer load superseded this one
+  const totOf=x=>{const d=(x&&x.data)||{};return d.total_matched||(Array.isArray(d)?d.length:((d.logs||[]).length))||0;};
+  const logsTot=logsJ?totOf(logsJ):null,errTot=errJ?totOf(errJ):null;
+  const fb=statsJ&&statsJ.data?statsJ.data.storage||null:null;
+  const g=(o,k)=>(o&&o[k])||0;
+  // Metric names stay live from the 30s prefetch; label count + block count come
+  // from this pass so the subtitle can't lag behind on first paint.
+  const names=ST.server.names.length;
+  const lblCount=Array.isArray(lblJ&&lblJ.data)?lblJ.data.filter(l=>l!=='__name__').length:ST.server.labels.length;
+  tx($('ovw-metrics-val'),names?names.toLocaleString():'—');
+  tx($('ovw-metrics-sub'),names?`${lblCount.toLocaleString()} labels · ${g(fb&&fb.metrics,'blocks')} blocks`:'waiting for first sample');
+  // Log volume + error share.
+  tx($('ovw-logs-val'),logsTot!=null?(logsTot?logsTot.toLocaleString():'0'):'—');
+  tx($('ovw-logs-sub'),logsTot!=null?(errTot?`${errTot.toLocaleString()} errors (${Math.min(100,Math.round(errTot/Math.max(1,logsTot)*100))}%)`:'no errors in window'):'query failed');
+  $('ovw-logs-val').className='ovw-val'+(errTot&&logsTot&&errTot/logsTot>0.1?' hot':'');
+  // Span volume.
+  let tracesTot=null;
+  if(tracesJ){const d=tracesJ.data||{};tracesTot=Math.max(d.total_spans_in_range||0,d.spans_matched||0);}
+  tx($('ovw-traces-val'),tracesTot!=null?(tracesTot?tracesTot.toLocaleString():'0'):'—');
+  const sps=tracesTot/(w.min*60);
+  tx($('ovw-traces-sub'),tracesTot==null?'query failed':tracesTot?(sps>=1?`${fmtRate(sps)} spans/s avg`:`${(sps*60).toFixed(1)} spans/min avg`):'no spans in window');
+  // Alert state breakdown + feed.
+  if(alertsJ){
+    const list=alertsJ.data||[],st=a=>String(a.state||'').toLowerCase();
+    const firing=list.filter(a=>st(a)==='firing').length,pend=list.filter(a=>st(a)==='pending').length,ack=list.filter(a=>st(a)==='acknowledged').length;
+    tx($('ovw-alerts-val'),String(firing));
+    $('ovw-alerts-val').className='ovw-val'+(firing?' hot':pend?' warm':'');
+    tx($('ovw-alerts-sub'),list.length?`${pend} pending · ${ack} acked · ${list.length-firing-pend-ack} other`:'all clear');
+    renderOvwAlerts(list);
+  }else{tx($('ovw-alerts-val'),'—');tx($('ovw-alerts-sub'),'alert store unreachable');}
+  renderOvwStorage(fb,statsJ&&statsJ.data?statsJ.data.buffer:null,statsJ&&statsJ.data?statsJ.data.config:null);
+  // Top services: the log field index (frequency-ranked, flushed blocks only)
+  // merged with metric label values (buffer-aware), so services that only exist
+  // in fresh, unflushed data still surface before the first block rotation.
+  const svcVals=[...(Array.isArray(svcJ&&svcJ.data)?svcJ.data:[]),...(Array.isArray(svcLblJ&&svcLblJ.data)?svcLblJ.data:[])]
+    .filter((v,i,a)=>typeof v==='string'&&v&&a.indexOf(v)===i).slice(0,12);
+  $('ovw-services').innerHTML=svcVals.length
+    ?svcVals.map(v=>`<button class="ovw-chip" data-svc="${esc(v)}" title="Filter logs by this service">${esc(v)}</button>`).join('')
+    :(svcJ||svcLblJ)?'<span class="ovw-chip dim">no service.name seen yet</span>':'service index unreachable';
+  $('ovw-onboard').classList.toggle('show',!names&&logsTot===0&&tracesTot===0&&ovwStorageEmpty(fb));
+  tx($('ovw-subtitle'),`last ${w.label} · refreshed ${new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit',second:'2-digit'})}`);
+  drawSpark(logsJ,errJ,w);
 }
 /* Live ingestion rates — /api/v1/ingest_rates poller (5s, overview only) */
 let rateTmr=null,ratesInit=false;
@@ -1821,36 +1975,70 @@ el.innerHTML=fmtRate(s.avg_60s||0)+'<small> /s · 60s avg</small>';
 el.title=`now ${s.current_per_sec||0}/s · 5m ${fmtRate(s.avg_5m)} · 15m ${fmtRate(s.avg_15m)} · ${fmtBytes(s.bytes_per_sec||0)}`;
 const bs=$('rbs-'+k);
 if(bs)bs.textContent=fmtBytes(s.bytes_per_sec||0)+' wire · '+fmtRate(Math.round(s.total))+' total';
-const gap=s.gap_secs||0;
+const gap=s.gap_secs||0,tot=+s.total||0;
 if(dot)dot.className='rate-dot'+(gap===0?' on':gap<=60?' warn':' err');
-if(gp){gp.textContent=gap===0?'':'gap '+gap+'s';gp.style.color=gap>60?'var(--err)':'var(--warn)';}
+if(gp){
+  if(!tot){gp.textContent='no data yet';gp.style.color='var(--text-muted)';}
+  else if(gap===0){gp.textContent='live';gp.style.color='var(--text-muted)';}
+  else{gp.textContent='gap '+gap+'s';gp.style.color=gap>60?'var(--err)':'var(--warn)';}
+}
 const h=(d.history||{})[k];
 if(Array.isArray(h))drawRateSpark($('rsp-'+k),h,COLORS[ix]);
 });
 }
 function startRates(){if(rateTmr)return;pollRates();rateTmr=setInterval(()=>{if(!document.hidden)pollRates();},5000);}
 function stopRates(){if(rateTmr){clearInterval(rateTmr);rateTmr=null;}}
-function drawSpark(logsJ){
-  const cv=$('ovw-spark');const dpr=window.devicePixelRatio||1;
-  const W=cv.clientWidth||800,H=cv.clientHeight||110;cv.width=W*dpr;cv.height=H*dpr;
-  const ctx=cv.getContext('2d');ctx.scale(dpr,dpr);ctx.clearRect(0,0,W,H);
-  const rows=logsJ?(Array.isArray(logsJ.data)?logsJ.data:(logsJ.data||{}).logs||[]):[];
-  const vol=logsJ&&logsJ.data&&logsJ.data.volume_summary||null;
-  const now=Math.floor(Date.now()/1000),s=now-21600;
-  const N=48;let buckets;
-  if(vol&&vol.length>0){buckets=vol;}else{buckets=new Array(N).fill(0);rows.forEach(r=>{const idx=Math.min(N-1,Math.floor(((r.timestamp_ns/1e9)-s)/21600*N));if(idx>=0)buckets[idx]++;});}
-  if(!buckets.some(v=>v>0)){ctx.fillStyle='#74889f';ctx.font='11px monospace';ctx.fillText('No log volume in range',10,H/2);return;}
-  const max=Math.max(...buckets,1);
-  ctx.beginPath();
-  buckets.forEach((v,i)=>{const x=i/(N-1)*(W-12)+6,y=H-8-(v/max)*(H-20);if(i===0)ctx.moveTo(x,y);else ctx.lineTo(x,y);});
-  ctx.strokeStyle='#00F5D4';ctx.lineWidth=1.5;ctx.stroke();
-  ctx.lineTo(W-6,H-8);ctx.lineTo(6,H-8);ctx.closePath();
-  ctx.fillStyle='rgba(0,245,212,.08)';ctx.fill();
+/* Full overview refresh every 30s while visible; the 5s rates poller keeps the
+   ingest cards warm in between. Window is recomputed from the active range each
+   pass, so a preset change picked up on the next tick. */
+function startOverview(){
+  if(ovwTmr)return;
+  ovwTmr=setInterval(()=>{if(!document.hidden)loadOverview();},30000);
+  loadOverview();
 }
-document.addEventListener('click',e=>{
-  const card=e.target.closest('.ovw-card');
-  if(card&&card.dataset.sig){switchSig(card.dataset.sig);}
+function stopOverview(){if(ovwTmr){clearInterval(ovwTmr);ovwTmr=null;}}
+document.addEventListener('visibilitychange',()=>{if(!document.hidden&&ST.sig==='overview')loadOverview();});
+
+/* Log-volume histogram for the active window: server-side volume_summary
+   (exactly 60 buckets across start..end) drawn as bars, with the error-only
+   query overlaid in red. Falls back to bucketing returned rows server
+   summaries are missing. */
+function drawSpark(logsJ,errJ,w){
+  const cv=$('ovw-spark');if(!cv)return;
+  const dpr=window.devicePixelRatio||1,W=cv.clientWidth||760,H=cv.clientHeight||150;
+  cv.width=W*dpr;cv.height=H*dpr;
+  const ctx=cv.getContext('2d');ctx.setTransform(dpr,0,0,dpr,0,0);ctx.clearRect(0,0,W,H);
+  const sum=x=>{const d=x&&x.data;return d&&Array.isArray(d.volume_summary)&&d.volume_summary.length?d.volume_summary:null;};
+  const all=sum(logsJ),err=sum(errJ);
+  if(!all||!all.some(v=>v>0)){
+    ctx.fillStyle='#74889f';ctx.font='11px monospace';ctx.fillText('No log volume in this window',10,H/2);
+    tx($('ovw-vol-peak'),'');tx($('ovw-vol-meta'),'');return;
+  }
+  const N=all.length,max=Math.max(...all,1),pad=6,base=H-14,bw=(W-pad*2)/N;
+  for(let i=0;i<N;i++){const v=all[i];if(!v)continue;const h=Math.max(1,(v/max)*(H-26));ctx.fillStyle='rgba(0,245,212,.5)';ctx.fillRect(pad+i*bw,base-h,Math.max(bw-1,.6),h);}
+  if(err&&err.length===N)for(let i=0;i<N;i++){const v=err[i];if(!v)continue;const h=Math.max(1,(v/max)*(H-26));ctx.fillStyle='rgba(248,113,113,.95)';ctx.fillRect(pad+i*bw,base-h,Math.max(bw-1,.6),h);}
+  ctx.strokeStyle='#1e293b';ctx.beginPath();ctx.moveTo(pad,base+.5);ctx.lineTo(W-pad,base+.5);ctx.stroke();
+  const lbl=t=>new Date(t*1000).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
+  ctx.fillStyle='#74889f';ctx.font='9px monospace';
+  ctx.fillText(lbl(w.start),pad,H-3);
+  const end=lbl(w.end);ctx.fillText(end,Math.max(pad,W-pad-ctx.measureText(end).width),H-3);
+  const peak=Math.max(...all),pi=all.indexOf(peak),span=(w.end-w.start)/N;
+  tx($('ovw-vol-peak'),`peak ${peak.toLocaleString()} · ${lbl(w.start+(pi+.5)*span)}`);
+  tx($('ovw-vol-meta'),`${N} × ${span<60?Math.round(span)+'s':span<3600?Math.round(span/60)+'m':(span/3600).toFixed(1)+'h'} buckets`);
+}
+/* Overview interactions: cards jump to their signal, service chips run a log
+   filter, alert rows jump to the alert stream. */
+$('ovw-cards').addEventListener('click',e=>{const c=e.target.closest('.ovw-card');if(c&&c.dataset.sig)switchSig(c.dataset.sig);});
+$('ovw-cards').addEventListener('keydown',e=>{if(e.key!=='Enter'&&e.key!==' ')return;const c=e.target.closest('.ovw-card');if(c&&c.dataset.sig){e.preventDefault();switchSig(c.dataset.sig);}});
+$('ovw-services').addEventListener('click',e=>{
+  const chip=e.target.closest('[data-svc]');if(!chip)return;
+  switchSig('logs',true);
+  E.qIn.value=`service.name="${chip.dataset.svc}"`;
+  updateSearchClear();runQuery();
 });
+$('ovw-alerts-list').addEventListener('click',()=>switchSig('alerts'));
+$('ovw-storage-card').addEventListener('click',()=>openSettings());
+
 
 /* SIGNAL SWITCH */
 function switchSig(sig,fromUrl=false){
@@ -1873,7 +2061,7 @@ function switchSig(sig,fromUrl=false){
   if(sig==='alerts'){pollAlerts();setupAlertPolling();}
   if(!fromUrl)updateUrl();
   if(sig==='alerts')switchAlertView(ST.alerts.subView,true);
-  if(sig==='overview'){loadOverview();startRates();}else stopRates();
+  if(sig==='overview'){startOverview();startRates();}else{stopRates();stopOverview();}
   if(sig==='metrics'||sig==='logs'||sig==='traces')runQuery();
 }
 $('signal-tabs').addEventListener('click',e=>{const t=e.target.closest('[data-sig]');if(t)switchSig(t.dataset.sig);});
