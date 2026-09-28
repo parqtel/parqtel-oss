@@ -1,5 +1,81 @@
 use serde::{Deserialize, Serialize};
 
+/// How built-in alert preset packs are activated (`[alerts.presets].mode`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PresetMode {
+    /// No built-in packs are loaded.
+    Off,
+    /// Packs activate when one of their canary metrics is detected; packs
+    /// whose metrics never appear stay dormant. Checked at startup and every
+    /// few minutes until every selected pack has resolved. Once activated a
+    /// pack never deactivates (no flap) and is never re-inserted (a user's
+    /// API disable/delete sticks for the process lifetime).
+    #[default]
+    Auto,
+    /// Every selected pack activates at startup regardless of metrics.
+    All,
+}
+
+/// Built-in alert preset pack activation (`[alerts.presets]`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PresetConfig {
+    /// Activation mode (default: `auto`).
+    #[serde(default)]
+    pub mode: PresetMode,
+    /// Include-only list of pack keys. Wins over `exclude` when both are set
+    /// (a warning is logged). Accepts a YAML/TOML array or a comma-separated
+    /// string (for `PARQTEL__ALERTS__PRESETS__INCLUDE=kafka,redis` env vars).
+    #[serde(default, deserialize_with = "string_or_seq")]
+    pub include: Vec<String>,
+    /// Pack keys to skip when `include` is empty.
+    #[serde(default, deserialize_with = "string_or_seq")]
+    pub exclude: Vec<String>,
+}
+
+/// Deserialize either a list of strings or a single comma-separated string.
+///
+/// Figment env values are plain strings, so `include = "kafka,redis"` must
+/// parse the same way as `include = ["kafka", "redis"]`.
+fn string_or_seq<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct StringOrSeq;
+
+    impl<'de> serde::de::Visitor<'de> for StringOrSeq {
+        type Value = Vec<String>;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("a comma-separated string or a list of strings")
+        }
+
+        fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(v.split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+                .collect())
+        }
+
+        fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+        where
+            A: serde::de::SeqAccess<'de>,
+        {
+            let mut out = Vec::new();
+            while let Some(elem) = seq.next_element::<String>()? {
+                out.push(elem);
+            }
+            Ok(out)
+        }
+    }
+
+    deserializer.deserialize_any(StringOrSeq)
+}
+
 /// Configuration for the alert engine.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AlertConfig {
@@ -11,6 +87,9 @@ pub struct AlertConfig {
     pub refinement_enabled: bool,
     /// Threshold for noise suppression (0.0-1.0).
     pub noise_suppression_threshold: f32,
+    /// Built-in preset pack activation.
+    #[serde(default)]
+    pub presets: PresetConfig,
     /// Postmortem engine configuration.
     #[serde(default)]
     pub postmortem: Option<PostmortemConfig>,
@@ -26,6 +105,7 @@ impl Default for AlertConfig {
             noise_window_firings: 30,
             refinement_enabled: true,
             noise_suppression_threshold: 0.7,
+            presets: PresetConfig::default(),
             postmortem: Some(PostmortemConfig::default()),
             notifications: Some(NotificationConfig::default()),
         }

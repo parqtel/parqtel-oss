@@ -20,6 +20,21 @@ impl AlertRuleRegistry {
         self.rules.write().await.insert(rule.id.clone(), rule);
     }
 
+    /// Insert only when the id is unused; returns true when inserted.
+    ///
+    /// Built-in preset activation uses this so user-authored rules always
+    /// win: a rule loaded from `rules_dir` or created via the API with the
+    /// same id is never overwritten.
+    pub async fn insert_if_absent(&self, rule: AlertRule) -> bool {
+        let mut rules = self.rules.write().await;
+        if rules.contains_key(&rule.id) {
+            false
+        } else {
+            rules.insert(rule.id.clone(), rule);
+            true
+        }
+    }
+
     pub async fn remove(&self, id: &str) -> Option<AlertRule> {
         self.rules.write().await.remove(id)
     }

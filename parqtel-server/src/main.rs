@@ -89,7 +89,13 @@ async fn main() -> anyhow::Result<()> {
         figment = figment.merge(Toml::file("config/default.toml"));
     }
 
+    // Accept both env spellings: `PARQTEL_SECTION__KEY` (what the prefix
+    // strip naturally yields) and the documented `PARQTEL__SECTION__KEY`.
+    // Without the second provider, the leading `__` leaves an empty first
+    // key segment and the value is silently ignored (verified empirically
+    // against /api/v1/stats: PARQTEL__QUERY__MAX_SERIES never applied).
     figment = figment.merge(Env::prefixed("PARQTEL_").split("__"));
+    figment = figment.merge(Env::prefixed("PARQTEL__").split("__"));
 
     // Apply CLI overrides
     if let Some(bind) = cli.bind {
@@ -301,6 +307,53 @@ async fn run_server(
             }
         }
     });
+
+    // Built-in alert preset packs ([alerts.presets]: off | auto | all).
+    // Runs *before* the rules_dir pass below so a file rule with the same id
+    // overrides the built-in, and every insert is insert-if-absent so a rule
+    // the user disabled/deleted via the API is never re-inserted (activation
+    // is one-shot per pack per process). Plan: docs/BUILTIN_ALERT_PRESETS_PLAN.md.
+    let mut preset_pending: Vec<&'static parqtel_alert::builtin::BuiltinPack> = Vec::new();
+    {
+        let presets = &state.inner.config.alerts.presets;
+        if presets.mode != parqtel_core::config::PresetMode::Off {
+            let metrics = state.inner.query_executor.list_metrics().await;
+            preset_pending = parqtel_alert::builtin::activate_initial(
+                presets,
+                &metrics,
+                &state.inner.alert_registry,
+            )
+            .await;
+            if !preset_pending.is_empty() {
+                tracing::debug!(
+                    pending = preset_pending.len(),
+                    "built-in alert packs awaiting canary metrics"
+                );
+            }
+        }
+    }
+    // Auto mode: retry packs whose canary metrics have not arrived yet every
+    // 5 minutes until the pending set drains. Activations never revert, so
+    // the task exits for good once every selected pack has resolved.
+    if !preset_pending.is_empty() {
+        let preset_state = state.clone();
+        tokio::spawn(async move {
+            let mut pending = preset_pending;
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
+            interval.tick().await; // startup pass already ran; wait a full interval
+            while !pending.is_empty() {
+                interval.tick().await;
+                let metrics = preset_state.inner.query_executor.list_metrics().await;
+                pending = parqtel_alert::builtin::activate_detected(
+                    pending,
+                    &metrics,
+                    &preset_state.inner.alert_registry,
+                )
+                .await;
+            }
+            tracing::debug!("all selected built-in alert packs resolved");
+        });
+    }
 
     // Load alert rules from the configured directory (evaluator + router
     // both key off the registry; without this, rules only exist via the API).

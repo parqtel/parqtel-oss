@@ -80,6 +80,10 @@ data:
     noise_window_firings = {{ .Values.parqtel.alerts.noiseWindowFirings | int }}
     refinement_enabled = {{ .Values.parqtel.alerts.refinementEnabled }}
     noise_suppression_threshold = {{ .Values.parqtel.alerts.noiseSuppressionThreshold }}
+    [alerts.presets]
+    mode = {{ .Values.parqtel.alerts.presets.mode | quote }}
+    include = {{ .Values.parqtel.alerts.presets.include | toJson }}
+    exclude = {{ .Values.parqtel.alerts.presets.exclude | toJson }}
     [alerts.postmortem]
     enabled = {{ .Values.parqtel.alerts.postmortem.enabled }}
     auto_draft = {{ .Values.parqtel.alerts.postmortem.autoDraft }}
