@@ -85,6 +85,11 @@ impl MetricsService for OtlpGrpcService {
                     .rates
                     .record_metrics(count, wire_bytes);
                 crate::otel_sli::record_ingest("metrics", count);
+                tracing::debug!(
+                    signal = "metrics",
+                    ingested = count,
+                    "gRPC metrics export accepted"
+                );
                 Ok(Response::new(ExportMetricsServiceResponse {
                     partial_success: None,
                 }))
@@ -130,6 +135,11 @@ impl LogsService for OtlpGrpcService {
                     .rates
                     .record_logs(count, wire_bytes);
                 crate::otel_sli::record_ingest("logs", count);
+                tracing::debug!(
+                    signal = "logs",
+                    ingested = count,
+                    "gRPC logs export accepted"
+                );
                 Ok(Response::new(ExportLogsServiceResponse {
                     partial_success: None,
                 }))
@@ -175,6 +185,11 @@ impl TraceService for OtlpGrpcService {
                     .rates
                     .record_spans(count, wire_bytes);
                 crate::otel_sli::record_ingest("traces", count);
+                tracing::debug!(
+                    signal = "traces",
+                    ingested = count,
+                    "gRPC traces export accepted"
+                );
                 Ok(Response::new(ExportTraceServiceResponse {
                     partial_success: None,
                 }))

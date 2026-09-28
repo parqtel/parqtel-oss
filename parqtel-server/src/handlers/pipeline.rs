@@ -16,6 +16,7 @@ pub async fn create_recording_rule(
     State(state): State<AppState>,
     Json(group): Json<parqtel_pipeline::rule::schema::RecordingRuleGroup>,
 ) -> impl IntoResponse {
+    tracing::info!(group = %group.name, rules = group.rules.len(), "creating recording rule");
     state.inner.pipeline_registry.add_group(group.clone());
     (
         StatusCode::CREATED,
@@ -27,6 +28,7 @@ pub async fn create_pipeline(
     State(state): State<AppState>,
     Json(pipeline): Json<parqtel_pipeline::rule::schema::PipelineDefinition>,
 ) -> impl IntoResponse {
+    tracing::info!(name = %pipeline.name, "creating pipeline");
     state.inner.pipeline_registry.add_pipeline(pipeline.clone());
     (
         StatusCode::CREATED,
@@ -38,6 +40,7 @@ pub async fn delete_recording_rule(
     State(state): State<AppState>,
     axum::extract::Path(name): axum::extract::Path<String>,
 ) -> impl IntoResponse {
+    tracing::info!(group = %name, "deleting recording rule");
     state.inner.pipeline_registry.remove_group(&name);
     Json(json!({"status": "success"}))
 }
@@ -46,6 +49,7 @@ pub async fn delete_pipeline(
     State(state): State<AppState>,
     axum::extract::Path(name): axum::extract::Path<String>,
 ) -> impl IntoResponse {
+    tracing::info!(name = %name, "deleting pipeline");
     state.inner.pipeline_registry.remove_pipeline(&name);
     Json(json!({"status": "success"}))
 }

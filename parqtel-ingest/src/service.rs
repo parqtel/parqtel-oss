@@ -64,14 +64,23 @@ impl BlockRotator {
     /// returned a spurious "Cannot flush empty buffer" error).
     pub async fn flush(&mut self) -> Result<()> {
         if self.writer.is_empty() {
+            tracing::debug!("metric block flush skipped: buffer empty");
             return Ok(());
         }
+        let row_count = self.writer.len();
+        let started = std::time::Instant::now();
         let mut writer = std::mem::replace(&mut self.writer, BlockWriter::new(self.config.clone()));
         let metadata = tokio::task::spawn_blocking(move || writer.flush())
             .await
             .map_err(|e| Error::Internal(format!("flush task panicked: {}", e)))??;
         self.last_flush = Instant::now();
         let _ = self.metadata_tx.send(metadata);
+        tracing::debug!(
+            signal = "metrics",
+            rows = row_count,
+            duration_ms = started.elapsed().as_millis(),
+            "metric block flushed to parquet"
+        );
         Ok(())
     }
 }
@@ -113,17 +122,25 @@ impl LogRotator {
         Ok(false)
     }
 
-    /// See [BlockRotator::flush] for the blocking-pool rationale.
     pub async fn flush(&mut self) -> Result<()> {
         if self.writer.is_empty() {
+            tracing::debug!("log block flush skipped: buffer empty");
             return Ok(());
         }
+        let row_count = self.writer.len();
+        let started = std::time::Instant::now();
         let mut writer = std::mem::replace(&mut self.writer, LogWriter::new(self.config.clone()));
         let metadata = tokio::task::spawn_blocking(move || writer.flush())
             .await
             .map_err(|e| Error::Internal(format!("flush task panicked: {}", e)))??;
         self.last_flush = Instant::now();
         let _ = self.metadata_tx.send(metadata);
+        tracing::debug!(
+            signal = "logs",
+            rows = row_count,
+            duration_ms = started.elapsed().as_millis(),
+            "log block flushed to parquet"
+        );
         Ok(())
     }
 }
@@ -243,6 +260,12 @@ impl IngestionService {
         self.stats
             .ingested_points
             .fetch_add(count, Ordering::Relaxed);
+        tracing::debug!(
+            signal = "metrics",
+            ingested = count,
+            flushed = flushed,
+            "metrics ingestion complete"
+        );
         Ok(count)
     }
 
@@ -343,6 +366,12 @@ impl LogIngestionService {
         self.stats
             .ingested_points
             .fetch_add(count, Ordering::Relaxed);
+        tracing::debug!(
+            signal = "logs",
+            ingested = count,
+            flushed = flushed,
+            "logs ingestion complete"
+        );
         Ok(count)
     }
 
@@ -413,17 +442,25 @@ impl TraceRotator {
         Ok(false)
     }
 
-    /// See [BlockRotator::flush] for the blocking-pool rationale.
     pub async fn flush(&mut self) -> Result<()> {
         if self.writer.is_empty() {
+            tracing::debug!("trace block flush skipped: buffer empty");
             return Ok(());
         }
+        let row_count = self.writer.len();
+        let started = std::time::Instant::now();
         let mut writer = std::mem::replace(&mut self.writer, TraceWriter::new(self.config.clone()));
         let metadata = tokio::task::spawn_blocking(move || writer.flush())
             .await
             .map_err(|e| Error::Internal(format!("flush task panicked: {}", e)))??;
         self.last_flush = Instant::now();
         let _ = self.metadata_tx.send(metadata);
+        tracing::debug!(
+            signal = "traces",
+            rows = row_count,
+            duration_ms = started.elapsed().as_millis(),
+            "trace block flushed to parquet"
+        );
         Ok(())
     }
 }
@@ -530,6 +567,12 @@ impl TraceIngestionService {
         self.stats
             .ingested_points
             .fetch_add(count, Ordering::Relaxed);
+        tracing::debug!(
+            signal = "traces",
+            ingested = count,
+            flushed = flushed,
+            "traces ingestion complete"
+        );
         Ok(count)
     }
 

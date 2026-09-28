@@ -67,6 +67,7 @@ impl RuleRegistry {
 
     /// Remove a recording rule group by name.
     pub fn remove_group(&self, name: &str) {
+        tracing::debug!(group = %name, "recording rule group removed");
         if let Ok(mut groups) = self.groups.write() {
             groups.remove(name);
         }
@@ -74,6 +75,7 @@ impl RuleRegistry {
 
     /// Add a recording rule group.
     pub fn add_group(&self, group: RecordingRuleGroup) {
+        tracing::debug!(group = %group.name, rules = group.rules.len(), "recording rule group added");
         if let Ok(mut groups) = self.groups.write() {
             groups.insert(group.name.clone(), group);
         }
@@ -81,6 +83,7 @@ impl RuleRegistry {
 
     /// Add a pipeline definition.
     pub fn add_pipeline(&self, pipeline: PipelineDefinition) {
+        tracing::debug!(name = %pipeline.name, "pipeline added");
         if let Ok(mut pipelines) = self.pipelines.write() {
             pipelines.insert(pipeline.name.clone(), pipeline);
         }
@@ -88,6 +91,7 @@ impl RuleRegistry {
 
     /// Remove a pipeline by name.
     pub fn remove_pipeline(&self, name: &str) {
+        tracing::debug!(name = %name, "pipeline removed");
         if let Ok(mut pipelines) = self.pipelines.write() {
             pipelines.remove(name);
         }

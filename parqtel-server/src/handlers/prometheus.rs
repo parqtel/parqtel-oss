@@ -174,13 +174,16 @@ pub async fn query_instant(
     let Query(params) = match params {
         Ok(q) => q,
         Err(e) => {
+            tracing::debug!(error = %e, "query_instant: invalid params");
             return (
                 StatusCode::BAD_REQUEST,
                 Json(json!({"status": "error", "error": e.to_string()})),
             )
-                .into_response()
+                .into_response();
         }
     };
+
+    tracing::debug!(query = %params.query, time = params.time, "query_instant received");
 
     let now = params
         .time
@@ -333,6 +336,14 @@ pub async fn query_range(
                 .into_response()
         }
     };
+
+    tracing::debug!(
+        query = %params.query,
+        start = params.start,
+        end = params.end,
+        step = params.step,
+        "query_range received"
+    );
 
     let start_ns = (params.start * 1_000_000_000.0) as i64;
     let end_ns = (params.end * 1_000_000_000.0) as i64;

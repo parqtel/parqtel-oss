@@ -60,8 +60,11 @@ impl EvaluationEngine {
 
     async fn evaluate_all(&self) {
         let rules = self.registry.list_enabled().await;
+        let rule_count = rules.len();
+        tracing::debug!(rules = rule_count, "alert evaluation cycle starting");
         let timeout = Duration::from_secs(self.config.evaluation_timeout_secs);
         let mut join_set = JoinSet::new();
+        let cycle_start = std::time::Instant::now();
 
         for rule in rules {
             let store = self.store.clone();
@@ -74,11 +77,18 @@ impl EvaluationEngine {
                 .await;
                 if result.is_err() {
                     tracing::warn!(rule_id = %rule.id, "rule evaluation timed out");
+                } else {
+                    tracing::debug!(rule_id = %rule.id, "rule evaluated");
                 }
             });
         }
 
         while join_set.join_next().await.is_some() {}
+        tracing::debug!(
+            rules = rule_count,
+            duration_ms = cycle_start.elapsed().as_millis(),
+            "alert evaluation cycle complete"
+        );
     }
 
     async fn evaluate_rule(
@@ -136,6 +146,12 @@ impl EvaluationEngine {
                                 let _ = self.event_tx.send(AlertFiringEvent {
                                     instance: instance.clone(),
                                 });
+                                tracing::info!(
+                                    rule_id = %rule.id,
+                                    fingerprint = %fingerprint,
+                                    value = value,
+                                    "alert fired: condition met for duration"
+                                );
                             }
                         }
                     } else {

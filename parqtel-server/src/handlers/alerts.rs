@@ -26,18 +26,21 @@ fn ok_json<T: Serialize>(data: T) -> impl IntoResponse {
 /// GET /api/v1/alerts
 pub async fn list_alerts(State(state): State<AppState>) -> impl IntoResponse {
     let alerts = state.inner.alert_store.list_active().await;
+    tracing::debug!(count = alerts.len(), "listing active alerts");
     ok_json(alerts)
 }
 
 /// GET /api/v1/alerts/:id
 pub async fn get_alert(State(state): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
     let Ok(ulid) = id.parse::<Ulid>() else {
+        tracing::debug!(alert_id = %id, "get_alert: invalid ulid format");
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({"error": "invalid alert id"})),
         )
             .into_response();
     };
+    tracing::debug!(alert_id = %ulid.to_string(), "fetching alert by id");
     match state.inner.alert_store.get_by_id(ulid).await {
         Some(alert) => ok_json(alert).into_response(),
         None => (
@@ -78,12 +81,18 @@ pub async fn acknowledge_alert(
         TransitionEvent::Acknowledged { by: by.clone() },
     ) {
         instance.state = new_state;
-        instance.acknowledged_by = Some(by);
+        instance.acknowledged_by = Some(by.clone());
         instance.updated_at = chrono::Utc::now();
         instance.transition_log.push(transition);
         state.inner.alert_store.save(&instance).await;
+        tracing::info!(
+            alert_id = %ulid.to_string(),
+            acknowledged_by = %by,
+            "alert acknowledged"
+        );
         ok_json(instance).into_response()
     } else {
+        tracing::debug!(alert_id = %ulid.to_string(), "alert acknowledge: invalid state transition");
         (
             StatusCode::CONFLICT,
             Json(serde_json::json!({"error": "invalid state transition"})),
