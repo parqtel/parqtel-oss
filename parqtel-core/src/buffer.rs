@@ -28,6 +28,9 @@ impl MemoryBuffer {
 
     /// Push metric data points into the indexed buffer.
     pub async fn push_metrics(&self, name: &str, data_points: &[DataPoint]) {
+        if !data_points.is_empty() {
+            tracing::debug!(metric = %name, points = data_points.len(), "buffered metrics");
+        }
         let mut buf = self.metrics.write().await;
         buf.entry(name.to_string())
             .or_insert_with(|| Vec::with_capacity(128))
@@ -36,11 +39,17 @@ impl MemoryBuffer {
 
     /// Push log records into the buffer.
     pub async fn push_logs(&self, logs: &[LogRecord]) {
+        if !logs.is_empty() {
+            tracing::debug!(logs = logs.len(), "buffered logs");
+        }
         self.logs.write().await.extend_from_slice(logs);
     }
 
     /// Push spans into the buffer (queryable immediately, pre-flush).
     pub async fn push_spans(&self, spans: &[Span]) {
+        if !spans.is_empty() {
+            tracing::debug!(spans = spans.len(), "buffered spans");
+        }
         self.spans.write().await.extend_from_slice(spans);
     }
 
@@ -101,20 +110,45 @@ impl MemoryBuffer {
 
     /// Drain all metrics (called after flush).
     pub async fn drain_metrics(&self) -> Vec<(String, Vec<DataPoint>)> {
-        let mut buf = self.metrics.write().await;
-        std::mem::take(&mut *buf).into_iter().collect()
+        let drained: Vec<(String, Vec<DataPoint>)> = {
+            let mut buf = self.metrics.write().await;
+            std::mem::take(&mut *buf).into_iter().collect()
+        };
+        let total: usize = drained.iter().map(|(_, v)| v.len()).sum();
+        tracing::debug!(
+            signal = "metrics",
+            drained = total,
+            "buffer drained after flush"
+        );
+        drained
     }
 
     /// Drain all logs (called after flush).
     pub async fn drain_logs(&self) -> Vec<LogRecord> {
-        let mut buf = self.logs.write().await;
-        std::mem::take(&mut *buf)
+        let drained = {
+            let mut buf = self.logs.write().await;
+            std::mem::take(&mut *buf)
+        };
+        tracing::debug!(
+            signal = "logs",
+            drained = drained.len(),
+            "buffer drained after flush"
+        );
+        drained
     }
 
     /// Drain all spans (called after trace flush).
     pub async fn drain_spans(&self) -> Vec<Span> {
-        let mut buf = self.spans.write().await;
-        std::mem::take(&mut *buf)
+        let drained = {
+            let mut buf = self.spans.write().await;
+            std::mem::take(&mut *buf)
+        };
+        tracing::debug!(
+            signal = "traces",
+            drained = drained.len(),
+            "buffer drained after flush"
+        );
+        drained
     }
 
     /// Buffer stats for monitoring: (metrics, logs, spans).
@@ -149,6 +183,23 @@ impl MemoryBuffer {
                             return out;
                         }
                     }
+                }
+            }
+        }
+        out
+    }
+
+    /// All distinct values of one label across every buffered metric series,
+    /// newest-first per series. Unbounded (mirror of [`Self::label_names`])
+    /// so full-enumeration paths (`list_label_values`) see the freshest
+    /// data the block index may not cover yet.
+    pub async fn label_values(&self, label: &str) -> std::collections::HashSet<String> {
+        let buf = self.metrics.read().await;
+        let mut out = std::collections::HashSet::new();
+        for points in buf.values() {
+            for dp in points.iter().rev() {
+                if let Some(v) = dp.labels.get(label) {
+                    out.insert(v.to_string());
                 }
             }
         }
