@@ -5,7 +5,10 @@ mod server;
 mod storage;
 mod telemetry;
 
-pub use alert::{AlertConfig, NotificationConfig, PostmortemConfig, RouteConfig, SilenceConfig};
+pub use alert::{
+    AlertConfig, NotificationConfig, PostmortemConfig, PresetConfig, PresetMode, RouteConfig,
+    SilenceConfig,
+};
 pub use ingest::{IngestConfig, TailSamplingConfig};
 pub use query::{QueryConfig, UIConfig};
 pub use server::ServerConfig;
@@ -190,6 +193,41 @@ mod tests {
         assert_eq!(config.rules_dir, "rules");
         assert_eq!(config.noise_window_firings, 30);
         assert!(config.refinement_enabled);
+        // Built-in packs default to auto-activation (plan §8 decision 1).
+        assert_eq!(config.presets.mode, PresetMode::Auto);
+        assert!(config.presets.include.is_empty());
+        assert!(config.presets.exclude.is_empty());
+    }
+
+    #[test]
+    fn test_preset_config_serde_defaults() {
+        let config: PresetConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(config.mode, PresetMode::Auto);
+        assert!(config.include.is_empty());
+        assert!(config.exclude.is_empty());
+    }
+
+    #[test]
+    fn test_preset_config_mode_off_roundtrip() {
+        let config: PresetConfig = serde_json::from_str(r#"{"mode":"off"}"#).unwrap();
+        assert_eq!(config.mode, PresetMode::Off);
+        let config: PresetConfig = serde_json::from_str(r#"{"mode":"all"}"#).unwrap();
+        assert_eq!(config.mode, PresetMode::All);
+    }
+
+    #[test]
+    fn test_preset_config_include_accepts_string_or_seq() {
+        // Figment env values arrive as plain strings: "kafka,redis".
+        let config: PresetConfig =
+            serde_json::from_str(r#"{"include": "kafka, redis", "exclude": ["java"]}"#).unwrap();
+        assert_eq!(
+            config.include,
+            vec!["kafka".to_string(), "redis".to_string()]
+        );
+        assert_eq!(config.exclude, vec!["java".to_string()]);
+        // Empty segments from trailing commas are dropped.
+        let config: PresetConfig = serde_json::from_str(r#"{"include": "kafka,,redis,"}"#).unwrap();
+        assert_eq!(config.include.len(), 2);
     }
 
     #[test]

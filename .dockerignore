@@ -40,6 +40,8 @@ __pycache__/
 # None of these are copied by any Dockerfile; keeping them out shrinks the
 # context sent to `docker build` and prevents the planner's COPY . . from
 # dragging in dev data or generated graphs.
+# Note: rules/presets/ MUST be included in the build context because
+# parqtel-alert embeds the preset YAML files at compile time via include_str!.
 data/
 graphify-out/
 .rtk/
@@ -47,3 +49,5 @@ graphify-out/
 charts/
 compose/
 rules/
+!rules/presets/
+!rules/presets/*.yaml

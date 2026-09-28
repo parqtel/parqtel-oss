@@ -74,6 +74,18 @@ rules_dir = "rules"
 noise_window_firings = 30
 refinement_enabled = true
 noise_suppression_threshold = 0.7
+[alerts.presets]
+# Built-in alert packs embedded in the binary (see rules/presets/README.md).
+# auto = activate a pack when its canary metrics are detected (default)
+# all  = activate every selected pack at startup, regardless of metrics
+# off  = never load built-in packs
+mode = "auto"
+# Include-only pack keys (wins over exclude when both are set):
+# include = ["kubernetes", "postgres"]
+# Or exclude specific packs (applied when include is empty):
+# exclude = ["service-red"]
+include = []
+exclude = []
 [alerts.postmortem]
 enabled = true
 auto_draft = true
@@ -202,6 +214,32 @@ Per-service overrides; each entry fully replaces the global policy for that serv
 | `noise_window_firings` | Integer | `30` | Number of firings in window to calculate noise score |
 | `refinement_enabled` | Boolean | `true` | Enable automatic alert refinement |
 | `noise_suppression_threshold` | Float | `0.7` | Threshold for noise suppression (0.0-1.0) |
+
+### `[alerts.presets]`
+
+Built-in alert packs embedded in the binary (`rules/presets/*.yaml`; see
+`docs/BUILTIN_ALERT_PRESETS_PLAN.md`). Packs activate automatically when
+their canary metrics appear in the metric index/buffer, or explicitly via the
+selection lists below. Once activated, a pack never deactivates, and rules in
+`rules_dir` (or created via the API) with the same id always override the
+built-in.
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `mode` | String | `"auto"` | Activation mode: `auto` (activate on canary metric detection), `all` (activate all selected packs at startup), `off` (never load built-ins) |
+| `include` | String list or comma-separated string | `[]` | Include-only list of pack keys; wins over `exclude` when both are set (warning logged). Unknown keys are logged and ignored |
+| `exclude` | String list or comma-separated string | `[]` | Pack keys to skip; applied only when `include` is empty |
+
+Pack keys: `kubernetes`, `coredns`, `external-secrets`, `service-red`,
+`parqtel` (more packs land with the remaining plan phases).
+
+Env override examples:
+
+```bash
+PARQTEL__ALERTS__PRESETS__MODE=auto
+PARQTEL__ALERTS__PRESETS__INCLUDE=kubernetes,parqtel   # include-only
+PARQTEL__ALERTS__PRESETS__EXCLUDE=service-red          # exclude
+```
 
 ### `[alerts.postmortem]`
 

@@ -126,3 +126,35 @@ fn all_presets_are_valid_and_evaluable() -> Result<(), Box<dyn Error>> {
     );
     Ok(())
 }
+
+/// Rule ids are the registry key: a duplicate id anywhere would silently
+/// shadow another pack's rule during built-in activation (insert-if-absent)
+/// or the rules_dir load (insert-overwrites). Ids must be globally unique
+/// across every pack file, including future packs.
+#[test]
+fn preset_rule_ids_are_globally_unique() -> Result<(), Box<dyn Error>> {
+    let mut seen: std::collections::HashMap<String, PathBuf> = std::collections::HashMap::new();
+    let mut problems = Vec::new();
+    for path in preset_files()? {
+        let rules = parse_rules_from_str(&fs::read_to_string(&path)?)?;
+        for rule in rules {
+            if let Some(prev) = seen.get(&rule.id) {
+                problems.push(format!(
+                    "{}: duplicate rule id {:?} (first seen in {})",
+                    path.display(),
+                    rule.id,
+                    prev.display()
+                ));
+            } else {
+                seen.insert(rule.id.clone(), path.clone());
+            }
+        }
+    }
+    assert!(
+        problems.is_empty(),
+        "duplicate preset rule ids:\n{}",
+        problems.join("\n")
+    );
+    assert!(!seen.is_empty(), "no preset rules were discovered");
+    Ok(())
+}

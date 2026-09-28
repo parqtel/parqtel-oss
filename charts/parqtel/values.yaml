@@ -203,6 +203,16 @@ parqtel:
   alerts:
     # -- Directory containing alert rule YAML files.
     rulesDir: "/etc/parqtel/rules"
+    # -- Built-in alert preset pack activation (embedded in the binary).
+    # mode: "auto" activates a pack when its canary metrics are detected,
+    # "all" activates every selected pack at startup, "off" disables them.
+    presets:
+      # -- Activation mode: auto | all | off
+      mode: "auto"
+      # -- Include-only list of pack keys (wins over exclude when both set).
+      include: []
+      # -- Pack keys to skip (applied when include is empty).
+      exclude: []
     # -- Number of firings in window to calculate noise score.
     noiseWindowFirings: 30
     # -- Enable automatic alert refinement.
