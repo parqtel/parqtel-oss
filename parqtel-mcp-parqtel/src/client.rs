@@ -141,15 +141,33 @@ impl ParqtelClient {
     }
 
     /// Indexed values for one label (`/api/v1/label/{name}/values`).
-    /// Label names are restricted to `[a-zA-Z0-9_]` so the path segment
-    /// is safe without URL encoding.
+    /// Dotted Prometheus-style names (`service.name`,
+    /// `app.kubernetes.io/name`) are percent-encoded into the path segment;
+    /// anything outside `[a-zA-Z0-9_.]` plus a short denylist of traversal
+    /// and delimiter characters is rejected so the segment cannot escape
+    /// the route or smuggle extra path/query parts.
     pub async fn label_values(&self, name: &str) -> Result<Value, McpError> {
-        if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        if name.is_empty() || name.len() > 256 {
             return Err(McpError::InvalidRequest(format!(
-                "invalid label name '{name}': expected [a-zA-Z0-9_]"
+                "invalid label name '{name}': must be 1-256 chars"
             )));
         }
-        self.get(&format!("/api/v1/label/{name}/values"), &[]).await
+        if name == "."
+            || name == ".."
+            || name.contains("/../")
+            || name.starts_with("../")
+            || name.ends_with("/..")
+            || name.contains(['/', '\\', '?', '#', '%', '\0'])
+            || !name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.' || c == '-')
+        {
+            return Err(McpError::InvalidRequest(format!(
+                "invalid label name '{name}': expected [a-zA-Z0-9_.-] with no path separators"
+            )));
+        }
+        self.get(&format!("/api/v1/label/{}/values", encode(name)), &[])
+            .await
     }
 
     /// Log search (`/api/v1/logs`) with an optional severity floor.
@@ -208,6 +226,23 @@ impl ParqtelClient {
     pub async fn stats(&self) -> Result<Value, McpError> {
         self.get("/api/v1/stats", &[]).await
     }
+}
+
+/// Percent-encode one URL path segment (RFC 3986 unreserved set passes
+/// through; everything else — including `.` only when it would form a
+/// traversal — becomes `%XX`). Dots are safe mid-segment so Prometheus
+/// names like `service.name` reach the server intact.
+fn encode(segment: &str) -> String {
+    const UNRESERVED: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~";
+    let mut out = String::with_capacity(segment.len());
+    for b in segment.bytes() {
+        if UNRESERVED.contains(&b) {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
 }
 
 /// Unwrap Parqtel's `{status, data|error}` envelope. HTTP-level failures
@@ -362,7 +397,19 @@ mod tests {
     #[tokio::test]
     async fn label_values_rejects_unsafe_names() {
         let client = ParqtelClient::new("http://127.0.0.1:1").unwrap();
-        for bad in ["", "../etc", "a/b", "x y"] {
+        for bad in [
+            "",
+            "../etc",
+            "a/b",
+            "..",
+            ".",
+            "a/../b",
+            "x y",
+            "a?b",
+            "a#b",
+            "a%b",
+            "x".repeat(257).as_str(),
+        ] {
             assert!(
                 client.label_values(bad).await.is_err(),
                 "'{bad}' must be rejected by validation"
@@ -372,6 +419,37 @@ mod tests {
         // server — the failure is connection-level, not validation.
         let err = client.label_values("__name__").await.unwrap_err();
         assert!(err.to_string().contains("parqtel request failed"));
+    }
+
+    #[test]
+    fn encode_passes_rfc3986_unreserved() {
+        assert_eq!(encode("service.name"), "service.name");
+        assert_eq!(encode("__name__"), "__name__");
+        assert_eq!(encode("a-b_c~d"), "a-b_c~d");
+    }
+
+    #[tokio::test]
+    async fn label_values_encodes_dotted_names() {
+        // Dotted names must reach the server as one path segment: spin a
+        // stub that captures the raw path and assert no traversal happened.
+        use axum::extract::Path as AxumPath;
+        let app = Router::new().route(
+            "/api/v1/label/:name/values",
+            get(|AxumPath(name): AxumPath<String>| async move {
+                Json(json!({"status": "success", "data": {"segment": name}}))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        // Give the server time to start (borne from the same runtime).
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let client = ParqtelClient::new(&format!("http://{addr}")).unwrap();
+        let out = client.label_values("service.name").await.unwrap();
+        assert_eq!(out["data"]["segment"], "service.name");
+        server.abort();
     }
 
     #[tokio::test]

@@ -65,15 +65,19 @@ pub fn make_query_metrics_labels_tool() -> McpTool {
         name: "query_metrics_labels".to_string(),
         description: "Discover metric/label metadata: list all indexed label names, or the \
                       indexed values of one label (e.g. __name__ for metric names, \
-                      service_name for services). Use before query_metrics to build selectors."
+                      service_name for services — note: this cluster's service \
+                      dimension is the dotted service.name label, which works \
+                      here too). Use before query_metrics to build selectors."
             .to_string(),
         input_schema: json!({
             "type": "object",
             "properties": {
                 "label": {
                     "type": "string",
-                    "description": "Label name, restricted to [a-zA-Z0-9_] \
-                                    (e.g. __name__, service_name, host, method). \
+                    "description": "Label name, e.g. __name__, service_name, service.name, \
+                                    host, namespace, method. Dotted names \
+                                    (service.name, app.kubernetes.io/name) are \
+                                    accepted and URL-encoded automatically. \
                                     Omit to list all label names."
                 }
             },
