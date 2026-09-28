@@ -79,6 +79,12 @@ pub async fn ingest_json(State(state): State<AppState>, body: Bytes) -> Response
                 .fetch_add(count, std::sync::atomic::Ordering::Relaxed);
             state.inner.metrics.rates.record_metrics(count, wire_bytes);
             crate::otel_sli::record_ingest("metrics", count);
+            tracing::debug!(
+                signal = "metrics",
+                ingested = count,
+                wire_bytes,
+                "HTTP metrics ingest accepted"
+            );
             (StatusCode::OK, Json(json!({ "ingested": count }))).into_response()
         }
         Err(e) => {
@@ -162,6 +168,12 @@ pub async fn ingest_logs_json(State(state): State<AppState>, body: Bytes) -> Res
                 .ingested_points
                 .fetch_add(count, std::sync::atomic::Ordering::Relaxed);
             state.inner.metrics.rates.record_logs(count, wire_bytes);
+            tracing::debug!(
+                signal = "logs",
+                ingested = count,
+                wire_bytes,
+                "HTTP logs ingest accepted"
+            );
             crate::otel_sli::record_ingest("logs", count);
             (StatusCode::OK, Json(json!({ "ingested": count }))).into_response()
         }
@@ -205,6 +217,12 @@ pub async fn ingest_traces_json(State(state): State<AppState>, body: Bytes) -> R
                 .fetch_add(count, std::sync::atomic::Ordering::Relaxed);
             state.inner.metrics.rates.record_spans(count, wire_bytes);
             crate::otel_sli::record_ingest("traces", count);
+            tracing::debug!(
+                signal = "traces",
+                ingested = count,
+                wire_bytes,
+                "HTTP traces ingest accepted"
+            );
             (StatusCode::OK, Json(json!({ "ingested": count }))).into_response()
         }
         Err(e) => {

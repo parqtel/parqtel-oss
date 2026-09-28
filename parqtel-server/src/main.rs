@@ -105,6 +105,11 @@ async fn main() -> anyhow::Result<()> {
 
     let config: Config = figment.extract()?;
     config.validate()?;
+    tracing::debug!(
+        log_level = %config.telemetry.log_level,
+        log_format = %config.telemetry.log_format,
+        "configuration validated"
+    );
 
     // 2. Initialize Telemetry
     // Self-observability: leveled console logs, plus OTLP traces + SLI metrics
@@ -126,6 +131,8 @@ async fn main() -> anyhow::Result<()> {
         bind = config.server.bind_address,
         data_dir = ?config.storage.data_dir,
         logs_dir = ?config.logs.data_dir,
+        log_level = %config.telemetry.log_level,
+        log_format = %config.telemetry.log_format,
         otlp_enabled = config.telemetry.otlp_enabled,
         otlp_endpoint = %config.telemetry.otlp_endpoint,
         self_telemetry_active = telemetry_guard.is_enabled(),
@@ -139,10 +146,12 @@ async fn main() -> anyhow::Result<()> {
 
     let mut index = BlockIndex::new(&config.storage.data_dir);
     index.load().unwrap_or_default();
+    tracing::debug!(blocks = index.blocks.len(), "metrics block index loaded");
     let index = Arc::new(tokio::sync::RwLock::new(index));
 
     let mut log_index = BlockIndex::new(&config.logs.data_dir);
     log_index.load().unwrap_or_default();
+    tracing::debug!(blocks = log_index.blocks.len(), "logs block index loaded");
     let log_index = Arc::new(tokio::sync::RwLock::new(log_index));
 
     // 4. Handle Subcommands
@@ -223,6 +232,10 @@ async fn run_server(
     std::fs::create_dir_all(&trace_data_dir).unwrap_or_default();
     let mut trace_index = BlockIndex::new(&trace_data_dir);
     trace_index.load().unwrap_or_default();
+    tracing::debug!(
+        blocks = trace_index.blocks.len(),
+        "trace block index loaded"
+    );
     let trace_index = Arc::new(tokio::sync::RwLock::new(trace_index));
 
     let trace_idx_clone = trace_index.clone();
@@ -268,6 +281,10 @@ async fn run_server(
         ui_etag,
     )
     .await;
+    tracing::debug!(
+        signals = "metrics, logs, traces",
+        "parqtel application state initialized"
+    );
 
     // Span-metrics RED consumer: derived metrics flow into the metrics
     // ingestion path as normal OTLP metrics would.
@@ -297,6 +314,8 @@ async fn run_server(
                 }
                 if count > 0 {
                     tracing::info!(dir = %rules_dir.display(), rules = count, "alert rules loaded");
+                } else {
+                    tracing::debug!(dir = %rules_dir.display(), "no alert rules found in directory");
                 }
             }
             Err(e) => {
@@ -334,9 +353,13 @@ async fn run_server(
                     otel_sli::record_flush("metrics", started.elapsed().as_secs_f64(), Ok(flushed));
                     if flushed {
                         let (now, _, _) = buffer.stats().await;
-                        otel_sli::record_flush_rows(
-                            "metrics",
-                            before_metrics.saturating_sub(now) as u64,
+                        let drained = before_metrics.saturating_sub(now);
+                        otel_sli::record_flush_rows("metrics", drained as u64);
+                        tracing::debug!(
+                            signal = "metrics",
+                            drained_rows = drained,
+                            duration_ms = started.elapsed().as_millis(),
+                            "buffer flushed to parquet block"
                         );
                     }
                 }
@@ -357,7 +380,14 @@ async fn run_server(
                     otel_sli::record_flush("logs", started.elapsed().as_secs_f64(), Ok(flushed));
                     if flushed {
                         let (_, now, _) = buffer.stats().await;
-                        otel_sli::record_flush_rows("logs", before_logs.saturating_sub(now) as u64);
+                        let drained = before_logs.saturating_sub(now);
+                        otel_sli::record_flush_rows("logs", drained as u64);
+                        tracing::debug!(
+                            signal = "logs",
+                            drained_rows = drained,
+                            duration_ms = started.elapsed().as_millis(),
+                            "buffer flushed to parquet block"
+                        );
                     }
                 }
                 Err(e) => {
@@ -377,9 +407,13 @@ async fn run_server(
                     otel_sli::record_flush("traces", started.elapsed().as_secs_f64(), Ok(flushed));
                     if flushed {
                         let (_, _, now) = buffer.stats().await;
-                        otel_sli::record_flush_rows(
-                            "traces",
-                            before_spans.saturating_sub(now) as u64,
+                        let drained = before_spans.saturating_sub(now);
+                        otel_sli::record_flush_rows("traces", drained as u64);
+                        tracing::debug!(
+                            signal = "traces",
+                            drained_rows = drained,
+                            duration_ms = started.elapsed().as_millis(),
+                            "buffer flushed to parquet block"
                         );
                     }
                 }

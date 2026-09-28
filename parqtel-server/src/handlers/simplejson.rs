@@ -34,12 +34,14 @@ pub struct SimpleJSONQueryResult {
 
 /// Handler for POST /search.
 pub async fn search(State(state): State<AppState>) -> Json<Vec<String>> {
+    tracing::debug!("simplejson search received");
     let metrics = state.inner.query_executor.list_metrics().await;
     Json(metrics.into_iter().collect())
 }
 
 /// Handler for POST /query.
 pub async fn query(State(state): State<AppState>, Json(params): Json<SimpleJSONQuery>) -> Response {
+    tracing::debug!(targets = params.targets.len(), "simplejson query received");
     let mut all_results = Vec::new();
 
     let start_ns = chrono::DateTime::parse_from_rfc3339(&params.range.from)

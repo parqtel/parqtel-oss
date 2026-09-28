@@ -48,6 +48,15 @@ impl Scanner {
         start_ns: i64,
         end_ns: i64,
     ) -> Result<Vec<DataPoint>> {
+        let start_time = std::time::Instant::now();
+        let block_count = blocks.len();
+        tracing::debug!(
+            metric = %metric_name,
+            blocks = block_count,
+            start_ns,
+            end_ns,
+            "scanning blocks"
+        );
         let sem = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT));
         let mut tasks = Vec::new();
         for block in blocks.into_iter().take(MAX_BLOCKS) {
@@ -69,6 +78,13 @@ impl Scanner {
             all_points.extend(points);
         }
         all_points.sort_by_key(|p| p.timestamp_ns);
+        tracing::debug!(
+            metric = %metric_name,
+            blocks = block_count,
+            points = all_points.len(),
+            duration_ms = start_time.elapsed().as_millis(),
+            "scan complete"
+        );
         Ok(all_points)
     }
 

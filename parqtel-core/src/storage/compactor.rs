@@ -33,8 +33,11 @@ pub struct Compactor;
 impl Compactor {
     pub async fn run_loop(index: Arc<RwLock<BlockIndex>>, config: BlockConfig) {
         let interval = Duration::from_secs(config.compaction_interval_secs.max(60));
+        tracing::debug!(interval_secs = interval.as_secs(), "compactor started");
         loop {
             tokio::time::sleep(interval).await;
+            tracing::debug!("compaction cycle starting");
+            let cycle_start = std::time::Instant::now();
             if let Err(e) = Self::compact_once(&index, &config).await {
                 tracing::error!("Compaction failed: {}", e);
             }
@@ -42,6 +45,10 @@ impl Compactor {
             if let Err(e) = Self::compact_tiered(&index, &config).await {
                 tracing::error!("Tiered compaction failed: {}", e);
             }
+            tracing::debug!(
+                duration_ms = cycle_start.elapsed().as_millis(),
+                "compaction cycle complete"
+            );
         }
     }
 
@@ -58,6 +65,7 @@ impl Compactor {
                 .cloned()
                 .collect();
             if small_blocks.len() < 2 {
+                tracing::debug!("compaction: fewer than 2 small blocks, skipping");
                 return Ok(());
             }
             let count = std::cmp::min(8, small_blocks.len());
@@ -75,6 +83,11 @@ impl Compactor {
                 idx.blocks.retain(|b| &b.path != path);
             }
             idx.save()?;
+            tracing::debug!(
+                signal = ?signal_type,
+                blocks_removed = original_paths.len(),
+                "compaction: empty blocks removed"
+            );
             return Ok(());
         }
 
@@ -91,6 +104,11 @@ impl Compactor {
         for path in original_paths {
             let _ = fs::remove_file(path);
         }
+        tracing::debug!(
+            signal = ?signal_type,
+            merged_blocks = to_compact.len(),
+            "compaction: small blocks merged"
+        );
         Ok(())
     }
 
@@ -100,6 +118,7 @@ impl Compactor {
         let now_ns = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
         let six_hours_ns = 6 * 3600 * 1_000_000_000i64;
         let twenty_four_hours_ns = 24 * 3600 * 1_000_000_000i64;
+        tracing::debug!("tiered compaction cycle starting");
 
         // Process each signal type
         for signal_type in &[SignalType::Metrics, SignalType::Logs, SignalType::Traces] {
@@ -118,6 +137,11 @@ impl Compactor {
             };
 
             if candidates.len() < 2 {
+                tracing::debug!(
+                    signal = ?signal_type,
+                    candidate_blocks = candidates.len(),
+                    "tiered compaction: not enough candidates, skipping"
+                );
                 continue;
             }
 
@@ -344,6 +368,14 @@ impl Compactor {
 
         fs::rename(&tmp_path, &final_path)?;
         let size_bytes = fs::metadata(&final_path)?.len();
+        tracing::debug!(
+            signal = ?signal_type,
+            row_count = row_count,
+            size_bytes = size_bytes,
+            start_ts,
+            end_ts,
+            "compacted block written"
+        );
 
         Ok(BlockMetadata {
             path: final_path,

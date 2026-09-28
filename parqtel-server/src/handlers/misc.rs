@@ -16,6 +16,7 @@ pub async fn health() -> impl IntoResponse {
 /// snapshot for the UI overview and settings panels. Reads block-index
 /// metadata only (no Parquet decode), plus live buffer counts.
 pub async fn stats(State(state): State<AppState>) -> Response {
+    tracing::debug!("stats request received");
     let cfg = &state.inner.config;
     let [metrics, logs, traces] = match state.inner.query_executor.storage_stats().await {
         Ok(s) => s,

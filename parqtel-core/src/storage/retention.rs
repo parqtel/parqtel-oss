@@ -38,11 +38,30 @@ impl RetentionPolicy {
             }
         });
 
+        tracing::debug!(
+            total_blocks = idx.blocks.len() + to_delete.len(),
+            expired_blocks = to_delete.len(),
+            cutoff_ns = cutoff,
+            retention_days = retention_days,
+            "retention enforcement check"
+        );
+
         if !to_delete.is_empty() {
             idx.save()?;
-            for path in to_delete {
+            let deleted = to_delete.len();
+            for path in &to_delete {
                 let _ = fs::remove_file(path);
             }
+            tracing::info!(
+                deleted_blocks = deleted,
+                retention_days = retention_days,
+                "retention policy deleted expired blocks"
+            );
+        } else {
+            tracing::debug!(
+                retention_days = retention_days,
+                "retention policy: no expired blocks"
+            );
         }
         Ok(())
     }

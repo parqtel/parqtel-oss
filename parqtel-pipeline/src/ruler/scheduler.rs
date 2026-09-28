@@ -68,12 +68,15 @@ impl RulerScheduler {
             if now_ns - last >= interval_ns {
                 // Truncate to interval boundary
                 let eval_ts = (now_ns / interval_ns) * interval_ns;
+                tracing::debug!(group = %group.name, "recording rule group evaluation due");
                 if let Err(e) = self.evaluator.evaluate_group(group, eval_ts).await {
                     error!("Failed to evaluate group '{}': {}", group.name, e);
                 } else {
                     let mut state = self.last_eval.write().await;
                     state.insert(group.name.clone(), eval_ts);
                 }
+            } else {
+                tracing::debug!(group = %group.name, "recording rule group not yet due");
             }
         }
     }

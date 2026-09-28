@@ -325,6 +325,13 @@ impl QueryExecutor {
         }
         let series_vec: Vec<TimeSeries> = out_series.into_values().collect();
 
+        tracing::debug!(
+            metric = %format!("{:?}", expr),
+            series = total_series,
+            points_scanned,
+            duration_ms = start_time.elapsed().as_millis(),
+            "execute_ast query complete"
+        );
         Ok(QueryResult {
             series: series_vec,
             execution_time: start_time.elapsed(),
@@ -436,6 +443,7 @@ impl QueryExecutor {
         }
 
         // 2. Scan blocks concurrently
+        let blocks_count = blocks.len();
         let mut raw_points =
             Scanner::scan(blocks, plan.metric_name.clone(), plan.start_ns, plan.end_ns).await?;
 
@@ -525,6 +533,14 @@ impl QueryExecutor {
         }
         results = apply_post_processing(results, &plan);
 
+        tracing::debug!(
+            metric = %plan.metric_name,
+            blocks = blocks_count,
+            series = total_series_count,
+            points_scanned,
+            duration_ms = start_time.elapsed().as_millis(),
+            "query execute complete"
+        );
         Ok(QueryResult {
             series: results,
             execution_time: start_time.elapsed(),
@@ -1389,7 +1405,11 @@ impl QueryExecutor {
         // G5: merge per-block label-value dictionaries from metadata
         // (flush-time index) instead of decoding blocks. Blocks whose
         // metadata lacks the field (pre-index blocks) fall back to a scan.
-        let mut values = HashSet::new();
+        // The in-memory buffer is the freshest source: on a busy cluster the
+        // last-5-blocks window can miss labels whose series only live in the
+        // buffer (or whose recent blocks predate the index), so buffered
+        // values are merged too.
+        let mut values = self.buffer.label_values(label).await;
         let mut scan_metric = Vec::new();
         let mut scan_logs = Vec::new();
 
@@ -2094,6 +2114,32 @@ mod tests {
         let values = exec.list_label_values("host").await;
         assert!(values.contains("h1"));
         assert!(values.contains("h2"));
+    }
+
+    #[tokio::test]
+    async fn test_list_label_values_merges_buffer() {
+        // Values that exist only in the in-memory buffer (never flushed)
+        // must still surface: on a busy cluster the last-5-blocks window
+        // can otherwise hide whole label dimensions.
+        let (exec, _dir) = setup_with_data().await;
+        let dps: Vec<_> = (0..3)
+            .map(|i| {
+                parqtel_core::DataPoint::new(
+                    50_000 + i,
+                    parqtel_core::MetricValue::Double(i as f64),
+                    LabelSet::try_from_iter(vec![("buffer_only_dim", format!("bval-{i}"))])
+                        .unwrap(),
+                )
+                .unwrap()
+            })
+            .collect();
+        exec.buffer()
+            .push_metrics("buffer_only_metric_0", &dps)
+            .await;
+
+        let values = exec.list_label_values("buffer_only_dim").await;
+        assert!(values.contains("bval-0"));
+        assert!(values.contains("bval-2"));
     }
 
     #[tokio::test]

@@ -59,6 +59,7 @@ impl RulerEvaluator {
             };
 
             if results.is_empty() {
+                tracing::debug!(rule = %rule.record, "recording rule produced no results");
                 continue;
             }
 
@@ -98,6 +99,11 @@ impl RulerEvaluator {
                 error!("Failed to write rule '{}' results: {}", rule.record, e);
             }
         }
+        info!(
+            "Recording rule group '{}' evaluation complete ({} rules)",
+            group.name,
+            group.rules.len()
+        );
         Ok(())
     }
 }
