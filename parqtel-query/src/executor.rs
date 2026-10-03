@@ -248,7 +248,14 @@ impl QueryExecutor {
                 let mut raw = if blocks.is_empty() {
                     Vec::new()
                 } else {
-                    Scanner::scan(blocks, name.clone(), scan_start, end_ns).await?
+                    Scanner::scan(
+                        blocks,
+                        name.clone(),
+                        scan_start,
+                        end_ns,
+                        service_of(matchers),
+                    )
+                    .await?
                 };
                 // Buffer
                 raw.extend(self.buffer.scan_metrics(name, scan_start, end_ns).await);
@@ -495,8 +502,14 @@ impl QueryExecutor {
 
         // 2. Scan blocks concurrently
         let blocks_count = blocks.len();
-        let mut raw_points =
-            Scanner::scan(blocks, plan.metric_name.clone(), plan.start_ns, plan.end_ns).await?;
+        let mut raw_points = Scanner::scan(
+            blocks,
+            plan.metric_name.clone(),
+            plan.start_ns,
+            plan.end_ns,
+            service_of(&plan.matchers),
+        )
+        .await?;
 
         // 2b. Merge in-memory buffer data (not yet flushed to disk)
         let buffered = self
@@ -1150,7 +1163,10 @@ impl QueryExecutor {
             let mut points: Vec<parqtel_core::DataPoint> = if blocks.is_empty() {
                 Vec::new()
             } else {
-                Scanner::scan(blocks, name.clone(), start_ns, end_ns).await?
+                // This loop enriches a correlate result across every metric
+                // name, so there is no single selector and nothing to narrow
+                // the service on.
+                Scanner::scan(blocks, name.clone(), start_ns, end_ns, None).await?
             };
             points.extend(self.buffer.scan_metrics(&name, start_ns, end_ns).await);
             for p in points {
@@ -1505,7 +1521,7 @@ impl QueryExecutor {
         }
 
         for block in scan_metric {
-            if let Ok(points) = Scanner::scan(vec![block], "".into(), 0, i64::MAX).await {
+            if let Ok(points) = Scanner::scan(vec![block], "".into(), 0, i64::MAX, None).await {
                 for p in points {
                     if let Some(v) = p.labels.get(label) {
                         values.insert(v.to_string());
@@ -1887,6 +1903,28 @@ fn evaluate_steps_to_series(
         Ok(())
     })?;
     Ok(out_series.into_values().collect())
+}
+
+/// The value of a `service.name` equality selector, when the query has one.
+///
+/// Passed to the scanner so it can prune row groups on service. Rows are
+/// written grouped by (metric, resource), so `service_name` statistics are exact
+/// per row group — and on a multi-tenant cluster the service is usually the
+/// *selective* dimension, not the metric name.
+///
+/// Only an exact equality matcher on the real `service.name` label is used.
+///
+/// * `!=` and `=~` are ignored: they exclude some rows rather than identifying
+///   one group, so there is nothing safe to prune from.
+/// * The underscored `service_name` spelling is deliberately **not** an alias.
+///   No series ever carries that label — the resource attribute is stored under
+///   the dotted OTLP key — so such a matcher matches nothing at row level, and
+///   honouring it here would prune the block on a value no row can hold.
+fn service_of(matchers: &[crate::matcher::LabelMatcher]) -> Option<&str> {
+    matchers
+        .iter()
+        .find(|m| m.op == crate::matcher::MatchOp::Equal && m.name == "service.name")
+        .map(|m| m.value.as_str())
 }
 
 fn collect_metric_refs(
@@ -2423,6 +2461,104 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.logs.len(), 1); // only 1 log, ordering still works
+    }
+
+    /// A `{service.name="x"}` selector narrows the scan at the block level. The
+    /// result must be identical to the unfiltered query — a prune that dropped a
+    /// row group holding the requested service would be silent data loss.
+    ///
+    /// Uses its own fixture rather than `setup_with_data`, whose resource
+    /// attributes use the underscored `service_name` spelling. That spelling
+    /// populates neither the `service_name` column nor the reconstructed series
+    /// labels, so a `service.name` selector against it correctly matches
+    /// nothing — which would make this test prove nothing.
+    #[tokio::test]
+    async fn test_service_selector_matches_the_unfiltered_query() {
+        let dir = tempdir().unwrap();
+        let engine = Arc::new(ParquetStorageEngine::new(BlockConfig {
+            data_dir: dir.path().to_path_buf(),
+            ..Default::default()
+        }));
+        let storage: Arc<dyn StorageEngine> = engine.clone();
+
+        // Two services, two series each — the dotted OTLP resource key, which
+        // is what `extract_correlation_labels` reads.
+        let metrics: Vec<parqtel_core::Metric> = ["web", "api"]
+            .iter()
+            .flat_map(|svc| {
+                ["h1", "h2"].map(move |host| parqtel_core::Metric {
+                    name: "cpu".into(),
+                    kind: parqtel_core::MetricKind::Gauge,
+                    resource_attributes: LabelSet::try_from_iter(vec![(
+                        "service.name",
+                        (*svc).to_string(),
+                    )])
+                    .unwrap(),
+                    data_points: vec![
+                        parqtel_core::DataPoint::new(
+                            1000,
+                            parqtel_core::MetricValue::Double(10.0),
+                            LabelSet::try_from_iter(vec![("host", host)]).unwrap(),
+                        )
+                        .unwrap(),
+                        parqtel_core::DataPoint::new(
+                            2000,
+                            parqtel_core::MetricValue::Double(20.0),
+                            LabelSet::try_from_iter(vec![("host", host)]).unwrap(),
+                        )
+                        .unwrap(),
+                    ],
+                    ..Default::default()
+                })
+            })
+            .collect();
+        storage.write_metrics_batch(metrics).await.unwrap();
+        // Persist off the runtime thread, as the other tests do: the sidecar
+        // write is blocking I/O.
+        let engine_for_persist = engine.clone();
+        tokio::task::spawn_blocking(move || {
+            let idx = engine_for_persist.metrics_index().blocking_read();
+            let store = parqtel_core::BlockIndexStore::new(&idx);
+            store.mark_dirty();
+            parqtel_core::storage::persist_blocking(&idx, &store)
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        let mut index = BlockIndex::new(dir.path());
+        index.load().unwrap();
+        let exec = QueryExecutor::new(
+            Arc::new(tokio::sync::RwLock::new(index)),
+            Arc::new(tokio::sync::RwLock::new(BlockIndex::new(
+                &dir.path().join("logs"),
+            ))),
+            dir.path().join("traces"),
+        );
+
+        let plain = crate::parser::parse_expr("cpu").unwrap();
+        let unfiltered = exec.execute_ast(&plain, 0, 5000, Some(1000)).await.unwrap();
+        assert_eq!(unfiltered.total_series_count, 4, "2 services x 2 hosts");
+
+        let web = crate::parser::parse_expr(r#"cpu{service.name="web"}"#).unwrap();
+        let filtered = exec.execute_ast(&web, 0, 5000, Some(1000)).await.unwrap();
+        assert_eq!(
+            filtered.total_series_count, 2,
+            "service pruning must keep every series of the requested service"
+        );
+        assert!(
+            filtered
+                .series
+                .iter()
+                .all(|s| s.labels.get("service.name") == Some("web")),
+            "only web series should come back"
+        );
+
+        let absent = crate::parser::parse_expr(r#"cpu{service.name="nope"}"#).unwrap();
+        let absent = exec
+            .execute_ast(&absent, 0, 5000, Some(1000))
+            .await
+            .unwrap();
+        assert_eq!(absent.total_series_count, 0, "absent service -> no series");
     }
 
     #[tokio::test]

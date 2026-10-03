@@ -45,11 +45,13 @@ impl Scanner {
     /// semaphore acquired *before* spawning, so we never oversubscribe) and
     /// skips row groups whose timestamp statistics fall outside [start_ns,
     /// end_ns].
+    #[allow(clippy::too_many_arguments)]
     pub async fn scan(
         blocks: Vec<BlockMetadata>,
         metric_name: String,
         start_ns: i64,
         end_ns: i64,
+        service_name: Option<&str>,
     ) -> Result<Vec<DataPoint>> {
         let start_time = std::time::Instant::now();
         let block_count = blocks.len();
@@ -64,6 +66,8 @@ impl Scanner {
         let mut tasks = Vec::new();
         for block in blocks.into_iter().take(MAX_BLOCKS) {
             let m_name = metric_name.clone();
+            // Owned so the blocking closure is 'static.
+            let svc_name = service_name.map(|s| s.to_string());
             let permit = sem
                 .clone()
                 .acquire_owned()
@@ -71,7 +75,7 @@ impl Scanner {
                 .map_err(|e| Error::Internal(e.to_string()))?;
             tasks.push(tokio::task::spawn_blocking(move || {
                 let _permit = permit;
-                Self::scan_block(block, m_name, start_ns, end_ns)
+                Self::scan_block(block, m_name, start_ns, end_ns, svc_name.as_deref())
             }));
         }
 
@@ -96,6 +100,7 @@ impl Scanner {
         metric_name: String,
         start_ns: i64,
         end_ns: i64,
+        service_name: Option<&str>,
     ) -> Result<Vec<DataPoint>> {
         let file = match File::open(&meta.path) {
             Ok(f) => f,
@@ -131,7 +136,15 @@ impl Scanner {
         // Then narrow by value. Time statistics alone cannot help here: a block
         // interleaves every metric it holds, so every row group in the window
         // matches and all of them get decoded.
-        groups = row_groups_matching_metric(&reader_builder, &groups, "metric_name", &metric_name);
+        groups = row_groups_matching_value(&reader_builder, &groups, "metric_name", &metric_name);
+        // Rows are written grouped by (metric, resource), so `service_name`
+        // statistics are exact per row group too. Pruning on service is what a
+        // `{service.name="api"}` selector needs once the metric has narrowed
+        // things down - and on a multi-tenant cluster it is usually the
+        // selective dimension, not the metric.
+        if let Some(service) = service_name {
+            groups = row_groups_matching_value(&reader_builder, &groups, "service_name", service);
+        }
         if groups.is_empty() {
             return Ok(Vec::new());
         }
@@ -582,8 +595,20 @@ pub fn row_groups_matching_metric(
     metric_column: &str,
     metric_name: &str,
 ) -> Vec<usize> {
+    row_groups_matching_value(reader, candidates, metric_column, metric_name)
+}
+
+/// Narrows `candidates` to the row groups that may contain `value` in
+/// `column`. See [`row_groups_matching_metric`] for why statistics come first
+/// and what the guarantees are.
+pub fn row_groups_matching_value(
+    reader: &ParquetRecordBatchReaderBuilder<File>,
+    candidates: &[usize],
+    column: &str,
+    value: &str,
+) -> Vec<usize> {
     let columns = reader.metadata().file_metadata().schema_descr().columns();
-    let Some(metric_idx) = columns.iter().position(|c| c.name() == metric_column) else {
+    let Some(col_idx) = columns.iter().position(|c| c.name() == column) else {
         // No such column: cannot prune, keep everything.
         return candidates.to_vec();
     };
@@ -592,13 +617,13 @@ pub fn row_groups_matching_metric(
     // `list_label_values` falls back to a full scan when a block predates the
     // flush-time label index. Treating it as a value to match would prune the
     // whole block, since the empty string sorts before every real name.
-    if metric_name.is_empty() {
+    if value.is_empty() {
         return candidates.to_vec();
     }
-    let needle = metric_name.as_bytes();
+    let needle = value.as_bytes();
     let mut kept = Vec::with_capacity(candidates.len());
     for &rg in candidates {
-        let col_md = reader.metadata().row_group(rg).column(metric_idx);
+        let col_md = reader.metadata().row_group(rg).column(col_idx);
 
         // Statistics first: they are free and, because rows are written grouped
         // by metric name, a row group's min and max for `metric_name` are
@@ -635,7 +660,7 @@ pub fn row_groups_matching_metric(
         // Statistics could not decide, so fall back to the bloom filter. It can
         // report a false positive but never a false negative, so this is also
         // safe to use for absence.
-        match reader.get_row_group_column_bloom_filter(rg, metric_idx) {
+        match reader.get_row_group_column_bloom_filter(rg, col_idx) {
             Ok(Some(filter)) => {
                 if !filter.check(needle) {
                     continue;

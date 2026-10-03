@@ -791,7 +791,8 @@ async fn run_export(
         idx.query(start_ns, end_ns, Some(&metric))
     };
 
-    let points = parqtel_core::storage::Scanner::scan(blocks, metric, start_ns, end_ns).await?;
+    let points =
+        parqtel_core::storage::Scanner::scan(blocks, metric, start_ns, end_ns, None).await?;
 
     let mut file = std::fs::File::create(output)?;
     writeln!(file, "timestamp_ns,value,labels")?;
