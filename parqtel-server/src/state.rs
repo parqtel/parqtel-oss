@@ -48,6 +48,7 @@ impl AppState {
         config: Config,
         ui_content: Vec<u8>,
         ui_etag: String,
+        contention: Arc<parqtel_core::ContentionMetrics>,
     ) -> Self {
         let data_dir = config.storage.data_dir.clone();
         let saved_search_dir = config.storage.data_dir.clone();
@@ -79,7 +80,7 @@ impl AppState {
                 config,
                 ui_content,
                 ui_etag,
-                metrics: crate::metrics::ServerMetrics::default(),
+                metrics: crate::metrics::ServerMetrics::with_contention(contention),
                 alert_registry,
                 alert_store,
                 alert_engine,
@@ -124,19 +125,24 @@ impl AppState {
             config.storage.data_dir.join("traces"),
         );
         let memory_buffer = executor.memory_buffer();
+        let contention = Arc::new(parqtel_core::ContentionMetrics::new());
 
         Self::new(
             IngestionService::new(config.storage.clone(), tx)
-                .with_memory_buffer(memory_buffer.clone()),
+                .with_memory_buffer(memory_buffer.clone())
+                .with_contention(contention.clone()),
             LogIngestionService::new(config.logs.clone(), ltx)
-                .with_memory_buffer(memory_buffer.clone()),
+                .with_memory_buffer(memory_buffer.clone())
+                .with_contention(contention.clone()),
             TraceIngestionService::new(config.storage.clone(), ttx)
-                .with_memory_buffer(memory_buffer),
+                .with_memory_buffer(memory_buffer)
+                .with_contention(contention.clone()),
             executor,
             index,
             config,
             vec![],
             "".into(),
+            contention,
         )
         .await
     }

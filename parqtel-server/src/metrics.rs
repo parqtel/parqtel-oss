@@ -1,4 +1,4 @@
-use parqtel_core::BlockIndex;
+use parqtel_core::{BlockIndex, ContentionMetrics, Histogram};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::RwLock;
@@ -14,6 +14,12 @@ pub struct ServerMetrics {
     /// Live per-signal ingestion rates (metrics samples / log records /
     /// spans) — 1-second buckets over a 15-minute window.
     pub rates: RatesSnapshot,
+    /// Lock-wait and flush-shape counters, shared with the ingestion services
+    /// and the block-index tasks.
+    pub contention: Arc<ContentionMetrics>,
+    /// Process RSS in bytes, sampled by the background tick rather than read
+    /// from `/proc` on every `/metrics` scrape.
+    process_rss_bytes: AtomicU64,
 }
 
 impl Default for ServerMetrics {
@@ -28,7 +34,35 @@ impl Default for ServerMetrics {
                 1.0, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0, 2500.0, 5000.0,
             ])),
             rates: RatesSnapshot::default(),
+            contention: Arc::new(ContentionMetrics::new()),
+            process_rss_bytes: AtomicU64::new(0),
         }
+    }
+}
+
+impl ServerMetrics {
+    /// Builds metrics backed by an existing [`ContentionMetrics`], so the
+    /// ingestion services and `/metrics` report the same counters.
+    pub fn with_contention(contention: Arc<ContentionMetrics>) -> Self {
+        Self {
+            contention,
+            ..Self::default()
+        }
+    }
+
+    /// Samples process memory and caches it for [`Self::render`].
+    ///
+    /// Called from the background tick: reading `/proc/self/status` is a
+    /// blocking syscall, and doing it per Prometheus scrape put file I/O on
+    /// the request path for a gauge that changes slowly.
+    pub fn refresh_process_memory(&self) {
+        self.process_rss_bytes
+            .store(read_rss_bytes(), Ordering::Relaxed);
+    }
+
+    /// Last sampled process RSS in bytes (0 until the first sample).
+    pub fn process_rss_bytes(&self) -> u64 {
+        self.process_rss_bytes.load(Ordering::Relaxed)
     }
 }
 
@@ -299,55 +333,6 @@ pub fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
-pub struct Histogram {
-    buckets: Vec<f64>,
-    counts: Vec<u64>,
-    sum: f64,
-    count: u64,
-}
-
-impl Histogram {
-    pub fn new(buckets: Vec<f64>) -> Self {
-        let n = buckets.len();
-        Self {
-            buckets,
-            counts: vec![0; n + 1],
-            sum: 0.0,
-            count: 0,
-        }
-    }
-
-    /// Records one observation into the histogram.
-    pub fn record(&mut self, value: f64) {
-        self.sum += value;
-        self.count += 1;
-        for (i, &bound) in self.buckets.iter().enumerate() {
-            if value <= bound {
-                self.counts[i] += 1;
-                return;
-            }
-        }
-        // Above every bucket bound -> the +Inf overflow slot.
-        if let Some(last) = self.counts.last_mut() {
-            *last += 1;
-        }
-    }
-
-    pub fn render(&self, name: &str) -> String {
-        let mut out = String::new();
-        let mut cumulative = 0;
-        for (i, &b) in self.buckets.iter().enumerate() {
-            cumulative += self.counts[i];
-            out.push_str(&format!("{}_bucket{{le=\"{}\"}} {}\n", name, b, cumulative));
-        }
-        cumulative += self.counts.last().unwrap_or(&0);
-        out.push_str(&format!("{}_bucket{{le=\"+Inf\"}} {}\n", name, cumulative));
-        out.push_str(&format!("{}_sum {}\n", name, self.sum));
-        out.push_str(&format!("{}_count {}\n", name, self.count));
-        out
-    }
-}
-
 impl ServerMetrics {
     pub async fn render(&self, index: &Arc<RwLock<BlockIndex>>) -> String {
         let mut out = String::new();
@@ -409,7 +394,10 @@ impl ServerMetrics {
 
         out.push_str("# HELP parqtel_process_rss_bytes Process RSS memory in bytes\n");
         out.push_str("# TYPE parqtel_process_rss_bytes gauge\n");
-        out.push_str(&format!("parqtel_process_rss_bytes {}\n", get_rss()));
+        out.push_str(&format!(
+            "parqtel_process_rss_bytes {}\n",
+            self.process_rss_bytes()
+        ));
 
         let now = now_secs();
         let [metrics, logs, spans] = self.rates.snapshot(now);
@@ -470,21 +458,27 @@ impl ServerMetrics {
             ));
         }
 
+        // Lock waits, flush shape and index contention.
+        out.push_str(&self.contention.render());
+
         out
     }
 }
 
-fn get_rss() -> u64 {
+/// Reads VmRSS from `/proc/self/status`. Returns 0 on non-Linux or when the
+/// field cannot be parsed, which renders as a zero gauge rather than a gap.
+fn read_rss_bytes() -> u64 {
     #[cfg(target_os = "linux")]
     {
         if let Ok(status) = std::fs::read_to_string("/proc/self/status") {
             for line in status.lines() {
-                if line.starts_with("VmRSS:") {
-                    let parts: Vec<&str> = line.split_whitespace().collect();
-                    if parts.len() >= 2 {
-                        if let Ok(kb) = parts[1].parse::<u64>() {
-                            return kb * 1024;
-                        }
+                if let Some(rest) = line.strip_prefix("VmRSS:") {
+                    if let Some(kb) = rest
+                        .split_whitespace()
+                        .next()
+                        .and_then(|v| v.parse::<u64>().ok())
+                    {
+                        return kb.saturating_mul(1024);
                     }
                 }
             }
@@ -533,6 +527,62 @@ mod tests {
         assert!(output.contains("parqtel_ingest_rate_per_sec{signal=\"metrics\"}"));
         assert!(output.contains("parqtel_ingest_gap_secs{signal=\"traces\"}"));
         assert!(output.contains("parqtel_ingested_items_total{signal=\"logs\"}"));
+    }
+
+    /// `/metrics` must not read `/proc` — the gauge is sampled by the
+    /// background tick so a scrape is not a blocking syscall on the request
+    /// path. Before the first sample it renders 0, not a gap.
+    #[tokio::test]
+    async fn test_render_does_not_sample_process_memory() {
+        let dir = tempdir().unwrap();
+        let index = Arc::new(RwLock::new(BlockIndex::new(dir.path())));
+        let metrics = ServerMetrics::default();
+        assert_eq!(metrics.process_rss_bytes(), 0, "no sample taken yet");
+
+        let before = metrics.render(&index).await;
+        assert!(before.contains("parqtel_process_rss_bytes 0\n"));
+        assert_eq!(
+            metrics.process_rss_bytes(),
+            0,
+            "rendering must not populate the cached gauge"
+        );
+
+        metrics.refresh_process_memory();
+        // On Linux with a populated /proc the value must now be non-zero;
+        // elsewhere the test only asserts the render stays well formed.
+        let after = metrics.render(&index).await;
+        assert!(after.contains("parqtel_process_rss_bytes "));
+        #[cfg(target_os = "linux")]
+        assert!(
+            metrics.process_rss_bytes() > 0,
+            "Linux must sample a non-zero RSS"
+        );
+    }
+
+    /// The `/metrics` body must carry the shared contention counters, so the
+    /// ingest lock-wait and flush histograms are actually scrapeable.
+    #[tokio::test]
+    async fn test_render_includes_contention_metrics() {
+        let dir = tempdir().unwrap();
+        let index = Arc::new(RwLock::new(BlockIndex::new(dir.path())));
+        let contention = Arc::new(ContentionMetrics::new());
+        contention.record_ingest_lock_wait(
+            parqtel_core::SignalType::Metrics,
+            std::time::Duration::from_millis(250),
+        );
+        {
+            let _guard = contention.flush_started(parqtel_core::SignalType::Metrics);
+        }
+        let metrics = ServerMetrics::with_contention(contention);
+
+        let output = metrics.render(&index).await;
+        assert!(output.contains("parqtel_ingest_lock_wait_seconds{signal=\"metrics\"}_count 1"));
+        assert!(output.contains("parqtel_flush_duration_seconds{signal=\"metrics\"}_count 1"));
+        // Every signal must be present from boot so dashboards do not have to
+        // handle series appearing and disappearing.
+        assert!(output.contains("parqtel_ingest_lock_wait_seconds{signal=\"logs\"}_count 0"));
+        assert!(output.contains("parqtel_flush_inflight{signal=\"traces\"} 0"));
+        assert!(output.contains("parqtel_index_lock_wait_seconds_count 0"));
     }
 
     #[test]

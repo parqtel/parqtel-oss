@@ -9,6 +9,7 @@ pub mod engine;
 pub mod error;
 pub mod models;
 pub mod storage;
+pub mod telemetry;
 
 pub use buffer::MemoryBuffer;
 pub use config::{
@@ -18,3 +19,4 @@ pub use engine::StorageEngine;
 pub use error::{Error, Result};
 pub use models::*;
 pub use storage::{start_maintenance, BlockIndex, RetentionPolicy, Scanner};
+pub use telemetry::{ContentionMetrics, FlushGuard, Histogram};

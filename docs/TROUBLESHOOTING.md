@@ -56,6 +56,41 @@ If the compactor cannot keep up with the ingestion rate, you will have many smal
 - **Diagnostic:** Check `parqtel_storage_blocks` / `parqtel_storage_bytes` / `parqtel_storage_rows` on `/metrics` for block accumulation, and watch server logs for `Compaction failed` errors.
 - **Solution:** Decrease `PARQTEL__STORAGE__COMPACTION_INTERVAL_SECS` (more frequent passes) or provide more CPU/IOPS.
 
+## 3a. Ingest latency (contention)
+
+Every signal is ingested under one mutex, and a block flush runs while that
+mutex is held. These series make that contention measurable instead of
+requiring a profiler:
+
+| Metric | What it tells you |
+|--------|-------------------|
+| `parqtel_ingest_lock_wait_seconds{signal}` | How long a request waited for the ingest mutex. This is the best single predictor of ingest p99 — a p99 approaching the flush duration means requests are queueing behind a flush. |
+| `parqtel_flush_duration_seconds{signal}` | Wall time of each flush that actually wrote rows (encode + compress + fsync), including capacity-triggered flushes inside a request, which the 5-second tick does not see. |
+| `parqtel_flush_inflight{signal}` | Flushes currently running. Normally 0 or 1. |
+| `parqtel_flush_rows_total{signal}` | Rows written to blocks since start — tells you how much work each flush is doing. |
+| `parqtel_index_lock_wait_seconds` | How long the block-index writer waited for the write lock. Every query handler reads that lock, so this is why a query tail latency tracks the index. |
+
+```promql
+# p99 time an ingest request spent waiting for the mutex
+histogram_quantile(0.99, sum by (le, signal) (rate(parqtel_ingest_lock_wait_seconds_bucket[5m])))
+
+# flush pressure: how long each block write takes
+histogram_quantile(0.99, sum by (le, signal) (rate(parqtel_flush_duration_seconds_bucket[15m])))
+```
+
+All signals are emitted from boot, including zero-valued series, so a
+dashboard query does not have to handle series appearing and disappearing.
+
+**If `parqtel_ingest_lock_wait_seconds` p99 is high:** the blocks are too
+large or rotate too rarely, so each flush holds the mutex for a long time.
+Lower `PARQTEL__STORAGE__MAX_ROWS_PER_BLOCK` (and `PARQTEL__LOGS__...` for
+logs) to flush more often with less work each time.
+
+**If `parqtel_index_lock_wait_seconds` is high:** the index is being
+re-serialised and rewritten on every flush while holding the write lock, so
+its cost scales with the total index size — that is, with your retention
+window.
+
 ### "Invalid timestamp column" / arrow2-era blocks
 After the arrow2 → arrow 59 migration, Parquet blocks written by older builds are unreadable: compaction and scans log `Arrow error: Invalid timestamp column`. **Wipe the data directory** (`data/`, `data/logs/`, `data/traces/`) when upgrading across that boundary — old blocks cannot be converted in place.
 

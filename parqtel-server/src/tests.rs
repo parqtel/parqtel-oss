@@ -54,6 +54,7 @@ async fn setup_test_app() -> axum::Router {
         config,
         ui_content,
         ui_etag,
+        Arc::new(parqtel_core::ContentionMetrics::new()),
     )
     .await;
 
@@ -131,9 +132,22 @@ async fn test_metrics_endpoint() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::OK);
-    let body = to_bytes(response.into_body(), 10240).await.unwrap();
+    // Generous body buffer: the endpoint now also emits the ingest lock-wait,
+    // flush and index-contention series for all three signals.
+    let body = to_bytes(response.into_body(), 65536).await.unwrap();
     let body_str = String::from_utf8(body.to_vec()).unwrap();
     assert!(body_str.contains("parqtel_storage_blocks"));
+    assert!(body_str.contains("parqtel_ingest_lock_wait_seconds"));
+    assert!(body_str.contains("parqtel_flush_duration_seconds"));
+    assert!(body_str.contains("parqtel_index_lock_wait_seconds"));
+    // Every signal must be present from boot so dashboards do not have to
+    // handle series appearing and disappearing.
+    for signal in ["metrics", "logs", "traces"] {
+        assert!(
+            body_str.contains(&format!("parqtel_flush_inflight{{signal=\"{signal}\"}}")),
+            "missing flush_inflight series for {signal}"
+        );
+    }
 }
 
 #[tokio::test]
