@@ -246,6 +246,11 @@ let reader = reader_builder.build()?;
 - Enable by default for metrics and logs once it is implemented; expose `wal_sync_mode` (`none`/`interval`/`fsync`) so the durability/throughput trade-off is explicit.
 - Bound WAL size and segment count; expose replay duration and last-replay outcome on `/api/v1/stats`.
 
+**Also the prerequisite for BL-01-14.** The async flush worker (acknowledge
+before durable) is deferred until this lands, because a WAL is what makes an
+unacknowledged flush recoverable. If the async flush is wanted sooner, do this
+item first.
+
 **Acceptance.** Crash (SIGKILL) mid-ingest loses < 5 s of data with default settings; steady-state ingest throughput impact < 10 %.
 
 **Effort** XL · **Risk** Medium

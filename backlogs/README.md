@@ -11,12 +11,12 @@
 
 | Doc | Domain | Items | Theme |
 |-----|--------|-------|-------|
-| [BL-01-ingest-throughput.md](./BL-01-ingest-throughput.md) | Ingestion hot path | 13 | Lock serialization, allocator pressure, batching, backpressure |
+| [BL-01-ingest-throughput.md](./BL-01-ingest-throughput.md) | Ingestion hot path | 14 | Lock serialization, allocator pressure, batching, backpressure |
 | [BL-02-query-latency.md](./BL-02-query-latency.md) | Query execution | 19 | Label cloning, per-step work, single-thread evaluation, pushdown |
 | [BL-03-storage-optimization.md](./BL-03-storage-optimization.md) | Storage format & lifecycle | 15 | Parquet layout, bloom filters, series encoding, index, compaction |
 | [BL-04-runtime-observability.md](./BL-04-runtime-observability.md) | Runtime, middleware, config | 14 | Scheduler hygiene, limits, caching, CI perf gates |
 
-**Total: 61 items** — 13 Critical/High, 26 Medium, 22 Low.
+**Total: 62 items** — 13 Critical/High, 27 Medium, 22 Low.
 
 ---
 
@@ -89,12 +89,21 @@ Establish that the current pain is where we claim it is, and land zero-risk wins
 ### Phase 1 — Unblock the async runtime (2–3 weeks)
 Removes the seconds-long global stalls. Largely mechanical, low risk, high payoff.
 
-- BL-01-01 async flush worker (release the ingest lock before encode)
-- BL-03-01 index persistence off the write lock (debounced append-only log)
-- BL-03-02 compaction/retention fully on `spawn_blocking`
+- **BL-03-01** index persistence off the write lock (debounced, off-lock I/O) — *landed, #44*
+- **BL-03-02** compaction/retention fully on `spawn_blocking` — *landed, #44*
+- **BL-01-05** decode on a dedicated blocking pool; typed JSON instead of `Value`
+- **BL-01-11** split batches across the block boundary (no partial push + client error)
+- **BL-01-01a** shard the rotator by metric-name hash — flush stays synchronous
 - BL-02-04 move the query CPU half into one `spawn_blocking`
-- BL-01-05 decode on a dedicated blocking pool; typed JSON instead of `Value`
-- BL-04-07 explicit tokio worker sizing; BL-04-01 global blocking semaphore
+- BL-04-07 explicit tokio worker sizing; BL-04-04 global blocking semaphore
+
+**Durability note.** BL-01-01 was deliberately split. The sharded form
+(BL-01-01a) removes cross-metric contention while keeping a flush
+acknowledged only once it is on disk. The stronger form — releasing the lock
+before the encode, so even the flushing bucket does not block — **acknowledges
+a request before its data is durable** and is therefore deferred to **BL-01-14,
+gated on the WAL (BL-03-12)**. Taking that trade silently would be the wrong
+call while `wal_enabled` defaults to `false`.
 
 **Exit criteria:** max global stall < 100 ms; ingest p99 < 250 ms; p99/p50 ingest ratio < 3.
 
@@ -124,7 +133,9 @@ Writes are cheaper and files are 2–5× smaller, which also makes Phase 2's sca
 
 ### Phase 4 — Durability, caching, long tail (2 weeks)
 
-- BL-03-12 WAL enabled by default for metrics and logs
+- BL-03-12 WAL — **prerequisite for BL-01-14**, so pick this first if the
+  async flush worker is wanted sooner
+- BL-01-14 async flush worker (only once the WAL can recover an unacknowledged flush)
 - BL-04-08 short-TTL result cache + query parse cache
 - BL-03-05 (tier-aware codec/level policy: fast codec hot, high level cold)
 - BL-04-09 backpressure and load shedding on ingest
@@ -144,7 +155,7 @@ Writes are cheaper and files are 2–5× smaller, which also makes Phase 2's sca
 |---|---|---|
 | `Arc<LabelSet>` refactor touches every operator | High | Land behind a feature flag; keep `InstantVector` constructors; conformance suite (`parqtel-query/src/conformance.rs`) gates each step |
 | Schema change (series dictionary) breaks existing data dirs | High | Version the schema in `BlockMetadata`; support reading v1 and writing v2; document wipe-or-upgrade |
-| Async flush loses crash-safety (response returns before durability) | Medium | Keep WAL (BL-03-12) as the durability boundary; otherwise flush synchronously when the WAL is disabled |
+| Async flush loses crash-safety (response returns before durability) | Medium | Deferred to BL-01-14 behind the WAL (BL-03-12); flushes stay synchronous until then |
 | Off-thread drops (BL-01-09) can reorder drain/flush | Low | Drain ordering is already best-effort post-flush; verify no double-count regression in ingest tests |
 | Parallel evaluation changes float summation order | Low | Aggregations are per-group; only per-series concat order changes. Assert against conformance fixtures |
 

@@ -38,23 +38,41 @@ impl BlockWriter {
         }
     }
 
-    pub fn push(&mut self, metric: Metric) -> Result<()> {
+    /// Appends a metric, splitting it across blocks when it does not fit.
+    ///
+    /// A single metric can carry more points than a whole block (a high-card
+    /// burst), which the previous code handled by pushing points until the
+    /// buffer filled and then returning an error — leaving the request
+    /// *partially* accepted and telling the client to retry a batch that was
+    /// already half-ingested. Splitting keeps the invariant the caller relies
+    /// on: every point handed to `push` is either fully accepted into a block
+    /// or reported as an error, never both.
+    ///
+    /// Returns the block metadata of each block written along the way.
+    pub fn push(&mut self, metric: Metric) -> Result<Vec<BlockMetadata>> {
         let name = Arc::new(metric.name);
         let resource = Arc::new(metric.resource_attributes);
         let kind = metric.kind;
 
-        for dp in metric.data_points {
-            if self.buffer.len() >= self.capacity {
-                return Err(Error::Validation("Block writer buffer is full".into()));
+        let mut flushed = Vec::new();
+        let mut points = metric.data_points.into_iter().peekable();
+        while points.peek().is_some() {
+            let room = self.capacity.saturating_sub(self.buffer.len());
+            if room == 0 {
+                flushed.push(self.flush()?);
+                continue;
             }
-            self.buffer.push(DataPointContext {
-                name: name.clone(),
-                kind,
-                resource: resource.clone(),
-                dp,
-            });
+            let take = room.min(points.len());
+            for dp in points.by_ref().take(take) {
+                self.buffer.push(DataPointContext {
+                    name: name.clone(),
+                    kind,
+                    resource: resource.clone(),
+                    dp,
+                });
+            }
         }
-        Ok(())
+        Ok(flushed)
     }
 
     pub fn len(&self) -> usize {
@@ -191,12 +209,18 @@ impl LogWriter {
         }
     }
 
-    pub fn push(&mut self, log: LogRecord) -> Result<()> {
+    /// Appends a log record, flushing first when the buffer is full.
+    ///
+    /// Mirrors [`BlockWriter::push`]: rather than rejecting the record the
+    /// caller already pushed, the block is closed and the record starts the
+    /// next one, so a full buffer can never fail a request.
+    pub fn push(&mut self, log: LogRecord) -> Result<Option<BlockMetadata>> {
+        let mut flushed = None;
         if self.buffer.len() >= self.capacity {
-            return Err(Error::Validation("Log writer buffer is full".into()));
+            flushed = Some(self.flush()?);
         }
         self.buffer.push(log);
-        Ok(())
+        Ok(flushed)
     }
 
     pub fn len(&self) -> usize {
@@ -312,12 +336,16 @@ impl TraceWriter {
         }
     }
 
-    pub fn push(&mut self, span: Span) -> Result<()> {
+    /// Appends a span, flushing first when the buffer is full.
+    ///
+    /// Mirrors [`LogWriter::push`].
+    pub fn push(&mut self, span: Span) -> Result<Option<BlockMetadata>> {
+        let mut flushed = None;
         if self.buffer.len() >= self.capacity {
-            return Err(Error::Validation("Trace writer buffer is full".into()));
+            flushed = Some(self.flush()?);
         }
         self.buffer.push(span);
-        Ok(())
+        Ok(flushed)
     }
 
     pub fn len(&self) -> usize {
