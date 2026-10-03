@@ -287,6 +287,70 @@ return the expected label shapes, and `test-aggregations` (22/22),
 cargo run --release -p parqtel-query --example bench_query_concurrency
 ```
 
+## Metric-name pruning uses statistics first (`BL-03-03`, follow-up)
+
+#51 added bloom filters on `metric_name` because the premise was that
+row-group statistics cannot discriminate on a value column. **They can.** Rows
+are written grouped by metric name, so a row group's `metric_name` min and max
+are usually the *same value* — an exact, free answer requiring nothing to be
+read from the filter region.
+
+Probing the writer output confirms it: for a five-metric block with one row
+group per metric, `metric_name` statistics are `min == max == "metric_N"` in
+every group. (`service_name` statistics came back all-null in that probe only
+because the fixture put `service.name` in point labels rather than resource
+attributes, so the column was never populated.)
+
+### The real comparison is three-way
+
+200 metrics × 500 points in one block, querying one metric of 200, through the
+production `Scanner::scan` path:
+
+| configuration | size | write | query |
+|---|---|---|---|
+| neither (old blocks) | 1.29 MB | 38 ms | 30.33 ms |
+| **statistics only** | 1.47 MB | 55 ms | **2.34 ms** |
+| statistics + bloom | 1.49 MB | 42 ms | 2.49 ms |
+
+Against "neither": **12.1× for 14 % size with statistics alone**; adding bloom
+filters on top moves the query by nothing measurable (2.34 → 2.49 ms is noise)
+and costs a further ~2 % size.
+
+So the honest conclusion is that **statistics do the work and bloom filters are
+a fallback**, not the primary mechanism. Bloom filters are retained only because
+they still answer correctly when statistics are absent — a block written with
+statistics disabled, or one where a long value was truncated out of the index —
+and because they cost ~2 % of size for that.
+
+An absent metric now costs **0.02 ms** instead of 30 ms: nothing is decoded at
+all.
+
+### A bug the change exposed
+
+`list_label_values` calls `Scanner::scan` with an **empty** metric name to mean
+"no metric filter" — it falls back to a full block scan for blocks that predate
+the flush-time label index. The empty string sorts before every real metric
+name, so treating it as a value to match pruned the whole block and silently
+returned no label values. `test_list_label_values` caught it.
+
+An empty metric name now means "no filter" and keeps every candidate, pinned by
+`metric_pruning_treats_an_empty_name_as_no_filter` across all four
+statistics/filter combinations.
+
+### Why the statistics test is one-sided
+
+Testing "the needle is outside `[min, max]`" proves **absence**, which is all
+that is needed to skip a group. Unlike the time prune, it needs no null check:
+min/max cover non-null values only, and a null row cannot contain the value
+being searched for. Byte comparison is sound because UTF-8 byte order is
+code-point order.
+
+### Reproducing
+
+```bash
+cargo run --release -p parqtel-core --example bench_bloom
+```
+
 ## Streaming step evaluation (`BL-02-03`)
 
 `eval_steps` returned `Vec<(i64, InstantVector)>` — every step of the range held

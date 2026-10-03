@@ -312,28 +312,35 @@ mod tests {
         }]
     }
 
-    /// Writes a metrics block with the **same** writer properties production
-    /// uses, including the bloom filters — a test that omitted them would pass
-    /// while proving nothing about the bloom path.
-    fn write_metrics_parquet_prod(path: &std::path::Path, metrics: &[Metric], rg_rows: usize) {
+    /// Writes a metrics block with explicit control over which read-path
+    /// metadata is present, so each pruning mechanism can be tested in
+    /// isolation. A test that enabled everything would pass while proving
+    /// nothing about which mechanism did the work.
+    fn write_block_with(
+        path: &std::path::Path,
+        metrics: &[Metric],
+        rg_rows: usize,
+        stats: bool,
+        bloom: bool,
+    ) {
         let chunk = StorageModel::metrics_to_chunk(metrics).unwrap();
         let file = fs::File::create(path).unwrap();
-        let writer_props = WriterProperties::builder()
+        let mut builder = WriterProperties::builder()
             .set_compression(Compression::UNCOMPRESSED)
             .set_writer_version(WriterVersion::PARQUET_2_0)
             .set_max_row_group_row_count(Some(rg_rows))
-            .set_column_bloom_filter_enabled(
-                parquet::schema::types::ColumnPath::from("metric_name"),
-                true,
-            )
-            .set_column_bloom_filter_enabled(
-                parquet::schema::types::ColumnPath::from("service_name"),
-                true,
-            )
-            .set_statistics_enabled(parquet::file::properties::EnabledStatistics::Page)
-            .set_column_index_truncate_length(Some(64))
-            .build();
-        let mut writer = ArrowWriter::try_new(file, chunk.schema(), Some(writer_props)).unwrap();
+            .set_statistics_enabled(if stats {
+                parquet::file::properties::EnabledStatistics::Chunk
+            } else {
+                parquet::file::properties::EnabledStatistics::None
+            });
+        if bloom {
+            use parquet::schema::types::ColumnPath;
+            builder = builder
+                .set_column_bloom_filter_enabled(ColumnPath::from("metric_name"), true)
+                .set_column_bloom_filter_enabled(ColumnPath::from("service_name"), true);
+        }
+        let mut writer = ArrowWriter::try_new(file, chunk.schema(), Some(builder.build())).unwrap();
         writer.write(&chunk).unwrap();
         writer.close().unwrap();
     }
@@ -361,77 +368,118 @@ mod tests {
             .collect()
     }
 
+    fn builder_for(
+        path: &std::path::Path,
+    ) -> parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder<fs::File> {
+        let file = fs::File::open(path).unwrap();
+        parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(file).unwrap()
+    }
+
     /// A bloom filter may report a false positive but must NEVER report a false
-    /// negative. This is the soundness property that matters: a false negative
-    /// silently drops data from a query result.
+    /// negative. A false negative silently drops data from a query result.
     ///
-    /// Every metric is checked against every row group it actually occupies, and
-    /// the result must be compared against ground truth from the data itself
-    /// rather than against a hard-coded expectation.
+    /// Checked against which row group actually holds each metric rather than a
+    /// hard-coded expectation, so it cannot drift from the data.
     #[test]
-    fn bloom_pruning_never_drops_a_row_group_that_contains_the_metric() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("bloom.parquet");
-        const METRICS: usize = 10;
-        const POINTS: usize = 100;
-        let metrics = multi_metric_block(METRICS, POINTS);
-        // One row group per metric, since the rows are written consecutively.
-        write_metrics_parquet_prod(&path, &metrics, POINTS);
-
-        let file = fs::File::open(&path).unwrap();
-        let builder =
-            parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(file).unwrap();
-        let md = builder.metadata().clone();
-        assert_eq!(md.num_row_groups(), METRICS, "one row group per metric");
-
-        for m in 0..METRICS {
-            let name = format!("metric_{m}");
-            let candidates: Vec<usize> = (0..METRICS).collect();
-            let kept =
-                scanner::row_groups_matching_metric(&builder, &candidates, "metric_name", &name);
-            // Ground truth: row group m is the one holding this metric's rows.
-            assert!(
-                kept.contains(&m),
-                "{name} lives in row group {m} but bloom pruning returned {kept:?}"
+    fn metric_pruning_never_drops_a_row_group_that_contains_the_metric() {
+        for (label, stats, bloom) in [
+            ("statistics only", true, false),
+            ("statistics + bloom", true, true),
+            ("bloom only (no statistics)", false, true),
+        ] {
+            let dir = tempdir().unwrap();
+            let path = dir.path().join("sound.parquet");
+            const METRICS: usize = 10;
+            const POINTS: usize = 100;
+            write_block_with(
+                &path,
+                &multi_metric_block(METRICS, POINTS),
+                POINTS,
+                stats,
+                bloom,
             );
+
+            let builder = builder_for(&path);
+            assert_eq!(
+                builder.metadata().num_row_groups(),
+                METRICS,
+                "{label}: one row group per metric"
+            );
+            let candidates: Vec<usize> = (0..METRICS).collect();
+            for m in 0..METRICS {
+                let name = format!("metric_{m}");
+                let kept = scanner::row_groups_matching_metric(
+                    &builder,
+                    &candidates,
+                    "metric_name",
+                    &name,
+                );
+                assert!(
+                    kept.contains(&m),
+                    "{label}: {name} lives in row group {m} but pruning returned {kept:?}"
+                );
+            }
         }
     }
 
-    /// The point of the feature: a query for one metric must not decode every
-    /// row group in the block.
+    /// Statistics are the mechanism that does the real work, and they are free:
+    /// this is the headline result, so it is pinned separately.
     #[test]
-    fn bloom_pruning_reduces_the_row_groups_read() {
+    fn metric_statistics_prune_without_any_filter() {
         let dir = tempdir().unwrap();
-        let path = dir.path().join("bloom_hit.parquet");
+        let path = dir.path().join("stats_only.parquet");
         const METRICS: usize = 10;
         const POINTS: usize = 100;
-        write_metrics_parquet_prod(&path, &multi_metric_block(METRICS, POINTS), POINTS);
+        // No bloom filters at all.
+        write_block_with(
+            &path,
+            &multi_metric_block(METRICS, POINTS),
+            POINTS,
+            true,
+            false,
+        );
 
-        let file = fs::File::open(&path).unwrap();
-        let builder =
-            parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(file).unwrap();
+        let builder = builder_for(&path);
         let candidates: Vec<usize> = (0..METRICS).collect();
-
         let kept =
             scanner::row_groups_matching_metric(&builder, &candidates, "metric_name", "metric_4");
-        assert!(
-            kept.len() < METRICS,
-            "bloom pruning should drop row groups, kept {kept:?}"
+        assert_eq!(
+            kept,
+            vec![4],
+            "exact statistics should keep exactly the one row group, with no \
+             filter written and nothing read"
         );
-        assert!(kept.contains(&4), "and must keep the right one: {kept:?}");
     }
 
-    /// A metric that is absent from the block prunes to nothing, which is the
-    /// case that would otherwise decode the whole file for an empty result.
+    /// With neither statistics nor a filter, nothing can be concluded and every
+    /// row group must be kept. This is the fail-open rule and the reason old
+    /// blocks remain correct.
     #[test]
-    fn bloom_pruning_drops_everything_for_an_absent_metric() {
+    fn metric_pruning_fails_open_with_neither_statistics_nor_filter() {
         let dir = tempdir().unwrap();
-        let path = dir.path().join("bloom_absent.parquet");
-        write_metrics_parquet_prod(&path, &multi_metric_block(4, 50), 50);
+        let path = dir.path().join("neither.parquet");
+        write_block_with(&path, &multi_metric_block(4, 50), 50, false, false);
 
-        let file = fs::File::open(&path).unwrap();
-        let builder =
-            parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(file).unwrap();
+        let builder = builder_for(&path);
+        let kept =
+            scanner::row_groups_matching_metric(&builder, &[0, 1, 2, 3], "metric_name", "nope");
+        assert_eq!(
+            kept,
+            vec![0, 1, 2, 3],
+            "a block with neither statistics nor a filter must keep every row group"
+        );
+    }
+
+    /// A query for a metric that is absent from the block prunes to nothing,
+    /// which is the case that would otherwise decode a whole file for an empty
+    /// result.
+    #[test]
+    fn metric_pruning_drops_everything_for_an_absent_metric() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("absent.parquet");
+        write_block_with(&path, &multi_metric_block(4, 50), 50, true, true);
+
+        let builder = builder_for(&path);
         let kept =
             scanner::row_groups_matching_metric(&builder, &[0, 1, 2, 3], "metric_name", "nope");
         assert!(
@@ -440,37 +488,36 @@ mod tests {
         );
     }
 
-    /// Without a bloom filter on the column — as on every block written before
-    /// this change — pruning must keep everything rather than guess.
+    /// An empty metric name means "no metric filter" — several callers scan a
+    /// block for every series, `list_label_values` among them. Treating it as a
+    /// value to match would prune the entire block and silently return
+    /// nothing, since the empty string sorts before every real metric name.
     #[test]
-    fn bloom_pruning_fails_open_when_no_filter_exists() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("bloom_none.parquet");
-        // No bloom filters: this is the old writer.
-        write_metrics_parquet_rg(&path, &multi_metric_block(4, 50), 50);
+    fn metric_pruning_treats_an_empty_name_as_no_filter() {
+        for (stats, bloom) in [(true, true), (true, false), (false, true), (false, false)] {
+            let dir = tempdir().unwrap();
+            let path = dir.path().join("empty.parquet");
+            write_block_with(&path, &multi_metric_block(4, 50), 50, stats, bloom);
 
-        let file = fs::File::open(&path).unwrap();
-        let builder =
-            parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(file).unwrap();
-        let kept =
-            scanner::row_groups_matching_metric(&builder, &[0, 1, 2, 3], "metric_name", "nope");
-        assert_eq!(
-            kept,
-            vec![0, 1, 2, 3],
-            "a block with no bloom filter must keep every row group"
-        );
+            let builder = builder_for(&path);
+            let kept =
+                scanner::row_groups_matching_metric(&builder, &[0, 1, 2, 3], "metric_name", "");
+            assert_eq!(
+                kept,
+                vec![0, 1, 2, 3],
+                "an empty metric name must keep every row group (stats={stats}, bloom={bloom})"
+            );
+        }
     }
 
-    /// A column that is not in the schema at all must also fail open.
+    /// A column that is not in the schema must also fail open.
     #[test]
-    fn bloom_pruning_fails_open_for_an_unknown_column() {
+    fn metric_pruning_fails_open_for_an_unknown_column() {
         let dir = tempdir().unwrap();
-        let path = dir.path().join("bloom_nocol.parquet");
-        write_metrics_parquet_prod(&path, &multi_metric_block(4, 50), 50);
+        let path = dir.path().join("nocol.parquet");
+        write_block_with(&path, &multi_metric_block(4, 50), 50, true, true);
 
-        let file = fs::File::open(&path).unwrap();
-        let builder =
-            parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(file).unwrap();
+        let builder = builder_for(&path);
         let kept = scanner::row_groups_matching_metric(
             &builder,
             &[0, 1, 2, 3],

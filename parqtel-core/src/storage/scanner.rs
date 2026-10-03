@@ -555,11 +555,21 @@ impl Scanner {
 /// this row group contain this value?" without decoding a page, which is the
 /// difference between reading one row group per query and reading all of them.
 ///
-/// A bloom filter may report a false positive but never a false negative, so
-/// this can only skip groups that genuinely lack the value. Any condition that
-/// cannot be evaluated — no filter on the column, an unreadable filter, a column
-/// absent from the schema — keeps the group, so the worst case is the behaviour
-/// before bloom filters existed.
+/// Two mechanisms, cheapest first:
+///
+/// 1. **Row-group statistics.** Rows are written grouped by metric name, so a
+///    row group's `metric_name` min and max are usually the same value. Testing
+///    the needle against that range is exact and free — no filter read, no
+///    probabilistic answer. This is what prunes in practice.
+/// 2. **Bloom filters**, consulted only when the statistics cannot decide
+///    (column missing, no min/max, or an unexpected physical type).
+///
+/// Either way this can only skip groups that genuinely lack the value: a
+/// statistic range or a bloom filter may report a false *positive*, never a
+/// false negative. Any condition that cannot be evaluated keeps the group, so
+/// the worst case is the behaviour that existed before any of this.
+///
+/// An empty `metric_name` means "no metric filter" and keeps every candidate.
 ///
 /// Only `metric_name` is filtered. A service-name conjunct would need the
 /// service plumbed into the scan, and once `BL-03-07` orders rows by
@@ -577,11 +587,57 @@ pub fn row_groups_matching_metric(
         // No such column: cannot prune, keep everything.
         return candidates.to_vec();
     };
+    // An empty metric name means "no metric filter", not "the metric whose name
+    // is the empty string". Callers use it to scan a block for every series -
+    // `list_label_values` falls back to a full scan when a block predates the
+    // flush-time label index. Treating it as a value to match would prune the
+    // whole block, since the empty string sorts before every real name.
+    if metric_name.is_empty() {
+        return candidates.to_vec();
+    }
+    let needle = metric_name.as_bytes();
     let mut kept = Vec::with_capacity(candidates.len());
     for &rg in candidates {
+        let col_md = reader.metadata().row_group(rg).column(metric_idx);
+
+        // Statistics first: they are free and, because rows are written grouped
+        // by metric name, a row group's min and max for `metric_name` are
+        // usually the same value — exact, not probabilistic. This is the check
+        // that actually does the work on well-written blocks.
+        //
+        // This is a one-sided test, so unlike the time prune it does **not**
+        // need a null check: min/max cover non-null values only, and a null row
+        // cannot contain the value being searched for. If the value lies
+        // outside [min, max] then no row in this group has it.
+        //
+        // Byte comparison is sound: UTF-8 byte order is code-point order, so
+        // comparing raw bytes against the encoded needle matches string order.
+        let decided_by_stats = match col_md.statistics() {
+            Some(Statistics::ByteArray(s)) => match (s.min_opt(), s.max_opt()) {
+                (Some(min), Some(max)) => {
+                    if min.data() > needle || max.data() < needle {
+                        continue;
+                    }
+                    true
+                }
+                // All-null column, or no min/max: says nothing either way.
+                _ => false,
+            },
+            // A different physical type (INT32 indices for an older writer,
+            // say): not comparable here.
+            _ => false,
+        };
+        if decided_by_stats {
+            kept.push(rg);
+            continue;
+        }
+
+        // Statistics could not decide, so fall back to the bloom filter. It can
+        // report a false positive but never a false negative, so this is also
+        // safe to use for absence.
         match reader.get_row_group_column_bloom_filter(rg, metric_idx) {
             Ok(Some(filter)) => {
-                if !filter.check(metric_name.as_bytes()) {
+                if !filter.check(needle) {
                     continue;
                 }
             }
