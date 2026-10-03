@@ -1,14 +1,17 @@
-//! Measures what bloom filters buy a single-metric query, and what they cost.
+//! Measures what prunes a single-metric query, and what each mechanism costs.
 //!
-//! Row-group statistics only narrow on **time**. A metrics block interleaves
-//! every metric it holds, so a query for one metric finds every row group in
-//! the window and decodes all of them. A bloom filter on `metric_name` answers
-//! "could this row group contain this value?" without decoding a page.
+//! Two mechanisms exist, and the order matters:
 //!
-//! Both blocks are read through the production `Scanner::scan` path, so the
-//! comparison is the real query path and not a reimplementation of it. The
-//! block written *without* bloom filters also stands in for every block written
-//! before this change, which is exactly the case that must keep working.
+//! 1. **Row-group statistics on `metric_name`.** Rows are written grouped by
+//!    metric name, so a row group's min and max for that column are usually the
+//!    same value — an exact, free answer, with nothing read from the filter
+//!    region. This is what actually prunes.
+//! 2. **Bloom filters**, consulted only when the statistics cannot decide.
+//!
+//! So the interesting comparison is three-way: neither (the old world),
+//! statistics alone, and statistics + bloom. Blocks are read through the
+//! production `Scanner::scan` path, so this measures the real query rather than
+//! a reimplementation of it.
 //!
 //! Run: cargo run --release -p parqtel-core --example bench_bloom
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -50,7 +53,12 @@ fn build_metrics() -> Vec<Metric> {
         .collect()
 }
 
-fn write_block(path: &std::path::Path, metrics: &[Metric], with_bloom: bool) -> Result<Duration> {
+fn write_block(
+    path: &std::path::Path,
+    metrics: &[Metric],
+    with_stats: bool,
+    with_bloom: bool,
+) -> Result<Duration> {
     let chunk = StorageModel::metrics_to_chunk(metrics)?;
     let file = std::fs::File::create(path)?;
     let mut builder = parquet::file::properties::WriterProperties::builder()
@@ -58,14 +66,17 @@ fn write_block(path: &std::path::Path, metrics: &[Metric], with_bloom: bool) -> 
             parquet::basic::ZstdLevel::default(),
         ))
         .set_writer_version(parquet::file::properties::WriterVersion::PARQUET_2_0)
-        .set_max_row_group_row_count(Some(ROW_GROUP));
+        .set_max_row_group_row_count(Some(ROW_GROUP))
+        .set_statistics_enabled(if with_stats {
+            parquet::file::properties::EnabledStatistics::Page
+        } else {
+            parquet::file::properties::EnabledStatistics::None
+        });
     if with_bloom {
         use parquet::schema::types::ColumnPath;
         builder = builder
             .set_column_bloom_filter_enabled(ColumnPath::from("metric_name"), true)
-            .set_column_bloom_filter_enabled(ColumnPath::from("service_name"), true)
-            .set_statistics_enabled(parquet::file::properties::EnabledStatistics::Page)
-            .set_column_index_truncate_length(Some(64));
+            .set_column_bloom_filter_enabled(ColumnPath::from("service_name"), true);
     }
     let props = builder.build();
     let started = Instant::now();
@@ -116,63 +127,72 @@ async fn best_scan(path: &std::path::Path, metric: &str, runs: usize) -> Result<
 #[tokio::main]
 async fn main() -> Result<()> {
     let dir = tempfile::tempdir()?;
-    let plain = dir.path().join("plain.parquet");
-    let bloomed = dir.path().join("bloom.parquet");
     let metrics = build_metrics();
     let rows = METRICS * POINTS_PER_METRIC;
 
-    let plain_write = write_block(&plain, &metrics, false)?;
-    let bloom_write = write_block(&bloomed, &metrics, true)?;
-    let plain_size = std::fs::metadata(&plain)
-        .map_err(parqtel_core::Error::Io)?
-        .len();
-    let bloom_size = std::fs::metadata(&bloomed)
-        .map_err(parqtel_core::Error::Io)?
-        .len();
+    // Three configurations, oldest first.
+    let configs: [(&str, bool, bool); 3] = [
+        ("neither (old blocks)", false, false),
+        ("statistics only", true, false),
+        ("statistics + bloom", true, true),
+    ];
 
     println!("block: {METRICS} metrics x {POINTS_PER_METRIC} points = {rows} rows");
     println!(
-        "  size  : {:.2} MB without bloom -> {:.2} MB with bloom ({:+.1}%)",
-        plain_size as f64 / 1e6,
-        bloom_size as f64 / 1e6,
-        100.0 * (bloom_size as f64 - plain_size as f64) / plain_size as f64
+        "
+{:<24} {:>10} {:>10} {:>10}",
+        "configuration", "size", "write", "query"
     );
-    println!(
-        "  write : {:.0} ms without bloom -> {:.0} ms with bloom ({:+.1}%)",
-        plain_write.as_secs_f64() * 1e3,
-        bloom_write.as_secs_f64() * 1e3,
-        100.0 * (bloom_write.as_secs_f64() - plain_write.as_secs_f64()) / plain_write.as_secs_f64()
-    );
+    let mut baseline: Option<(u64, Duration)> = None;
+    for (label, stats, bloom) in configs {
+        let path = dir
+            .path()
+            .join(format!("{}.parquet", label.replace([' ', '(', ')'], "_")));
+        let write = write_block(&path, &metrics, stats, bloom)?;
+        let size = std::fs::metadata(&path)
+            .map_err(parqtel_core::Error::Io)?
+            .len();
+        let (points, query) = best_scan(&path, "metric_7", 4).await?;
+        assert_eq!(
+            points, POINTS_PER_METRIC,
+            "{label}: must return the same points regardless of pruning metadata"
+        );
+        println!(
+            "{label:<24} {:>8.2} MB {:>8.0} ms {:>8.2} ms",
+            size as f64 / 1e6,
+            write.as_secs_f64() * 1e3,
+            query.as_secs_f64() * 1e3
+        );
+        if baseline.is_none() {
+            baseline = Some((size, query));
+        }
+    }
 
-    println!("\nsingle-metric query (one metric of {METRICS}), best of 4:");
-    let (plain_pts, plain_t) = best_scan(&plain, "metric_7", 4).await?;
-    let (bloom_pts, bloom_t) = best_scan(&bloomed, "metric_7", 4).await?;
-    println!(
-        "  without bloom: {plain_pts} points decoded, {:.2} ms",
-        plain_t.as_secs_f64() * 1e3
-    );
-    println!(
-        "  with bloom   : {bloom_pts} points decoded, {:.2} ms",
-        bloom_t.as_secs_f64() * 1e3
-    );
-    println!(
-        "  speedup      : {:.1}x  (both must decode the same {} points)",
-        plain_t.as_secs_f64() / bloom_t.as_secs_f64(),
-        plain_pts
-    );
-    assert_eq!(
-        plain_pts, bloom_pts,
-        "bloom filters must not change how many points a query returns"
-    );
+    let (base_size, base_query) = baseline.expect("at least one configuration");
+    println!("\nvs \"neither\":");
+    for (label, _, _) in configs.iter().skip(1) {
+        let path = dir
+            .path()
+            .join(format!("{}.parquet", label.replace([' ', '(', ')'], "_")));
+        let size = std::fs::metadata(&path)
+            .map_err(parqtel_core::Error::Io)?
+            .len();
+        let (_, query) = best_scan(&path, "metric_7", 4).await?;
+        println!(
+            "  {label:<24} {:>8.1}% size, {:>6.1}x query",
+            100.0 * (size as f64 - base_size as f64) / base_size as f64,
+            base_query.as_secs_f64() / query.as_secs_f64()
+        );
+    }
 
-    // A metric that is not in the block: with bloom filters this should not
-    // decode anything at all.
-    let (absent_pts, absent_t) = best_scan(&bloomed, "no_such_metric", 2).await?;
+    // A metric that is not in the block decodes nothing at all.
+    let bloomed = dir.path().join("statistics___bloom.parquet");
+    let (absent, t) = best_scan(&bloomed, "no_such_metric", 2).await?;
     println!(
-        "\nabsent metric with bloom: {absent_pts} points, {:.2} ms",
-        absent_t.as_secs_f64() * 1e3
+        "\nabsent metric: {absent} points, {:.2} ms",
+        t.as_secs_f64() * 1e3
     );
-    assert_eq!(absent_pts, 0);
+    assert_eq!(absent, 0);
 
     Ok(())
 }
