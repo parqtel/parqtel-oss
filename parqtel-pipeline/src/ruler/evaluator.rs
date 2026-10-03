@@ -171,6 +171,7 @@ mod tests {
                 metric_name: "service:error_rate:rate5m".into(),
                 start_ns: 0,
                 end_ns: i64::MAX,
+                service_name: None,
             })
             .await
             .unwrap();
@@ -220,6 +221,7 @@ mod tests {
                 metric_name: "test:metric".into(),
                 start_ns: 0,
                 end_ns: i64::MAX,
+                service_name: None,
             })
             .await
             .unwrap();

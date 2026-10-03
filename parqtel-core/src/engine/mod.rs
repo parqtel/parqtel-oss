@@ -32,6 +32,9 @@ pub struct MetricScanRequest {
     pub metric_name: String,
     pub start_ns: i64,
     pub end_ns: i64,
+    /// Value of a `service.name` equality selector, when the caller has one.
+    /// Lets the scanner prune row groups on service as well as metric.
+    pub service_name: Option<String>,
 }
 
 /// Request parameters for scanning logs.
@@ -167,6 +170,7 @@ mod tests {
                 metric_name: "test_metric".into(),
                 start_ns: 0,
                 end_ns: i64::MAX,
+                service_name: None,
             })
             .await
             .unwrap();

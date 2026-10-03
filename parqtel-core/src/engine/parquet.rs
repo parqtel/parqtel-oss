@@ -270,6 +270,7 @@ impl StorageEngine for ParquetStorageEngine {
             request.metric_name,
             request.start_ns,
             request.end_ns,
+            request.service_name.as_deref(),
         )
         .await
     }
@@ -526,6 +527,7 @@ mod tests {
                 metric_name: "cpu_usage".into(),
                 start_ns: 0,
                 end_ns: i64::MAX,
+                service_name: None,
             })
             .await
             .unwrap();

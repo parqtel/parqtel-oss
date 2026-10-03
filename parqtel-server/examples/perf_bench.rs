@@ -305,7 +305,7 @@ async fn main() {
     let mut times = Vec::new();
     for _ in 0..ITERS {
         let t0 = Instant::now();
-        let pts = Scanner::scan(blocks.clone(), "bench.cpu".into(), 0, i64::MAX)
+        let pts = Scanner::scan(blocks.clone(), "bench.cpu".into(), 0, i64::MAX, None)
             .await
             .unwrap();
         assert_eq!(pts.len(), BLOCKS * POINTS_PER_BLOCK);
@@ -325,7 +325,7 @@ async fn main() {
     let mut times = Vec::new();
     for _ in 0..ITERS {
         let t0 = Instant::now();
-        let pts = Scanner::scan(blocks.clone(), "bench.cpu".into(), n_start, n_end)
+        let pts = Scanner::scan(blocks.clone(), "bench.cpu".into(), n_start, n_end, None)
             .await
             .unwrap();
         assert_eq!(pts.len() as usize, POINTS_PER_BLOCK / 2);

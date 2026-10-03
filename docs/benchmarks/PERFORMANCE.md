@@ -485,3 +485,75 @@ than a filter that can only be probabilistic.
 ```bash
 cargo run --release -p parqtel-core --example bench_bloom
 ```
+
+## Service-level row-group pruning (`BL-03-07`, revised)
+
+#52 established that `metric_name` row-group statistics are exact and free,
+which left `BL-03-07` worth only the **service** dimension. That turns out to
+be available without re-ordering any rows either: rows are already written
+grouped by `(metric, resource)`, so `service_name` statistics are exact per row
+group too.
+
+Probing a production-shaped block (one metric, eight services, one row group
+each, service in the dotted OTLP resource key `service.name`) gives:
+
+```
+metric_name:   rg0..rg7  min == max == "http_requests"
+service_name:  rg0..rg7  min == max == "svc-0" .. "svc-7"
+```
+
+Both exact. So `Scanner::scan` now takes an optional service, taken from the
+query's `service.name` equality matcher, and prunes on it after pruning on the
+metric.
+
+### Result
+
+Multi-tenant shape — one metric, eight services, querying `service.name="svc-3"`:
+
+| | time | rows decoded |
+|---|---|---|
+| without the service predicate | 2.05 ms | 4 000 (whole block) |
+| **with service pruning** | **0.43 ms** | 500 |
+
+**4.8×**, and metric-only pruning cannot help here at all: all eight row groups
+are the same metric, so this is entirely the service dimension.
+
+### Only equality matchers, and only the real label
+
+- `!=` and `=~` are ignored. They exclude some rows rather than identifying one
+  group, so there is nothing safe to prune from.
+- The underscored `service_name` spelling is **not** treated as an alias. No
+  series carries that label — the resource attribute is stored under the
+  dotted OTLP key — so such a matcher matches nothing at row level, and
+  honouring it here would prune the block on a value no row can hold. Caught
+  by live probing: the alias returned 0 series, which is correct only because
+  the matcher matches nothing, not because pruning worked.
+
+### Not over-pruning
+
+The failure mode that matters is dropping a row group that *does* hold the
+requested service, which is silent data loss. `test_service_selector_matches_the_unfiltered_query`
+builds a two-service × two-host fixture with the dotted key and asserts
+`cpu{service.name="web"}` returns exactly the web series, that an absent
+service returns none, and that the fixture itself is production-shaped — the
+existing `setup_with_data` fixture uses the underscored key, so it would have
+made the test pass for the wrong reason. `service_pruning_is_exact_in_both_directions`
+does the same at the row-group level.
+
+Verified live: `http_requests_total_0{service.name="load-generator"}` returns
+the same 30 series as the unfiltered query, and a nonexistent service returns
+none.
+
+### Row-group sizing, still open
+
+`BL-03-07` also recommended retuning the default `row_group_size`. That is not
+addressed here and remains open: with metric and service pruning both exact, the
+remaining lever is how many *series* a row group spans when several share a
+metric and service — which is the common case, since row-group boundaries
+follow row counts, not series boundaries.
+
+### Reproducing
+
+```bash
+cargo run --release -p parqtel-core --example bench_bloom
+```

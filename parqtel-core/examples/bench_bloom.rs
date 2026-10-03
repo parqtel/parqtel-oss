@@ -114,7 +114,7 @@ async fn best_scan(path: &std::path::Path, metric: &str, runs: usize) -> Result<
     let mut points = 0;
     for _ in 0..runs {
         let started = Instant::now();
-        let out = Scanner::scan(vec![meta.clone()], metric.to_string(), 0, i64::MAX).await?;
+        let out = Scanner::scan(vec![meta.clone()], metric.to_string(), 0, i64::MAX, None).await?;
         let elapsed = started.elapsed();
         if elapsed < best {
             best = elapsed;
@@ -184,6 +184,87 @@ async fn main() -> Result<()> {
             base_query.as_secs_f64() / query.as_secs_f64()
         );
     }
+
+    // Multi-tenant shape: one metric, 8 services, one row group each. This is
+    // where metric pruning cannot help and service pruning is the selective
+    // dimension - the common case for a shared cluster.
+    let svc_metrics: Vec<Metric> = (0..8)
+        .map(|s| Metric {
+            name: "http_requests".to_string(),
+            kind: parqtel_core::models::metrics::MetricKind::Sum,
+            resource_attributes: parqtel_core::LabelSet::try_from_iter(vec![
+                ("service.name", format!("svc-{s}")),
+                ("cluster", "prod".to_string()),
+            ])
+            .unwrap(),
+            data_points: (0..POINTS_PER_METRIC)
+                .map(|i| {
+                    DataPoint::new(
+                        i as i64 * 1_000_000_000 + 1,
+                        MetricValue::Double(i as f64),
+                        parqtel_core::LabelSet::try_from_iter(vec![(
+                            "route".to_string(),
+                            "r0".to_string(),
+                        )])
+                        .unwrap(),
+                    )
+                    .unwrap()
+                })
+                .collect(),
+            ..Default::default()
+        })
+        .collect();
+    let svc_path = dir.path().join("services.parquet");
+    write_block(&svc_path, &svc_metrics, true, true)?;
+    let svc_meta = metadata(
+        &svc_path,
+        svc_metrics.iter().map(|m| m.data_points.len()).sum(),
+    );
+    let mut svc_best = f64::MAX;
+    let mut metric_only_best = f64::MAX;
+    for _ in 0..4 {
+        // With a service: metric pruning cannot discriminate (all 8 row groups
+        // are the same metric), so the service predicate is what narrows it.
+        let started = Instant::now();
+        let out = Scanner::scan(
+            vec![svc_meta.clone()],
+            "http_requests".to_string(),
+            0,
+            i64::MAX,
+            Some("svc-3"),
+        )
+        .await?;
+        svc_best = svc_best.min(started.elapsed().as_secs_f64());
+        assert_eq!(out.len(), POINTS_PER_METRIC, "svc-3's rows only");
+
+        // Same query without the service predicate: decodes the whole block.
+        let started = Instant::now();
+        let out = Scanner::scan(
+            vec![svc_meta.clone()],
+            "http_requests".to_string(),
+            0,
+            i64::MAX,
+            None,
+        )
+        .await?;
+        metric_only_best = metric_only_best.min(started.elapsed().as_secs_f64());
+        assert_eq!(out.len(), POINTS_PER_METRIC * 8, "all eight services");
+    }
+    println!("\nmulti-tenant: 1 metric x 8 services, querying service=svc-3");
+    println!(
+        "  without the service predicate: {:.2} ms (decodes all {} rows)",
+        metric_only_best * 1e3,
+        POINTS_PER_METRIC * 8
+    );
+    println!(
+        "  with service pruning       : {:.2} ms ({} rows)",
+        svc_best * 1e3,
+        POINTS_PER_METRIC
+    );
+    println!(
+        "  speedup                   : {:.1}x",
+        metric_only_best / svc_best
+    );
 
     // A metric that is not in the block decodes nothing at all.
     let bloomed = dir.path().join("statistics___bloom.parquet");
