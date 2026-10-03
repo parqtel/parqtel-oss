@@ -23,7 +23,7 @@ Severity: **C** Critical, **H** High, **M** Medium, **L** Low. Effort: S ≤ 2d,
 
 ---
 
-## BL-02-02 (C) — Aggregation group keys allocated and cloned 3× per series per step; label sets rebuilt via `merge`-per-label
+## BL-02-02 (C, landed) — Aggregation group keys allocated and cloned 3× per series per step; label sets rebuilt via `merge`-per-label
 
 **Evidence** — `parqtel-query/src/eval.rs:682-700`: the key `Vec<(String, String)>` is built fresh per series — `labels.get(l).map(|x| (l.clone(), x.to_string()))` (`:686`), and `Grouping::Without` also sorts (`:698`). Then `groups.entry(key.clone())` (`:701`) and `group_labels.entry(key.clone())` (`:702`) deep-clone the key **twice more**. Finally `:708-714` rebuilds a `LabelSet` one label at a time via `merge`, which clones the entire map per `merge` (`labels.rs:72-78`) → **O(L² log L)**.
 
@@ -35,7 +35,30 @@ Severity: **C** Critical, **H** High, **M** Medium, **L** Low. Effort: S ≤ 2d,
 - Store labels in the group entry; drop the second map.
 - Same single-pass builder replaces the `merge`-per-label pattern in `executor.rs:1827-1839` (`strip_metric_name`) and `eval.rs:1068-1087` (`result_labels`).
 
-**Acceptance.** ~60 M allocations → ~0 extra. `sum by(...)` on the reference workload: ≥ 8× faster; no `merge` call remains inside a per-series or per-step loop (enforceable by a clippy lint or a source assertion test).
+**Resolution taken.**
+- The group key is an allocation-free `u64` fingerprint: the projected label
+  pairs are hashed straight into a `DefaultHasher` instead of materialising a
+  `Vec<(String, String)>` and cloning it twice. `Grouping::By` lists are sorted
+  and deduplicated **once per aggregation** (not per series per step) so that
+  `by(a,b)` and `by(b,a)` hash identically — the normalisation has to happen
+  somewhere, and the hot loop is the wrong place.
+- The group's `LabelSet` is built **once per distinct fingerprint for the whole
+  query** and cached on the `Evaluator`. A group's *values* change every step;
+  its *labels* never do, so this is the natural split.
+- `LabelSet::filtered` and `LabelSet::with` were added as single-pass
+  alternatives to `merge` with a one-entry set, and every
+  merge-per-label loop in the evaluator (`result_labels`, `histogram_quantile`,
+  binary-op `group_left` extras) was replaced with them. Each of those was
+  O(L² log L).
+
+`grouping_fingerprint_separates_distinct_projections` pins the cases where the
+new hashed key could silently merge groups that must stay distinct: different
+values, an absent label vs a present one, source label ordering, `by` argument
+ordering, and labels excluded by `without`.
+
+**Acceptance.** No `merge` call remains inside a per-series or per-step loop in
+the evaluator; group-key collisions covered by the test above; measured as part
+of the 6.9× in `BL-02-01`.
 
 **Effort** L · **Risk** Medium
 

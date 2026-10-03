@@ -40,7 +40,9 @@ pub fn fixture() -> crate::ast::SeriesData {
                 .collect::<Vec<_>>(),
         )
         .unwrap_or_default();
-        data.entry(name.to_string()).or_default().push((ls, points));
+        data.entry(name.to_string())
+            .or_default()
+            .push((crate::ast::shared_labels(ls), points));
     };
 
     // ── counters: 1/sec at 15s interval, 0..2h ──────────────────────────

@@ -225,3 +225,64 @@ count is worth more than splitting the loop.
 ```bash
 cargo run --release -p parqtel-query --example bench_query_concurrency
 ```
+
+## Shared label sets and hashed group keys (`BL-02-01`, `BL-02-02`)
+
+The single largest cost in query evaluation was `LabelSet` — a
+`BTreeMap<String, String>` — being cloned at every stage boundary.
+
+**Per-step label clones.** `eval_selector` cloned each series' labels once per
+*step*. Every step sees the same series, so a 1 000-series × 1 000-step panel
+spent ~20M string allocations producing identical results.
+`SeriesData`, `HistData`, `InstantVector` and `RangeVector` now carry
+`Arc<LabelSet>`; cloning is a refcount bump. Operators that genuinely change
+labels build a new set; binary-op results reuse the input `Arc` outright when
+nothing changes.
+
+**Aggregation group keys.** The grouping key was a
+`Vec<(String, String)>` built per series per step (two allocations per label)
+and cloned twice more, with the group's `LabelSet` rebuilt by merging one label
+at a time — O(L² log L). Now:
+
+- the key is an allocation-free `u64` fingerprint of the projected pairs;
+- `Grouping::By` lists are sorted and deduplicated **once per aggregation**, so
+  `by(a,b)` and `by(b,a)` hash identically without a per-series sort;
+- the group's label set is built once per distinct fingerprint and cached on
+  the `Evaluator` for the whole query — a group's values change every step, its
+  labels never do;
+- `LabelSet::filtered` / `LabelSet::with` replace every remaining
+  merge-per-label loop in the evaluator.
+
+### Result
+
+300 series × 400 points, 20 000 evaluation steps, identical results:
+
+```
+before:  3.01s
+after:   0.438s
+         6.9x
+```
+
+Concurrency behaviour is unchanged: four concurrent queries still run 3.5×
+faster than sequentially, because each one's evaluation is its own blocking
+job.
+
+### Correctness
+
+Hashing the group key means a collision would silently merge two groups. That is
+pinned by `grouping_fingerprint_separates_distinct_projections`, which covers
+different values, an absent label vs a present one, source label ordering, `by`
+argument ordering, and labels excluded by `without`.
+`group_labels_are_cached_across_steps_but_values_are_not` pins the other half:
+group labels are identical across steps while the aggregated values are
+recomputed.
+
+Verified against the live stack: `by`/`without`/ungrouped/`on`/`ignoring` all
+return the expected label shapes, and `test-aggregations` (22/22),
+`test-functions` (104/104) and `test-builder` (99/99) pass.
+
+### Reproducing
+
+```bash
+cargo run --release -p parqtel-query --example bench_query_concurrency
+```
