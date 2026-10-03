@@ -1,10 +1,9 @@
 pub use parqtel_core::BlockMetadata;
 use parqtel_core::{
-    BlockConfig, DataPoint, Error, LabelSet, LogBlockConfig, LogRecord, Metric, MetricKind, Result,
-    Span, StorageModel,
+    compression_from_name, BlockConfig, DataPoint, Error, LabelSet, LogBlockConfig, LogRecord,
+    Metric, MetricKind, Result, Span, StorageModel,
 };
 use parquet::arrow::ArrowWriter;
-use parquet::basic::Compression;
 use parquet::file::properties::{WriterProperties, WriterVersion};
 use std::collections::{BTreeMap, HashSet};
 use std::fs::{self, File};
@@ -133,6 +132,7 @@ impl BlockWriter {
             &tmp_path,
             chunk,
             &self.config.compression,
+            self.config.compression_level,
             self.config.row_group_size,
         )?;
         fs::rename(&tmp_path, &final_path)?;
@@ -271,6 +271,7 @@ impl LogWriter {
             &tmp_path,
             chunk,
             &self.config.compression,
+            self.config.compression_level,
             self.config.row_group_size,
         )?;
         fs::rename(&tmp_path, &final_path)?;
@@ -362,6 +363,7 @@ impl TraceWriter {
             &tmp_path,
             chunk,
             &self.config.compression,
+            self.config.compression_level,
             self.config.row_group_size,
         )?;
         fs::rename(&tmp_path, &final_path)?;
@@ -393,17 +395,13 @@ fn write_parquet_file(
     path: &Path,
     record_batch: arrow::record_batch::RecordBatch,
     compression: &str,
+    compression_level: Option<i32>,
     row_group_size: usize,
 ) -> Result<()> {
     let file = File::create(path)?;
 
     let writer_props = WriterProperties::builder()
-        .set_compression(match compression {
-            "zstd" => Compression::ZSTD(Default::default()),
-            "snappy" => Compression::SNAPPY,
-            "lz4" => Compression::LZ4_RAW,
-            _ => Compression::UNCOMPRESSED,
-        })
+        .set_compression(compression_from_name(compression, compression_level))
         .set_writer_version(WriterVersion::PARQUET_2_0)
         .set_max_row_group_row_count(Some(row_group_size.max(1)))
         .build();

@@ -280,10 +280,20 @@ async fn run_server(
         memory_buffer.clone(),
         trace_data_dir.clone(),
     )
-    .with_query_lookback(config.query.lookback_delta_ns);
+    .with_query_lookback(config.query.lookback_delta_ns)
+    .with_result_limits(config.query.max_series, config.query.max_samples_per_series);
 
-    start_maintenance(index.clone(), config.storage.clone());
-    start_maintenance(log_index.clone(), config.logs.clone().into());
+    let retention_interval_secs = config.server.retention_interval_secs;
+    start_maintenance(
+        index.clone(),
+        config.storage.clone(),
+        retention_interval_secs,
+    );
+    start_maintenance(
+        log_index.clone(),
+        config.logs.clone().into(),
+        retention_interval_secs,
+    );
     // Traces: retention only. Trace blocks share the metrics BlockConfig
     // (TraceWriter is built from config.storage), but the compactor's
     // read_source_blocks only decodes metrics/logs schemas — running full
@@ -293,6 +303,7 @@ async fn run_server(
     tokio::spawn(RetentionPolicy::run_loop(
         trace_index.clone(),
         config.storage.clone(),
+        retention_interval_secs,
     ));
 
     let state = AppState::new(
@@ -412,8 +423,13 @@ async fn run_server(
     // gauges (buffer occupancy, RSS) so memory pressure is visible *before* the
     // OOM killer arrives rather than only in a post-mortem.
     let state_clone = state.clone();
+    let flush_interval_secs = config.server.flush_interval_secs;
     let flush_task = tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+        // The tick only *asks* each rotator whether its block duration has
+        // elapsed, so this interval bounds how late a duration-triggered flush
+        // can be — not how often blocks are written.
+        let mut interval =
+            tokio::time::interval(std::time::Duration::from_secs(flush_interval_secs.max(1)));
         loop {
             interval.tick().await;
 
@@ -507,8 +523,10 @@ async fn run_server(
 
     // Alert evaluation loop
     let state_clone = state.clone();
+    let alert_interval_secs = config.server.alert_interval_secs;
     let alert_eval_task = tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(15));
+        let mut interval =
+            tokio::time::interval(std::time::Duration::from_secs(alert_interval_secs.max(1)));
         loop {
             interval.tick().await;
             let rules = state_clone.inner.alert_registry.list_enabled().await;
@@ -531,7 +549,10 @@ async fn run_server(
                     Err(_) => continue,
                 };
                 let now_ns = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
-                let start_ns = now_ns - 300_000_000_000; // 5 min lookback
+                // Same lookback instant queries use, so an alert sees exactly
+                // the window an operator would see in the UI.
+                let start_ns =
+                    now_ns.saturating_sub(state_clone.inner.config.query.lookback_delta_ns);
                 let plan = parqtel_query::QueryPlan::new_full(
                     metric_name,
                     matchers,

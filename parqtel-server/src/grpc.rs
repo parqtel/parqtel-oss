@@ -34,6 +34,11 @@ impl OtlpGrpcService {
     }
 
     /// Serves all three collector services on the given address.
+    ///
+    /// Message-size and concurrency limits are taken from the same config the
+    /// HTTP path uses, so a batch that is accepted over HTTP is not rejected
+    /// over gRPC with an opaque `ResourceExhausted` — tonic's own defaults
+    /// (4 MiB decode) previously disagreed with `ingest.max_body_size`.
     pub async fn serve(
         state: AppState,
         addr: std::net::SocketAddr,
@@ -42,13 +47,50 @@ impl OtlpGrpcService {
         use parqtel_ingest::otel::collector::metrics::v1::metrics_service_server::MetricsServiceServer;
         use parqtel_ingest::otel::collector::trace::v1::trace_service_server::TraceServiceServer;
 
+        let limits = GrpcLimits::from_config(&state.inner.config);
         let svc = Self::new(state);
         tonic::transport::Server::builder()
-            .add_service(MetricsServiceServer::new(svc.clone()))
-            .add_service(LogsServiceServer::new(svc.clone()))
-            .add_service(TraceServiceServer::new(svc))
+            .concurrency_limit_per_connection(limits.concurrency_limit)
+            // tonic 0.13 carries the message-size limits on the generated
+            // service rather than the transport builder.
+            .add_service(
+                MetricsServiceServer::new(svc.clone())
+                    .max_decoding_message_size(limits.max_message_bytes)
+                    .max_encoding_message_size(limits.max_message_bytes),
+            )
+            .add_service(
+                LogsServiceServer::new(svc.clone())
+                    .max_decoding_message_size(limits.max_message_bytes)
+                    .max_encoding_message_size(limits.max_message_bytes),
+            )
+            .add_service(
+                TraceServiceServer::new(svc)
+                    .max_decoding_message_size(limits.max_message_bytes)
+                    .max_encoding_message_size(limits.max_message_bytes),
+            )
             .serve(addr)
             .await
+    }
+}
+
+/// Server limits applied to the OTLP gRPC listener.
+#[derive(Debug, Clone, Copy)]
+pub struct GrpcLimits {
+    /// Maximum accepted request (and response) message size, in bytes.
+    pub max_message_bytes: usize,
+    /// Maximum concurrent in-flight requests per connection.
+    pub concurrency_limit: usize,
+}
+
+impl GrpcLimits {
+    /// Derives the limits from `ingest.max_body_size` and
+    /// `server.grpc_concurrency_limit`.
+    pub fn from_config(config: &parqtel_core::Config) -> Self {
+        Self {
+            max_message_bytes: config.ingest.max_body_size.max(1024),
+            // Clamped to at least 1: a zero limit would reject every request.
+            concurrency_limit: config.server.grpc_concurrency_limit.max(1),
+        }
     }
 }
 
@@ -217,4 +259,34 @@ pub async fn serve_grpc(state: AppState, bind_address: &str) -> anyhow::Result<O
         .await
         .map_err(|e| anyhow::anyhow!("gRPC server error: {e}"))?;
     Ok(Some(()))
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+    use super::*;
+
+    #[test]
+    fn limits_track_ingest_body_limit() {
+        // The point of the change: a batch accepted over HTTP must also be
+        // accepted over gRPC. tonic's own default was 4 MiB while
+        // `ingest.max_body_size` defaulted to 10 MiB.
+        let mut config = parqtel_core::Config::default();
+        config.ingest.max_body_size = 10 * 1024 * 1024;
+        let limits = GrpcLimits::from_config(&config);
+        assert_eq!(limits.max_message_bytes, 10 * 1024 * 1024);
+        assert_eq!(limits.concurrency_limit, 64);
+    }
+
+    #[test]
+    fn degenerate_config_values_are_clamped() {
+        // A zero concurrency limit would reject every request outright; a
+        // zero body limit would make the listener unusable. Both must floor.
+        let mut config = parqtel_core::Config::default();
+        config.ingest.max_body_size = 0;
+        config.server.grpc_concurrency_limit = 0;
+        let limits = GrpcLimits::from_config(&config);
+        assert_eq!(limits.max_message_bytes, 1024);
+        assert_eq!(limits.concurrency_limit, 1);
+    }
 }

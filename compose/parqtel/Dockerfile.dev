@@ -24,6 +24,10 @@ COPY parqtel-mcp-notion/ parqtel-mcp-notion/
 COPY parqtel-mcp-discord/ parqtel-mcp-discord/
 COPY parqtel-mcp-gdocs/ parqtel-mcp-gdocs/
 COPY parqtel-mcp-parqtel/ parqtel-mcp-parqtel/
+# parqtel-alert embeds the built-in alert preset packs at compile time via
+# include_str!("../../rules/presets/*.yaml"), so these files must be present in
+# the build context or the build fails with "couldn't read ...".
+COPY rules/presets/ rules/presets/
 
 RUN cargo build --release --package parqtel-server
 

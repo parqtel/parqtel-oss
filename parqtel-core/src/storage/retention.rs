@@ -10,8 +10,17 @@ use tokio::sync::RwLock;
 pub struct RetentionPolicy;
 
 impl RetentionPolicy {
-    pub async fn run_loop(index: Arc<RwLock<BlockIndex>>, config: BlockConfig) {
-        let interval = Duration::from_secs(3600);
+    /// Sweeps expired blocks every `interval_secs`.
+    ///
+    /// The interval is clamped to at least one second so a zero-valued config
+    /// cannot turn this into a tight loop that hammers the filesystem.
+    pub async fn run_loop(index: Arc<RwLock<BlockIndex>>, config: BlockConfig, interval_secs: u64) {
+        let interval = Duration::from_secs(interval_secs.max(1));
+        tracing::debug!(
+            interval_secs = interval.as_secs(),
+            retention_days = config.retention_days,
+            "retention policy started"
+        );
         loop {
             tokio::time::sleep(interval).await;
             if let Err(e) = Self::enforce(&index, config.retention_days).await {

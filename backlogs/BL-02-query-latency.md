@@ -273,6 +273,7 @@ Severity: **C** Critical, **H** High, **M** Medium, **L** Low. Effort: S ≤ 2d,
 
 ## BL-02-19 (L) — Remaining query-path inefficiencies
 
+
 | # | Gap | Evidence | Resolution |
 |---|-----|----------|------------|
 | a | `Regex::new` per **step** for `label_replace` in the AST engine (legacy path compiles once) | `eval.rs:512` inside `eval_label_replace`, called per step from `eval_call` (`:293`) | Hoist into parse phase — store `Arc<Regex>` in `CallExpr` |
@@ -285,6 +286,18 @@ Severity: **C** Critical, **H** High, **M** Medium, **L** Low. Effort: S ≤ 2d,
 | h | Query parsed twice per request | `matcher.rs:472-479 needs_ast()` → `parse_expr`, then `prometheus.rs:201`/`:367` parse again | Return the parsed `Expr`, or add a small parse cache (see BL-04-08) |
 | i | `BTreeMap` used where the access pattern is hash | `executor.rs:244`, `:371`, `:460` (`series_map`), `:312` (`out_series`); also `contains_key` then `entry` at `:385-388`, `:478-482` (two descents per point) | `HashMap` + `with_capacity(series_hint)`; keep one `BTreeMap` only where deterministic output ordering is required and sort once at the end; single `entry()` call |
 | j | `QueryResult`/`TimeSeries` derive `Clone`, `PartialEq`, `Deserialize` although only consumed once | `models.rs:6-11`, `:22-28`, `:31-43` | Drop unused derives — especially `Clone`, which given BL-02-03 makes accidental deep clones of entire result sets look free |
+
+## BL-02-20 (L) — `query_range` never evaluates the final partial step
+
+**Evidence** — `eval.rs:102` steps with `while ts < end_ns`, so for `start`, `end`, `step` the last evaluated instant is `start + k*step` with `start + k*step < end` — i.e. up to one `step` before `end`. A `query_range` over `[now-900, now]` with `step=60` therefore cannot see samples in the newest 60 s, even though `query` (instant) at the same `end` sees them through the 5-minute lookback.
+
+**Gap.** This matches Prometheus's step semantics, so it is **not** a bug to fix — but it is silent and surprising. Observed while validating the container suites: `sum by (method) (x)` over a 15-minute window returned zero series while the same query returned three a minute later, purely because the newest samples fell past the last step. An integration suite that rebuilds the stack and immediately asserts on a wide range window will fail intermittently for this reason and be blamed on the change under test.
+
+**Resolution.** Document it in `docs/QUERY_LIMITATIONS_REVIEW.md` and in the range-query handler docs, and make the integration scripts step-aware: either use `step <= 15` for windows that end at "now", or end the window at `now - step`. Consider whether the UI's own range queries should extend `end` by one step so the newest interval is visible.
+
+**Acceptance.** Documented limitation; `make test-aggregations` and `make test-functions` pass immediately after `make local-rebuild` without waiting for data to accumulate.
+
+**Effort** S · **Risk** Low
 
 ---
 
