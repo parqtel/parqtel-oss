@@ -4,7 +4,10 @@ use crate::models::metrics::DataPoint;
 use crate::models::storage::{BlockMetadata, StorageModel};
 use crate::models::traces::Span;
 use arrow_array::{Array, TimestampNanosecondArray};
-use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+use parquet::arrow::arrow_reader::{
+    ArrowReaderMetadata, ArrowReaderOptions, ParquetRecordBatchReaderBuilder,
+};
+use parquet::file::metadata::PageIndexPolicy;
 use parquet::file::metadata::ParquetMetaData;
 use parquet::file::statistics::Statistics;
 use std::collections::HashMap;
@@ -103,24 +106,37 @@ impl Scanner {
             Err(e) => return Err(Error::Io(e)),
         };
 
-        let reader_builder = ParquetRecordBatchReaderBuilder::try_new(file)
-            .map_err(|e| Error::Parquet(e.to_string()))?;
+        // Metadata is kept, not just the builder: bloom filters and the column
+        // index live on it, and both prune row groups before any page is
+        // decoded.
+        let meta = ArrowReaderMetadata::load(
+            &file,
+            // The page index is what makes column- and page-level pruning
+            // possible; without it only row-group statistics exist. `Optional`
+            // rather than `Required`, because blocks written before bloom
+            // filters and page statistics were added have no page index and
+            // must still be readable.
+            ArrowReaderOptions::new().with_page_index_policy(PageIndexPolicy::Optional),
+        )
+        .map_err(|e| Error::Parquet(e.to_string()))?;
+        let reader_builder = ParquetRecordBatchReaderBuilder::new_with_metadata(file, meta.clone());
 
         // Skip row groups whose timestamp statistics cannot overlap the query
         // window: on a multi-row-group block this turns "decode the block" into
         // "decode the slice in range".
-        let reader_builder = match row_groups_in_range(
-            reader_builder.metadata(),
-            "timestamp_ns",
-            start_ns,
-            end_ns,
-        ) {
-            Some(groups) if groups.is_empty() => return Ok(Vec::new()),
-            Some(groups) => reader_builder.with_row_groups(groups),
-            None => reader_builder,
-        };
+        let mut groups =
+            row_groups_in_range(reader_builder.metadata(), "timestamp_ns", start_ns, end_ns)
+                .unwrap_or_else(|| (0..reader_builder.metadata().num_row_groups()).collect());
 
+        // Then narrow by value. Time statistics alone cannot help here: a block
+        // interleaves every metric it holds, so every row group in the window
+        // matches and all of them get decoded.
+        groups = row_groups_matching_metric(&reader_builder, &groups, "metric_name", &metric_name);
+        if groups.is_empty() {
+            return Ok(Vec::new());
+        }
         let reader = reader_builder
+            .with_row_groups(groups)
             .build()
             .map_err(|e| Error::Parquet(e.to_string()))?;
 
@@ -530,7 +546,61 @@ impl Scanner {
 /// the caller must read every row group. Row groups with unusable statistics
 /// are kept rather than skipped, so the worst case is reading more than
 /// needed, never returning fewer rows.
-pub(crate) fn row_groups_in_range(
+/// Drops row groups that cannot contain `metric_name`, using the bloom filters
+/// the writer emits on `metric_name` and `service_name`.
+///
+/// Row-group statistics only narrow on **time**. A metrics block interleaves
+/// every metric it holds, so a query for one metric finds every row group
+/// overlapping the window and decodes all of them. A bloom filter answers "could
+/// this row group contain this value?" without decoding a page, which is the
+/// difference between reading one row group per query and reading all of them.
+///
+/// A bloom filter may report a false positive but never a false negative, so
+/// this can only skip groups that genuinely lack the value. Any condition that
+/// cannot be evaluated — no filter on the column, an unreadable filter, a column
+/// absent from the schema — keeps the group, so the worst case is the behaviour
+/// before bloom filters existed.
+///
+/// Only `metric_name` is filtered. A service-name conjunct would need the
+/// service plumbed into the scan, and once `BL-03-07` orders rows by
+/// `(metric_name, service_name, timestamp_ns)` the *row-group statistics*
+/// prune on service exactly and for free — strictly better than a bloom filter,
+/// which can only be probabilistic.
+pub fn row_groups_matching_metric(
+    reader: &ParquetRecordBatchReaderBuilder<File>,
+    candidates: &[usize],
+    metric_column: &str,
+    metric_name: &str,
+) -> Vec<usize> {
+    let columns = reader.metadata().file_metadata().schema_descr().columns();
+    let Some(metric_idx) = columns.iter().position(|c| c.name() == metric_column) else {
+        // No such column: cannot prune, keep everything.
+        return candidates.to_vec();
+    };
+    let mut kept = Vec::with_capacity(candidates.len());
+    for &rg in candidates {
+        match reader.get_row_group_column_bloom_filter(rg, metric_idx) {
+            Ok(Some(filter)) => {
+                if !filter.check(metric_name.as_bytes()) {
+                    continue;
+                }
+            }
+            // No filter on this column for this group: cannot rule it out.
+            Ok(None) => {}
+            Err(e) => {
+                tracing::trace!(
+                    row_group = rg,
+                    error = %e,
+                    "bloom filter unreadable; keeping row group"
+                );
+            }
+        }
+        kept.push(rg);
+    }
+    kept
+}
+
+pub fn row_groups_in_range(
     metadata: &ParquetMetaData,
     ts_column: &str,
     start_ns: i64,

@@ -4,7 +4,8 @@ use parqtel_core::{
     Metric, MetricKind, Result, Span, StorageModel,
 };
 use parquet::arrow::ArrowWriter;
-use parquet::file::properties::{WriterProperties, WriterVersion};
+use parquet::file::properties::{EnabledStatistics, WriterProperties, WriterVersion};
+use parquet::schema::types::ColumnPath;
 use std::collections::{BTreeMap, HashSet};
 use std::fs::{self, File};
 use std::path::Path;
@@ -441,6 +442,35 @@ impl TraceWriter {
     }
 }
 
+/// Columns that carry a bloom filter.
+///
+/// Chosen because they are the columns a query filters on *before* it can skip
+/// anything: the metric name selects which blocks are relevant at all, and the
+/// service name is the second-level discriminator. `timestamp_ns` is already
+/// covered exactly by row-group statistics, which are cheaper and exact, so a
+/// bloom filter there would add size for no pruning power.
+const BLOOM_METRIC_NAME: &str = "metric_name";
+const BLOOM_SERVICE_NAME: &str = "service_name";
+
+/// Bloom filter false-positive probability.
+///
+/// The reader treats a positive as "the value might be present" and decodes the
+/// row group anyway, so this only affects how often that happens — never
+/// correctness.
+const BLOOM_FPP: f64 = 0.01;
+
+/// Truncation length for the column index, in bytes.
+///
+/// Long enough to keep a full path, short enough that a pathological label
+/// value cannot bloat the footer.
+const COLUMN_INDEX_TRUNCATE_LENGTH: usize = 64;
+
+/// Target data page size, in bytes.
+///
+/// Smaller than the Parquet default so the column index has pages finer than
+/// `row_group_size` to point at.
+const DATA_PAGE_SIZE_LIMIT: usize = 512 * 1024;
+
 /// Writes one block to Parquet, splitting it into `row_group_size`-row groups.
 ///
 /// `row_group_size` is not cosmetic: the scanner skips whole row groups whose
@@ -461,6 +491,26 @@ fn write_parquet_file(
         .set_compression(compression_from_name(compression, compression_level))
         .set_writer_version(WriterVersion::PARQUET_2_0)
         .set_max_row_group_row_count(Some(row_group_size.max(1)))
+        // A bloom filter per row group lets the reader reject a row group for a
+        // metric it does not contain without decoding any page. A metrics block
+        // holds many metric names, so time-range statistics alone cannot narrow
+        // a single-metric query: every row group overlaps in time and all of
+        // them were being decoded.
+        // Per-column, so only these two pay the size cost. Enabling it for
+        // every column would bloat blocks with filters nothing reads.
+        .set_column_bloom_filter_enabled(ColumnPath::from(BLOOM_METRIC_NAME), true)
+        .set_column_bloom_filter_enabled(ColumnPath::from(BLOOM_SERVICE_NAME), true)
+        // Default false-positive probability. Named so the trade is visible:
+        // a filter this good costs roughly 10 bits per distinct value.
+        .set_bloom_filter_fpp(BLOOM_FPP)
+        // Page-level statistics plus a bounded column index. Row-group
+        // statistics are all-or-nothing at `row_group_size` granularity; the
+        // column index lets a reader skip a *page* inside a group.
+        .set_statistics_enabled(EnabledStatistics::Page)
+        .set_column_index_truncate_length(Some(COLUMN_INDEX_TRUNCATE_LENGTH))
+        // Bound the page size so the column index has finer granularity than a
+        // whole row group would otherwise give.
+        .set_data_page_size_limit(DATA_PAGE_SIZE_LIMIT)
         .build();
 
     let mut writer = ArrowWriter::try_new(file, record_batch.schema(), Some(writer_props))

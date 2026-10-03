@@ -346,3 +346,78 @@ to 16 MB — a 10× under-report caused entirely by the warm-up.
 ```bash
 cargo run --release -p parqtel-query --example bench_query_memory
 ```
+
+## Bloom filters on the metric-name column (`BL-03-03`)
+
+Row-group statistics only narrow on **time**. A metrics block interleaves every
+metric it holds, so a query for one metric found every row group overlapping the
+window and decoded all of them — pruning could only ever help a *range* query,
+never a *selectivity* query, which is the common case in an SRE tool.
+
+Bloom filters on `metric_name` and `service_name` answer "could this row group
+contain this value?" without decoding a page.
+
+### Result
+
+200 metrics × 500 points in one block, queried for one metric of 200, measured
+through the production `Scanner::scan` path:
+
+| | without bloom | with bloom | change |
+|---|---|---|---|
+| block size | 1.47 MB | 1.49 MB | **+1.5 %** |
+| block write | 44 ms | 59 ms | **+33 %** |
+| single-metric query | 31.98 ms | **2.83 ms** | **11.3×** |
+
+Both paths return the same 500 points, asserted by the benchmark. A query for a
+metric that is not in the block decodes nothing at all and returns empty.
+
+### Why the write cost is worth paying
+
++33 % on a 100 000-row block is ~15 ms. At the default 1 M-row block size that is
+roughly 150 ms extra per block, and blocks are written every few minutes. Against
+an 11× read improvement on the query that an SRE dashboard actually issues, that
+is not a close call — but it is a real cost and is stated rather than omitted.
+
+Filters are enabled **per column**, not globally, so `labels` (already the
+largest column) does not pay for a filter nothing reads.
+
+### Soundness, and the fail-open rule
+
+A bloom filter may report a false positive but must never report a **false
+negative** — a false negative silently drops data from a query result. Every
+condition that cannot be evaluated keeps the row group:
+
+- no filter on that column for that group,
+- an unreadable filter,
+- the column absent from the schema.
+
+So the worst case is exactly the behaviour that existed before bloom filters.
+Pinned by `bloom_pruning_never_drops_a_row_group_that_contains_the_metric`,
+`bloom_pruning_reduces_the_row_groups_read`,
+`bloom_pruning_drops_everything_for_an_absent_metric`,
+`bloom_pruning_fails_open_when_no_filter_exists` and
+`bloom_pruning_fails_open_for_an_unknown_column`.
+
+### Backwards compatibility
+
+The page index is loaded with `PageIndexPolicy::Optional`, not `Required`:
+blocks written before this change have no page index and must still be
+readable. `bloom_pruning_fails_open_when_no_filter_exists` writes a block with
+the *old* writer properties and asserts every row group is kept.
+
+### Still open
+
+Page/column-index-based pruning *within* a row group. The index is now written
+and loaded, but nothing reads it yet; it is left for a follow-up because it must
+stay sound under the same fail-open rule.
+
+`service_name` is not used as a bloom conjunct yet, and deliberately so: once
+rows are ordered by `(metric_name, service_name, timestamp_ns)` (`BL-03-07`), the
+row-group statistics prune on service *exactly* and for free — strictly better
+than a filter that can only be probabilistic.
+
+### Reproducing
+
+```bash
+cargo run --release -p parqtel-core --example bench_bloom
+```
