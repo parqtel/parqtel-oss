@@ -6,8 +6,8 @@ use crate::writer::{BlockMetadata, BlockWriter, LogWriter, TraceWriter};
 use bytes::Bytes;
 use parqtel_core::MemoryBuffer;
 use parqtel_core::{
-    BlockConfig, DataPoint, Error, LogBlockConfig, LogRecord, Metric, Result, Span,
-    TailSamplingConfig,
+    BlockConfig, ContentionMetrics, DataPoint, Error, LogBlockConfig, LogRecord, Metric, Result,
+    SignalType, Span, TailSamplingConfig,
 };
 use prost::Message;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -41,18 +41,25 @@ impl BlockRotator {
     /// Returns `true` if a flush happened (caller drains the memory buffer).
     /// ponytail: a single batch larger than a whole block still overflows one
     /// block boundary — split batches if that ever matters.
-    pub async fn push(&mut self, metric: Metric) -> Result<bool> {
+    pub async fn push(
+        &mut self,
+        metric: Metric,
+        contention: Option<&ContentionMetrics>,
+    ) -> Result<bool> {
         let mut flushed = false;
         if self.writer.len() + metric.data_points.len() > self.config.max_rows_per_block {
-            self.flush().await?;
+            self.flush(contention).await?;
             flushed = true;
         }
         self.writer.push(metric).map(|_| flushed)
     }
 
-    pub async fn check_and_flush(&mut self) -> Result<bool> {
+    pub async fn check_and_flush(
+        &mut self,
+        contention: Option<&ContentionMetrics>,
+    ) -> Result<bool> {
         if Instant::now().duration_since(self.last_flush) >= self.max_duration {
-            self.flush().await?;
+            self.flush(contention).await?;
             return Ok(true);
         }
         Ok(false)
@@ -62,7 +69,13 @@ impl BlockRotator {
     /// encoding/compression/disk I/O never stalls a tokio worker while the
     /// ingest mutex is held. Idempotent on an empty buffer (the old code
     /// returned a spurious "Cannot flush empty buffer" error).
-    pub async fn flush(&mut self) -> Result<()> {
+    ///
+    /// The whole encode happens while the caller still holds the ingest mutex,
+    /// which is why the guard below exists: it makes flush wall time and the
+    /// in-flight gauge observable without a profiler. The idle no-op path
+    /// returns before creating a guard, so an empty flush cannot dilute the
+    /// histogram.
+    pub async fn flush(&mut self, contention: Option<&ContentionMetrics>) -> Result<()> {
         if self.writer.is_empty() {
             tracing::debug!("metric block flush skipped: buffer empty");
             return Ok(());
@@ -70,9 +83,20 @@ impl BlockRotator {
         let row_count = self.writer.len();
         let started = std::time::Instant::now();
         let mut writer = std::mem::replace(&mut self.writer, BlockWriter::new(self.config.clone()));
-        let metadata = tokio::task::spawn_blocking(move || writer.flush())
-            .await
-            .map_err(|e| Error::Internal(format!("flush task panicked: {}", e)))??;
+        let flush_guard = contention.map(|c| c.flush_started(SignalType::Metrics));
+        let encoded = tokio::task::spawn_blocking(move || writer.flush()).await;
+        // Unwrap the JoinError separately from the writer's own Result so the
+        // row count can still be attributed when the flush succeeded.
+        let metadata = match encoded {
+            Ok(result) => result,
+            Err(e) => {
+                return Err(Error::Internal(format!("flush task panicked: {}", e)));
+            }
+        };
+        if let (Some(guard), Ok(meta)) = (flush_guard, metadata.as_ref()) {
+            guard.count_rows(meta.row_count as u64);
+        }
+        let metadata = metadata?;
         self.last_flush = Instant::now();
         let _ = self.metadata_tx.send(metadata);
         tracing::debug!(
@@ -106,23 +130,30 @@ impl LogRotator {
         }
     }
 
-    pub async fn push(&mut self, log: LogRecord) -> Result<bool> {
+    pub async fn push(
+        &mut self,
+        log: LogRecord,
+        contention: Option<&ContentionMetrics>,
+    ) -> Result<bool> {
         if self.writer.len() + 1 > self.config.max_rows_per_block {
-            self.flush().await?;
+            self.flush(contention).await?;
             return self.writer.push(log).map(|_| true);
         }
         self.writer.push(log).map(|_| false)
     }
 
-    pub async fn check_and_flush(&mut self) -> Result<bool> {
+    pub async fn check_and_flush(
+        &mut self,
+        contention: Option<&ContentionMetrics>,
+    ) -> Result<bool> {
         if Instant::now().duration_since(self.last_flush) >= self.max_duration {
-            self.flush().await?;
+            self.flush(contention).await?;
             return Ok(true);
         }
         Ok(false)
     }
 
-    pub async fn flush(&mut self) -> Result<()> {
+    pub async fn flush(&mut self, contention: Option<&ContentionMetrics>) -> Result<()> {
         if self.writer.is_empty() {
             tracing::debug!("log block flush skipped: buffer empty");
             return Ok(());
@@ -130,9 +161,18 @@ impl LogRotator {
         let row_count = self.writer.len();
         let started = std::time::Instant::now();
         let mut writer = std::mem::replace(&mut self.writer, LogWriter::new(self.config.clone()));
-        let metadata = tokio::task::spawn_blocking(move || writer.flush())
-            .await
-            .map_err(|e| Error::Internal(format!("flush task panicked: {}", e)))??;
+        let flush_guard = contention.map(|c| c.flush_started(SignalType::Logs));
+        let encoded = tokio::task::spawn_blocking(move || writer.flush()).await;
+        let metadata = match encoded {
+            Ok(result) => result,
+            Err(e) => {
+                return Err(Error::Internal(format!("flush task panicked: {}", e)));
+            }
+        };
+        if let (Some(guard), Ok(meta)) = (flush_guard, metadata.as_ref()) {
+            guard.count_rows(meta.row_count as u64);
+        }
+        let metadata = metadata?;
         self.last_flush = Instant::now();
         let _ = self.metadata_tx.send(metadata);
         tracing::debug!(
@@ -155,11 +195,32 @@ pub struct IngestionStats {
     pub dropped_spans: AtomicU64,
 }
 
+/// Acquires a rotator lock, recording how long the acquisition took.
+///
+/// Every ingest request for a signal serializes on one mutex, and a block
+/// flush runs while that mutex is held, so lock wait is the best single
+/// predictor of ingest p99. The clock is read immediately after the guard is
+/// returned so the contended mutex is never held while the histogram lock is
+/// taken.
+async fn lock_rotator<'a, T>(
+    rotator: &'a Mutex<T>,
+    signal: SignalType,
+    contention: Option<&ContentionMetrics>,
+) -> tokio::sync::MutexGuard<'a, T> {
+    let started = Instant::now();
+    let guard = rotator.lock().await;
+    if let Some(c) = contention {
+        c.record_ingest_lock_wait(signal, started.elapsed());
+    }
+    guard
+}
+
 /// Public service for ingesting OTLP metrics.
 pub struct IngestionService {
     rotator: Arc<Mutex<BlockRotator>>,
     stats: Arc<IngestionStats>,
     memory_buffer: Option<MemoryBuffer>,
+    contention: Option<Arc<ContentionMetrics>>,
 }
 
 impl IngestionService {
@@ -168,12 +229,19 @@ impl IngestionService {
             rotator: Arc::new(Mutex::new(BlockRotator::new(config, metadata_tx))),
             stats: Arc::new(IngestionStats::default()),
             memory_buffer: None,
+            contention: None,
         }
     }
 
     /// Set the shared memory buffer for stream-queryable data.
     pub fn with_memory_buffer(mut self, buffer: MemoryBuffer) -> Self {
         self.memory_buffer = Some(buffer);
+        self
+    }
+
+    /// Share lock-wait and flush counters with the `/metrics` renderer.
+    pub fn with_contention(mut self, contention: Arc<ContentionMetrics>) -> Self {
+        self.contention = Some(contention);
         self
     }
 
@@ -241,14 +309,16 @@ impl IngestionService {
                 buf.push_metrics(&m.name, &points).await;
             }
         }
-        let mut rotator = self.rotator.lock().await;
+        let contention = self.contention.clone();
+        let mut rotator =
+            lock_rotator(&self.rotator, SignalType::Metrics, contention.as_deref()).await;
         for m in metrics {
             count += m.data_points.len() as u64;
-            if rotator.push(m).await? {
+            if rotator.push(m, contention.as_deref()).await? {
                 flushed = true;
             }
         }
-        if rotator.check_and_flush().await? {
+        if rotator.check_and_flush(contention.as_deref()).await? {
             flushed = true;
         }
         drop(rotator);
@@ -272,7 +342,11 @@ impl IngestionService {
     /// Checks for duration-based flush; returns `true` when a flush happened
     /// (the shared memory buffer is drained so flushed rows aren't double-read).
     pub async fn check_and_flush(&self) -> Result<bool> {
-        let flushed = self.rotator.lock().await.check_and_flush().await?;
+        let contention = self.contention.clone();
+        let flushed = lock_rotator(&self.rotator, SignalType::Metrics, contention.as_deref())
+            .await
+            .check_and_flush(contention.as_deref())
+            .await?;
         if flushed {
             if let Some(ref buf) = self.memory_buffer {
                 buf.drain_metrics().await;
@@ -282,8 +356,11 @@ impl IngestionService {
     }
 
     pub async fn shutdown(&self) -> Result<()> {
-        let mut rotator = self.rotator.lock().await;
-        let _ = rotator.flush().await;
+        let contention = self.contention.clone();
+        let mut rotator =
+            lock_rotator(&self.rotator, SignalType::Metrics, contention.as_deref()).await;
+        let _ = rotator.flush(contention.as_deref()).await;
+        drop(rotator);
         if let Some(ref buf) = self.memory_buffer {
             buf.drain_metrics().await;
         }
@@ -304,6 +381,7 @@ pub struct LogIngestionService {
     rotator: Arc<Mutex<LogRotator>>,
     stats: Arc<IngestionStats>,
     memory_buffer: Option<MemoryBuffer>,
+    contention: Option<Arc<ContentionMetrics>>,
 }
 
 impl LogIngestionService {
@@ -312,12 +390,19 @@ impl LogIngestionService {
             rotator: Arc::new(Mutex::new(LogRotator::new(config, metadata_tx))),
             stats: Arc::new(IngestionStats::default()),
             memory_buffer: None,
+            contention: None,
         }
     }
 
     /// Set the shared memory buffer for stream-queryable data.
     pub fn with_memory_buffer(mut self, buffer: MemoryBuffer) -> Self {
         self.memory_buffer = Some(buffer);
+        self
+    }
+
+    /// Share lock-wait and flush counters with the `/metrics` renderer.
+    pub fn with_contention(mut self, contention: Arc<ContentionMetrics>) -> Self {
+        self.contention = Some(contention);
         self
     }
 
@@ -348,13 +433,15 @@ impl LogIngestionService {
         if let Some(ref buf) = self.memory_buffer {
             buf.push_logs(&logs).await;
         }
-        let mut rotator = self.rotator.lock().await;
+        let contention = self.contention.clone();
+        let mut rotator =
+            lock_rotator(&self.rotator, SignalType::Logs, contention.as_deref()).await;
         for l in logs {
-            if rotator.push(l).await? {
+            if rotator.push(l, contention.as_deref()).await? {
                 flushed = true;
             }
         }
-        if rotator.check_and_flush().await? {
+        if rotator.check_and_flush(contention.as_deref()).await? {
             flushed = true;
         }
         drop(rotator);
@@ -378,7 +465,11 @@ impl LogIngestionService {
     /// Checks for duration-based flush; returns `true` when a flush happened
     /// (the shared memory buffer is drained so flushed rows aren't double-read).
     pub async fn check_and_flush(&self) -> Result<bool> {
-        let flushed = self.rotator.lock().await.check_and_flush().await?;
+        let contention = self.contention.clone();
+        let flushed = lock_rotator(&self.rotator, SignalType::Logs, contention.as_deref())
+            .await
+            .check_and_flush(contention.as_deref())
+            .await?;
         if flushed {
             if let Some(ref buf) = self.memory_buffer {
                 buf.drain_logs().await;
@@ -388,8 +479,11 @@ impl LogIngestionService {
     }
 
     pub async fn shutdown(&self) -> Result<()> {
-        let mut rotator = self.rotator.lock().await;
-        let _ = rotator.flush().await;
+        let contention = self.contention.clone();
+        let mut rotator =
+            lock_rotator(&self.rotator, SignalType::Logs, contention.as_deref()).await;
+        let _ = rotator.flush(contention.as_deref()).await;
+        drop(rotator);
         if let Some(ref buf) = self.memory_buffer {
             buf.drain_logs().await;
         }
@@ -426,23 +520,30 @@ impl TraceRotator {
         }
     }
 
-    pub async fn push(&mut self, span: Span) -> Result<bool> {
+    pub async fn push(
+        &mut self,
+        span: Span,
+        contention: Option<&ContentionMetrics>,
+    ) -> Result<bool> {
         if self.writer.len() + 1 > self.config.max_rows_per_block {
-            self.flush().await?;
+            self.flush(contention).await?;
             return self.writer.push(span).map(|_| true);
         }
         self.writer.push(span).map(|_| false)
     }
 
-    pub async fn check_and_flush(&mut self) -> Result<bool> {
+    pub async fn check_and_flush(
+        &mut self,
+        contention: Option<&ContentionMetrics>,
+    ) -> Result<bool> {
         if Instant::now().duration_since(self.last_flush) >= self.max_duration {
-            self.flush().await?;
+            self.flush(contention).await?;
             return Ok(true);
         }
         Ok(false)
     }
 
-    pub async fn flush(&mut self) -> Result<()> {
+    pub async fn flush(&mut self, contention: Option<&ContentionMetrics>) -> Result<()> {
         if self.writer.is_empty() {
             tracing::debug!("trace block flush skipped: buffer empty");
             return Ok(());
@@ -450,9 +551,18 @@ impl TraceRotator {
         let row_count = self.writer.len();
         let started = std::time::Instant::now();
         let mut writer = std::mem::replace(&mut self.writer, TraceWriter::new(self.config.clone()));
-        let metadata = tokio::task::spawn_blocking(move || writer.flush())
-            .await
-            .map_err(|e| Error::Internal(format!("flush task panicked: {}", e)))??;
+        let flush_guard = contention.map(|c| c.flush_started(SignalType::Traces));
+        let encoded = tokio::task::spawn_blocking(move || writer.flush()).await;
+        let metadata = match encoded {
+            Ok(result) => result,
+            Err(e) => {
+                return Err(Error::Internal(format!("flush task panicked: {}", e)));
+            }
+        };
+        if let (Some(guard), Ok(meta)) = (flush_guard, metadata.as_ref()) {
+            guard.count_rows(meta.row_count as u64);
+        }
+        let metadata = metadata?;
         self.last_flush = Instant::now();
         let _ = self.metadata_tx.send(metadata);
         tracing::debug!(
@@ -475,6 +585,7 @@ pub struct TraceIngestionService {
     span_metrics_tx: Option<mpsc::UnboundedSender<Vec<Metric>>>,
     /// Tail-sampling policy; default (keep-all) short-circuits to zero cost.
     tail_sampling: TailSamplingConfig,
+    contention: Option<Arc<ContentionMetrics>>,
 }
 
 impl TraceIngestionService {
@@ -485,12 +596,19 @@ impl TraceIngestionService {
             memory_buffer: None,
             span_metrics_tx: None,
             tail_sampling: TailSamplingConfig::default(),
+            contention: None,
         }
     }
 
     /// Set the shared memory buffer for stream-queryable spans.
     pub fn with_memory_buffer(mut self, buffer: MemoryBuffer) -> Self {
         self.memory_buffer = Some(buffer);
+        self
+    }
+
+    /// Share lock-wait and flush counters with the `/metrics` renderer.
+    pub fn with_contention(mut self, contention: Arc<ContentionMetrics>) -> Self {
+        self.contention = Some(contention);
         self
     }
 
@@ -551,13 +669,15 @@ impl TraceIngestionService {
         if let Some(ref buf) = self.memory_buffer {
             buf.push_spans(&spans).await;
         }
-        let mut rotator = self.rotator.lock().await;
+        let contention = self.contention.clone();
+        let mut rotator =
+            lock_rotator(&self.rotator, SignalType::Traces, contention.as_deref()).await;
         for s in spans {
-            if rotator.push(s).await? {
+            if rotator.push(s, contention.as_deref()).await? {
                 flushed = true;
             }
         }
-        rotator.check_and_flush().await?;
+        rotator.check_and_flush(contention.as_deref()).await?;
         drop(rotator);
         if flushed {
             if let Some(ref buf) = self.memory_buffer {
@@ -579,7 +699,11 @@ impl TraceIngestionService {
     /// Checks for duration-based flush; returns `true` when a flush happened
     /// (the shared memory buffer is drained so flushed spans aren't double-read).
     pub async fn check_and_flush(&self) -> Result<bool> {
-        let flushed = self.rotator.lock().await.check_and_flush().await?;
+        let contention = self.contention.clone();
+        let flushed = lock_rotator(&self.rotator, SignalType::Traces, contention.as_deref())
+            .await
+            .check_and_flush(contention.as_deref())
+            .await?;
         if flushed {
             if let Some(ref buf) = self.memory_buffer {
                 buf.drain_spans().await;
@@ -589,8 +713,11 @@ impl TraceIngestionService {
     }
 
     pub async fn shutdown(&self) -> Result<()> {
-        let mut rotator = self.rotator.lock().await;
-        let _ = rotator.flush().await;
+        let contention = self.contention.clone();
+        let mut rotator =
+            lock_rotator(&self.rotator, SignalType::Traces, contention.as_deref()).await;
+        let _ = rotator.flush(contention.as_deref()).await;
+        drop(rotator);
         if let Some(ref buf) = self.memory_buffer {
             buf.drain_spans().await;
         }
@@ -613,37 +740,284 @@ mod tests {
     use serde_json::json;
     use tempfile::tempdir;
 
-    #[tokio::test]
-    async fn test_block_rotator_flush() {
-        let dir = tempdir().unwrap();
-        let config = BlockConfig {
-            data_dir: dir.path().to_path_buf(),
+    /// Small block config so a handful of points forces a flush.
+    fn tiny_metrics_config(dir: &std::path::Path) -> BlockConfig {
+        BlockConfig {
+            data_dir: dir.to_path_buf(),
             max_rows_per_block: 10,
             block_duration_secs: 1,
             ..Default::default()
-        };
+        }
+    }
+
+    fn one_point_metric(name: &str, ts: i64) -> Metric {
+        Metric {
+            name: name.into(),
+            kind: parqtel_core::MetricKind::Gauge,
+            data_points: vec![parqtel_core::DataPoint::new(
+                ts,
+                parqtel_core::MetricValue::Double(1.0),
+                parqtel_core::LabelSet::default(),
+            )
+            .unwrap()],
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn test_block_rotator_flush() {
+        let dir = tempdir().unwrap();
+        let config = tiny_metrics_config(dir.path());
         let (tx, mut rx) = mpsc::unbounded_channel();
         let mut rotator = BlockRotator::new(config, tx);
 
         rotator
-            .push(Metric {
-                name: "m1".into(),
-                kind: parqtel_core::MetricKind::Gauge,
-                data_points: vec![parqtel_core::DataPoint::new(
-                    100,
-                    parqtel_core::MetricValue::Double(1.0),
-                    parqtel_core::LabelSet::default(),
-                )
-                .unwrap()],
-                ..Default::default()
-            })
+            .push(one_point_metric("m1", 100), None)
             .await
             .unwrap();
 
-        rotator.flush().await.unwrap();
+        rotator.flush(None).await.unwrap();
         let meta = rx.recv().await.unwrap();
         assert_eq!(meta.row_count, 1);
         assert!(meta.path.exists());
+    }
+
+    /// An idle flush must not produce an observation: it dilutes the flush
+    /// latency histogram and would show up as a p50 far below any real flush.
+    #[tokio::test]
+    async fn test_idle_flush_is_not_recorded() {
+        let dir = tempdir().unwrap();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let contention = ContentionMetrics::new();
+        let mut rotator = BlockRotator::new(tiny_metrics_config(dir.path()), tx);
+
+        rotator.flush(Some(&contention)).await.unwrap();
+        assert!(rx.try_recv().is_err(), "no block should be written");
+        assert_eq!(contention.flush_duration_count(SignalType::Metrics), 0);
+        assert_eq!(contention.flush_rows(SignalType::Metrics), 0);
+        assert_eq!(contention.flush_inflight(SignalType::Metrics), 0);
+    }
+
+    /// A real flush records wall time, rows written, and leaves the in-flight
+    /// gauge at zero — the guard must not leak on the error path either.
+    #[tokio::test]
+    async fn test_flush_records_duration_rows_and_clears_inflight() {
+        let dir = tempdir().unwrap();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let contention = ContentionMetrics::new();
+        let mut rotator = BlockRotator::new(tiny_metrics_config(dir.path()), tx);
+
+        rotator
+            .push(one_point_metric("m1", 100), Some(&contention))
+            .await
+            .unwrap();
+        rotator.flush(Some(&contention)).await.unwrap();
+
+        let meta = rx.recv().await.unwrap();
+        assert_eq!(contention.flush_duration_count(SignalType::Metrics), 1);
+        assert_eq!(contention.flush_rows(SignalType::Metrics), 1);
+        assert_eq!(contention.flush_inflight(SignalType::Metrics), 0);
+        assert_eq!(
+            contention.flush_rows(SignalType::Metrics),
+            meta.row_count as u64,
+            "rows recorded must match the block that was written"
+        );
+    }
+
+    /// Crossing the row cap triggers a flush from inside `push`, so the
+    /// capacity-triggered path — the expensive case that the 5s tick never
+    /// sees — must be observable too.
+    #[tokio::test]
+    async fn test_capacity_triggered_flush_is_recorded() {
+        let dir = tempdir().unwrap();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let contention = ContentionMetrics::new();
+        let mut rotator = BlockRotator::new(tiny_metrics_config(dir.path()), tx);
+
+        // Fill to exactly max_rows_per_block (10).
+        for i in 0..10 {
+            rotator
+                .push(one_point_metric("m1", 100 + i), Some(&contention))
+                .await
+                .unwrap();
+        }
+        assert_eq!(contention.flush_duration_count(SignalType::Metrics), 0);
+
+        // The 11th point crosses the cap: `push` must flush first and report
+        // that it did, so the caller drains the memory buffer.
+        let flushed = rotator
+            .push(one_point_metric("m1", 200), Some(&contention))
+            .await
+            .unwrap();
+        assert!(flushed, "push must report the flush so the buffer drains");
+
+        let meta = rx.recv().await.unwrap();
+        assert_eq!(meta.row_count, 10);
+        assert_eq!(contention.flush_duration_count(SignalType::Metrics), 1);
+        assert_eq!(contention.flush_rows(SignalType::Metrics), 10);
+        assert_eq!(contention.flush_inflight(SignalType::Metrics), 0);
+    }
+
+    /// Every ingest request for a signal must record exactly one lock-wait
+    /// observation, and the counter must be attributable per signal.
+    #[tokio::test]
+    async fn test_ingest_records_lock_wait_per_signal() {
+        let dir = tempdir().unwrap();
+        let contention = Arc::new(ContentionMetrics::new());
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let (ltx, _lrx) = mpsc::unbounded_channel();
+        let (ttx, _trx) = mpsc::unbounded_channel();
+
+        let metrics_svc = IngestionService::new(tiny_metrics_config(dir.path()), tx)
+            .with_contention(contention.clone());
+        let logs_svc = LogIngestionService::new(
+            LogBlockConfig {
+                data_dir: dir.path().join("logs"),
+                ..Default::default()
+            },
+            ltx,
+        )
+        .with_contention(contention.clone());
+        let traces_svc = TraceIngestionService::new(tiny_metrics_config(dir.path()), ttx)
+            .with_contention(contention.clone());
+
+        metrics_svc
+            .ingest_metrics(vec![one_point_metric("m1", 100)])
+            .await
+            .unwrap();
+        metrics_svc
+            .ingest_metrics(vec![one_point_metric("m1", 200)])
+            .await
+            .unwrap();
+        logs_svc
+            .ingest_json(Bytes::from(
+                serde_json::to_vec(&json!({
+                    "resourceLogs": [{
+                        "resource": {"attributes": [
+                            {"key": "service.name", "value": {"stringValue": "svc"}}
+                        ]},
+                        "scopeLogs": [{
+                            "logRecords": [{
+                                "timeUnixNano": "100",
+                                "severityNumber": 9,
+                                "severityText": "INFO",
+                                "body": {"stringValue": "hello"}
+                            }]
+                        }]
+                    }]
+                }))
+                .unwrap(),
+            ))
+            .await
+            .unwrap();
+        traces_svc
+            .ingest_json(Bytes::from(
+                serde_json::to_vec(&json!({
+                    "resourceSpans": [{
+                        "resource": {"attributes": [
+                            {"key": "service.name", "value": {"stringValue": "svc"}}
+                        ]},
+                        "scopeSpans": [{
+                            "spans": [{
+                                "traceId": "0af7651916cd43dd8448eb211c80319c",
+                                "spanId": "b7ad6b7169203331",
+                                "name": "op",
+                                "kind": 2,
+                                "startTimeUnixNano": "100",
+                                "endTimeUnixNano": "200"
+                            }]
+                        }]
+                    }]
+                }))
+                .unwrap(),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(contention.ingest_lock_wait_count(SignalType::Metrics), 2);
+        assert_eq!(contention.ingest_lock_wait_count(SignalType::Logs), 1);
+        assert_eq!(contention.ingest_lock_wait_count(SignalType::Traces), 1);
+
+        // The rendered body must be scrapeable and carry all three signals.
+        let rendered = contention.render();
+        assert!(rendered.contains("parqtel_ingest_lock_wait_seconds{signal=\"metrics\"}_count 2"));
+        assert!(rendered.contains("parqtel_ingest_lock_wait_seconds{signal=\"logs\"}_count 1"));
+        assert!(rendered.contains("parqtel_ingest_lock_wait_seconds{signal=\"traces\"}_count 1"));
+    }
+
+    /// Concurrent requests must each record a lock wait and none may be lost —
+    /// this is the observation that predicts ingest p99, so a dropped
+    /// observation would hide exactly the stall we are looking for.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_concurrent_ingest_records_every_lock_wait() {
+        let dir = tempdir().unwrap();
+        let contention = Arc::new(ContentionMetrics::new());
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let service = Arc::new(
+            IngestionService::new(tiny_metrics_config(dir.path()), tx)
+                .with_contention(contention.clone()),
+        );
+
+        const CONCURRENT: usize = 32;
+        let mut handles = Vec::with_capacity(CONCURRENT);
+        for i in 0..CONCURRENT {
+            let service = service.clone();
+            handles.push(tokio::spawn(async move {
+                service
+                    .ingest_metrics(vec![one_point_metric("m1", 1000 + i as i64)])
+                    .await
+                    .unwrap();
+            }));
+        }
+        for h in handles {
+            h.await.unwrap();
+        }
+
+        assert_eq!(
+            contention.ingest_lock_wait_count(SignalType::Metrics),
+            CONCURRENT as u64,
+            "every request must record exactly one lock-wait observation"
+        );
+        assert_eq!(
+            contention.ingest_lock_wait_count(SignalType::Logs),
+            0,
+            "log requests must not pollute the metrics series"
+        );
+    }
+
+    /// The service must still work with no contention sink attached, so an
+    /// embedder that does not build telemetry pays nothing.
+    #[tokio::test]
+    async fn test_services_work_without_contention_metrics() {
+        let dir = tempdir().unwrap();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        // block_duration_secs = 0 makes the duration check fire immediately,
+        // so check_and_flush exercises the periodic path deterministically.
+        let service = IngestionService::new(
+            BlockConfig {
+                block_duration_secs: 0,
+                ..tiny_metrics_config(dir.path())
+            },
+            tx,
+        );
+
+        assert_eq!(
+            service
+                .ingest_metrics(vec![one_point_metric("m1", 100)])
+                .await
+                .unwrap(),
+            1
+        );
+        assert!(service.check_and_flush().await.unwrap());
+        service.shutdown().await.unwrap();
+
+        let mut metas = Vec::new();
+        while let Ok(meta) = rx.try_recv() {
+            metas.push(meta);
+        }
+        assert!(!metas.is_empty(), "flushes must still publish blocks");
+        let total: usize = metas.iter().map(|m| m.row_count).sum();
+        assert_eq!(total, 1, "the point must be written exactly once");
     }
 
     #[tokio::test]
@@ -928,9 +1302,9 @@ mod tests {
             "".into(),
             "".into(),
         );
-        rotator.push(log).await.unwrap();
+        rotator.push(log, None).await.unwrap();
 
-        rotator.flush().await.unwrap();
+        rotator.flush(None).await.unwrap();
         let meta = rx.recv().await.unwrap();
         assert_eq!(meta.row_count, 1);
     }
@@ -948,21 +1322,24 @@ mod tests {
         let mut rotator = BlockRotator::new(config, tx);
 
         rotator
-            .push(parqtel_core::Metric {
-                name: "m".into(),
-                kind: parqtel_core::MetricKind::Gauge,
-                data_points: vec![parqtel_core::DataPoint::new(
-                    100,
-                    parqtel_core::MetricValue::Double(1.0),
-                    parqtel_core::LabelSet::default(),
-                )
-                .unwrap()],
-                ..Default::default()
-            })
+            .push(
+                parqtel_core::Metric {
+                    name: "m".into(),
+                    kind: parqtel_core::MetricKind::Gauge,
+                    data_points: vec![parqtel_core::DataPoint::new(
+                        100,
+                        parqtel_core::MetricValue::Double(1.0),
+                        parqtel_core::LabelSet::default(),
+                    )
+                    .unwrap()],
+                    ..Default::default()
+                },
+                None,
+            )
             .await
             .unwrap();
 
         // Should not flush since duration hasn't elapsed
-        rotator.check_and_flush().await.unwrap();
+        rotator.check_and_flush(None).await.unwrap();
     }
 }

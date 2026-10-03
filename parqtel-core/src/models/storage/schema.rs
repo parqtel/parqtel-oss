@@ -31,6 +31,35 @@ pub enum SignalType {
     Traces,
 }
 
+impl SignalType {
+    /// Every signal, in the canonical order used by telemetry arrays.
+    ///
+    /// `index()` is the position in this array, so
+    /// `SIGNAL_COUNT == SignalType::ALL.len()` keeps per-signal counter
+    /// arrays in step with the enum.
+    pub const ALL: [SignalType; 3] = [SignalType::Metrics, SignalType::Logs, SignalType::Traces];
+
+    /// Stable lowercase name, used as a telemetry label value.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            SignalType::Metrics => "metrics",
+            SignalType::Logs => "logs",
+            SignalType::Traces => "traces",
+        }
+    }
+
+    /// Dense index into a per-signal array.
+    ///
+    /// Const-evaluable, so it can size arrays at compile time.
+    pub const fn index(self) -> usize {
+        match self {
+            SignalType::Metrics => 0,
+            SignalType::Logs => 1,
+            SignalType::Traces => 2,
+        }
+    }
+}
+
 /// Returns the canonical Arrow [Schema] for metric storage.
 pub fn metrics_schema() -> Schema {
     Schema::new(vec![

@@ -191,12 +191,22 @@ async fn run_server(
     hasher.update(UI_HTML.as_bytes());
     let ui_etag = format!("\"{}\"", hex::encode(hasher.finalize()));
 
-    // Metrics pipeline
+    // Metrics pipeline.
+    //
+    // `ContentionMetrics` is created once and shared with the three ingestion
+    // services, the three block-index tasks and the /metrics renderer, so a
+    // lock wait recorded on the ingest path is the same series an operator
+    // scrapes. The index writer measures how long it waits for the write lock
+    // because every query handler contends for it.
+    let contention = Arc::new(parqtel_core::ContentionMetrics::new());
     let (tx, mut rx) = mpsc::unbounded_channel();
     let idx_clone = index.clone();
+    let idx_contention = contention.clone();
     let index_task = tokio::spawn(async move {
         while let Some(meta) = rx.recv().await {
+            let started = std::time::Instant::now();
             let mut idx = idx_clone.write().await;
+            idx_contention.record_index_lock_wait(started.elapsed());
             if let Err(e) = idx.add(meta) {
                 tracing::error!("Failed to add block to index: {}", e);
             }
@@ -206,9 +216,12 @@ async fn run_server(
     // Logs pipeline
     let (log_tx, mut log_rx) = mpsc::unbounded_channel();
     let log_idx_clone = log_index.clone();
+    let log_idx_contention = contention.clone();
     let log_index_task = tokio::spawn(async move {
         while let Some(meta) = log_rx.recv().await {
+            let started = std::time::Instant::now();
             let mut idx = log_idx_clone.write().await;
+            log_idx_contention.record_index_lock_wait(started.elapsed());
             if let Err(e) = idx.add(meta) {
                 tracing::error!("Failed to add log block to index: {}", e);
             }
@@ -218,10 +231,12 @@ async fn run_server(
     // Create shared in-memory buffer for stream-queryable data
     let memory_buffer = parqtel_core::MemoryBuffer::new();
 
-    let ingestion_service =
-        IngestionService::new(config.storage.clone(), tx).with_memory_buffer(memory_buffer.clone());
+    let ingestion_service = IngestionService::new(config.storage.clone(), tx)
+        .with_memory_buffer(memory_buffer.clone())
+        .with_contention(contention.clone());
     let log_ingestion_service = LogIngestionService::new(config.logs.clone(), log_tx)
-        .with_memory_buffer(memory_buffer.clone());
+        .with_memory_buffer(memory_buffer.clone())
+        .with_contention(contention.clone());
     let (trace_tx, mut trace_rx) = mpsc::unbounded_channel();
     // Span-metrics RED bridge: trace ingestion derives
     // traces_service_{requests,errors,duration_ms} metrics and feeds them
@@ -231,7 +246,8 @@ async fn run_server(
     let trace_ingestion_service = TraceIngestionService::new(config.storage.clone(), trace_tx)
         .with_memory_buffer(memory_buffer.clone())
         .with_span_metrics(span_metrics_tx)
-        .with_tail_sampling(config.ingest.tail_sampling.clone());
+        .with_tail_sampling(config.ingest.tail_sampling.clone())
+        .with_contention(contention.clone());
 
     // Trace index - uses same data_dir as metrics but separate index file
     let trace_data_dir = config.storage.data_dir.join("traces");
@@ -245,9 +261,12 @@ async fn run_server(
     let trace_index = Arc::new(tokio::sync::RwLock::new(trace_index));
 
     let trace_idx_clone = trace_index.clone();
+    let trace_idx_contention = contention.clone();
     let trace_index_task = tokio::spawn(async move {
         while let Some(meta) = trace_rx.recv().await {
+            let started = std::time::Instant::now();
             let mut idx = trace_idx_clone.write().await;
+            trace_idx_contention.record_index_lock_wait(started.elapsed());
             if let Err(e) = idx.add(meta) {
                 tracing::error!("Failed to add trace block to index: {}", e);
             }
@@ -285,6 +304,7 @@ async fn run_server(
         config.clone(),
         ui_content,
         ui_etag,
+        contention,
     )
     .await;
     tracing::debug!(
@@ -478,6 +498,10 @@ async fn run_server(
 
             let (metrics, logs, spans) = buffer.stats().await;
             otel_sli::record_gauges(metrics as u64, logs as u64, spans as u64);
+            // Sample process memory here rather than in the /metrics handler:
+            // reading /proc/self/status is a blocking syscall and RSS changes
+            // far more slowly than a Prometheus scrape interval.
+            state_clone.inner.metrics.refresh_process_memory();
         }
     });
 
