@@ -13,6 +13,28 @@ pub struct IngestConfig {
     /// Tail-sampling policy for traces (keep-all by default).
     #[serde(default)]
     pub tail_sampling: TailSamplingConfig,
+    /// Number of writer shards used by the metrics ingest rotator.
+    ///
+    /// Every ingest request for a signal serialises on one lock, and a block
+    /// flush runs while that lock is held — so one flush stalls every metric
+    /// request for its encode duration. Sharding lets unrelated metrics be
+    /// ingested concurrently while a flush is in flight.
+    ///
+    /// The shards are **not** independent blocks: a flush merges every shard
+    /// into one file, so the block count and query fan-out are unchanged.
+    /// Durability is unchanged too — a flush is still acknowledged only once
+    /// it is on disk.
+    ///
+    /// Clamped to 1..=256. 1 restores the previous single-writer behaviour.
+    /// Raise it only where `parqtel_ingest_lock_wait_seconds` shows real
+    /// contention: it costs a little memory (one writer buffer per shard) and
+    /// one extra lock acquisition per push.
+    #[serde(default = "default_rotator_shards")]
+    pub rotator_shards: usize,
+}
+
+fn default_rotator_shards() -> usize {
+    4
 }
 
 /// Tail-sampling policy for traces: decide per trace (after all spans of a
@@ -58,6 +80,7 @@ impl Default for IngestConfig {
             wal_enabled: false,
             log_wal_enabled: true,
             tail_sampling: TailSamplingConfig::default(),
+            rotator_shards: default_rotator_shards(),
         }
     }
 }

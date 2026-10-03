@@ -186,6 +186,10 @@ pub struct ContentionMetrics {
     flush_rows: [AtomicU64; SIGNAL_COUNT],
     /// Time spent waiting for the block index write lock.
     index_lock_wait: Mutex<Histogram>,
+    /// Writer shards the metrics ingest rotator is using, or 0 when unknown.
+    /// Zero is the unambiguous "not reported" value, distinct from a
+    /// legitimately configured single shard.
+    ingest_rotator_shards: AtomicU64,
 }
 
 impl Default for ContentionMetrics {
@@ -203,7 +207,22 @@ impl ContentionMetrics {
             flush_inflight: std::array::from_fn(|_| AtomicU64::new(0)),
             flush_rows: std::array::from_fn(|_| AtomicU64::new(0)),
             index_lock_wait: Mutex::new(Histogram::seconds()),
+            ingest_rotator_shards: AtomicU64::new(0),
         }
+    }
+
+    /// Records how many writer shards the metrics ingest rotator uses.
+    ///
+    /// Reported once at startup. Zero means the caller did not report it, so
+    /// a dashboard never mistakes "unknown" for "single-writer".
+    pub fn set_ingest_rotator_shards(&self, shards: usize) {
+        self.ingest_rotator_shards
+            .store(shards as u64, Ordering::Relaxed);
+    }
+
+    /// Writer shards in use, or 0 when not reported.
+    pub fn ingest_rotator_shards(&self) -> u64 {
+        self.ingest_rotator_shards.load(Ordering::Relaxed)
     }
 
     /// Records how long a request waited for the ingest mutex of `signal`.
@@ -307,6 +326,18 @@ impl ContentionMetrics {
             "counter",
             |s| self.flush_rows(s).to_string(),
         );
+
+        // Process-wide, not per signal: only the metrics rotator is sharded.
+        render_header(
+            &mut out,
+            "parqtel_ingest_rotator_shards",
+            "Writer shards in the metrics ingest rotator (0 = not reported)",
+            "gauge",
+        );
+        out.push_str(&format!(
+            "parqtel_ingest_rotator_shards {}\n",
+            self.ingest_rotator_shards()
+        ));
 
         render_header(
             &mut out,
@@ -548,6 +579,26 @@ mod tests {
         assert!(bucket_line.contains("le=\""));
         assert!(bucket_line.contains("signal=\"traces\""));
         assert!(!bucket_line.contains("signal=\"metrics\""));
+    }
+
+    /// The shard gauge must distinguish "not reported" (0) from a genuinely
+    /// configured single shard, or a dashboard will conclude an embedder is
+    /// unsharded when it simply never called the setter.
+    #[test]
+    fn shard_gauge_distinguishes_unset_from_single_shard() {
+        let m = ContentionMetrics::new();
+        assert_eq!(
+            m.ingest_rotator_shards(),
+            0,
+            "unreported must read as 0, not as one shard"
+        );
+        m.set_ingest_rotator_shards(1);
+        assert_eq!(m.ingest_rotator_shards(), 1);
+        m.set_ingest_rotator_shards(4);
+        assert_eq!(m.ingest_rotator_shards(), 4);
+
+        let out = m.render();
+        assert!(out.contains("parqtel_ingest_rotator_shards 4"));
     }
 
     #[test]

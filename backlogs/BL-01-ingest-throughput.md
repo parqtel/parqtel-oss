@@ -22,12 +22,23 @@ Note: `tokio::sync::Mutex` is the correct primitive here (there is an `.await` i
 **Resolution.** Split into two parts, because they trade against each other and
 the trade is not mine to make unilaterally:
 
-- **BL-01-01a (landed, durability preserved)** — shard the rotator into N
-  buckets keyed by `metric_name` hash so unrelated metrics do not contend, and
-  only the flushing bucket blocks. The flush stays synchronous, so a request
-  is still not acknowledged until its data is on disk. Configurable via
-  `ingest.rotator_shards`; the per-shard row budget is divided down so the
-  total buffered rows per rotation round is unchanged.
+- **BL-01-01a (landed, durability preserved)** — shard the rotator's *locks*
+  into N buckets keyed by `metric_name` hash so unrelated metrics do not
+  contend. The flush stays synchronous, so a request is still not
+  acknowledged until its data is on disk; only the *other* requests stop
+  waiting. Configurable via `ingest.rotator_shards` (default 4).
+
+  **Shards are not independent blocks.** A flush takes the buffers from all
+  shards and writes **one** merged file, so the block count and query fan-out
+  are identical to the unsharded rotator. Sharding only the locks gets the
+  concurrency win without trading it for a worse one; independent per-shard
+  blocks would multiply query fan-out by the shard count.
+
+  Scope limit: only the **metrics** rotator is sharded. Logs and traces keep a
+  single writer because they have no free, request-stable series key to hash —
+  routing them round-robin would make one request able to trigger a flush in
+  *every* shard, which is strictly worse than today. See the follow-up note on
+  BL-01-15.
 - **BL-01-01b (deferred, see BL-01-14)** — hand the writer to a dedicated
   flush worker over a bounded channel and release the lock immediately, so
   even the flushing bucket does not block. This acknowledges a request before
@@ -41,8 +52,13 @@ contention is observable.
 flight; no endpoint observes a stall > 100 ms during a 1M-row flush;
 lock-wait p99 < 10 ms.
 
-**Effort** L (01a) + L (01b) · **Risk** Low for 01a (no durability change);
-Medium for 01b (durability semantics change, gated on BL-03-12)
+**Follow-up.** Ingest p99 is still bounded below by *flush duration / shards*,
+because the request that triggers a flush waits for it. Only BL-01-14 removes
+that bound.
+
+**Effort** L (01a, landed) + L (01b) · **Risk** Low for 01a (no durability
+change, no on-disk change); Medium for 01b (durability semantics change, gated
+on BL-03-12)
 
 ---
 
@@ -246,6 +262,50 @@ Medium for 01b (durability semantics change, gated on BL-03-12)
 | e | `fs::create_dir_all` + `fs::metadata` per flush | `writer.rs:131`, `:139` (and `:269`/`:277`, `:360`/`:368`) — directory is already created at `main.rs:150-151` | Create once at startup; take size from the writer's byte counter |
 | f | `/v1/traces` wired to the JSON handler only | `parqtel-server/src/router.rs:45` vs. content negotiation for metrics/logs (`:41`, `:43`; `handlers/ingest.rs:255-278`) | Wire content negotiation for traces too — currently protobuf exporters hitting `/v1/traces` fail at `service.rs:523` and are pushed onto slower paths |
 | g | `TraceWriter::buffer` growth cycle | `writer.rs:302-312` — fresh multi-hundred-MB `Vec` allocation per flush | Reuse the allocation across flushes (swap-and-clear with retained capacity) |
+
+---
+
+## BL-01-15 (M, follow-up) — Logs and traces rotators are still single-writer
+
+**Status:** open. Recorded as the deliberate scope limit of BL-01-01a rather
+than an oversight.
+
+**Evidence.** `BL-01-01a` shards the **metrics** rotator only
+(`parqtel-ingest/src/service.rs`, `BlockRotator::with_shards`). `LogRotator`
+and `TraceRotator` still hold a single writer behind one mutex, so a log or
+trace flush stalls every request for that signal.
+
+**Why it was not done.** Sharding needs a request-stable key, and the two
+signals do not have a free one:
+
+- Metrics carry `Metric.name`, already in hand, free to hash, and stable for
+  the process lifetime.
+- A log record has no series name. Its natural key is `resource_attributes`,
+  but hashing a `LabelSet` means walking a `BTreeMap` per record — cheaper
+  done once per request, at the cost of assuming the records in a batch share a
+  resource (true for OTLP, but an assumption).
+- Round-robin is worse than not sharding: one request would touch every shard,
+  so a single request could trigger a flush in each and pay N encodes instead
+  of one.
+
+**Resolution.** Pick a key and prove it is cheap before sharding:
+
+1. Logs: hash the resource attributes **once per request** (from the first
+   record) rather than per record, and measure the cost. Document the
+   same-resource assumption explicitly.
+2. Traces: hash the resource attributes of the first span, or accept a single
+   writer because tail sampling already groups spans by trace.
+3. Whichever is chosen, keep the merge-on-flush property from `BL-01-01a` so
+   block count does not multiply.
+
+Re-measure `parqtel_ingest_lock_wait_seconds{signal="logs"|"traces"}` first —
+if it is not materially high, this is not worth doing and should be closed.
+
+**Acceptance.** `parqtel_ingest_lock_wait_seconds` p99 for logs and/or traces
+improves ≥ 3× on the load-generator profile, with `parqtel_storage_blocks`
+unchanged for the same ingested row count.
+
+**Effort** M · **Risk** Medium (a wrong key choice makes things worse)
 
 ---
 

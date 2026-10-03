@@ -64,7 +64,8 @@ requiring a profiler:
 
 | Metric | What it tells you |
 |--------|-------------------|
-| `parqtel_ingest_lock_wait_seconds{signal}` | How long a request waited for the ingest mutex. This is the best single predictor of ingest p99 — a p99 approaching the flush duration means requests are queueing behind a flush. |
+| `parqtel_ingest_rotator_shards` | Writer shards in the metrics rotator. Reports 0 when an embedder never set it. |
+| `parqtel_ingest_lock_wait_seconds{signal}` | How long a request waited for the ingest mutex or one of its writer shards. This is the best single predictor of ingest p99 — a p99 approaching the flush duration means requests are queueing behind a flush. |
 | `parqtel_flush_duration_seconds{signal}` | Wall time of each flush that actually wrote rows (encode + compress + fsync), including capacity-triggered flushes inside a request, which the 5-second tick does not see. |
 | `parqtel_flush_inflight{signal}` | Flushes currently running. Normally 0 or 1. |
 | `parqtel_flush_rows_total{signal}` | Rows written to blocks since start — tells you how much work each flush is doing. |
@@ -84,9 +85,20 @@ All signals are emitted from boot, including zero-valued series, so a
 dashboard query does not have to handle series appearing and disappearing.
 
 **If `parqtel_ingest_lock_wait_seconds` p99 is high:** the blocks are too
-large or rotate too rarely, so each flush holds the mutex for a long time.
-Lower `PARQTEL__STORAGE__MAX_ROWS_PER_BLOCK` (and `PARQTEL__LOGS__...` for
-logs) to flush more often with less work each time.
+large or rotate too rarely, so each flush holds the lock for a long time.
+Two levers, in order of preference:
+
+1. Raise `PARQTEL__INGEST__ROTATOR_SHARDS` (default 4). Concurrent pushes
+   then continue into fresh shard buffers while a flush encodes, so only the
+   flush's *own* shard is blocked. Block count and durability are unchanged —
+   the shards are merged into a single file on flush.
+2. Lower `PARQTEL__STORAGE__MAX_ROWS_PER_BLOCK` (and `PARQTEL__LOGS__...` for
+   logs) so each flush does less work.
+
+Note that even fully sharded, a request that triggers a flush still waits for
+that flush: it is not acknowledged until its data is on disk. Removing that
+wait is BL-01-14 and is deferred until the WAL can recover an unacknowledged
+flush.
 
 **If `parqtel_index_lock_wait_seconds` is high:** the index is being
 re-serialised and rewritten while holding the write lock, so its cost scales

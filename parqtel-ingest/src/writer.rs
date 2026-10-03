@@ -75,6 +75,35 @@ impl BlockWriter {
         Ok(flushed)
     }
 
+    /// Combines several shard writers into one, so a sharded rotator still
+    /// produces a **single** Parquet block per flush.
+    ///
+    /// Sharding the ingest lock without merging here would multiply the block
+    /// count — and therefore query fan-out — by the shard count, trading one
+    /// problem for a worse one. Merging keeps the on-disk shape identical to
+    /// the unsharded rotator: same file count, same size, same row-group
+    /// layout.
+    ///
+    /// Shard writers hold disjoint metric sets by construction (a metric is
+    /// always routed to the same shard), so no deduplication is needed; the
+    /// merged writer simply re-groups on flush as it always did.
+    pub fn merge(writers: Vec<BlockWriter>) -> Result<BlockWriter> {
+        let mut config: Option<BlockConfig> = None;
+        let mut buffer = Vec::new();
+        for mut w in writers {
+            config = Some(w.config.clone());
+            buffer.append(&mut w.buffer);
+        }
+        let config =
+            config.ok_or_else(|| Error::Internal("Cannot merge an empty writer set".into()))?;
+        let capacity = config.max_rows_per_block;
+        Ok(BlockWriter {
+            config,
+            buffer,
+            capacity,
+        })
+    }
+
     pub fn len(&self) -> usize {
         self.buffer.len()
     }
