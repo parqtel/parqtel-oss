@@ -77,6 +77,32 @@ impl LabelSet {
         Self { inner }
     }
 
+    /// Copy of this set with the entries rejected by `keep` removed.
+    ///
+    /// One pass, O(L log L). The obvious alternative — repeatedly calling
+    /// [`Self::merge`] once per unwanted label — is O(L² log L), because every
+    /// `merge` clones the whole map. Aggregations and `histogram_quantile` both
+    /// used to build output label sets that way, once per series per step.
+    pub fn filtered<F: FnMut(&str, &str) -> bool>(&self, mut keep: F) -> Self {
+        Self {
+            inner: self
+                .inner
+                .iter()
+                .filter(|(k, v)| keep(k, v))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+        }
+    }
+
+    /// Copy of this set with `key` set to `value`.
+    ///
+    /// Single-pass alternative to `merge` with a one-entry set.
+    pub fn with(&self, key: &str, value: &str) -> Self {
+        let mut inner = self.inner.clone();
+        inner.insert(key.to_string(), value.to_string());
+        Self { inner }
+    }
+
     /// Converts the [LabelSet] to a compact JSON string.
     pub fn to_json(&self) -> Result<String> {
         serde_json::to_string(&self).map_err(Error::Serde)

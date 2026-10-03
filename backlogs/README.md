@@ -96,6 +96,8 @@ Removes the seconds-long global stalls. Largely mechanical, low risk, high payof
 - **BL-01-01a** shard the rotator's locks by metric-name hash, merging on flush
   so block count is unchanged — flush stays synchronous
 - **BL-02-04a** move the query CPU half onto the blocking pool
+- **BL-02-01/02** share label sets behind `Arc`; fingerprint-keyed, cached
+  aggregation groups — **6.9×** on the reference workload
 - BL-02-04 move the query CPU half into one `spawn_blocking`
 - BL-04-07 explicit tokio worker sizing; BL-04-04 global blocking semaphore
 

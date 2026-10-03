@@ -151,18 +151,37 @@ pub struct BinaryExpr {
     pub return_bool: bool,
 }
 
+/// Shared, immutable label set for one series.
+///
+/// A `LabelSet` is a `BTreeMap<String, String>`, so cloning it costs one heap
+/// allocation per label plus a fresh tree node. The evaluator used to clone a
+/// series' labels **once per step**: a 1 000-series × 1 000-step panel is
+/// ~20M string allocations whose results are all identical, because every step
+/// sees the same series.
+///
+/// Labels are therefore shared behind an `Arc`. Cloning becomes a refcount
+/// bump. Operators that genuinely change labels — aggregations, `label_replace`,
+/// `label_join` — build a new `LabelSet` and wrap it in a fresh `Arc`;
+/// everything that merely passes a series through clones the `Arc`.
+pub type SharedLabels = std::sync::Arc<LabelSet>;
+
+/// Wraps a freshly built label set for a new series.
+pub fn shared_labels(labels: LabelSet) -> SharedLabels {
+    std::sync::Arc::new(labels)
+}
+
 /// An evaluated instant vector at one timestamp: series → value.
 /// Ordered map semantics come from sorting at the end of evaluation.
 #[derive(Debug, Clone, Default)]
 pub struct InstantVector {
-    pub series: Vec<(LabelSet, f64)>,
+    pub series: Vec<(SharedLabels, f64)>,
 }
 
 impl InstantVector {
     pub fn get(&self, labels: &LabelSet) -> Option<f64> {
         self.series
             .iter()
-            .find(|(ls, _)| ls == labels)
+            .find(|(ls, _)| ls.as_ref() == labels)
             .map(|(_, v)| *v)
     }
     pub fn is_empty(&self) -> bool {
@@ -171,7 +190,7 @@ impl InstantVector {
 }
 
 /// Evaluated range vector: per-series windows for a single step.
-pub type RangeVector = Vec<(LabelSet, Vec<Sample>)>;
+pub type RangeVector = Vec<(SharedLabels, Vec<Sample>)>;
 
 /// Evaluation context for one step of a range query.
 #[derive(Debug, Clone, Copy)]
@@ -187,7 +206,10 @@ pub struct EvalContext {
 
 /// Raw sample source for the evaluator: metric name → per-series points
 /// (already filtered by matchers, sorted by timestamp).
-pub type SeriesData = HashMap<String, Vec<(LabelSet, Vec<(i64, f64)>)>>;
+///
+/// Labels are shared, so the per-step evaluation clones `Arc`s rather than
+/// whole label sets. See [`SharedLabels`].
+pub type SeriesData = HashMap<String, Vec<(SharedLabels, Vec<(i64, f64)>)>>;
 
 /// One native/OTLP histogram sample (explicit-bucket form).
 #[derive(Debug, Clone)]
@@ -298,7 +320,7 @@ impl HistSample {
 }
 
 /// Raw histogram sample source: metric name → per-series histogram points.
-pub type HistData = HashMap<String, Vec<(LabelSet, Vec<HistSample>)>>;
+pub type HistData = HashMap<String, Vec<(SharedLabels, Vec<HistSample>)>>;
 
 pub mod keywords {
     pub const AGGREGATIONS: &[&str] = &[

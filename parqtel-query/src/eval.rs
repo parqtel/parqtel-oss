@@ -22,6 +22,16 @@ pub struct Evaluator<'a> {
     all_names: Vec<String>,
     /// Instant-selector lookback (Prometheus lookback-delta; 5m default).
     lookback_ns: i64,
+    /// Group label sets for aggregations, keyed by the grouping fingerprint.
+    ///
+    /// The *values* of an aggregation group change every step but its *labels*
+    /// never do, so building the output label set once per group and reusing it
+    /// across steps removes one `LabelSet` construction per series per step.
+    ///
+    /// A `Mutex` rather than a `RefCell` to keep `Evaluator` `Sync`; the lock
+    /// is uncontended and taken once per series per step, against the
+    /// allocations it avoids.
+    group_cache: std::sync::Mutex<std::collections::HashMap<u64, crate::ast::SharedLabels>>,
 }
 
 impl<'a> Evaluator<'a> {
@@ -31,6 +41,7 @@ impl<'a> Evaluator<'a> {
             data,
             hist_data: None,
             all_names: data.keys().cloned().collect(),
+            group_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
             lookback_ns: 5 * 60 * 1_000_000_000,
         }
     }
@@ -41,6 +52,7 @@ impl<'a> Evaluator<'a> {
             data,
             hist_data: None,
             all_names: data.keys().cloned().collect(),
+            group_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
             lookback_ns: lookback_ns.max(1),
         }
     }
@@ -52,13 +64,42 @@ impl<'a> Evaluator<'a> {
         self
     }
 
+    /// Builds (and caches) the label set for one aggregation group.
+    ///
+    /// Single pass over the projected labels rather than a `merge` per label,
+    /// which was O(L^2 log L). The result is cached by fingerprint for the whole
+    /// query, because a group's labels are identical on every step even though its
+    /// values are not.
+    fn cache_group_labels(&self, key: u64, labels: &LabelSet, grouping: &Grouping) {
+        let mut cache = self.group_cache.lock().unwrap_or_else(|e| e.into_inner());
+        if cache.contains_key(&key) {
+            return;
+        }
+        let built = match grouping {
+            Grouping::None => LabelSet::default(),
+            Grouping::By(list) => LabelSet::try_from_iter(
+                list.iter()
+                    .filter_map(|l| labels.get(l).map(|v| (l.clone(), v.to_string()))),
+            )
+            .unwrap_or_default(),
+            Grouping::Without(list) => LabelSet::try_from_iter(
+                labels
+                    .iter()
+                    .filter(|(k, _)| *k != "__name__" && !list.iter().any(|l| l == k))
+                    .map(|(k, v)| (k.to_string(), v.to_string())),
+            )
+            .unwrap_or_default(),
+        };
+        cache.insert(key, crate::ast::shared_labels(built));
+    }
+
     /// Latest histogram sample for each series of `name` at ctx.ts_ns
     /// (same lookback rule as instant selectors).
     fn hist_selector_windows(
         &self,
         sel: &SelectorExpr,
         ctx: EvalContext,
-    ) -> Result<Vec<(LabelSet, crate::ast::HistSample)>> {
+    ) -> Result<Vec<(crate::ast::SharedLabels, crate::ast::HistSample)>> {
         let out = Vec::new();
         let Some(name) = &sel.metric_name else {
             return Ok(out);
@@ -84,7 +125,10 @@ impl<'a> Evaluator<'a> {
             if s.timestamp_ns < shifted - lookback {
                 continue;
             }
-            found.push((labels.clone(), s.clone()));
+            // `labels` is shared across every step; cloning the Arc is a
+            // refcount bump where cloning the LabelSet was one allocation per
+            // label per step.
+            found.push((std::sync::Arc::clone(labels), s.clone()));
         }
         Ok(found)
     }
@@ -119,7 +163,7 @@ impl<'a> Evaluator<'a> {
             Expr::Number(n) => Ok(InstantVector {
                 // Scalars are handled specially in binary ops; as a plain
                 // instant vector a scalar has empty labels.
-                series: vec![(LabelSet::default(), *n)],
+                series: vec![(crate::ast::shared_labels(LabelSet::default()), *n)],
             }),
             Expr::Paren(inner) => self.eval(inner, ctx),
             Expr::Str(_) => Err(Error::Validation(
@@ -202,24 +246,34 @@ impl<'a> Evaluator<'a> {
                 let mut sub_ctx = ctx;
                 sub_ctx.subquery_step_ns = Some(step);
                 // Cache of inner instant vectors per timestamp.
-                let mut series_windows: BTreeMap<LabelSet, Vec<crate::models::Sample>> =
-                    BTreeMap::new();
+                // Keyed by fingerprint rather than by label set: an
+                // `BTreeMap<LabelSet, _>` would compare whole label sets on
+                // every lookup, and grouping by fingerprint keeps the first
+                // occurrence's `Arc` so the window carries shared labels.
+                let mut order: Vec<u64> = Vec::new();
+                let mut series_windows: std::collections::HashMap<
+                    u64,
+                    (crate::ast::SharedLabels, Vec<crate::models::Sample>),
+                > = std::collections::HashMap::new();
                 let mut ts = window_start + step;
                 while ts <= window_end {
                     sub_ctx.ts_ns = ts;
                     let iv = self.eval(inner, sub_ctx)?;
                     for (labels, v) in iv.series {
-                        series_windows
-                            .entry(labels)
-                            .or_default()
-                            .push(crate::models::Sample {
-                                timestamp_ns: ts,
-                                value: v,
-                            });
+                        let fp = labels.fingerprint();
+                        let slot = series_windows.entry(fp).or_insert_with(|| {
+                            order.push(fp);
+                            (labels, Vec::new())
+                        });
+                        slot.1.push(crate::models::Sample {
+                            timestamp_ns: ts,
+                            value: v,
+                        });
                     }
                     ts += step;
                 }
-                for (labels, samples) in series_windows {
+                for fp in order {
+                    let (labels, samples) = series_windows.remove(&fp).unwrap_or_default();
                     if !samples.is_empty() {
                         out.push((labels, samples));
                     }
@@ -254,7 +308,10 @@ impl<'a> Evaluator<'a> {
                 Ok(map_values(v, |x| math_fn(&call.name, x)))
             }
             "pi" => Ok(InstantVector {
-                series: vec![(LabelSet::default(), std::f64::consts::PI)],
+                series: vec![(
+                    crate::ast::shared_labels(LabelSet::default()),
+                    std::f64::consts::PI,
+                )],
             }),
             "atan2" => {
                 // atan2(y, x): y is the vector, x a scalar (PromQL flips the
@@ -296,22 +353,28 @@ impl<'a> Evaluator<'a> {
                 let v = self.eval(&call.args[0], ctx)?;
                 if v.series.len() == 1 {
                     Ok(InstantVector {
-                        series: vec![(LabelSet::default(), v.series[0].1)],
+                        series: vec![(
+                            crate::ast::shared_labels(LabelSet::default()),
+                            v.series[0].1,
+                        )],
                     })
                 } else {
                     Ok(InstantVector {
-                        series: vec![(LabelSet::default(), f64::NAN)],
+                        series: vec![(crate::ast::shared_labels(LabelSet::default()), f64::NAN)],
                     })
                 }
             }
             "vector" => {
                 let s = self.eval_scalar(&call.args[0], ctx)?;
                 Ok(InstantVector {
-                    series: vec![(LabelSet::default(), s)],
+                    series: vec![(crate::ast::shared_labels(LabelSet::default()), s)],
                 })
             }
             "time" => Ok(InstantVector {
-                series: vec![(LabelSet::default(), ctx.ts_ns as f64 / 1e9)],
+                series: vec![(
+                    crate::ast::shared_labels(LabelSet::default()),
+                    ctx.ts_ns as f64 / 1e9,
+                )],
             }),
             "absent" => self.eval_absent(call, ctx),
             // Date helpers: operate on the evaluation timestamp.
@@ -322,7 +385,7 @@ impl<'a> Evaluator<'a> {
                 if call.args.is_empty() {
                     let v = date_component(&call.name, ctx.ts_ns as f64 / 1e9);
                     Ok(InstantVector {
-                        series: vec![(LabelSet::default(), v)],
+                        series: vec![(crate::ast::shared_labels(LabelSet::default()), v)],
                     })
                 } else {
                     let v = self.eval(&call.args[0], ctx)?;
@@ -379,7 +442,7 @@ impl<'a> Evaluator<'a> {
                     )));
                 };
                 let wins = self.hist_selector_windows(sel, ctx)?;
-                let out: Vec<(LabelSet, f64)> = wins
+                let out: Vec<(crate::ast::SharedLabels, f64)> = wins
                     .into_iter()
                     .map(|(labels, h)| {
                         let v = match call.name.as_str() {
@@ -406,7 +469,7 @@ impl<'a> Evaluator<'a> {
                     )));
                 };
                 let wins = self.hist_selector_windows(sel, ctx)?;
-                let out: Vec<(LabelSet, f64)> = wins
+                let out: Vec<(crate::ast::SharedLabels, f64)> = wins
                     .into_iter()
                     .map(|(labels, h)| {
                         let v = if call.name == "histogram_stddev" {
@@ -429,7 +492,7 @@ impl<'a> Evaluator<'a> {
                     ));
                 };
                 let wins = self.hist_selector_windows(sel, ctx)?;
-                let out: Vec<(LabelSet, f64)> = wins
+                let out: Vec<(crate::ast::SharedLabels, f64)> = wins
                     .into_iter()
                     .map(|(labels, h)| (labels, h.fraction(lower, upper)))
                     .collect();
@@ -452,7 +515,7 @@ impl<'a> Evaluator<'a> {
                                 .unwrap_or(false);
                             if has_native {
                                 let wins = self.hist_selector_windows(sel, ctx)?;
-                                let out: Vec<(LabelSet, f64)> = wins
+                                let out: Vec<(crate::ast::SharedLabels, f64)> = wins
                                     .into_iter()
                                     .filter_map(|(labels, h)| {
                                         let v = h.quantile(q);
@@ -492,11 +555,11 @@ impl<'a> Evaluator<'a> {
                     }
                 }
                 return Ok(InstantVector {
-                    series: vec![(labels, 1.0)],
+                    series: vec![(crate::ast::shared_labels(labels), 1.0)],
                 });
             }
             return Ok(InstantVector {
-                series: vec![(LabelSet::default(), 1.0)],
+                series: vec![(crate::ast::shared_labels(LabelSet::default()), 1.0)],
             });
         }
         Ok(InstantVector::default())
@@ -521,10 +584,13 @@ impl<'a> Evaluator<'a> {
                         rep = rep.replace(&format!("${i}"), m.as_str());
                     }
                 }
-                let mut new_labels = labels.clone();
+                // label_replace genuinely changes the labels, so this is a new
+                // series identity and must get a fresh Arc — see BL-02-01 for
+                // retiring the merge-per-label pattern (BL-02-02).
+                let mut new_labels = (*labels).clone();
                 new_labels = new_labels
                     .merge(&LabelSet::try_from_iter(vec![(dst.clone(), rep)]).unwrap_or_default());
-                out.push((new_labels, val));
+                out.push((crate::ast::shared_labels(new_labels), val));
             } else {
                 out.push((labels, val));
             }
@@ -547,11 +613,13 @@ impl<'a> Evaluator<'a> {
                 .iter()
                 .map(|s| labels.get(s).map(|x| x.to_string()).unwrap_or_default())
                 .collect();
-            let new_labels = labels.merge(
+            // Genuinely new labels: clone the existing set, then insert.
+            let mut new_labels = (*labels).clone();
+            new_labels = new_labels.merge(
                 &LabelSet::try_from_iter(vec![(dst.clone(), joined.join(&sep))])
                     .unwrap_or_default(),
             );
-            out.push((new_labels, val));
+            out.push((crate::ast::shared_labels(new_labels), val));
         }
         Ok(InstantVector { series: out })
     }
@@ -570,7 +638,10 @@ impl<'a> Evaluator<'a> {
                 .filter(|(k, _)| !dels.contains(&k.to_string()))
                 .map(|(k, v)| (k.to_string(), v.to_string()))
                 .collect::<Vec<_>>();
-            out.push((LabelSet::try_from_iter(kept).unwrap_or_default(), val));
+            out.push((
+                crate::ast::shared_labels(LabelSet::try_from_iter(kept).unwrap_or_default()),
+                val,
+            ));
         }
         Ok(InstantVector { series: out })
     }
@@ -585,41 +656,19 @@ impl<'a> Evaluator<'a> {
                 .get("le")
                 .and_then(|s| s.parse::<f64>().ok())
                 .unwrap_or(f64::INFINITY);
-            let mut rest = labels.clone();
-            // remove le
-            let mut without_le = LabelSet::default();
-            for (k, v) in rest.iter() {
-                if k != "le" {
-                    without_le = without_le.merge(
-                        &LabelSet::try_from_iter(vec![(k.to_string(), v.to_string())])
-                            .unwrap_or_default(),
-                    );
-                }
-            }
-            rest = without_le;
+            // Drop the `le` bucket label in one pass; the previous
+            // merge-per-label loop was O(L² log L) per series per step.
+            let rest = labels.filtered(|k, _| k != "le");
             hists.entry(rest).or_default().push((le, val));
         }
         let mut out = Vec::new();
         for (labels, mut buckets) in hists {
             buckets.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-            let mut labels = labels;
-            labels = labels.merge(
-                &LabelSet::try_from_iter(vec![("__name__".to_string(), String::new())])
-                    .unwrap_or_default(),
-            );
             if let Some(qv) = quantile_from_buckets(q, &buckets) {
-                // Drop the __name__="" we just added — Prometheus clears the
-                // metric name for histogram_quantile results.
-                let mut clean = LabelSet::default();
-                for (k, v) in labels.iter() {
-                    if k != "__name__" {
-                        clean = clean.merge(
-                            &LabelSet::try_from_iter(vec![(k.to_string(), v.to_string())])
-                                .unwrap_or_default(),
-                        );
-                    }
-                }
-                out.push((clean, qv));
+                // Prometheus clears the metric name for histogram_quantile
+                // results, which `filtered` does in one pass.
+                let clean = labels.filtered(|k, _| k != "__name__");
+                out.push((crate::ast::shared_labels(clean), qv));
             }
         }
         Ok(InstantVector { series: out })
@@ -650,11 +699,11 @@ impl<'a> Evaluator<'a> {
                         }
                     }
                     return Ok(InstantVector {
-                        series: vec![(labels, 1.0)],
+                        series: vec![(crate::ast::shared_labels(labels), 1.0)],
                     });
                 }
                 return Ok(InstantVector {
-                    series: vec![(LabelSet::default(), 1.0)],
+                    series: vec![(crate::ast::shared_labels(LabelSet::default()), 1.0)],
                 });
             }
             return Ok(InstantVector::default());
@@ -674,53 +723,47 @@ impl<'a> Evaluator<'a> {
     // ── Aggregations ──────────────────────────────────────────────────────
     fn eval_aggregation(&self, agg: &AggregationExpr, ctx: EvalContext) -> Result<InstantVector> {
         let v = self.eval(&agg.expr, ctx)?;
-        // group key per series
-        let mut groups: BTreeMap<Vec<(String, String)>, Vec<f64>> = BTreeMap::new();
-        let mut group_labels: BTreeMap<Vec<(String, String)>, LabelSet> = BTreeMap::new();
-
+        // Grouping is recomputed for every series on every step, so this loop
+        // is the hottest part of an aggregation. It used to build a
+        // `Vec<(String, String)>` key (two allocations per label), clone it
+        // twice more, and rebuild the output `LabelSet` by merging one label
+        // at a time — O(L^2 log L) per series per step.
+        //
+        // Now: an allocation-free fingerprint is the key, and the group's
+        // label set is built once and cached for the whole query.
+        // Normalised once per aggregation, not once per series: `by(a,b)` and
+        // `by(b,a)` select the same pairs and must hash identically, and the
+        // list has to be in a canonical order for that.
+        let grouping = normalize_grouping(&agg.grouping);
+        let mut groups: std::collections::HashMap<u64, Vec<f64>> = std::collections::HashMap::new();
+        let mut group_order: Vec<u64> = Vec::new();
         for (labels, val) in &v.series {
-            let key: Vec<(String, String)> = match &agg.grouping {
-                Grouping::None => vec![],
-                Grouping::By(list) => list
-                    .iter()
-                    .filter_map(|l| labels.get(l).map(|x| (l.clone(), x.to_string())))
-                    .collect(),
-                Grouping::Without(list) => {
-                    let mut k = Vec::new();
-                    for (lk, lv) in labels.iter() {
-                        let lk_str = lk.to_string();
-                        if lk_str == "__name__" || list.contains(&lk_str) {
-                            continue;
-                        }
-                        k.push((lk_str, lv.to_string()));
-                    }
-                    k.sort();
-                    k
+            let key = grouping_fingerprint(labels, &grouping);
+            match groups.get_mut(&key) {
+                Some(vals) => vals.push(*val),
+                None => {
+                    group_order.push(key);
+                    groups.insert(key, vec![*val]);
+                    self.cache_group_labels(key, labels, &grouping);
                 }
-            };
-            groups.entry(key.clone()).or_default().push(*val);
-            group_labels.entry(key.clone()).or_insert_with(|| {
-                match &agg.grouping {
-                    Grouping::None => LabelSet::default(),
-                    Grouping::By(_) | Grouping::Without(_) => {
-                        // Reconstruct from the first series' labels
-                        let mut l = LabelSet::default();
-                        for (k, vv) in &key {
-                            l = l.merge(
-                                &LabelSet::try_from_iter(vec![(k.clone(), vv.clone())])
-                                    .unwrap_or_default(),
-                            );
-                        }
-                        l
-                    }
-                }
-            });
+            }
         }
+        // Deterministic output order: sorted by key, as the previous
+        // BTreeMap<Vec<..>> was. Not first-appearance order, which would make
+        // tie-breaks in any downstream sort unstable.
+        group_order.sort_unstable();
 
+        let cache = self.group_cache.lock().unwrap_or_else(|e| e.into_inner());
         let mut out = Vec::new();
-        for (key, vals) in groups {
-            let labels = group_labels.get(&key).cloned().unwrap_or_default();
-            let result = match agg.op {
+        for key in group_order {
+            let Some(vals) = groups.get(&key) else {
+                continue;
+            };
+            let labels = match cache.get(&key) {
+                Some(l) => crate::ast::SharedLabels::clone(l),
+                None => continue,
+            };
+            let result: Option<f64> = match agg.op {
                 AggregationOp::Sum => Some(vals.iter().sum()),
                 AggregationOp::Avg => Some(vals.iter().sum::<f64>() / vals.len() as f64),
                 AggregationOp::Min => {
@@ -777,7 +820,7 @@ impl<'a> Evaluator<'a> {
                     .map(|p| self.eval_scalar(p, ctx))
                     .transpose()?
                     .unwrap_or(1.0) as usize;
-                let mut series: Vec<(LabelSet, f64)> = v.series;
+                let mut series: Vec<(crate::ast::SharedLabels, f64)> = v.series;
                 if agg.op == AggregationOp::TopK {
                     series
                         .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
@@ -799,7 +842,7 @@ impl<'a> Evaluator<'a> {
                 vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
                 let qv = quantile_of(q, &vals);
                 return Ok(InstantVector {
-                    series: vec![(LabelSet::default(), qv)],
+                    series: vec![(crate::ast::shared_labels(LabelSet::default()), qv)],
                 });
             }
             AggregationOp::CountValues => {
@@ -815,12 +858,14 @@ impl<'a> Evaluator<'a> {
                 for (_, v) in &v.series {
                     *counts.entry(fmt_num(*v)).or_insert(0) += 1;
                 }
-                let out: Vec<(LabelSet, f64)> = counts
+                let out: Vec<(crate::ast::SharedLabels, f64)> = counts
                     .into_iter()
                     .map(|(val, n)| {
                         (
-                            LabelSet::try_from_iter(vec![(label_name.clone(), val)])
-                                .unwrap_or_default(),
+                            crate::ast::shared_labels(
+                                LabelSet::try_from_iter(vec![(label_name.clone(), val)])
+                                    .unwrap_or_default(),
+                            ),
                             n as f64,
                         )
                     })
@@ -847,7 +892,7 @@ impl<'a> Evaluator<'a> {
             (Expr::Number(a), Expr::Number(bb)) => {
                 let v = apply_binary_op(b.op, *a, *bb, b.return_bool)?;
                 Ok(InstantVector {
-                    series: vec![(LabelSet::default(), v)],
+                    series: vec![(crate::ast::shared_labels(LabelSet::default()), v)],
                 })
             }
             (Expr::Number(a), _) => {
@@ -951,7 +996,7 @@ impl<'a> Evaluator<'a> {
 
         // Build rhs index by match key
         type MatchKey = Vec<(String, String)>;
-        type Matches = Vec<(LabelSet, f64)>;
+        type Matches = Vec<(crate::ast::SharedLabels, f64)>;
         let mut rhs_index: BTreeMap<MatchKey, Matches> = BTreeMap::new();
         for (labels, v) in rhs.series {
             rhs_index
@@ -983,19 +1028,18 @@ impl<'a> Evaluator<'a> {
                             let v = apply_binary_op(b.op, lv, *rv, b.return_bool)?;
                             if let Some(v) = filter_cmp(b, v) {
                                 // group_left: projected match labels + extras from RHS
-                                let mut labels = result_labels(b, &llabels, rlabels);
+                                // group_left: LHS labels plus extras from RHS.
+                                let base = result_labels(b, &llabels, rlabels);
+                                let mut labels = (*base).clone();
                                 for e in extra.iter() {
                                     if let Some(ev) = rlabels.get(e) {
-                                        labels = labels.merge(
-                                            &LabelSet::try_from_iter(vec![(
-                                                e.clone(),
-                                                ev.to_string(),
-                                            )])
-                                            .unwrap_or_default(),
-                                        );
+                                        // `with` is a single-pass insert;
+                                        // `merge` with a one-entry set clones
+                                        // the whole map.
+                                        labels = labels.with(e, ev);
                                     }
                                 }
-                                out.push((labels, v));
+                                out.push((crate::ast::shared_labels(labels), v));
                             }
                         }
                     }
@@ -1064,29 +1108,108 @@ fn filter_cmp(b: &BinaryExpr, v: f64) -> Option<f64> {
     }
 }
 
-/// Result-label projection per PromQL semantics (G3):
+/// Canonical form of a grouping: the `By` label list sorted and deduplicated.
+///
+/// Sorting happens once per aggregation rather than once per series per step,
+/// so that the per-series fingerprint can hash in a canonical order and
+/// `by(a,b)` and `by(b,a)` agree without paying for a sort in the hot loop.
+// The hot loop therefore requires a normalised grouping; callers get one from
+/// here.
+fn normalize_grouping(grouping: &Grouping) -> Grouping {
+    match grouping {
+        Grouping::By(list) => {
+            let mut sorted: Vec<String> = list.clone();
+            sorted.sort();
+            sorted.dedup();
+            Grouping::By(sorted)
+        }
+        other => other.clone(),
+    }
+}
+
+/// Allocation-free fingerprint of a series' grouping projection.
+///
+/// Recomputed for every series on every step, so this must not allocate. The
+/// obvious key — a `Vec<(String, String)>` of the projected labels — costs two
+/// allocations per label and is then cloned twice more for the two maps it
+/// keys. Hashing the projected pairs straight into a hasher avoids all of that.
+///
+/// Only equality matters here, so a plain `DefaultHasher` is fine: a collision
+/// would merge two groups, which the tests below check for.
+fn grouping_fingerprint(labels: &LabelSet, grouping: &Grouping) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    match grouping {
+        Grouping::None => {}
+        Grouping::By(list) => {
+            // Hash in the declared order so `by(a,b)` and `by(b,a)` agree.
+            for l in list {
+                if let Some(v) = labels.get(l) {
+                    l.hash(&mut h);
+                    v.hash(&mut h);
+                } else {
+                    // A missing label is part of the key: `by(a)` with and
+                    // without `a` must not collapse into one group.
+                    l.hash(&mut h);
+                    0u8.hash(&mut h);
+                }
+            }
+        }
+        Grouping::Without(list) => {
+            // `labels.iter()` is already sorted, so the order is canonical.
+            for (k, v) in labels.iter() {
+                if k == "__name__" || list.iter().any(|l| l == k) {
+                    continue;
+                }
+                k.hash(&mut h);
+                v.hash(&mut h);
+            }
+        }
+    }
+    h.finish()
+}
+
+/// Result labels for a binary op: the G3 projection.
+///
+/// PromQL semantics:
 /// - default (no modifier): LHS labels minus `__name__`
 /// - `on(x, ...)`: ONLY the on-labels
 /// - `ignoring(x, ...)`: LHS labels minus `__name__` minus the ignored set
-fn result_labels(b: &BinaryExpr, lhs: &LabelSet, _rhs: &LabelSet) -> LabelSet {
-    let mut out = LabelSet::default();
+///
+/// Prometheus drops `__name__` from binary-op results and applies the
+/// `on`/`ignoring` projection when one is present. In the overwhelmingly common
+/// case of `foo / bar` — no projection, and no metric name to drop — the result
+/// labels are identical to the LHS labels, so the caller's `Arc` is reused
+/// instead of rebuilding the set. Otherwise a fresh set is built in one pass
+/// (`filtered`), not by merging one label at a time.
+fn result_labels(
+    b: &BinaryExpr,
+    lhs: &crate::ast::SharedLabels,
+    _rhs: &crate::ast::SharedLabels,
+) -> crate::ast::SharedLabels {
     let matching = b.matching.as_ref().map(|(vm, _)| vm);
-    for (k, v) in lhs.iter() {
+    let set = lhs.as_ref();
+
+    let projects = match matching {
+        Some(VectorMatch::On(list)) => set.keys().any(|k| !list.contains(k)),
+        Some(VectorMatch::Ignoring(list)) => set.keys().any(|k| list.contains(k)),
+        Some(VectorMatch::All) | None => false,
+    };
+    let drops_name = set.get("__name__").is_some();
+
+    if !projects && !drops_name {
+        return crate::ast::SharedLabels::clone(lhs);
+    }
+    crate::ast::shared_labels(set.filtered(|k, _| {
         if k == "__name__" {
-            continue;
+            return false;
         }
-        let keep = match matching {
+        match matching {
             Some(VectorMatch::On(list)) => list.iter().any(|l| l == k),
             Some(VectorMatch::Ignoring(list)) => !list.iter().any(|l| l == k),
             Some(VectorMatch::All) | None => true,
-        };
-        if keep {
-            out = out.merge(
-                &LabelSet::try_from_iter(vec![(k.to_string(), v.to_string())]).unwrap_or_default(),
-            );
         }
-    }
-    out
+    }))
 }
 
 fn apply_binary_op(op: BinaryOp, a: f64, b: f64, return_bool: bool) -> Result<f64> {
@@ -1542,8 +1665,8 @@ mod tests {
         data.insert(
             "requests".into(),
             vec![
-                (mk_labels("a"), points.clone()),
-                (mk_labels("b"), points.clone()),
+                (crate::ast::shared_labels(mk_labels("a")), points.clone()),
+                (crate::ast::shared_labels(mk_labels("b")), points.clone()),
             ],
         );
         data
@@ -1740,9 +1863,18 @@ mod tests {
         data.insert(
             "vals".into(),
             vec![
-                (mk("a"), vec![(95_000_000_000, 30.0)]),
-                (mk("b"), vec![(95_000_000_000, 10.0)]),
-                (mk("c"), vec![(95_000_000_000, 20.0)]),
+                (
+                    crate::ast::shared_labels(mk("a")),
+                    vec![(95_000_000_000, 30.0)],
+                ),
+                (
+                    crate::ast::shared_labels(mk("b")),
+                    vec![(95_000_000_000, 10.0)],
+                ),
+                (
+                    crate::ast::shared_labels(mk("c")),
+                    vec![(95_000_000_000, 20.0)],
+                ),
             ],
         );
         let ev = Evaluator::new(&data);
@@ -1813,6 +1945,116 @@ mod tests {
         );
     }
 
+    /// The aggregation group key is now a hash, so a collision would silently
+    /// merge two groups. These cover the cases where the projection looks
+    /// similar but must stay distinct.
+    #[test]
+    fn grouping_fingerprint_separates_distinct_projections() {
+        let ls = |pairs: &[(&str, &str)]| {
+            LabelSet::try_from_iter(pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())))
+                .unwrap()
+        };
+        let by = |l: &[&str]| Grouping::By(l.iter().map(|s| s.to_string()).collect());
+
+        let a = ls(&[("a", "1"), ("b", "2")]);
+        let b = ls(&[("a", "1"), ("b", "3")]);
+        assert_ne!(
+            grouping_fingerprint(&a, &by(&["a", "b"])),
+            grouping_fingerprint(&b, &by(&["a", "b"])),
+            "different values must not collide"
+        );
+
+        // A missing label is part of the key: `by(a)` with a="1" and with a
+        // absent must not collapse into one group.
+        let missing = ls(&[("b", "2")]);
+        assert_ne!(
+            grouping_fingerprint(&a, &by(&["a"])),
+            grouping_fingerprint(&missing, &by(&["a"])),
+            "absent label must be distinguished from a present one"
+        );
+
+        // The same projection from differently-ordered input sets must agree.
+        let reordered = ls(&[("b", "2"), ("a", "1")]);
+        assert_eq!(
+            grouping_fingerprint(&a, &by(&["a", "b"])),
+            grouping_fingerprint(&reordered, &by(&["a", "b"])),
+            "label order in the source set must not matter"
+        );
+
+        // `by(a,b)` and `by(b,a)` select the same pairs and must agree. The
+        // hot loop cannot sort per series, so `eval_aggregation` normalises the
+        // list once per call; this asserts that contract.
+        assert_eq!(
+            grouping_fingerprint(&a, &normalize_grouping(&by(&["a", "b"]))),
+            grouping_fingerprint(&a, &normalize_grouping(&by(&["b", "a"]))),
+            "selecting the same pairs in a different declared order must agree"
+        );
+
+        // `without` excludes labels; two sets differing only in an excluded
+        // label belong to the same group.
+        let without_a = |l: &[&str]| Grouping::Without(l.iter().map(|s| s.to_string()).collect());
+        let with_extra = ls(&[("a", "1"), ("b", "2"), ("z", "9")]);
+        assert_eq!(
+            grouping_fingerprint(&a, &without_a(&["a", "z"])),
+            grouping_fingerprint(&with_extra, &without_a(&["a", "z"])),
+            "an excluded label must not split a group"
+        );
+
+        // Grouping::None puts everything in one group.
+        assert_eq!(
+            grouping_fingerprint(&a, &Grouping::None),
+            grouping_fingerprint(&b, &Grouping::None)
+        );
+    }
+
+    /// A group's labels are built once and reused across steps; the values must
+    /// still be recomputed per step. This pins the two halves of that split.
+    #[test]
+    fn group_labels_are_cached_across_steps_but_values_are_not() {
+        let mk = |v: &str| {
+            LabelSet::try_from_iter(vec![
+                ("host".to_string(), "h1".to_string()),
+                ("dc".to_string(), v.to_string()),
+            ])
+            .unwrap()
+        };
+        let mut data = SeriesData::new();
+        data.insert(
+            "m".into(),
+            vec![
+                (
+                    crate::ast::shared_labels(mk("a")),
+                    vec![(0, 1.0), (10_000_000_000, 2.0)],
+                ),
+                (
+                    crate::ast::shared_labels(mk("b")),
+                    vec![(0, 10.0), (10_000_000_000, 20.0)],
+                ),
+            ],
+        );
+        let eval = Evaluator::new(&data);
+        let expr = crate::parser::parse_expr("sum by (dc) (m)").unwrap();
+
+        let steps = eval
+            .eval_steps(&expr, 0, 20_000_000_000, 10_000_000_000)
+            .unwrap();
+        assert_eq!(steps.len(), 2, "two steps");
+        for (_, iv) in &steps {
+            assert_eq!(iv.series.len(), 2, "one group per dc value");
+        }
+        // Values differ per step; labels do not.
+        let v0: Vec<f64> = steps[0].1.series.iter().map(|(_, v)| *v).collect();
+        let v1: Vec<f64> = steps[1].1.series.iter().map(|(_, v)| *v).collect();
+        assert_ne!(v0, v1, "each step must recompute the aggregate");
+        assert_eq!(
+            steps[0].1.series[0].0.as_ref(),
+            steps[1].1.series[0].0.as_ref(),
+            "group labels must be identical across steps"
+        );
+        // The cache holds one entry per distinct group.
+        assert_eq!(eval.group_cache.lock().unwrap().len(), 2);
+    }
+
     #[test]
     fn fn_range_changes_resets_deriv() {
         // Series with a reset and a change:
@@ -1822,7 +2064,7 @@ mod tests {
         data.insert(
             "cnt".into(),
             vec![(
-                ls,
+                crate::ast::shared_labels(ls.clone()),
                 vec![
                     (0, 1.0),
                     (10_000_000_000, 2.0),
@@ -1894,9 +2136,18 @@ mod tests {
         data.insert(
             "lat_bucket".into(),
             vec![
-                (mk("1"), vec![(95_000_000_000, 10.0)]),
-                (mk("5"), vec![(95_000_000_000, 40.0)]),
-                (mk("+Inf"), vec![(95_000_000_000, 50.0)]),
+                (
+                    crate::ast::shared_labels(mk("1")),
+                    vec![(95_000_000_000, 10.0)],
+                ),
+                (
+                    crate::ast::shared_labels(mk("5")),
+                    vec![(95_000_000_000, 40.0)],
+                ),
+                (
+                    crate::ast::shared_labels(mk("+Inf")),
+                    vec![(95_000_000_000, 50.0)],
+                ),
             ],
         );
         let ev = Evaluator::new(&data);
@@ -1925,7 +2176,10 @@ mod tests {
         };
         let mut hist = crate::ast::HistData::new();
         let ls = LabelSet::try_from_iter(vec![("service".to_string(), "a".to_string())]).unwrap();
-        hist.insert("lat".into(), vec![(ls, vec![mk_hist(95_000_000_000)])]);
+        hist.insert(
+            "lat".into(),
+            vec![(crate::ast::shared_labels(ls), vec![mk_hist(95_000_000_000)])],
+        );
         // SeriesData must still exist for the same selector to be scanned
         // as numeric — histogram series live in hist only; give it an
         // empty numeric series so refs resolve.
@@ -2008,9 +2262,18 @@ mod tests {
         data.insert(
             "vals".into(),
             vec![
-                (mk("a"), vec![(95_000_000_000, 1.0)]),
-                (mk("b"), vec![(95_000_000_000, 1.0)]),
-                (mk("c"), vec![(95_000_000_000, 2.0)]),
+                (
+                    crate::ast::shared_labels(mk("a")),
+                    vec![(95_000_000_000, 1.0)],
+                ),
+                (
+                    crate::ast::shared_labels(mk("b")),
+                    vec![(95_000_000_000, 1.0)],
+                ),
+                (
+                    crate::ast::shared_labels(mk("c")),
+                    vec![(95_000_000_000, 2.0)],
+                ),
             ],
         );
         let ev = Evaluator::new(&data);
@@ -2131,11 +2394,17 @@ mod tests {
         .unwrap();
         data.insert(
             "m1".into(),
-            vec![(l1, vec![(0, 2.0), (100_000_000_000, 2.0)])],
+            vec![(
+                (crate::ast::shared_labels(l1.clone())),
+                vec![(0, 2.0), (100_000_000_000, 2.0)],
+            )],
         );
         data.insert(
             "m2".into(),
-            vec![(l2, vec![(0, 3.0), (100_000_000_000, 3.0)])],
+            vec![(
+                (crate::ast::shared_labels(l2.clone())),
+                vec![(0, 3.0), (100_000_000_000, 3.0)],
+            )],
         );
         let expr = crate::parser::parse_expr("m1 * on(service) m2").unwrap();
         let ev = Evaluator::new(&data);
@@ -2176,11 +2445,17 @@ mod tests {
         .unwrap();
         data.insert(
             "m1".into(),
-            vec![(la, vec![(0, 10.0), (100_000_000_000, 10.0)])],
+            vec![(
+                (crate::ast::shared_labels(la.clone())),
+                vec![(0, 10.0), (100_000_000_000, 10.0)],
+            )],
         );
         data.insert(
             "m2".into(),
-            vec![(lb, vec![(0, 5.0), (100_000_000_000, 5.0)])],
+            vec![(
+                (crate::ast::shared_labels(lb.clone())),
+                vec![(0, 5.0), (100_000_000_000, 5.0)],
+            )],
         );
         let expr = crate::parser::parse_expr("m1 * on(service) m2").unwrap();
         let ev = Evaluator::new(&data);
@@ -2217,13 +2492,22 @@ mod tests {
         data.insert(
             "metric".into(),
             vec![
-                (s1.clone(), vec![(0, 1.0), (100_000_000_000, 1.0)]),
-                (s2.clone(), vec![(0, 2.0), (100_000_000_000, 2.0)]),
+                (
+                    crate::ast::shared_labels(s1.clone()),
+                    vec![(0, 1.0), (100_000_000_000, 1.0)],
+                ),
+                (
+                    crate::ast::shared_labels(s2.clone()),
+                    vec![(0, 2.0), (100_000_000_000, 2.0)],
+                ),
             ],
         );
         data.insert(
             "info".into(),
-            vec![(info, vec![(0, 100.0), (100_000_000_000, 100.0)])],
+            vec![(
+                crate::ast::shared_labels(info),
+                vec![(0, 100.0), (100_000_000_000, 100.0)],
+            )],
         );
         let expr = crate::parser::parse_expr("metric * on(service) group_left(team) info").unwrap();
         let ev = Evaluator::new(&data);
@@ -2261,9 +2545,10 @@ mod tests {
         let mut data = SeriesData::new();
         for i in 0..5 {
             let l = LabelSet::try_from_iter(vec![("i".to_string(), i.to_string())]).unwrap();
-            data.entry("m".into())
-                .or_default()
-                .push((l, vec![(0, i as f64), (100_000_000_000, i as f64)]));
+            data.entry("m".into()).or_default().push((
+                crate::ast::shared_labels(l),
+                vec![(0, i as f64), (100_000_000_000, i as f64)],
+            ));
         }
         let expr = crate::parser::parse_expr("topk(2, m)").unwrap();
         let ev = Evaluator::new(&data);
@@ -2294,9 +2579,10 @@ mod tests {
                 ("route".to_string(), "r".to_string()),
             ])
             .unwrap();
-            data.entry("latency_bucket".into())
-                .or_default()
-                .push((l, vec![(0, count), (100_000_000_000, count)]));
+            data.entry("latency_bucket".into()).or_default().push((
+                crate::ast::shared_labels(l),
+                vec![(0, count), (100_000_000_000, count)],
+            ));
         }
         let expr = crate::parser::parse_expr(
             "histogram_quantile(0.9, sum by (le, route) (latency_bucket))",

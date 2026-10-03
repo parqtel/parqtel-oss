@@ -336,8 +336,12 @@ impl QueryExecutor {
                             other => num_pts.push((t, v_to_f64(&other))),
                         }
                     }
+                    // One Arc per series, shared by every step that evaluates
+                    // it: cloning it per step is a refcount bump, where
+                    // cloning the LabelSet was one allocation per label.
+                    let labels = crate::ast::shared_labels(labels);
                     if !hist_pts.is_empty() {
-                        hist_entry.push((labels.clone(), hist_pts));
+                        hist_entry.push((std::sync::Arc::clone(&labels), hist_pts));
                     }
                     if !num_pts.is_empty() {
                         entry.push((labels, num_pts));
