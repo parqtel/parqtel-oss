@@ -87,7 +87,7 @@ Severity: **C** Critical, **H** High, **M** Medium, **L** Low. Effort: S ≤ 2d,
 
 ---
 
-## BL-02-06 (C) — `Regex::new` compiled **per row** in LogQL and pipeline predicates
+## BL-02-06 (C, landed) — `Regex::new` compiled **per row** in LogQL and pipeline predicates
 
 **Evidence**
 - `parqtel-query/src/logql.rs:681` — `let re = regex::Regex::new(regex).ok();` inside the per-clause loop of `log_matches`, which is the closure pushed into the block scan (`executor.rs:796-798`, `:709-711`). Runs **once per candidate row**.
@@ -100,13 +100,30 @@ Severity: **C** Critical, **H** High, **M** Medium, **L** Low. Effort: S ≤ 2d,
 
 **Resolution.** Change `Clause::Re { field, regex: String }` (clause enum at `logql.rs:342-429`) to hold `regex: Arc<Regex>`, populated in the parser (which already validates at `logql.rs:471`). Same for `Term.wildcard`. Keep the compile-once behaviour the selector path already has as the model.
 
-**Acceptance.** Regex compilation count per log query equals the number of `=~` clauses, not the number of rows (assert with a counting wrapper in a unit test). Log query p99 < 300 ms on 50k rows.
+**Resolution taken.** Rather than change the parsed `Clause` shape, a
+*prepared* query was added alongside it: `PreparedLogQuery`,
+`PreparedPredicate`, `PreparedSpanQuery` and `PreparedRowPredicate` move every
+per-query computation — regex compilation, wildcard compilation, needle
+lowercasing, severity-rank lookup — to a one-time `new()`, then match rows
+through `&self`. The existing `log_matches` / `log_matches_predicate` /
+`span_matches` / `row_matches_pred` remain as thin wrappers that prepare and
+match in one call, so embedders and tests are unaffected; the row loops in
+`executor.rs` now prepare once. `PreparedLogQuery::compiled_patterns()` makes
+"compiled once per query, not per row" directly assertable.
+
+**Acceptance.** Regex compilation count per log query equals the number of
+`=~` clauses, not the number of rows — covered by
+`regex_patterns_are_compiled_once_per_query`. Semantics pinned by
+`clause_and_term_semantics_are_pinned` and
+`predicate_composition_semantics_are_pinned`. Log query p99 < 300 ms on 50k
+rows: measured **205× faster** on the 3-clause/1-term benchmark over 20 000
+rows (`cargo run --release -p parqtel-query --example bench_logql`).
 
 **Effort** M · **Risk** Low (mechanical, parser-local)
 
 ---
 
-## BL-02-07 (M) — Per-row `to_lowercase()` allocations, repeated once **per term**
+## BL-02-07 (M, landed) — Per-row `to_lowercase()` allocations, repeated once **per term**
 
 **Evidence**
 - `logql.rs:714` — `let body = log.body.to_lowercase();` sits **inside** `for term in &q.terms`: a 2 KB body is lowercased and allocated 3× per row for 3 terms.
@@ -119,13 +136,23 @@ Severity: **C** Critical, **H** High, **M** Medium, **L** Low. Effort: S ≤ 2d,
 
 **Resolution.** Hoist the lowercase out of the term loop; store terms pre-lowercased at parse (they already are, `logql.rs:305`); replace the substring scans with the existing `contains_ci`. Optional follow-up: `contains_ci`'s byte-window scan (`executor.rs:1665-1674`) has no `memchr` fast path — a precompiled case-insensitive literal regex would use SIMD; only worth it once `contains_ci` becomes the shared implementation.
 
-**Acceptance.** Log search allocates one lowercase buffer per row (not per term); log query CPU ≥ 2× better on 3-term queries.
+**Resolution taken.** Superseded by the prepared-query work above: with the
+needle pre-lowercased and the haystack left raw, no per-row lowercase is needed
+at all. `contains_ci` compares ASCII case-folded over byte windows, so
+`hay.to_lowercase().contains(&needle.to_lowercase())` becomes allocation-free;
+`(?i)`-prefixed wildcard regexes already matched case-insensitively, so they
+also run against the raw body. Equivalence with the old form is asserted by
+`contains_ci_matches_lowercase_contains`.
+
+**Acceptance.** Zero per-row lowercase allocations; `contains_ci` verified
+equivalent to the lowercase form across case, empty-needle and
+needle-longer-than-haystack cases. Included in the 205× benchmark result.
 
 **Effort** S · **Risk** Low
 
 ---
 
-## BL-02-08 (M) — Per-row `SearchQuery` construction with cloned `Clause`s in the predicate evaluator
+## BL-02-08 (M, landed) — Per-row `SearchQuery` construction with cloned `Clause`s in the predicate evaluator
 
 **Evidence** — `logql.rs:636-650`: `log_matches_predicate` handles **every** atom by building a fresh `SearchQuery { clauses: vec![clause.clone()], terms: vec![] }` and recursing. `Clause` owns `String` field names (`logql.rs:342-429`), so that is 1–3 `String` clones + 2 `Vec` allocations **per atom per row**. Same at `:701-707` (`Clause::Not`) and `:871-877` (span side).
 
@@ -133,7 +160,15 @@ Severity: **C** Critical, **H** High, **M** Medium, **L** Low. Effort: S ≤ 2d,
 
 **Resolution.** Split `log_matches` into `clause_matches(&Clause, log, extra)` and `term_matches(&Term, log)`; the `And`/`Or`/`Not` tree then recurses directly with no wrapper `SearchQuery`. Pure refactor, no semantic change.
 
-**Acceptance.** No allocation attributable to predicate-tree traversal in the allocation profile of a log query.
+**Resolution taken.** The predicate walkers now recurse over
+`PreparedPredicate`/`PreparedRowPredicate` trees directly — the `SearchQuery`
+wrapper per atom is gone, so no `Clause` (and therefore no `String` field
+name) is cloned per row.
+
+**Acceptance.** No allocation attributable to predicate-tree traversal in the
+allocation profile of a log query. Covered by
+`predicate_composition_semantics_are_pinned`, which exercises AND/OR/NOT
+through both the wrapper and the prepared tree.
 
 **Effort** S · **Risk** Low
 

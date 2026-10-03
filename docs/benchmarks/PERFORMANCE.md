@@ -105,3 +105,69 @@ the user types (`/api/v1/label/<name>/values?limit=10&match=<prefix>`).
 ```bash
 cargo run --release -p parqtel-query --example bench_label_values
 ```
+
+## LogQL prepared-query path (`BL-02-06`, `BL-02-07`, `BL-02-08`)
+
+Log and trace search evaluated the *query* once per row: a `Regex::new` per
+`=~` clause per row, a `to_lowercase()` of the whole body per search term per
+row, a cloned `SearchQuery` per predicate atom, and a `String` clone of every
+resolved field value. Compiling a pattern costs ~1–10 µs against ~10 ns for
+the match, so the setup work dominated the search by three orders of
+magnitude.
+
+A *prepared* query now moves all of it to a one-time `new()`:
+`PreparedLogQuery`, `PreparedPredicate`, `PreparedSpanQuery` and
+`PreparedRowPredicate` hold compiled regexes, lowercased needles and resolved
+severity thresholds, then match rows through `&self`. Substring tests use an
+allocation-free ASCII-case-folded `contains_ci`, so no per-row lowercase is
+needed at all (`(?i)` wildcard regexes already match the raw body).
+
+The old `log_matches` / `log_matches_predicate` / `span_matches` /
+`row_matches_pred` entry points remain as thin wrappers that prepare and match
+in one call, so embedders and existing tests are unaffected; the row loops in
+`executor.rs` prepare once.
+
+### Result
+
+20 000 rows, 3 clauses + 1 wildcard term, 50 % of rows matching, identical
+results on both paths:
+
+```
+per-row prepare : 1.000s
+prepared once   : 4.881ms
+speedup         : 204.9x
+```
+
+### Semantics
+
+The refactor is behaviour-preserving, and that is pinned by tests rather than
+asserted in prose:
+
+- `clause_and_term_semantics_are_pinned` — an explicit expectation table for
+  every clause and term form, derived from the pre-refactor implementation
+  (case-sensitive equality for non-body fields, case-insensitive body
+  substring, `service` resolving through `resource_attributes` so it shadows
+  the same-named attribute, only `*` setting the wildcard flag, severity
+  mapping to `severity_number`).
+- `predicate_composition_semantics_are_pinned` — AND/OR/NOT trees through the
+  predicate API. These are separate because `parse_search` deliberately does
+  **not** flatten a top-level `OR`: it falls back to an unconstrained query, so
+  a search string containing `OR` matches everything. That is pre-existing
+  behaviour, which is why composition is pinned where the handlers actually
+  evaluate it.
+- `regex_patterns_are_compiled_once_per_query` — the compiled-pattern count is
+  a property of the query, not of the row count.
+- `contains_ci_matches_lowercase_contains` — the allocation-free replacement
+  agrees with the `to_lowercase().contains()` form it replaces, including
+  empty needles and needles longer than the haystack.
+
+A deliberate non-test: comparing the prepared path against the `log_matches`
+wrapper cannot detect a semantic regression, because the wrapper is
+implemented on top of the prepared path. An earlier draft of this work had
+exactly that test and it was worthless; the expectation tables above replace it.
+
+### Reproducing
+
+```bash
+cargo run --release -p parqtel-query --example bench_logql
+```

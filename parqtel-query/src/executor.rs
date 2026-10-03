@@ -748,15 +748,23 @@ impl QueryExecutor {
         // Predicate pushed down into the scan (see query_logs): only
         // matching rows materialize, bounded by `limit`; totals and volume
         // buckets still cover every match.
+        // Prepared once, then applied to every row: compiling the query's
+        // regexes and lowercasing its needles inside the row loop cost a
+        // regex compilation per clause per row.
+        let prepared_pred = crate::logql::PreparedPredicate::new(pred);
+        let prepared_pred = std::sync::Arc::new(prepared_pred);
         let pred_filter = {
-            let pred = std::sync::Arc::new(pred.clone());
+            let prepared_pred = prepared_pred.clone();
             let extra = extra.clone();
             std::sync::Arc::new(move |log: &parqtel_core::LogRecord| {
-                crate::logql::log_matches_predicate(&pred, log, &extra)
+                prepared_pred.matches(log, &extra)
             }) as std::sync::Arc<dyn Fn(&parqtel_core::LogRecord) -> bool + Send + Sync>
         };
-        let apply_pred =
-            |log: &parqtel_core::LogRecord| crate::logql::log_matches_predicate(pred, log, &extra);
+        let apply_pred = {
+            let prepared_pred = prepared_pred.clone();
+            let extra = extra.clone();
+            move |log: &parqtel_core::LogRecord| prepared_pred.matches(log, &extra)
+        };
 
         let mut total_logs_count = 0usize;
         let mut volume_summary = vec![0u64; 60];
@@ -835,15 +843,20 @@ impl QueryExecutor {
         let window_ns = (end_ns - start_ns) / 60;
         let extra = std::collections::HashMap::new();
         // Search pushed down into the scan (see query_logs).
+        // Prepared once for the same reason as the predicate path above.
+        let prepared_search = std::sync::Arc::new(crate::logql::PreparedLogQuery::new(search));
         let search_filter = {
-            let search = std::sync::Arc::new(search.clone());
+            let prepared_search = prepared_search.clone();
             let extra = extra.clone();
             std::sync::Arc::new(move |log: &parqtel_core::LogRecord| {
-                crate::logql::log_matches(&search, log, &extra)
+                prepared_search.matches(log, &extra)
             }) as std::sync::Arc<dyn Fn(&parqtel_core::LogRecord) -> bool + Send + Sync>
         };
-        let apply_search =
-            |log: &parqtel_core::LogRecord| crate::logql::log_matches(search, log, &extra);
+        let apply_search = {
+            let prepared_search = prepared_search.clone();
+            let extra = extra.clone();
+            move |log: &parqtel_core::LogRecord| prepared_search.matches(log, &extra)
+        };
 
         let mut total_logs_count = 0usize;
         let mut volume_summary = vec![0u64; 60];
@@ -1298,9 +1311,11 @@ impl QueryExecutor {
             spans.retain(|s| hex::encode(s.trace_id) == tid_lower);
         }
 
-        // ParqtelQL span predicates (push-down, before the limit).
+        // ParqtelQL span predicates (push-down, before the limit). Prepared
+        // once so the clause regexes are not compiled per span.
         if let Some(sq) = filter {
-            spans.retain(|s| crate::logql::span_matches(sq, s));
+            let prepared = crate::logql::PreparedSpanQuery::new(sq);
+            spans.retain(|s| prepared.matches(s));
         }
 
         let spans_matched = spans.len();

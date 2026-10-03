@@ -5,7 +5,7 @@
 //! them. Metrics/traces fetch targets and correlate enrichment use the
 //! same executor APIs the handlers use.
 
-use crate::logql::Predicate;
+use crate::logql::{CmpOp, Predicate};
 pub use crate::pipeline::{AggFn, AggSpec, Pipeline, Row, Stage};
 use parqtel_core::{Error, Result};
 use serde_json::{json, Value as Json};
@@ -93,75 +93,210 @@ pub fn run_stages(
 
 /// Row-level predicate evaluation (field ops against row.fields; body terms
 /// against the body field).
-pub fn row_matches_pred(row: &Row, pred: &Predicate) -> bool {
-    match pred {
-        Predicate::And(parts) => parts.iter().all(|p| row_matches_pred(row, p)),
-        Predicate::Or(parts) => parts.iter().any(|p| row_matches_pred(row, p)),
-        Predicate::Not(inner) => !row_matches_pred(row, inner),
-        Predicate::Atom(crate::logql::Atom::Term(term)) => {
-            let hay = row
-                .fields
-                .get("body")
-                .and_then(|b| b.as_str())
-                .unwrap_or("");
-            let matched = hay.to_lowercase().contains(&term.text);
-            if term.negate {
-                !matched
-            } else {
-                matched
+/// A pipeline row predicate with its per-query work already done.
+///
+/// Mirrors [`Predicate`]; compiling the clause regexes and lowercasing the term
+/// needles up front removes a `Regex::new` and a `to_lowercase` per row.
+#[derive(Debug, Clone)]
+pub struct PreparedRowPredicate(PreparedRowPredicateKind);
+
+#[derive(Debug, Clone)]
+enum PreparedRowPredicateKind {
+    And(Vec<PreparedRowPredicate>),
+    Or(Vec<PreparedRowPredicate>),
+    Not(Box<PreparedRowPredicate>),
+    Term { needle_lower: String, negate: bool },
+    Clause(PreparedRowClause),
+}
+
+#[derive(Debug, Clone)]
+enum PreparedRowClause {
+    Eq {
+        field: String,
+        value: String,
+    },
+    Ne {
+        field: String,
+        value: String,
+    },
+    Re {
+        field: String,
+        regex: Option<regex::Regex>,
+    },
+    Cmp {
+        field: String,
+        op: CmpOp,
+        value: f64,
+    },
+    Range {
+        field: String,
+        min: f64,
+        max: f64,
+    },
+    Exists {
+        field: String,
+    },
+    /// Threshold resolved from the severity name at prepare time. A pipeline
+    /// row carries `severity_number` as a field, so this is a real comparison
+    /// here (unlike the span path, where severity is not applicable).
+    SeverityMin(i32),
+    Not(Box<PreparedRowPredicate>),
+}
+
+impl PreparedRowPredicate {
+    /// Prepares a parsed predicate. Build once, reuse for every row.
+    pub fn new(pred: &Predicate) -> Self {
+        Self(Self::prepare(pred))
+    }
+
+    fn prepare(pred: &Predicate) -> PreparedRowPredicateKind {
+        use crate::logql::Atom;
+        match pred {
+            Predicate::And(parts) => {
+                PreparedRowPredicateKind::And(parts.iter().map(PreparedRowPredicate::new).collect())
             }
-        }
-        Predicate::Atom(crate::logql::Atom::Clause(clause)) => {
-            // Reuse clause logic through a pseudo-log bridge: evaluate the
-            // clause against row fields generically.
-            use crate::logql::Clause;
-            match clause {
-                Clause::Eq { field, value } => row
-                    .fields
-                    .get(field)
-                    .map(|v| value_matches(v, value))
-                    .unwrap_or(false),
-                Clause::Ne { field, value } => row
-                    .fields
-                    .get(field)
-                    .map(|v| !value_matches(v, value))
-                    .unwrap_or(true),
-                Clause::Re { field, regex } => {
-                    let re = regex::Regex::new(regex).ok();
-                    match (row.fields.get(field), re) {
-                        (Some(v), Some(re)) => re.is_match(&value_str(v)),
-                        _ => false,
-                    }
-                }
-                Clause::Cmp { field, op, value } => {
-                    let n = row.get_num(field);
-                    match (n, op) {
-                        (Some(n), crate::logql::CmpOp::Gt) => n > *value,
-                        (Some(n), crate::logql::CmpOp::Ge) => n >= *value,
-                        (Some(n), crate::logql::CmpOp::Lt) => n < *value,
-                        (Some(n), crate::logql::CmpOp::Le) => n <= *value,
-                        _ => false,
-                    }
-                }
-                Clause::Range { field, min, max } => row
-                    .get_num(field)
-                    .map(|n| n >= *min && n <= *max)
-                    .unwrap_or(false),
-                Clause::Exists { field } => row.fields.contains_key(field),
-                Clause::SeverityMin(sev) => {
-                    let min = crate::logql::severity_rank(sev).unwrap_or(9);
-                    row.get_num("severity_number")
-                        .map(|n| n >= min as f64)
-                        .unwrap_or(false)
-                }
-                Clause::Not(inner) => {
-                    // Invert by evaluating the inner clause against the row.
-                    let pred = Predicate::Atom(crate::logql::Atom::Clause((**inner).clone()));
-                    !row_matches_pred(row, &pred)
-                }
+            Predicate::Or(parts) => {
+                PreparedRowPredicateKind::Or(parts.iter().map(PreparedRowPredicate::new).collect())
+            }
+            Predicate::Not(inner) => {
+                PreparedRowPredicateKind::Not(Box::new(PreparedRowPredicate::new(inner)))
+            }
+            Predicate::Atom(Atom::Term(term)) => PreparedRowPredicateKind::Term {
+                needle_lower: term.text.to_lowercase(),
+                negate: term.negate,
+            },
+            Predicate::Atom(Atom::Clause(clause)) => {
+                PreparedRowPredicateKind::Clause(PreparedRowClause::prepare(clause))
             }
         }
     }
+
+    /// Wraps a single clause, used for `Clause::Not(inner)`.
+    fn from_clause(clause: &crate::logql::Clause) -> Self {
+        Self(PreparedRowPredicateKind::Clause(
+            PreparedRowClause::prepare(clause),
+        ))
+    }
+
+    /// Evaluates against one row.
+    pub fn matches(&self, row: &Row) -> bool {
+        self.0.matches(row)
+    }
+}
+
+impl PreparedRowPredicateKind {
+    fn matches(&self, row: &Row) -> bool {
+        match self {
+            // `.0` reaches this kind's matcher rather than the public per-row
+            // entry point on `PreparedRowPredicate`.
+            PreparedRowPredicateKind::And(parts) => parts.iter().all(|p| p.0.matches(row)),
+            PreparedRowPredicateKind::Or(parts) => parts.iter().any(|p| p.0.matches(row)),
+            PreparedRowPredicateKind::Not(inner) => !inner.0.matches(row),
+            PreparedRowPredicateKind::Term {
+                needle_lower,
+                negate,
+            } => {
+                let hay = row
+                    .fields
+                    .get("body")
+                    .and_then(|b| b.as_str())
+                    .unwrap_or("");
+                let found = crate::logql::contains_ci(hay, needle_lower);
+                if *negate {
+                    !found
+                } else {
+                    found
+                }
+            }
+            PreparedRowPredicateKind::Clause(c) => c.matches(row),
+        }
+    }
+}
+
+impl PreparedRowClause {
+    fn prepare(clause: &crate::logql::Clause) -> Self {
+        use crate::logql::Clause;
+        match clause {
+            Clause::Eq { field, value } => PreparedRowClause::Eq {
+                field: field.clone(),
+                value: value.clone(),
+            },
+            Clause::Ne { field, value } => PreparedRowClause::Ne {
+                field: field.clone(),
+                value: value.clone(),
+            },
+            Clause::Re { field, regex } => PreparedRowClause::Re {
+                field: field.clone(),
+                regex: regex::Regex::new(regex).ok(),
+            },
+            Clause::Cmp { field, op, value } => PreparedRowClause::Cmp {
+                field: field.clone(),
+                op: *op,
+                value: *value,
+            },
+            Clause::Range { field, min, max } => PreparedRowClause::Range {
+                field: field.clone(),
+                min: *min,
+                max: *max,
+            },
+            Clause::Exists { field } => PreparedRowClause::Exists {
+                field: field.clone(),
+            },
+            Clause::SeverityMin(sev) => {
+                PreparedRowClause::SeverityMin(crate::logql::severity_rank(sev).unwrap_or(9))
+            }
+            Clause::Not(inner) => {
+                PreparedRowClause::Not(Box::new(PreparedRowPredicate::from_clause(inner)))
+            }
+        }
+    }
+
+    fn matches(&self, row: &Row) -> bool {
+        match self {
+            PreparedRowClause::Eq { field, value } => row
+                .fields
+                .get(field)
+                .map(|v| value_matches(v, value))
+                .unwrap_or(false),
+            PreparedRowClause::Ne { field, value } => row
+                .fields
+                .get(field)
+                .map(|v| !value_matches(v, value))
+                .unwrap_or(true),
+            PreparedRowClause::Re { field, regex } => match (row.fields.get(field), regex) {
+                (Some(v), Some(re)) => re.is_match(&value_str(v)),
+                _ => false,
+            },
+            PreparedRowClause::Cmp { field, op, value } => match (row.get_num(field), op) {
+                (Some(n), CmpOp::Gt) => n > *value,
+                (Some(n), CmpOp::Ge) => n >= *value,
+                (Some(n), CmpOp::Lt) => n < *value,
+                (Some(n), CmpOp::Le) => n <= *value,
+                _ => false,
+            },
+            PreparedRowClause::Range { field, min, max } => match field.as_str() {
+                "duration" | "duration_ms" => row
+                    .get_num(field)
+                    .map(|n| n >= *min && n <= *max)
+                    .unwrap_or(false),
+                _ => false,
+            },
+            PreparedRowClause::Exists { field } => row.fields.contains_key(field),
+            PreparedRowClause::SeverityMin(min) => row
+                .get_num("severity_number")
+                .map(|n| n >= *min as f64)
+                .unwrap_or(false),
+            PreparedRowClause::Not(inner) => !inner.matches(row),
+        }
+    }
+}
+
+/// Evaluates a parsed predicate against a pipeline row.
+///
+/// Prepares first, so calling this per row repeats the preparation. Prefer
+/// [`PreparedRowPredicate`] in a filter loop.
+pub fn row_matches_pred(row: &Row, pred: &Predicate) -> bool {
+    PreparedRowPredicate::new(pred).matches(row)
 }
 
 fn value_matches(v: &Json, needle: &str) -> bool {
