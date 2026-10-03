@@ -286,3 +286,63 @@ return the expected label shapes, and `test-aggregations` (22/22),
 ```bash
 cargo run --release -p parqtel-query --example bench_query_concurrency
 ```
+
+## Streaming step evaluation (`BL-02-03`)
+
+`eval_steps` returned `Vec<(i64, InstantVector)>` — every step of the range held
+live until the last one finished. The executor then folded those into the
+result. Peak memory therefore scaled with **steps × output cardinality** on top
+of the output itself.
+
+`eval_steps_into` hands each step's vector to a consumer and drops it before the
+next step, so peak memory is one step's vector. `eval_steps` remains as a thin
+collecting wrapper, since the operator tests assert against that shape.
+
+### Result
+
+1 000 output series × 3 599 steps (a one-hour panel at a 1 s step), output
+56.6 MB, measured in a fresh process:
+
+| build | resident growth for the query | wall |
+|---|---|---|
+| collecting every step | 168.0 MB | 408 ms |
+| streaming into the result | **109.9 MB** | **368 ms** |
+
+58 MB less on a query whose own result is 56.6 MB. The saving is the retained
+per-step vectors — `steps × series × ~24 B`, i.e. ~86 MB at this size — and it
+scales with step count and output cardinality.
+
+### The size of this win depended on `BL-02-01`
+
+The original estimate of ~600 MB for a 1 000-series × 1 000-step panel was
+computed against **pre-`Arc`** label sets, at roughly 600 B each. With labels
+shared behind an `Arc`, a retained series costs ~24 B, so that workload's
+retained-step cost was already down to ~24 MB before this change.
+
+Streaming removed what remained. It did not remove 600 MB, because `BL-02-01`
+had already taken most of it — worth knowing before quoting the original figure.
+
+### A tempting optimisation that was unsound
+
+Caching series fingerprints keyed on `std::sync::Arc::as_ptr` looks free: the
+same series recur at every step, so it avoids re-hashing the label set. It is
+wrong. Each step's vector is dropped at the end of its callback, so a freed
+`Arc`'s address can be reused by the next step's allocation — a stale cache hit
+returns another series' fingerprint and merges two distinct series into one.
+Fingerprints are computed from label contents every time.
+
+### Measurement notes
+
+The package inherits `unsafe_code = "forbid"` from the workspace lint table, so
+a counting `GlobalAlloc` is not available in an example here; `VmHWM` is used
+instead. It is monotonic, so it must be sampled as a before/after delta in a
+**fresh process**. An earlier version warmed up first, which defeated the
+measurement entirely: the warm-up touched exactly the pages the measured query
+wanted, the allocator kept them, and the reported growth collapsed from 168 MB
+to 16 MB — a 10× under-report caused entirely by the warm-up.
+
+### Reproducing
+
+```bash
+cargo run --release -p parqtel-query --example bench_query_memory
+```

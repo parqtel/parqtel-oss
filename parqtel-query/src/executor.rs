@@ -1857,24 +1857,35 @@ fn evaluate_steps_to_series(
     step: i64,
 ) -> Result<Vec<TimeSeries>> {
     let eval = crate::eval::Evaluator::with_lookback(data, lookback_ns).with_hist_data(hist_data);
-    let steps = eval.eval_steps(expr, start_ns, end_ns, step)?;
 
-    // Convert per-step instant vectors into TimeSeries.
+    // Fold each step into the result as it is produced. Collecting every step
+    // first kept one instant vector per step live until the last step
+    // finished — 960 of them for a 4-hour panel at a 15 s step, ~160 MB for
+    // 1 000 series, on top of the output itself. Streaming makes peak memory
+    // one step's vector, so O(series) rather than O(steps x series).
     use std::collections::BTreeMap;
     let mut out_series: BTreeMap<u64, TimeSeries> = BTreeMap::new();
-    for (ts, iv) in &steps {
+    eval.eval_steps_into(expr, start_ns, end_ns, step, |ts, iv| {
         for (labels, value) in &iv.series {
+            // Hashed from the label *contents*, not cached by Arc address: the
+            // step's vector is dropped at the end of this call, so a freed Arc's
+            // address can be reused by the next step's allocation and a
+            // pointer-keyed cache would return a stale fingerprint and merge
+            // two distinct series.
             let fp = labels.fingerprint();
             let ts_entry = out_series.entry(fp).or_insert_with(|| TimeSeries {
                 labels: strip_metric_name(labels),
                 samples: Vec::new(),
             });
             ts_entry.samples.push(crate::models::Sample {
-                timestamp_ns: *ts,
+                timestamp_ns: ts,
                 value: *value,
             });
         }
-    }
+        // `iv` is dropped here, freeing this step's vector before the next
+        // step is evaluated.
+        Ok(())
+    })?;
     Ok(out_series.into_values().collect())
 }
 

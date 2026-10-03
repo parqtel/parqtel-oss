@@ -64,7 +64,7 @@ of the 6.9× in `BL-02-01`.
 
 ---
 
-## BL-02-03 (C) — Every step's result is retained in memory simultaneously
+## BL-02-03 (C, landed) — Every step's result is retained in memory simultaneously
 
 **Evidence** — `eval.rs:93-114` builds `Vec<(i64, InstantVector)>` for **all** steps, each `InstantVector` owning a `LabelSet` per series (`ast.rs:156-159`). `executor.rs:308` holds that whole vector, then `executor.rs:312-326` converts it to `BTreeMap<u64, TimeSeries>` — cloning labels **again** per series (`strip_metric_name`, itself O(L²) per BL-02-02).
 
@@ -72,7 +72,43 @@ of the 6.9× in `BL-02-01`.
 
 **Resolution.** Invert the loops: `eval_steps` should take a callback (`FnMut(&mut ResultBuilder)`) and fold each step's vector into `out_series` before dropping it. `executor.rs:313-325` already does the fold — just make it the inner loop. Peak memory becomes O(series) instead of O(steps × series), and labels are cloned once per **output** series rather than once per (step, series).
 
-**Acceptance.** Peak RSS for a 4-hour, 1 000-series panel < 150 MB. Guard with a test that asserts peak allocation does not scale with `step_ns`.
+**Resolution taken.** `eval_steps_into` folds each step's instant vector into
+the consumer as it is produced and drops it before the next step, so peak
+memory is one step's vector rather than all of them. `eval_steps` remains as a
+thin wrapper that collects, because the operator tests assert against that
+shape and because collecting is occasionally the convenient one.
+
+**Two findings worth recording.**
+
+1. **The size of this win depended on `BL-02-01`.** The original estimate of
+   ~600 MB for a 1 000-series × 1 000-step panel was computed against pre-`Arc`
+   label sets (~600 B each). With labels shared behind an `Arc`, a retained
+   series costs ~24 B, so that workload's retained-step cost was already down to
+   ~24 MB before this change. Streaming removes what remained — it did not
+   remove 600 MB, because `BL-02-01` had already taken most of it.
+2. **A fingerprint cache keyed on `Arc` pointer identity would have been
+   unsound.** It was tempting: the same series recur at every step, so keying on
+   `std::sync::Arc::as_ptr` avoids re-hashing. But each step's vector is dropped
+   at the end of its callback, so a freed `Arc`'s address can be reused by the
+   next step's allocation — a stale hit would return the wrong fingerprint and
+   merge two distinct series. Fingerprints are computed from label contents
+   every time.
+
+**Acceptance.** Measured on 1 000 output series × 3 599 steps
+(`cargo run --release -p parqtel-query --example bench_query_memory`):
+
+| build | resident growth for the query | wall |
+|---|---|---|
+| collecting every step | 168.0 MB | 408 ms |
+| streaming into the result | 109.9 MB | 368 ms |
+
+58 MB less for a query whose output is 56.6 MB, and the saving scales with
+step count × output cardinality. `eval_steps_into_matches_collecting_eval_steps`
+pins that streaming changes residency, not results, and
+`eval_steps_into_propagates_sink_errors` pins that a sink error aborts rather
+than silently truncating the range.
+
+**Effort** S · **Risk** Low (no behaviour change; the two tests above gate it)
 
 **Effort** M · **Risk** Medium
 

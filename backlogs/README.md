@@ -67,7 +67,7 @@ These are the acceptance anchors used by the acceptance criteria in each item.
 | Instant query p99, 1 000 series × 1 000 steps | seconds (derived) | **< 1 s** |
 | Range query p99, 7-day range, narrow metric | tens of ms narrow / seconds wide | **< 1 s** |
 | Logs query p99, 50k rows, 3-term search | tens of ms per block (regex per row) | **< 300 ms** |
-| Query peak RSS, 4-hour wide panel | ~600 MB (derived) | **< 150 MB** |
+| Query peak RSS, 4-hour wide panel | ~600 MB estimated (now ~110 MB after `BL-02-01`/`03`) | **< 150 MB** |
 | On-disk size vs uncompressed Parquet+JSON labels | baseline | **≤ 60 % (2–5× smaller)** |
 | Crash data loss window | up to a full block (no WAL) | **< 5 s** |
 
@@ -98,6 +98,8 @@ Removes the seconds-long global stalls. Largely mechanical, low risk, high payof
 - **BL-02-04a** move the query CPU half onto the blocking pool
 - **BL-02-01/02** share label sets behind `Arc`; fingerprint-keyed, cached
   aggregation groups — **6.9×** on the reference workload
+- **BL-02-03** stream steps into the result instead of retaining them all —
+  168 MB → 110 MB on a 1 000-series × 3 599-step query
 - BL-02-04 move the query CPU half into one `spawn_blocking`
 - BL-04-07 explicit tokio worker sizing; BL-04-04 global blocking semaphore
 

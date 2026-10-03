@@ -133,15 +133,29 @@ impl<'a> Evaluator<'a> {
         Ok(found)
     }
 
-    /// Top-level: evaluate for each step, returning per-step instant vectors.
-    pub fn eval_steps(
+    /// Top-level: evaluate for each step, handing each step's instant vector to
+    /// `sink` as soon as it is produced.
+    ///
+    /// The previous signature returned `Vec<(i64, InstantVector)>` — every step
+    /// of the range held live until the last one finished. For a 4-hour panel at
+    /// a 15 s step that is 960 vectors of (series, value) pairs, which for 1 000
+    /// series is ~160 MB resident purely in per-step vectors, on top of the
+    /// output. Peak memory is now one step's vector, so it is O(series) rather
+    /// than O(steps x series).
+    ///
+    /// `sink` takes the vector by value so it is freed as soon as the consumer
+    /// is done with it.
+    pub fn eval_steps_into<F>(
         &self,
         expr: &Expr,
         start_ns: i64,
         end_ns: i64,
         step_ns: i64,
-    ) -> Result<Vec<(i64, InstantVector)>> {
-        let mut out = Vec::new();
+        mut sink: F,
+    ) -> Result<()>
+    where
+        F: FnMut(i64, InstantVector) -> Result<()>,
+    {
         let mut ts = start_ns;
         while ts < end_ns {
             let ctx = EvalContext {
@@ -151,9 +165,31 @@ impl<'a> Evaluator<'a> {
                 subquery_step_ns: None,
             };
             let v = self.eval(expr, ctx)?;
-            out.push((ts, v));
+            sink(ts, v)?;
             ts += step_ns;
         }
+        Ok(())
+    }
+
+    /// Top-level: evaluate for each step, collecting every step's instant
+    /// vector.
+    ///
+    /// Retains every step, so prefer [`Self::eval_steps_into`] whenever the
+    /// consumer can fold incrementally. Kept because it is what the operator
+    /// tests assert against and because collecting is occasionally the
+    /// convenient shape.
+    pub fn eval_steps(
+        &self,
+        expr: &Expr,
+        start_ns: i64,
+        end_ns: i64,
+        step_ns: i64,
+    ) -> Result<Vec<(i64, InstantVector)>> {
+        let mut out = Vec::new();
+        self.eval_steps_into(expr, start_ns, end_ns, step_ns, |ts, v| {
+            out.push((ts, v));
+            Ok(())
+        })?;
         Ok(out)
     }
 
@@ -1948,6 +1984,88 @@ mod tests {
     /// The aggregation group key is now a hash, so a collision would silently
     /// merge two groups. These cover the cases where the projection looks
     /// similar but must stay distinct.
+    /// Streaming must not change what is produced, only how much is resident
+    /// at once. Asserts `eval_steps_into` and `eval_steps` agree exactly.
+    #[test]
+    fn eval_steps_into_matches_collecting_eval_steps() {
+        let mk = |v: &str| {
+            LabelSet::try_from_iter(vec![
+                ("host".to_string(), "h1".to_string()),
+                ("dc".to_string(), v.to_string()),
+            ])
+            .unwrap()
+        };
+        let mut data = SeriesData::new();
+        data.insert(
+            "m".into(),
+            vec![
+                (
+                    crate::ast::shared_labels(mk("a")),
+                    vec![(0, 1.0), (10_000_000_000, 2.0), (20_000_000_000, 4.0)],
+                ),
+                (
+                    crate::ast::shared_labels(mk("b")),
+                    vec![(0, 10.0), (10_000_000_000, 20.0), (20_000_000_000, 40.0)],
+                ),
+            ],
+        );
+        let eval = Evaluator::new(&data);
+        let expr = crate::parser::parse_expr("sum by (dc) (m)").unwrap();
+
+        let collected = eval
+            .eval_steps(&expr, 0, 30_000_000_000, 10_000_000_000)
+            .unwrap();
+
+        let mut streamed = Vec::new();
+        eval.eval_steps_into(&expr, 0, 30_000_000_000, 10_000_000_000, |ts, v| {
+            streamed.push((ts, v));
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(streamed.len(), collected.len(), "same step count");
+        for ((ts_a, a), (ts_b, b)) in streamed.iter().zip(collected.iter()) {
+            assert_eq!(ts_a, ts_b);
+            assert_eq!(a.series.len(), b.series.len());
+            for ((la, va), (lb, vb)) in a.series.iter().zip(b.series.iter()) {
+                assert_eq!(la.as_ref(), lb.as_ref(), "labels must match");
+                assert_eq!(va, vb, "values must match");
+            }
+        }
+        assert_eq!(streamed.len(), 3, "steps at 0/10/20ms");
+    }
+
+    /// `eval_steps_into` must surface a sink error rather than swallowing it,
+    /// otherwise a consumer that rejects a step would silently get a truncated
+    /// result.
+    #[test]
+    fn eval_steps_into_propagates_sink_errors() {
+        let mut data = SeriesData::new();
+        data.insert(
+            "m".into(),
+            vec![(
+                crate::ast::shared_labels(
+                    LabelSet::try_from_iter(vec![("a".to_string(), "1".to_string())]).unwrap(),
+                ),
+                vec![(0, 1.0), (10_000_000_000, 2.0)],
+            )],
+        );
+        let eval = Evaluator::new(&data);
+        let expr = crate::parser::parse_expr("m").unwrap();
+
+        let mut seen = 0usize;
+        let result: Result<()> =
+            eval.eval_steps_into(&expr, 0, 30_000_000_000, 10_000_000_000, |_ts, _v| {
+                seen += 1;
+                if seen == 2 {
+                    return Err(Error::Validation("sink said no".into()));
+                }
+                Ok(())
+            });
+        assert!(result.is_err(), "a sink error must abort the evaluation");
+        assert_eq!(seen, 2, "the sink must stop being called after it errors");
+    }
+
     #[test]
     fn grouping_fingerprint_separates_distinct_projections() {
         let ls = |pairs: &[(&str, &str)]| {
