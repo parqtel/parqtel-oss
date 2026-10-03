@@ -723,13 +723,16 @@ impl<'a> Evaluator<'a> {
             let result = match agg.op {
                 AggregationOp::Sum => Some(vals.iter().sum()),
                 AggregationOp::Avg => Some(vals.iter().sum::<f64>() / vals.len() as f64),
-                AggregationOp::Min => vals
-                    .iter()
-                    .copied()
-                    .fold(f64::INFINITY, f64::min)
-                    .is_finite()
-                    .then(|| vals.iter().copied().fold(f64::INFINITY, f64::min))
-                    .filter(|_| !vals.is_empty()),
+                AggregationOp::Min => {
+                    if vals.is_empty() {
+                        None
+                    } else {
+                        // Folded once: the previous `is_finite().then(|| …)`
+                        // form evaluated the identical fold a second time.
+                        let min = vals.iter().copied().fold(f64::INFINITY, f64::min);
+                        min.is_finite().then_some(min)
+                    }
+                }
                 AggregationOp::Max => {
                     if vals.is_empty() {
                         None

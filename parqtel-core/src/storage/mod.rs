@@ -13,9 +13,22 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 /// Starts background maintenance tasks.
-pub fn start_maintenance(index: Arc<RwLock<BlockIndex>>, config: BlockConfig) {
+///
+/// `retention_interval_secs` controls the sweep cadence for time-based
+/// expiry. It is a parameter rather than a literal because the sweep holds the
+/// block-index write lock while deleting files, so its cost is exactly the kind
+/// of thing an operator on a busy cluster needs to tune.
+pub fn start_maintenance(
+    index: Arc<RwLock<BlockIndex>>,
+    config: BlockConfig,
+    retention_interval_secs: u64,
+) {
     tokio::spawn(Compactor::run_loop(index.clone(), config.clone()));
-    tokio::spawn(RetentionPolicy::run_loop(index, config));
+    tokio::spawn(RetentionPolicy::run_loop(
+        index,
+        config,
+        retention_interval_secs,
+    ));
 }
 
 #[cfg(test)]

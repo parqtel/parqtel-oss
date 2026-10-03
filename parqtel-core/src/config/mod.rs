@@ -16,6 +16,7 @@ pub use storage::{BlockConfig, LogBlockConfig, RetentionConfig};
 pub use telemetry::{K8sProviderConfig, TelemetryConfig};
 
 use crate::error::{Error, Result};
+use parquet::basic::Compression;
 use serde::{Deserialize, Serialize};
 
 /// Global configuration for parqtel.
@@ -40,26 +41,11 @@ impl Config {
         if self.server.bind_address.is_empty() {
             errors.push("server.bind_address cannot be empty".to_string());
         }
-        if self.storage.data_dir.as_os_str().is_empty() {
-            errors.push("storage.data_dir must be a non-empty path".to_string());
-        }
-        if self.logs.data_dir.as_os_str().is_empty() {
-            errors.push("logs.data_dir must be a non-empty path".to_string());
-        }
-
-        let valid_codecs = ["zstd", "snappy", "lz4", "none"];
-        if !valid_codecs.contains(&self.storage.compression.as_str()) {
-            errors.push(format!(
-                "storage.compression must be one of: {}",
-                valid_codecs.join(", ")
-            ));
-        }
-        if !valid_codecs.contains(&self.logs.compression.as_str()) {
-            errors.push(format!(
-                "logs.compression must be one of: {}",
-                valid_codecs.join(", ")
-            ));
-        }
+        // Storage and logs share one rule set (see BlockConfig::validate_into);
+        // data_dir, compression, compression_level and row_group_size are all
+        // covered there.
+        self.storage.validate_into("storage", &mut errors);
+        self.logs.validate_into("logs", &mut errors);
 
         let valid_formats = ["text", "json"];
         if !valid_formats.contains(&self.telemetry.log_format.as_str()) {
@@ -98,6 +84,53 @@ fn validate_tail_sampling(policy: &TailSamplingConfig, path: &str, errors: &mut 
     }
 }
 
+/// Highest zstd level the underlying `zstd` crate accepts.
+pub const MAX_ZSTD_LEVEL: i32 = 22;
+
+/// Validates a compression level for codecs that take one.
+///
+/// Only zstd is tunable here; the level is ignored by snappy/lz4/none, which
+/// is harmless but worth rejecting so a level is never silently a no-op
+/// waiting to be "fixed" later.
+fn validate_compression_level(level: i32, path: &str, errors: &mut Vec<String>) {
+    if !(1..=MAX_ZSTD_LEVEL).contains(&level) {
+        errors.push(format!(
+            "{path} must be within 1..={MAX_ZSTD_LEVEL} for the zstd codec, got {level}"
+        ));
+    }
+}
+
+/// Codec names accepted for block compression.
+pub const VALID_COMPRESSION_CODECS: [&str; 4] = ["zstd", "snappy", "lz4", "none"];
+
+/// Resolves the codec name plus optional level into a Parquet `Compression`.
+///
+/// Single definition shared by the block writers and the compactor, which
+/// previously each carried their own `match` over the config string. Two copies
+/// meant a codec validated in one place could be written differently in the
+/// other, and neither could honour a level.
+///
+/// `level` is applied to zstd and ignored elsewhere; callers that want the
+/// codec's built-in default pass `None`.
+pub fn compression_from_name(name: &str, level: Option<i32>) -> parquet::basic::Compression {
+    match name {
+        // An out-of-range level falls back to the codec default rather than
+        // failing: config validation already rejects bad values at startup,
+        // and this function is also reachable from tests and embedders.
+        "zstd" => Compression::ZSTD(match level.map(|l| l.clamp(1, MAX_ZSTD_LEVEL)) {
+            Some(l) => parquet::basic::ZstdLevel::try_new(l)
+                .unwrap_or_else(|_| parquet::basic::ZstdLevel::default()),
+            None => parquet::basic::ZstdLevel::default(),
+        }),
+        "snappy" => Compression::SNAPPY,
+        "lz4" => Compression::LZ4_RAW,
+        // "none" and anything unrecognised. Config validation rejects unknown
+        // names at startup, so this arm is a defensive default rather than a
+        // silent accept.
+        _ => Compression::UNCOMPRESSED,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -116,6 +149,126 @@ mod tests {
     fn test_config_validation_success() {
         let config = Config::default();
         assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_compression_level_validation() {
+        // Level 0 (no compression), 23 (beyond the zstd range) and negative
+        // must all be rejected at startup rather than silently falling back.
+        for bad in [0, -1, 23, i32::MAX] {
+            let mut config = Config::default();
+            config.storage.compression_level = Some(bad);
+            let err = config.validate().unwrap_err().to_string();
+            assert!(
+                err.contains("storage.compression_level"),
+                "level {bad} must be rejected, got: {err}"
+            );
+        }
+
+        let mut config = Config::default();
+        config.storage.compression_level = Some(1);
+        config.logs.compression_level = Some(22);
+        assert!(config.validate().is_ok(), "valid levels must be accepted");
+    }
+
+    #[test]
+    fn test_compression_from_name() {
+        use parquet::basic::Compression;
+        assert!(matches!(
+            compression_from_name("zstd", None),
+            Compression::ZSTD(_)
+        ));
+        assert!(matches!(
+            compression_from_name("zstd", Some(1)),
+            Compression::ZSTD(_)
+        ));
+        assert!(matches!(
+            compression_from_name("snappy", Some(5)),
+            Compression::SNAPPY
+        ));
+        assert!(matches!(
+            compression_from_name("lz4", None),
+            Compression::LZ4_RAW
+        ));
+        assert!(matches!(
+            compression_from_name("none", None),
+            Compression::UNCOMPRESSED
+        ));
+        // Unknown names must not resolve to a compressing codec.
+        assert!(matches!(
+            compression_from_name("bogus", None),
+            Compression::UNCOMPRESSED
+        ));
+        // Out-of-range levels clamp rather than panic on the write path.
+        assert!(matches!(
+            compression_from_name("zstd", Some(999)),
+            Compression::ZSTD(_)
+        ));
+    }
+
+    /// `row_group_size` is what the scanner's row-group pruning depends on.
+    /// A value of 0, or one larger than the whole block, silently disables
+    /// pruning rather than erroring — so it must be rejected at startup.
+    #[test]
+    fn test_row_group_size_validation() {
+        let mut config = Config::default();
+        config.storage.row_group_size = 0;
+        let err = config.validate().unwrap_err().to_string();
+        assert!(err.contains("storage.row_group_size"), "got: {err}");
+
+        let mut config = Config::default();
+        config.storage.row_group_size = config.storage.max_rows_per_block + 1;
+        let err = config.validate().unwrap_err().to_string();
+        assert!(
+            err.contains("storage.row_group_size"),
+            "row group larger than a block disables pruning: {err}"
+        );
+
+        let mut config = Config::default();
+        config.logs.row_group_size = config.logs.max_rows_per_block + 1;
+        let err = config.validate().unwrap_err().to_string();
+        assert!(err.contains("logs.row_group_size"), "got: {err}");
+
+        // Equal to max_rows_per_block is the boundary and must be allowed.
+        let mut config = Config::default();
+        config.storage.row_group_size = config.storage.max_rows_per_block;
+        assert!(config.validate().is_ok());
+    }
+
+    /// A config file written before these knobs existed must still load, with
+    /// the previous hardcoded values reproduced by the defaults. Only the
+    /// blocks under test are supplied; the rest of `Config` keeps its
+    /// required-field contract, which is unchanged by this series.
+    #[test]
+    fn test_storage_and_server_blocks_deserialise_without_new_fields() {
+        let json = r#"{
+            "server": {"bind_address":"0.0.0.0:8080","max_connections":1024,"shutdown_timeout_secs":30},
+            "storage": {
+                "data_dir":"/tmp/pq","block_duration_secs":7200,"max_rows_per_block":1000000,
+                "compression":"zstd","retention_days":7,"compaction_interval_secs":3600,
+                "row_group_size":100000
+            },
+            "logs": {
+                "data_dir":"/tmp/pq/logs","block_duration_secs":1800,"max_rows_per_block":200000,
+                "compression":"zstd","retention_days":3,"compaction_interval_secs":3600,
+                "row_group_size":20000
+            }
+        }"#;
+        #[derive(serde::Deserialize)]
+        struct Partial {
+            server: ServerConfig,
+            storage: BlockConfig,
+            logs: LogBlockConfig,
+        }
+        let partial: Partial = serde_json::from_str(json).unwrap();
+        assert_eq!(partial.storage.compression_level, None);
+        assert_eq!(partial.logs.compression_level, None);
+        assert_eq!(partial.server.flush_interval_secs, 5);
+        assert_eq!(partial.server.alert_interval_secs, 15);
+        assert_eq!(partial.server.retention_interval_secs, 3600);
+        assert_eq!(partial.server.grpc_concurrency_limit, 64);
+        assert!(partial.storage.validate().is_ok());
+        assert!(partial.logs.validate().is_ok());
     }
 
     #[test]

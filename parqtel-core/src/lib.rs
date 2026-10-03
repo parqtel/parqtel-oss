@@ -13,7 +13,8 @@ pub mod telemetry;
 
 pub use buffer::MemoryBuffer;
 pub use config::{
-    BlockConfig, Config, LogBlockConfig, RetentionConfig, ServerConfig, TailSamplingConfig,
+    compression_from_name, BlockConfig, Config, LogBlockConfig, RetentionConfig, ServerConfig,
+    TailSamplingConfig,
 };
 pub use engine::StorageEngine;
 pub use error::{Error, Result};

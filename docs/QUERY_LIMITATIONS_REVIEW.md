@@ -95,6 +95,30 @@ the suite never has. **Plan:** seed across ≥3 flush windows
 **Source:** P0-8. With G7's multi-block baseline, tune the cap or add
 tier-aware selection (recent blocks + compacted tails).
 
+### G9b — `query_range` never evaluates the final partial step · Effort S
+**Source:** found while validating the container suites against
+`parqtel/fix-and-config` (2026-10-03); tracked as BL-02-20.
+**Behaviour:** `eval_steps` steps `while ts < end_ns`
+(`parqtel-query/src/eval.rs:102`), so the last evaluated instant sits up to
+one `step` before `end`. Samples newer than that are invisible to
+`query_range`, while an instant `query` at the same `end` still sees them via
+the 5-minute lookback.
+**Status:** **not a defect** — this is Prometheus's step semantics. But it is
+silent, and it makes integration suites flaky: `make test-aggregations`
+asserts on a 900s window at `step=60`, so immediately after
+`make local-rebuild` (when only seconds of data exist, all of it inside the
+invisible tail) three range checks fail and get misattributed to the change
+under test. Observed exactly that, then confirmed by replaying the same
+queries once data had accumulated.
+**Plan:** document on the range-query endpoint and in
+`docs/PQL_GUIDE.md`; make the integration scripts step-aware (use
+`step <= 15` for windows ending at "now", or end the window at `now - step`);
+decide whether UI range queries should extend `end` by one step so the newest
+interval is visible to the user.
+
+> Identifier note: `G9` is already used in P2 for the pipeline `fetch` stages,
+> so this entry is `G9b` rather than taking the number.
+
 ## P2 — Coverage gaps blocking real workflows
 
 ### G9 — Pipeline `fetch metrics` / `fetch traces` · Effort M each

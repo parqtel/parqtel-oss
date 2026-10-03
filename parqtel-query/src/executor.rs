@@ -25,6 +25,10 @@ pub struct QueryExecutor {
     trace_data_dir: std::path::PathBuf,
     /// Instant-selector lookback (Prometheus lookback-delta). 5m default.
     lookback_ns: i64,
+    /// Maximum distinct series a single query may materialise.
+    max_series: usize,
+    /// Maximum samples retained per series.
+    max_samples_per_series: usize,
 }
 
 /// Snapshot of per-signal storage stats for ops surfaces (UI overview,
@@ -38,10 +42,67 @@ pub struct SignalStats {
 }
 
 impl QueryExecutor {
+    /// Default instant-selector lookback: the Prometheus lookback-delta.
+    const DEFAULT_LOOKBACK_NS: i64 = 5 * 60 * 1_000_000_000;
+    /// Default per-query series cap, matching `query.max_series`.
+    const DEFAULT_MAX_SERIES: usize = 1000;
+    /// Default per-series sample cap, matching `query.max_samples_per_series`.
+    const DEFAULT_MAX_SAMPLES_PER_SERIES: usize = 10_000;
+
     /// Sets the instant-selector lookback window (builder).
     pub fn with_query_lookback(mut self, lookback_ns: i64) -> Self {
         self.lookback_ns = lookback_ns.max(1);
         self
+    }
+
+    /// Sets the per-query result limits (builder).
+    ///
+    /// The AST path applies the same caps as the plan path, so a query
+    /// cannot escape its configured memory bound by using PromQL features
+    /// rather than the legacy shape. Both values are clamped to at least 1:
+    /// a zero cap would silently return nothing.
+    pub fn with_result_limits(mut self, max_series: usize, max_samples_per_series: usize) -> Self {
+        self.max_series = max_series.max(1);
+        self.max_samples_per_series = max_samples_per_series.max(1);
+        self
+    }
+
+    /// Single construction point shared by every public constructor.
+    ///
+    /// The variants differ only in which optional pieces the caller supplies
+    /// (a pre-built storage engine, an externally owned trace index, a shared
+    /// memory buffer); everything derived — including the trace index, which
+    /// must be built from the caller's data dir rather than any fixed path —
+    /// happens here so the variants cannot drift apart.
+    fn build(
+        storage: Option<Arc<dyn StorageEngine>>,
+        index: Arc<RwLock<BlockIndex>>,
+        log_index: Arc<RwLock<BlockIndex>>,
+        trace_index: Option<Arc<RwLock<BlockIndex>>>,
+        buffer: Option<MemoryBuffer>,
+        trace_data_dir: std::path::PathBuf,
+    ) -> Self {
+        let storage = storage.unwrap_or_else(|| {
+            Arc::new(parqtel_core::engine::parquet::ParquetStorageEngine::new(
+                parqtel_core::BlockConfig::default(),
+            ))
+        });
+        let trace_index = trace_index.unwrap_or_else(|| {
+            let mut idx = BlockIndex::new(&trace_data_dir);
+            idx.load().ok();
+            Arc::new(RwLock::new(idx))
+        });
+        Self {
+            storage,
+            index,
+            log_index,
+            trace_index,
+            buffer: buffer.unwrap_or_default(),
+            trace_data_dir,
+            lookback_ns: Self::DEFAULT_LOOKBACK_NS,
+            max_series: Self::DEFAULT_MAX_SERIES,
+            max_samples_per_series: Self::DEFAULT_MAX_SAMPLES_PER_SERIES,
+        }
     }
 
     /// Creates a new [QueryExecutor] with shared block indexes.
@@ -50,22 +111,7 @@ impl QueryExecutor {
         log_index: Arc<RwLock<BlockIndex>>,
         trace_data_dir: std::path::PathBuf,
     ) -> Self {
-        let config = parqtel_core::BlockConfig::default();
-        let storage: Arc<dyn StorageEngine> = Arc::new(
-            parqtel_core::engine::parquet::ParquetStorageEngine::new(config),
-        );
-        let mut trace_index = BlockIndex::new(&trace_data_dir);
-        trace_index.load().ok();
-        let trace_index = Arc::new(RwLock::new(trace_index));
-        Self {
-            storage,
-            index,
-            log_index,
-            trace_index,
-            buffer: MemoryBuffer::new(),
-            trace_data_dir,
-            lookback_ns: 5 * 60 * 1_000_000_000,
-        }
+        Self::build(None, index, log_index, None, None, trace_data_dir)
     }
 
     /// Creates a new [QueryExecutor] with a memory buffer for stream-queryable data.
@@ -75,22 +121,7 @@ impl QueryExecutor {
         buffer: MemoryBuffer,
         trace_data_dir: std::path::PathBuf,
     ) -> Self {
-        let config = parqtel_core::BlockConfig::default();
-        let storage: Arc<dyn StorageEngine> = Arc::new(
-            parqtel_core::engine::parquet::ParquetStorageEngine::new(config),
-        );
-        let mut trace_index = BlockIndex::new(&trace_data_dir);
-        trace_index.load().ok();
-        let trace_index = Arc::new(RwLock::new(trace_index));
-        Self {
-            storage,
-            index,
-            log_index,
-            trace_index,
-            buffer,
-            trace_data_dir,
-            lookback_ns: 5 * 60 * 1_000_000_000,
-        }
+        Self::build(None, index, log_index, None, Some(buffer), trace_data_dir)
     }
 
     /// Creates a new [QueryExecutor] with a trace index and memory buffer.
@@ -101,19 +132,14 @@ impl QueryExecutor {
         buffer: MemoryBuffer,
         trace_data_dir: std::path::PathBuf,
     ) -> Self {
-        let config = parqtel_core::BlockConfig::default();
-        let storage: Arc<dyn StorageEngine> = Arc::new(
-            parqtel_core::engine::parquet::ParquetStorageEngine::new(config),
-        );
-        Self {
-            storage,
+        Self::build(
+            None,
             index,
             log_index,
-            trace_index,
-            buffer,
+            Some(trace_index),
+            Some(buffer),
             trace_data_dir,
-            lookback_ns: 5 * 60 * 1_000_000_000,
-        }
+        )
     }
 
     /// Creates a new [QueryExecutor] with a storage engine and block indexes.
@@ -123,18 +149,7 @@ impl QueryExecutor {
         log_index: Arc<RwLock<BlockIndex>>,
         trace_data_dir: std::path::PathBuf,
     ) -> Self {
-        let mut trace_index = BlockIndex::new(&trace_data_dir);
-        trace_index.load().ok();
-        let trace_index = Arc::new(RwLock::new(trace_index));
-        Self {
-            storage,
-            index,
-            log_index,
-            trace_index,
-            buffer: MemoryBuffer::new(),
-            trace_data_dir,
-            lookback_ns: 5 * 60 * 1_000_000_000,
-        }
+        Self::build(Some(storage), index, log_index, None, None, trace_data_dir)
     }
 
     /// Returns a clone of the memory buffer for use by ingestion services.
@@ -239,36 +254,66 @@ impl QueryExecutor {
                 raw.extend(self.buffer.scan_metrics(name, scan_start, end_ns).await);
                 points_scanned += raw.len() as u64;
 
-                // Group by series fingerprint -> labels
+                // Group by series fingerprint first, then match once per
+                // series. Every point of a series carries the same label set,
+                // so evaluating matchers per point repeated `points x matchers`
+                // B-tree string lookups where `series x matchers` suffices.
+                //
+                // `BTreeMap` (not `HashMap`) because the resulting
+                // `SeriesData` is walked in fingerprint order downstream, so
+                // series ids are deterministic across runs.
                 use std::collections::BTreeMap;
-                let mut series_map: BTreeMap<
+                let mut by_series: BTreeMap<
                     u64,
                     (parqtel_core::LabelSet, Vec<(i64, MetricValue)>),
                 > = BTreeMap::new();
                 for dp in raw {
-                    if !crate::matcher::evaluate_matchers(matchers, &dp.labels, name) {
-                        continue;
-                    }
-                    // Count into the volume histogram regardless of series
-                    // truncation. Lookback samples timestamped before
-                    // `start_ns` feed range-selector windows, not the visible
-                    // timeline, so they are excluded.
-                    if window_ns > 0 && dp.timestamp_ns >= start_ns {
-                        let bucket =
-                            ((dp.timestamp_ns - start_ns) / window_ns).clamp(0, 59) as usize;
-                        volume_summary[bucket] += 1;
-                    }
                     let fp = dp.labels.fingerprint();
-                    total_series += 1;
-                    let entry = series_map
+                    let entry = by_series
                         .entry(fp)
                         .or_insert_with(|| (dp.labels.clone(), Vec::new()));
                     entry.1.push((dp.timestamp_ns, dp.value));
                 }
+
+                // Apply matchers once per series, then enforce the same
+                // result limits the plan path applies, so the two engines
+                // cannot disagree about `total_series_count` or escape the
+                // configured memory bound.
+                let mut kept: Vec<(parqtel_core::LabelSet, Vec<(i64, MetricValue)>)> =
+                    Vec::with_capacity(by_series.len());
+                for (_fp, (labels, points)) in by_series {
+                    if !crate::matcher::evaluate_matchers(matchers, &labels, name) {
+                        continue;
+                    }
+                    // Counted as a matched series regardless of truncation, and
+                    // before it, so `total_series_count` reports what matched
+                    // rather than what survived.
+                    total_series += 1;
+                    for (ts, _) in &points {
+                        // Count into the volume histogram regardless of series
+                        // truncation. Lookback samples timestamped before
+                        // `start_ns` feed range-selector windows, not the
+                        // visible timeline, so they are excluded.
+                        if window_ns > 0 && *ts >= start_ns {
+                            let bucket = ((*ts - start_ns) / window_ns).clamp(0, 59) as usize;
+                            volume_summary[bucket] += 1;
+                        }
+                    }
+                    if kept.len() < self.max_series {
+                        kept.push((labels, points));
+                    }
+                }
+
                 let entry = data.entry(name.clone()).or_default();
                 let hist_entry = hist_data.entry(name.clone()).or_default();
-                for (_fp, (labels, mut pts)) in series_map {
+                for (labels, mut pts) in kept {
+                    // Samples were appended in scan order (blocks sorted by
+                    // timestamp, then buffer appends), so keep only the
+                    // oldest `max_samples_per_series` after sorting.
                     pts.sort_by_key(|(t, _)| *t);
+                    if pts.len() > self.max_samples_per_series {
+                        pts.truncate(self.max_samples_per_series);
+                    }
                     // Split histogram-valued samples into the structured
                     // channel; numeric series keep the plain path.
                     let mut hist_pts: Vec<crate::ast::HistSample> = Vec::new();
@@ -1978,6 +2023,128 @@ mod tests {
         assert_eq!(res.series.len(), 0);
         assert_eq!(res.points_scanned, 0);
         assert_eq!(res.volume_summary.len(), 60);
+    }
+
+    /// `total_series_count` used to increment once per *point* in the AST
+    /// path, so a single series with three samples reported 3. The plan path
+    /// has always counted distinct label sets; the two must agree.
+    #[tokio::test]
+    async fn test_execute_ast_counts_series_not_points() {
+        let (exec, _dir) = setup_with_data().await;
+        let expr = crate::parser::parse_expr("cpu").unwrap();
+        let res = exec.execute_ast(&expr, 0, 4000, Some(1000)).await.unwrap();
+        assert_eq!(
+            res.total_series_count, 2,
+            "`cpu` has 2 series (host=h1 with 2 points, host=h2 with 1)"
+        );
+
+        let plan =
+            QueryPlan::new("cpu".into(), vec![], 0, 4000, None, 10, 100, None, None).unwrap();
+        let plan_res = exec.execute(plan).await.unwrap();
+        assert_eq!(
+            res.total_series_count, plan_res.total_series_count,
+            "AST and plan paths must agree on the series count"
+        );
+    }
+
+    /// The AST path previously had no result limits at all, so a query could
+    /// materialise any number of series regardless of `query.max_series`. It
+    /// must now cap series while still reporting the full matched count —
+    /// matching the plan path's truncation semantics.
+    #[tokio::test]
+    async fn test_execute_ast_applies_max_series_limit() {
+        let (exec, _dir) = setup_with_data().await;
+        // 3 points across 2 series (h1, h2): with a cap of 1 the result is
+        // truncated but `total_series_count` still reflects both matches.
+        let exec = exec.with_result_limits(1, 10_000);
+        let expr = crate::parser::parse_expr("cpu").unwrap();
+        let res = exec.execute_ast(&expr, 0, 4000, Some(1000)).await.unwrap();
+        assert_eq!(res.total_series_count, 2, "both series matched");
+        assert_eq!(res.series.len(), 1, "only one series survives the cap");
+    }
+
+    /// Likewise `max_samples_per_series` must bound a single wide series.
+    ///
+    /// Asserted through `count_over_time`, which observes the number of
+    /// *input* samples the evaluator sees. The instant-vector result of a
+    /// plain selector is not a direct probe: every step re-reports the last
+    /// sample within lookback, so a series with one retained sample still
+    /// yields one output sample per step.
+    #[tokio::test]
+    async fn test_execute_ast_applies_max_samples_per_series_limit() {
+        let (exec, _dir) = setup_with_data().await;
+
+        // host=h1 has points at ts 1000 and 2000. Uncapped, count_over_time
+        // reaches 2; capping at 1 sample per series must hold it at 1.
+        let expr = crate::parser::parse_expr("count_over_time(cpu{host=\"h1\"}[5m])").unwrap();
+
+        let uncapped = exec.execute_ast(&expr, 0, 4000, Some(1000)).await.unwrap();
+        assert_eq!(
+            uncapped.series[0].samples.last().unwrap().value,
+            2.0,
+            "without the cap both samples are visible"
+        );
+
+        let capped = exec
+            .with_result_limits(10, 1)
+            .execute_ast(&expr, 0, 4000, Some(1000))
+            .await
+            .unwrap();
+        assert_eq!(
+            capped.series[0].samples.last().unwrap().value,
+            1.0,
+            "the per-series sample cap must bound what the evaluator sees"
+        );
+    }
+
+    #[test]
+    fn result_limits_are_clamped_above_zero() {
+        // A zero cap would silently return nothing, which is a far worse
+        // failure than ignoring the value.
+        let exec = QueryExecutor::new(
+            Arc::new(RwLock::new(BlockIndex::new(Path::new("/tmp/nl")))),
+            Arc::new(RwLock::new(BlockIndex::new(Path::new("/tmp/nl")))),
+            PathBuf::from("/tmp/nl/traces"),
+        )
+        .with_result_limits(0, 0);
+        assert_eq!(exec.max_series, 1);
+        assert_eq!(exec.max_samples_per_series, 1);
+    }
+
+    /// Every public constructor must produce an executor with the same
+    /// defaults; they previously duplicated their initialisation blocks, so a
+    /// new field could be added to one and forgotten in the others.
+    #[test]
+    fn all_constructors_share_defaults() {
+        let index = Arc::new(RwLock::new(BlockIndex::new(Path::new("/tmp/nc"))));
+        let log_index = Arc::new(RwLock::new(BlockIndex::new(Path::new("/tmp/nc"))));
+        let dir = PathBuf::from("/tmp/nc/traces");
+        let storage: Arc<dyn StorageEngine> =
+            Arc::new(ParquetStorageEngine::new(BlockConfig::default()));
+
+        let builders = vec![
+            QueryExecutor::new(index.clone(), log_index.clone(), dir.clone()),
+            QueryExecutor::with_buffer(
+                index.clone(),
+                log_index.clone(),
+                parqtel_core::MemoryBuffer::new(),
+                dir.clone(),
+            ),
+            QueryExecutor::with_trace_index(
+                index.clone(),
+                log_index.clone(),
+                Arc::new(RwLock::new(BlockIndex::new(&dir))),
+                parqtel_core::MemoryBuffer::new(),
+                dir.clone(),
+            ),
+            QueryExecutor::with_engine(storage, index.clone(), log_index.clone(), dir.clone()),
+        ];
+        for exec in builders {
+            assert_eq!(exec.lookback_ns, 5 * 60 * 1_000_000_000);
+            assert_eq!(exec.max_series, 1000);
+            assert_eq!(exec.max_samples_per_series, 10_000);
+            assert_eq!(exec.trace_data_dir, dir, "trace dir must be honoured");
+        }
     }
 
     #[tokio::test]

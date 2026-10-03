@@ -1,3 +1,4 @@
+use crate::error::{Error, Result};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -15,6 +16,10 @@ pub struct BlockConfig {
     pub max_rows_per_block: usize,
     /// Compression codec to use for Parquet files (zstd, snappy, lz4, none).
     pub compression: String,
+    /// Compression level for codecs that support tuning (e.g. zstd 1-22).
+    /// `None` uses the codec's built-in default.
+    #[serde(default)]
+    pub compression_level: Option<i32>,
     /// Data retention in days.
     pub retention_days: u64,
     /// Interval between compaction passes in seconds.
@@ -35,9 +40,58 @@ impl Default for BlockConfig {
             block_duration_secs: 7200,
             max_rows_per_block: 1_000_000,
             compression: "zstd".into(),
+            compression_level: None,
             retention_days: 7,
             compaction_interval_secs: 3600,
             row_group_size: 100_000,
+        }
+    }
+}
+
+impl BlockConfig {
+    /// Validates this block config on its own.
+    pub fn validate(&self) -> Result<()> {
+        let mut errors = Vec::new();
+        self.validate_into("storage", &mut errors);
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(Error::Validation(errors.join("; ")))
+        }
+    }
+
+    /// Appends any problems to `errors`, prefixed with `prefix`.
+    ///
+    /// Shared with [`LogBlockConfig`] via a common shape so the metrics and
+    /// logs blocks cannot drift: the two carry the same knobs, and only the
+    /// prefix differs.
+    pub(crate) fn validate_into(&self, prefix: &str, errors: &mut Vec<String>) {
+        if self.data_dir.as_os_str().is_empty() {
+            errors.push(format!("{prefix}.data_dir must be a non-empty path"));
+        }
+        if !super::VALID_COMPRESSION_CODECS.contains(&self.compression.as_str()) {
+            errors.push(format!(
+                "{prefix}.compression must be one of: {}",
+                super::VALID_COMPRESSION_CODECS.join(", ")
+            ));
+        }
+        if let Some(level) = self.compression_level {
+            super::validate_compression_level(
+                level,
+                &format!("{prefix}.compression_level"),
+                errors,
+            );
+        }
+        // `row_group_size` is the knob the scanner's row-group pruning depends
+        // on: a row group larger than a whole block means pruning can never
+        // help, which is a silent performance regression rather than an error.
+        if self.row_group_size == 0 {
+            errors.push(format!("{prefix}.row_group_size must be greater than 0"));
+        } else if self.row_group_size > self.max_rows_per_block {
+            errors.push(format!(
+                "{prefix}.row_group_size ({}) must not exceed {prefix}.max_rows_per_block ({})",
+                self.row_group_size, self.max_rows_per_block
+            ));
         }
     }
 }
@@ -53,6 +107,10 @@ pub struct LogBlockConfig {
     pub max_rows_per_block: usize,
     /// Compression codec to use for Parquet files (zstd, snappy, lz4, none).
     pub compression: String,
+    /// Compression level for codecs that support tuning (e.g. zstd 1-22).
+    /// `None` uses the codec's built-in default.
+    #[serde(default)]
+    pub compression_level: Option<i32>,
     /// Data retention in days.
     pub retention_days: u64,
     /// Interval between compaction passes in seconds.
@@ -68,6 +126,7 @@ impl Default for LogBlockConfig {
             block_duration_secs: 1800,
             max_rows_per_block: 200_000,
             compression: "zstd".into(),
+            compression_level: None,
             retention_days: 3,
             compaction_interval_secs: 3600,
             row_group_size: 20_000,
@@ -83,6 +142,7 @@ impl From<LogBlockConfig> for BlockConfig {
             block_duration_secs: log.block_duration_secs,
             max_rows_per_block: log.max_rows_per_block,
             compression: log.compression,
+            compression_level: log.compression_level,
             retention_days: log.retention_days,
             compaction_interval_secs: log.compaction_interval_secs,
             row_group_size: log.row_group_size,
@@ -90,5 +150,78 @@ impl From<LogBlockConfig> for BlockConfig {
     }
 }
 
+impl LogBlockConfig {
+    /// Validates this log block config on its own.
+    pub fn validate(&self) -> Result<()> {
+        let mut errors = Vec::new();
+        self.validate_into("logs", &mut errors);
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(Error::Validation(errors.join("; ")))
+        }
+    }
+
+    /// Delegates to [`BlockConfig::validate_into`] so the logs block is held
+    /// to exactly the same rules as the metrics block. Only the error prefix
+    /// differs.
+    pub(crate) fn validate_into(&self, prefix: &str, errors: &mut Vec<String>) {
+        BlockConfig::from(self.clone()).validate_into(prefix, errors)
+    }
+}
+
 /// Retained for compatibility but Config should be used.
 pub struct RetentionConfig;
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+    use super::*;
+
+    #[test]
+    fn defaults_are_valid() {
+        assert!(BlockConfig::default().validate().is_ok());
+        assert!(LogBlockConfig::default().validate().is_ok());
+    }
+
+    /// The log block config must be validated by exactly the same rules as
+    /// the metrics one; these are the two places a rule could be added twice
+    /// or forgotten.
+    #[test]
+    fn log_config_rejects_the_same_failures_as_metrics() {
+        for bad in [
+            LogBlockConfig {
+                compression: "bogus".into(),
+                ..Default::default()
+            },
+            LogBlockConfig {
+                compression_level: Some(0),
+                ..Default::default()
+            },
+            LogBlockConfig {
+                row_group_size: 0,
+                ..Default::default()
+            },
+            LogBlockConfig {
+                row_group_size: usize::MAX,
+                ..Default::default()
+            },
+            LogBlockConfig {
+                data_dir: PathBuf::new(),
+                ..Default::default()
+            },
+        ] {
+            let err = bad.validate().unwrap_err().to_string();
+            assert!(err.contains("logs."), "log error must be prefixed: {err}");
+        }
+    }
+
+    #[test]
+    fn log_to_block_conversion_preserves_compression_level() {
+        let log = LogBlockConfig {
+            compression_level: Some(3),
+            ..Default::default()
+        };
+        assert_eq!(BlockConfig::from(log).compression_level, Some(3));
+    }
+}

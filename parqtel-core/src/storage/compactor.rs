@@ -1,5 +1,5 @@
 use super::index::BlockIndex;
-use crate::config::BlockConfig;
+use crate::config::{compression_from_name, BlockConfig};
 use crate::error::{Error, Result};
 use crate::models::labels::LabelSet;
 use crate::models::logs::LogRecord;
@@ -7,7 +7,6 @@ use crate::models::metrics::{DataPoint, Metric, MetricKind};
 use crate::models::storage::{BlockMetadata, SignalType, StorageModel};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::arrow::arrow_writer::ArrowWriter;
-use parquet::basic::Compression;
 use parquet::file::properties::{WriterProperties, WriterVersion};
 use std::collections::{BTreeMap, HashSet};
 use std::fs::{self, File};
@@ -341,12 +340,10 @@ impl Compactor {
         fs::create_dir_all(&config.data_dir)?;
 
         let writer_props = WriterProperties::builder()
-            .set_compression(match config.compression.as_str() {
-                "zstd" => Compression::ZSTD(Default::default()),
-                "snappy" => Compression::SNAPPY,
-                "lz4" => Compression::LZ4_RAW,
-                _ => Compression::UNCOMPRESSED,
-            })
+            .set_compression(compression_from_name(
+                &config.compression,
+                config.compression_level,
+            ))
             .set_writer_version(WriterVersion::PARQUET_2_0)
             // Compaction rewrites blocks, so it must preserve the row-group
             // layout the scanner prunes on — otherwise compacted blocks quietly

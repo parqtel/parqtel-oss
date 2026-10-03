@@ -15,6 +15,10 @@ bind_address = "0.0.0.0:8080"
 grpc_bind_address = "0.0.0.0:4317"   # OTLP gRPC; "" disables
 max_connections = 1024
 shutdown_timeout_secs = 30
+flush_interval_secs = 5
+alert_interval_secs = 15
+retention_interval_secs = 3600
+grpc_concurrency_limit = 64
 
 [storage]
 backend = "parquet"
@@ -22,6 +26,7 @@ data_dir = "data"
 block_duration_secs = 7200        # 2 hours
 max_rows_per_block = 1000000
 compression = "zstd"              # zstd | snappy | lz4 | none
+compression_level = 1             # optional zstd level (1-22); unset = codec default
 retention_days = 7
 compaction_interval_secs = 3600   # 1 hour
 row_group_size = 100000
@@ -31,6 +36,7 @@ data_dir = "data/logs"
 block_duration_secs = 1800        # 30 minutes
 max_rows_per_block = 200000
 compression = "zstd"
+compression_level = 1             # optional zstd level (1-22); unset = codec default
 retention_days = 3
 compaction_interval_secs = 3600
 row_group_size = 20000
@@ -130,6 +136,10 @@ tls_secret_name = "parqtel-provider-tls"
 | `grpc_bind_address` | String | `"0.0.0.0:4317"` | TCP address for OTLP gRPC; empty string disables |
 | `max_connections` | Integer | `1024` | Maximum simultaneous TCP connections |
 | `shutdown_timeout_secs` | Integer | `30` | Seconds to wait for in-flight requests during graceful shutdown |
+| `flush_interval_secs` | Integer | `5` | Background tick that checks whether a block has reached its duration. Bounds how *late* a duration-triggered flush can be, not how often blocks are written |
+| `alert_interval_secs` | Integer | `15` | Seconds between alert-rule evaluation cycles |
+| `retention_interval_secs` | Integer | `3600` | Seconds between retention sweeps. Lower it if the sweep visibly stalls endpoints; raise it on very large indexes |
+| `grpc_concurrency_limit` | Integer | `64` | Maximum concurrent OTLP exports per gRPC connection. Without it a single client can monopolise the ingest mutex that HTTP exporters also queue on |
 
 ### `[storage]`
 
@@ -140,9 +150,10 @@ tls_secret_name = "parqtel-provider-tls"
 | `block_duration_secs` | Integer | `7200` | Time span of a single block (seconds) |
 | `max_rows_per_block` | Integer | `1000000` | Maximum rows before forced rotation |
 | `compression` | String | `"zstd"` | Parquet compression: `zstd`, `snappy`, `lz4`, `none` |
+| `compression_level` | Integer | unset | Compression level for `zstd` (`1`–`22`). Unset uses the codec default. Lower levels encode faster and compress less; use a low level for frequently rewritten blocks |
 | `retention_days` | Integer | `7` | Days to retain metric data |
 | `compaction_interval_secs` | Integer | `3600` | Interval between compaction passes |
-| `row_group_size` | Integer | `100000` | Rows per Parquet row group |
+| `row_group_size` | Integer | `100000` | Rows per Parquet row group. Must be ≤ `max_rows_per_block` — this is what row-group pruning depends on, so a too-large value silently costs query time |
 
 ### `[logs]`
 
@@ -152,9 +163,10 @@ tls_secret_name = "parqtel-provider-tls"
 | `block_duration_secs` | Integer | `1800` | Time span of a single log block |
 | `max_rows_per_block` | Integer | `200000` | Maximum rows before forced rotation |
 | `compression` | String | `"zstd"` | Parquet compression codec |
+| `compression_level` | Integer | unset | Compression level for `zstd` (`1`–`22`). Unset uses the codec default |
 | `retention_days` | Integer | `3` | Days to retain log data |
 | `compaction_interval_secs` | Integer | `3600` | Interval between compaction passes |
-| `row_group_size` | Integer | `20000` | Rows per Parquet row group |
+| `row_group_size` | Integer | `20000` | Rows per Parquet row group. Must be ≤ `max_rows_per_block` |
 
 ### `[ingest]`
 
@@ -297,12 +309,17 @@ Environment variables use the `PARQTEL__` prefix with `__` as the section separa
 export PARQTEL__SERVER__BIND_ADDRESS="0.0.0.0:9090"
 export PARQTEL__SERVER__MAX_CONNECTIONS=2048
 export PARQTEL__SERVER__GRPC_BIND_ADDRESS="0.0.0.0:4317"
+export PARQTEL__SERVER__FLUSH_INTERVAL_SECS=10
+export PARQTEL__SERVER__RETENTION_INTERVAL_SECS=1800
 
 # Storage
 export PARQTEL__STORAGE__DATA_DIR="/var/lib/parqtel/data"
-export PARQTEL__STORAGE__COMPRESSION="snappy"
+export PARQTEL__STORAGE__COMPRESSION="zstd"
+export PARQTEL__STORAGE__COMPRESSION_LEVEL=1
 export PARQTEL__STORAGE__RETENTION_DAYS=14
 export PARQTEL__STORAGE__BLOCK_DURATION_SECS=3600
+# Row-group pruning only works when the row group fits inside a block.
+export PARQTEL__STORAGE__ROW_GROUP_SIZE=50000
 
 # Logs
 export PARQTEL__LOGS__DATA_DIR="/var/lib/parqtel/logs"
