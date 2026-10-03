@@ -1,0 +1,303 @@
+# BL-03 — Storage Optimization
+
+**Domain:** `parqtel-core/src/storage/*`, `parqtel-core/src/models/storage/*`, `parqtel-ingest/src/writer.rs`
+**Goal:** 2–5× smaller blocks, write amplification and read amplification both down, no index/query cost that scales with the retention window, bounded crash-loss window.
+
+Severity: **C** Critical, **H** High, **M** Medium, **L** Low. Effort: S ≤ 2d, M ≤ 1w, L > 1w.
+
+---
+
+## BL-03-01 (C) — Whole index re-serialised and rewritten **inside the shared write lock** on every flush
+
+**Evidence**
+- `parqtel-core/src/storage/index.rs:33-39` — `save()` = `serde_json::to_string(&self.blocks)` → `fs::write(tmp)` → `fs::rename`. Called by `add()` (`:42-46`) and `remove()` (`:49-52`).
+- `parqtel-server/src/main.rs:197-204` (metrics), `:209-216` (logs), `:248-255` (traces): `while let Some(meta) = rx.recv().await { let mut idx = idx_clone.write().await; idx.add(meta) }` — **no `spawn_blocking`**.
+- `BlockIndex::add` also re-sorts the whole `blocks` vector on every insert (`index.rs:44`).
+- The payload includes `label_values: BTreeMap<String, BTreeSet<String>>` capped at `MAX_VALUES_PER_FIELD = 10_000` per field (`parqtel-ingest/src/writer.rs:86-90`, populated at `:91-118`).
+
+**Gap.** After **every** block flush the entire index — all blocks, all metric names, all label names, up to 10 000 values per label — is re-serialised to a JSON `String` in memory, written synchronously, and renamed, all while holding the `RwLock` that **every query handler** needs for `index.read()`. That is O(total_index_size) CPU + a blocking syscall pair per flush, on a tokio worker, under the write lock. As block count grows this is quadratic in the retention window, and every concurrent `/api/v1/query*` blocks for the duration.
+
+**Resolution.**
+- Mark the index dirty and persist on a **debounce** (1–2 s) or on shutdown, doing the `to_string` + write inside `spawn_blocking`.
+- Better: replace the JSON sidecar with an **append-only log** (one `serde_json` line per block add/remove), compacted periodically — O(1) per flush.
+- Never hold the index write lock across persistence: take the lock only to mutate the in-memory `Vec`, clone out what needs writing, release, then write.
+- Only sort on load or when the vector is known unsorted (or keep a sorted invariant by appending + merge).
+
+**Acceptance.** Query tail latency no longer scales with index size; index persistence is O(1) per flush; `index.json` write duration < 10 ms at 10 000 blocks.
+
+**Effort** M · **Risk** Medium (crash-consistency of the index format — needs a versioned format and a load-time repair path)
+
+---
+
+## BL-03-02 (C) — Compaction and retention run synchronous Parquet/filesystem work on tokio workers, holding the index write lock
+
+**Evidence**
+- `parqtel-core/src/storage/mod.rs:16-19` — `start_maintenance` spawns `Compactor::run_loop` and `RetentionPolicy::run_loop`.
+- `compactor.rs:34-53` — `run_loop` is `async` but `compact_once` (`:78`) and `compact_tiered` (`:184`, `:189`) call **sync** `read_source_blocks` (`:209-231`: `File::open` + `ParquetRecordBatchReaderBuilder` + full row decode via `StorageModel::row_to_point`) and **sync** `write_merged` (`:256-370`: `create_dir_all`, `File::create`, `ArrowWriter::write/close`, `rename`, `metadata`).
+- `compactor.rs:96-102` and `:191-197` — index **write** lock taken, then `idx.save()` inside it; `fs::remove_file` loop at `:104-106` / `:199-201`.
+- `retention.rs:27-54` — index write lock held across `idx.save()` (`:50`) **and** every `fs::remove_file` (`:52-54`).
+
+**Gap.** Tokio's multi-threaded runtime has no preemption for synchronous work. A worker stuck in `ArrowWriter::close()` cannot poll any other task assigned to it, so **every** request multiplexed on that worker stalls — not just storage endpoints. On the default `compaction_interval_secs = 3600` (`config/storage.rs:39`) the cycle decodes and re-encodes up to 8 small blocks (or 12 in the tiered pass), potentially many seconds, while holding the write lock that every query needs.
+
+**Resolution.**
+- Wrap `read_source_blocks`, `write_merged` and the delete batches in `spawn_blocking` (mirroring `parqtel-ingest/src/service.rs:73`).
+- Snapshot the candidate metadata under the **read** lock, release it, do all I/O lock-free, then take the write lock only to swap the `Vec`.
+- Add a compaction concurrency limit and make the cycle resumable so an interrupted compaction does not leave orphans.
+
+**Acceptance.** No endpoint observes a stall > 100 ms attributable to compaction or retention; index write-lock hold time < 1 ms.
+
+**Effort** M · **Risk** Medium
+
+---
+
+## BL-03-03 (H) — No bloom filters, no column/page index, no page-size limits in the Parquet writer
+
+**Evidence** — `parqtel-ingest/src/writer.rs:400-409` is the whole `WriterProperties` setup for metrics, logs and traces:
+```rust
+WriterProperties::builder()
+    .set_compression(/* codec only */)          // :401-406
+    .set_writer_version(WriterVersion::PARQUET_2_0)
+    .set_max_row_group_row_count(Some(row_group_size.max(1)))
+    .build();
+```
+No `set_bloom_filter_enabled` on `metric_name` / `service_name` / `timestamp_ns`; no `set_column_index_truncate_length`; no `EnabledStatistics::Page` tuning; no `set_data_page_size_limit`. `parqtel-core/src/storage/scanner.rs` reads **row-group** statistics (the only level written) and nothing finer.
+
+**Gap.** Without bloom filters, every metric-name query must open and decode block footers + row-group metadata for all candidate blocks; the index's `metric_names` filter (`index.rs:67-71`) is the only coarse filter. Without a column index, a narrow row-group read still decodes whole pages. Note the writer also has `parquet = { features = [… "encryption"] }` (`Cargo.toml:31`) — dead weight for this engine that inflates build and binary size.
+
+**Resolution.**
+- Enable bloom filters on `metric_name`, `service_name` (and `timestamp_ns` if the reader can use it) for all three schemas.
+- Enable page-level statistics and set a `column_index_truncate_length`; tune `data_page_size_limit`.
+- Extend `row_groups_in_range` (`scanner.rs:533-574`) to a column-chunk/page-level prune using the column index.
+- Drop the unused `encryption` feature.
+
+**Acceptance.** Narrow metric queries open ≤ 1 row group per candidate block; `parquet-tools inspect` confirms bloom filters present on the three key columns.
+
+**Effort** M · **Risk** Medium (page-level pruning needs care to stay *sound* — same rule as the existing row-group prune: keep rather than skip when statistics are absent)
+
+---
+
+## BL-03-04 (H) — `labels` stored as a per-row JSON string column instead of a series-keyed dictionary
+
+**Evidence**
+- `parqtel-core/src/models/storage/schema.rs:88` — metrics `labels` is `DataType::Utf8`; logs `attributes` and `resource_attributes` are `Utf8` (`:155-156`); traces `attributes`/`resource_attributes`/`events`/`links` are `Utf8` (`:227-230`).
+- By contrast `metric_name`, `service_name`, `service_version`, the k8s columns and `resource_attributes` (metrics) **are** dictionary-encoded (`schema.rs:44`, `:50`, `:84`).
+- Every row serialises its labels independently: `parqtel-core/src/models/storage/writer.rs:57` — `labels.append_value(&dp.labels.to_json()?)`; scanner caches by JSON text because "label JSON repeats once per series across thousands of rows" (`scanner.rs:132`, `:198-219`).
+
+**Gap.** The single largest column in the metrics/logs/traces blocks is a repeated, near-identical JSON blob — the archetypal Parquet anti-pattern. It costs: file size (zstd must re-compress the same text per row), write CPU (one `serde_json::to_string` per row), read CPU (one JSON parse per distinct series per chunk, cached but still per chunk), and scan bandwidth. This is the main reason blocks are large, which in turn is why scans are slow.
+
+**Resolution.**
+- Introduce a **series dictionary**: intern each distinct label set to a `u32 series_id` (from the same interner as BL-01-02), store `series_id` as `DataType::UInt32` (or `Dictionary(Int32, UInt32)`), and keep a per-block side table mapping `series_id → labels JSON`.
+- Equivalently, make `labels` a `Dictionary(Int32, Utf8)` column so Parquet dictionary-encodes it — cheaper to implement, smaller win, no side table.
+- Prefer the full series-id design; fall back to dictionary-encoding if the side-table complexity is not worth it in one step.
+- Same treatment for logs `attributes`/`resource_attributes` and traces `attributes`.
+
+**Acceptance.** Blocks ≥ 2× smaller (target ≤ 60 % of current bytes on the seeded benchmark dataset); flush CPU ≥ 25 % lower; narrow-query scan cost independent of `row_group_size` once bloom filters land.
+
+**Schema compatibility.** Version the schema in `BlockMetadata` (add `schema_version`), support reading v1 and writing v2, and document that pre-v2 data dirs must be wiped or migrated — consistent with the existing arrow2→arrow migration precedent recorded in `AGENTS.md`.
+
+**Effort** XL · **Risk** High (on-disk format change)
+
+---
+
+## BL-03-05 (H) — Compression level is not configurable; codec choice is stringly-typed and duplicated
+
+**Evidence** — `writer.rs:401-406` and `compactor.rs:344-349` both match on `config.compression` as a string:
+```rust
+"zstd" => Compression::ZSTD(Default::default()),  // library default level
+"snappy" => Compression::SNAPPY,
+"lz4" => Compression::LZ4_RAW,
+_ => Compression::UNCOMPRESSED,
+```
+Validation lives separately in `parqtel-core/src/config/mod.rs:50-62` against `["zstd","snappy","lz4","none"]`, so the mapping is duplicated in two places; `"none"` relies on the `_` arm. There is no level control and no distinction between `LZ4_RAW` (write) and its read-side equivalent.
+
+**Gap.** zstd at the library default is a size-first choice applied to the hot write path. Level 1 is typically 3–5× faster to encode with a modest size penalty — the right default for blocks written every 30–300 s (BL-01-04). Conversely, compacted cold data (24 h tier, `compactor.rs:120`) is written with the same setting even though it is read rarely and benefits from a higher level. The duplication also means a config typo validated in one place can behave differently in the other.
+
+**Resolution.**
+- Add `compression_level: Option<i32>` to `BlockConfig`/`LogBlockConfig`; single shared `fn compression_from_config(&str, Option<i32>) -> Compression` used by both the writer and the compactor.
+- Tier-aware policy: fast codec/level for fresh blocks, high level for compacted tiers (pairs with BL-03-09).
+- Make codec an enum rather than a string; keep string parsing at the config boundary only.
+
+**Acceptance.** `compression_level` documented in `docs/CONFIGURATION.md`; flush CPU for the default config drops ≥ 30 % at equal or better compressed size for the compacted tier.
+
+**Effort** S · **Risk** Low
+
+---
+
+## BL-03-06 (H) — Block index size is O(blocks × fields × values) and label-value lookups re-merge per block
+
+**Evidence** — `BlockMetadata` (`schema.rs:7-23`) carries, per block: `metric_names: HashSet<String>`, `label_names: HashSet<String>`, `label_values: BTreeMap<String, BTreeSet<String>>`. These are rebuilt per row at flush (`writer.rs:91-118` metrics, `:232-257` logs) and serialised wholesale on every save (`index.rs:34`). Lookups merge across blocks per call (`executor.rs:1297`, `:1324`, `:1513`). `metric_names` and `label_names` are **unbounded per block**.
+
+**Gap.** A 30-day retention at, say, 300 blocks/signal with 50 label fields at 10 000 values each produces an index measured in hundreds of MB — serialised in full on **every flush** (BL-03-01). Per-block `HashSet<String>` of metric names also duplicates information that is trivially derivable from the block's Parquet dictionary page.
+
+**Resolution.**
+- Replace per-block `metric_names`/`label_names` with a compact **series-dictionary side table**: one global `series_id → {metric, labels}` map plus a per-block `Vec<u32>` of the series it contains (falls out of BL-03-04).
+- Keep `label_values` only in a **separate**, independently-loaded autocomplete structure with its own cap and eviction, not in the hot `index.json`.
+- Persist the autocomplete structure lazily (it is rebuilt from blocks if lost) — `/api/v1/label/:name/values` already merges with the memory buffer (`buffer.rs:196-207`).
+- Add an index size guard: warn and prune `label_values` when the serialised index exceeds a configured threshold.
+
+**Acceptance.** `index.json` < 20 MB at 30 days retention with 10 000 blocks; index save duration independent of label cardinality.
+
+**Effort** L · **Risk** Medium
+
+---
+
+## BL-03-07 (H) — Row groups are time-sorted only; no `(metric_name, service_name, timestamp)` ordering, and default row-group sizes are coarse
+
+**Evidence**
+- `writer.rs:72` — `self.buffer.sort_by_key(|ctx| ctx.dp.timestamp_ns)`; compaction sorts by timestamp too (`compactor.rs:264`, `:306`).
+- `scanner.rs:520-532` documents the resulting invariant: pruning is only *useful* when rows are roughly time-ordered, and relies on flush/compaction sorting.
+- Defaults: metrics `row_group_size: 100_000` (`config/storage.rs:40`), logs `20_000` (`:73`), with `max_rows_per_block` 1 000 000 / 200 000 (`:36`, `:70`).
+- `row_groups_in_range` prunes on the timestamp column only (`scanner.rs:533-574`), and the metrics scan then filters by metric name row by row (`scanner.rs:187-190`).
+
+**Gap.** With a single global time ordering, a query for one metric in one service must decode a row group that also holds every other metric and every other service. At 100k rows per group, that is up to 100 000 rows decoded (and their label JSON parsed) to serve a handful of points. Metric names are already dictionary columns and service names are dictionary columns — sorting by them first costs nothing at write time and would make row-group pruning two-dimensional. The 100 000-row default is also coarse: it is 100 000 rows of decode work per group before pruning can help.
+
+**Resolution.**
+- Sort rows at flush by `(metric_name, service_name, timestamp_ns)` — for metrics; `(service_name, severity, timestamp_ns)` or just `(service_name, timestamp_ns)` for logs; traces already keyed by `start_time_ns`.
+- Extend `row_groups_in_range` into a `row_groups_matching(metadata, ts_column, start, end, name_column, name)` that intersects **both** the timestamp and the metric/service dictionary statistics.
+- Retune `row_group_size` defaults downward (25k–50k metrics, 5k–10k logs) once ordering is in place; document the trade-off (more row groups → more footer/metadata bytes).
+- Note `ROW_GROUP_ROWS`/`row_group_size` was already noted as a follow-up in `docs/benchmarks/PERFORMANCE.md` — this item closes it properly.
+
+**Acceptance.** A single-series query in a 1M-row block decodes ≤ 1 row group (measured via `parquet-tools inspect` + scan timing). Narrow-query scan cost independent of `row_group_size`.
+
+**Effort** M · **Risk** Medium (ordering change affects compaction grouping and the pruning soundness argument — extend the existing tests at `parqtel-core/src/storage/mod.rs:243-328`)
+
+---
+
+## BL-03-08 (M) — No column projection: scans decode every column of every candidate block
+
+**Evidence** — `scanner.rs:123-126` (metrics), `:350-352` (logs), `:475-477` (traces) build the reader with no projection mask:
+```rust
+let reader = reader_builder.build()?;
+```
+`ParquetRecordBatchReaderBuilder::with_projection` is never used. The metrics scan then reads columns 0, 1, 3, 11, 12, 13, 14 (`scanner.rs:134-178`) out of 15; log/trace scans via `StorageModel::row_to_log`/`row_to_span` need fewer than all 19/26 columns but pay for all of them.
+
+**Gap.** For a `resource_attributes` selection over metrics, columns 4–10 (six dictionary columns) and `value_complex` are decoded for nothing. For trace search, `events`, `links`, `trace_state`, `status_message` are decoded per span and then JSON-parsed by `row_to_span` (`scanner.rs:490-503`) even when the caller only filters on service/operation.
+
+**Resolution.** Project explicitly per signal and per query shape: metrics scan → `[0,1,3,11,12,13,14]`; log count/volume path → `[0, severity, attributes, resource_attributes]`; trace filter-only path → defer `row_to_span` entirely and filter on the cheap columns, materialising full spans only for rows that pass (this also fixes the asymmetry noted in BL-02-12). Add a `Projection` parameter to the scanner entry points.
+
+**Acceptance.** Bytes decompressed per query reduced by ≥ 30 % on the seeded dataset for all three signals.
+
+**Effort** M · **Risk** Medium (a wrong mask silently truncates columns — add a test asserting each scan path's projection matches its row decoder's needs)
+
+---
+
+## BL-03-09 (M) — Compaction is a full decode→re-encode with fixed, small merge limits and one merge per signal per pass
+
+**Evidence** — `compactor.rs:55-113` (`compact_once`) merges blocks with `row_count < 10000`, up to **8** at a time (`:71`), via full row decode (`read_source_blocks`, `:209-231`) and full re-encode (`write_merged`, `:256-370`). `compact_tiered` (`:117-207`) merges ≤ **12** blocks (`:174`) and then `break`s — **one merge per signal per pass** (`:202-203`). Block selection ignores adjacency for `compact_once` (it takes the first 8 small blocks from an unordered `filter`), and `write_merged` rebuilds `label_names`/`metric_names` but sets `label_values: Default::default()` (`:388`), so **compaction silently discards the label-value index** built at flush.
+
+**Gap.**
+- Merge limits are hard-coded, not driven by `max_rows_per_block`, so compaction cannot keep up with a high block-arrival rate and the small-block population grows.
+- One merge per signal per 3 600 s interval is far too slow to converge.
+- Compaction is read-amplifying: it decodes **every column** (BL-03-08) and re-serialises labels per row (`storage/writer.rs:57`).
+- Losing `label_values` on compaction regresses label-value autocomplete for all compacted blocks — a correctness-adjacent regression hidden in a maintenance path.
+
+**Resolution.**
+- Drive merge limits from `max_rows_per_block` / `row_group_size` instead of literals; select **adjacent** blocks (sorted by `start_timestamp_ns`, which the index already maintains) so merged blocks stay time-contiguous and pruning stays effective.
+- Loop until no mergeable group remains, bounded by a per-cycle budget and a concurrency limit, instead of one merge per pass.
+- Carry `label_values` through the merge (union of source blocks) or rebuild from the new block's own flush-time collection.
+- Use projection to skip unused columns during compaction decode, and consider rewriting via Parquet row-group-level copy when the schema is unchanged (avoids row materialisation entirely).
+
+**Acceptance.** Small-block count returns to steady state within one compaction interval at 10× the current block-arrival rate; compacted blocks retain their label-value index.
+
+**Effort** L · **Risk** Medium
+
+---
+
+## BL-03-10 (M) — Trace compaction is skipped entirely
+
+**Evidence** — `compactor.rs:178-182`: for `SignalType::Traces` the tiered pass `continue`s with the comment "skip read_source_blocks (which only handles metrics/logs) and just leave them for now". `read_source_blocks` (`:209-254`) only decodes metrics (`row_to_point`) and logs (`row_to_log`); there is no `row_to_span` branch.
+
+**Gap.** Trace blocks never merge. With `retention_days = 7` for traces and a 30-minute-ish flush cadence, the trace block count grows monotonically until retention deletes them, and every trace query pays the per-block overhead (open, footer decode, page decode) across all of them. Trace search is the query most sensitive to block count because each block read also JSON-parses span attributes.
+
+**Resolution.** Add a `row_to_span` branch to `read_source_blocks` and let traces participate in both passes. Merge on `(service_name, start_time_ns)` ordering to match BL-03-07. Guard with the same row-group-size preservation the metrics path already documents (`compactor.rs:351-354`).
+
+**Acceptance.** Trace block count is bounded under sustained ingest; trace search latency flat over a 7-day window rather than degrading linearly.
+
+**Effort** M · **Risk** Low
+
+---
+
+## BL-03-11 (M) — Retention holds the write lock across saves and deletes; no size-aware or dry-run policy
+
+**Evidence** — `retention.rs:23-60`: `let mut idx = index.write().await;` then `idx.blocks.retain(...)` (`:31-39`), `idx.save()?` (`:50`) and a `fs::remove_file` loop (`:52-54`) — **all under the write lock**. Sweep interval is a hard-coded 3 600 s (`retention.rs:14`). `retention_days` is time-based only; there is no size cap.
+
+**Gap.** Same lock-held-across-IO problem as BL-03-02, and it recurs hourly. Time-based-only retention means a high-cardinality or high-ingest deployment can fill the disk long before the retention horizon, with no back-pressure signal to the operator other than the deletion log line.
+
+**Resolution.**
+- Compute the deletion set under the read lock, release, delete files lock-free, then take the write lock once to remove the entries and persist.
+- Add `retention_max_bytes` (soft disk cap) alongside `retention_days`, deleting oldest-first when exceeded, with `parqtel_retention_deleted_blocks_total` and a disk-usage gauge exported.
+- Move the sweep interval into config rather than a literal (`retention.rs:14`).
+- Add a `--dry-run`/stats mode to the retention path so operators can preview deletions.
+
+**Acceptance.** Index write-lock hold time during retention < 1 ms; a disk-usage alert threshold exists and is documented.
+
+**Effort** M · **Risk** Low
+
+---
+
+## BL-03-12 (H) — No write-ahead log: crash loss is up to an entire block window
+
+**Evidence** — `parqtel-core/src/config/ingest.rs:58` — `wal_enabled: false` by default (`log_wal_enabled: true` at `:59` is unused by this path). The buffer is drained only after a successful flush (`parqtel-ingest/src/service.rs:255-259`, `:276-280`), and blocks rotate on row count or the (effectively dead) time trigger — see BL-01-04.
+
+**Gap.** On crash or OOM-kill, everything in the memory buffer is lost. Combined with `block_duration_secs = 7200` that is potentially hours of telemetry. For an SRE tool this is the most damaging reliability gap in the backlog: the data you lose is exactly the data you wanted during the incident.
+
+**Resolution.**
+- Implement a WAL per signal: append decoded points/records to a length-prefixed, CRC-checked segment file on the blocking pool (batched, not per point); on startup replay and re-ingest; truncate after a successful block flush.
+- Enable by default for metrics and logs once it is implemented; expose `wal_sync_mode` (`none`/`interval`/`fsync`) so the durability/throughput trade-off is explicit.
+- Bound WAL size and segment count; expose replay duration and last-replay outcome on `/api/v1/stats`.
+
+**Acceptance.** Crash (SIGKILL) mid-ingest loses < 5 s of data with default settings; steady-state ingest throughput impact < 10 %.
+
+**Effort** XL · **Risk** Medium
+
+---
+
+## BL-03-13 (L) — Schema and writer hygiene
+
+| # | Gap | Evidence | Resolution |
+|---|-----|----------|------------|
+| a | `value_complex` stores histogram/summary payloads as a JSON string | `schema.rs:91`, `storage/writer.rs:37`, `:74` | Once BL-03-04 lands, consider native list/struct columns; measure before committing |
+| b | `MetricValue` histograms carry `Vec<f64>`/`Vec<u64>` that are cloned per row per step on read | `parqtel-query/src/aggregation.rs:120-133`, `:336` | Tracked as BL-02-18 |
+| c | `fs::create_dir_all` per flush and `fs::metadata` after every rename | `writer.rs:131`, `:139`, `:269`, `:277`, `:360`, `:368`; `compactor.rs:341`, `:370` | Create once at startup (`main.rs:150-151`); take size from the writer's byte counter |
+| d | `Uuid::new_v4()` per block filename | `writer.rs:126`, `:264`, `:355`; `compactor.rs:336` | Monotonic `ulid` (already vendored, `Cargo.toml:59`) — also gives lexical ordering |
+| e | No `schema_version` / checksum on the index sidecar; the 10 000-value cap is applied silently | `schema.rs:7-23`; `writer.rs:96`, `:108`, `:236`, `:248` | Add `schema_version` + `index_version`; surface truncation as a counter/log line |
+| f | `row_group_size` is documented as the pruning knob but not validated against `max_rows_per_block` | `writer.rs:385-391`; `compactor.rs:351-354` | Validate at config load: `row_group_size <= max_rows_per_block` |
+| g | `parquet` `encryption` feature enabled but unused | `Cargo.toml:31` | Remove — build time and binary size |
+| h | `set_max_row_group_row_count` only; no `set_data_page_row_count_limit` | `writer.rs:408` | Tune alongside BL-03-03 |
+
+---
+
+## BL-03-14 (L) — Compaction tier policy is time-based only and hard-coded
+
+**Evidence** — `compactor.rs:117-121`: warm tier > 6 h → 6 h blocks; cold tier > 24 h → 24 h blocks, both as literals. Tier window choice (`:149-156`) is per-pass and driven by whether *any* candidate is > 24 h old, so a single old block switches the whole pass to 24 h targets. Candidates are capped by `row_count < 500_000` (`:132`) with no size or cost budget.
+
+**Resolution.** Make tier boundaries and target sizes config-driven (`compaction.tier_warm_secs`, `tier_cold_secs`, `max_merge_blocks`, `max_merge_bytes`); select the tier per merge group rather than per pass; add a cost budget so a compaction cycle cannot monopolise disk I/O. Pair with BL-03-05 for tier-specific compression.
+
+**Effort** S · **Risk** Low
+
+---
+
+## BL-03-15 (L) — Storage-level observability is thin
+
+**Gap.** There is no metric for index size, index save duration, compaction bytes read/written, compaction amplification ratio, or blocks-per-signal over time. `docs/benchmarks/PERFORMANCE.md` records throughput, but production operators have no visibility into compaction amplification or index growth — the two numbers that predict "disk full in 4 days".
+
+**Resolution.** Export: `parqtel_index_bytes`, `parqtel_index_save_duration_seconds`, `parqtel_blocks{signal}`, `parqtel_compaction_bytes_read`, `parqtel_compaction_bytes_written`, `parqtel_compaction_amplification_ratio`, `parqtel_retention_deleted_blocks_total`, `parqtel_block_write_duration_seconds` (split encode vs. rename). Follows from BL-03-01/02/09/11.
+
+**Effort** S · **Risk** Low
+
+---
+
+## Verification commands
+
+```bash
+# block size / row group / codec inspection
+parquet-tools inspect data/*.parquet | head -60
+
+# storage growth and compaction behaviour under load
+python3 scripts/gen_bench_data.py --help
+python3 scripts/varying-load-test.py --help
+python3 scripts/check-memory.sh
+
+# compaction + retention stats from the running server
+curl -s localhost:8080/api/v1/stats | jq '.storage'
+```

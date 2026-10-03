@@ -116,6 +116,8 @@ Benchmarked with sustained 1000 samples/sec (metrics + logs + traces) for 15 min
 
 Hot-path optimizations (non-blocking flushes, row-group pruning, label caching) are detailed in [docs/benchmarks/PERFORMANCE.md](docs/benchmarks/PERFORMANCE.md) — scan throughput +39%, narrow-range queries decode only matching row groups, and Parquet writes no longer stall async workers.
 
+The identified performance and storage-efficiency gaps, with prioritised resolutions, target service levels and a phased delivery plan, are tracked in [backlogs/README.md](backlogs/README.md).
+
 ## Architecture
 
 **The telemetry flow** — OTLP in, Parquet down, three query surfaces up:
