@@ -15,6 +15,29 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, Mutex};
 
+/// Publishes one freshly written block: records its flush duration and rows,
+/// then hands the metadata to the index channel.
+///
+/// Shared by every write path so a block closed mid-`push` is accounted for
+/// exactly like one closed by an explicit flush. Without this the capacity
+/// split in [`BlockWriter::push`] would write blocks that never appear in the
+/// flush metrics — the expensive case would again be invisible.
+fn record_block_written(
+    meta: &BlockMetadata,
+    contention: Option<&ContentionMetrics>,
+    signal: SignalType,
+) {
+    if let Some(c) = contention {
+        c.flush_started(signal).count_rows(meta.row_count as u64);
+    }
+    tracing::debug!(
+        signal = signal.as_str(),
+        rows = meta.row_count,
+        block = %meta.path.display(),
+        "block flushed while pushing"
+    );
+}
+
 /// Handles automatic rotation and flushing of metric blocks.
 pub struct BlockRotator {
     writer: BlockWriter,
@@ -36,11 +59,19 @@ impl BlockRotator {
         }
     }
 
-    /// Flushes first if the batch would exceed block capacity, then pushes.
-    /// Preserves every data point; the original dropped points past capacity.
-    /// Returns `true` if a flush happened (caller drains the memory buffer).
-    /// ponytail: a single batch larger than a whole block still overflows one
-    /// block boundary — split batches if that ever matters.
+    fn publish(&self, meta: BlockMetadata, contention: Option<&ContentionMetrics>) {
+        record_block_written(&meta, contention, SignalType::Metrics);
+        let _ = self.metadata_tx.send(meta);
+    }
+
+    /// Pushes a metric, closing a block first if it would not fit whole.
+    ///
+    /// A metric larger than a whole block is split across as many blocks as it
+    /// needs rather than being partially accepted and then reported as an
+    /// error (which made clients retry a batch that was already half-ingested).
+    ///
+    /// Returns `true` if any flush happened, so the caller drains the memory
+    /// buffer and the flushed rows are not read twice.
     pub async fn push(
         &mut self,
         metric: Metric,
@@ -51,7 +82,13 @@ impl BlockRotator {
             self.flush(contention).await?;
             flushed = true;
         }
-        self.writer.push(metric).map(|_| flushed)
+        // `push` may still have had to close a block mid-metric; publish
+        // whatever it wrote so no block is orphaned.
+        for meta in self.writer.push(metric)? {
+            flushed = true;
+            self.publish(meta, contention);
+        }
+        Ok(flushed)
     }
 
     pub async fn check_and_flush(
@@ -130,16 +167,25 @@ impl LogRotator {
         }
     }
 
+    /// Pushes a log record, closing the block first when it is full.
+    ///
+    /// Returns `true` if a flush happened, so the caller drains the memory
+    /// buffer.
+    fn publish(&self, meta: BlockMetadata, contention: Option<&ContentionMetrics>) {
+        record_block_written(&meta, contention, SignalType::Logs);
+        let _ = self.metadata_tx.send(meta);
+    }
+
     pub async fn push(
         &mut self,
         log: LogRecord,
         contention: Option<&ContentionMetrics>,
     ) -> Result<bool> {
-        if self.writer.len() + 1 > self.config.max_rows_per_block {
-            self.flush(contention).await?;
-            return self.writer.push(log).map(|_| true);
+        if let Some(meta) = self.writer.push(log)? {
+            self.publish(meta, contention);
+            return Ok(true);
         }
-        self.writer.push(log).map(|_| false)
+        Ok(false)
     }
 
     pub async fn check_and_flush(
@@ -195,6 +241,26 @@ pub struct IngestionStats {
     pub dropped_spans: AtomicU64,
 }
 
+/// Runs a blocking decode step on the blocking pool.
+///
+/// OTLP decode is tens of milliseconds of pure CPU for a large batch, plus one
+/// `LabelSet` allocation per point. Doing it inline parks a tokio worker for
+/// that whole duration, so concurrent ingest *and* query requests queue behind
+/// it. `spawn_blocking` hands the CPU to a thread that is allowed to block,
+/// leaving the async workers free to poll everything else.
+///
+/// `spawn_blocking` already propagates panics as a `JoinError`, so this does
+/// not need its own catch_unwind.
+async fn decode_offloading<T, F>(decode: F) -> Result<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T> + Send + 'static,
+{
+    tokio::task::spawn_blocking(decode)
+        .await
+        .map_err(|e| Error::Internal(format!("decode task panicked: {}", e)))?
+}
+
 /// Acquires a rotator lock, recording how long the acquisition took.
 ///
 /// Every ingest request for a signal serializes on one mutex, and a block
@@ -247,9 +313,13 @@ impl IngestionService {
 
     pub async fn ingest_proto(&self, body: Bytes) -> Result<u64> {
         self.stats.total_batches.fetch_add(1, Ordering::Relaxed);
-        let req = ExportMetricsServiceRequest::decode(body)
-            .map_err(|e| Error::Validation(format!("Protobuf decode error: {}", e)))?;
-        let metrics = OtlpDecoder::decode_metrics(req).inspect_err(|_| {
+        let metrics = decode_offloading(move || {
+            let req = ExportMetricsServiceRequest::decode(body)
+                .map_err(|e| Error::Validation(format!("Protobuf decode error: {e}")))?;
+            OtlpDecoder::decode_metrics(req)
+        })
+        .await
+        .inspect_err(|_| {
             self.stats.failed_batches.fetch_add(1, Ordering::Relaxed);
         })?;
         self.process_metrics(metrics).await
@@ -264,9 +334,13 @@ impl IngestionService {
 
     pub async fn ingest_json(&self, body: Bytes) -> Result<u64> {
         self.stats.total_batches.fetch_add(1, Ordering::Relaxed);
-        let json: serde_json::Value = serde_json::from_slice(&body)
-            .map_err(|e| Error::Validation(format!("JSON parse error: {}", e)))?;
-        let metrics = OtlpDecoder::decode_metrics_json(json).inspect_err(|_| {
+        let metrics = decode_offloading(move || {
+            let json: serde_json::Value = serde_json::from_slice(&body)
+                .map_err(|e| Error::Validation(format!("JSON parse error: {e}")))?;
+            OtlpDecoder::decode_metrics_json(json)
+        })
+        .await
+        .inspect_err(|_| {
             self.stats.failed_batches.fetch_add(1, Ordering::Relaxed);
         })?;
         self.process_metrics(metrics).await
@@ -324,7 +398,7 @@ impl IngestionService {
         drop(rotator);
         if flushed {
             if let Some(ref buf) = self.memory_buffer {
-                buf.drain_metrics().await;
+                buf.drain_offloaded(SignalType::Metrics).await;
             }
         }
         self.stats
@@ -349,7 +423,7 @@ impl IngestionService {
             .await?;
         if flushed {
             if let Some(ref buf) = self.memory_buffer {
-                buf.drain_metrics().await;
+                buf.drain_offloaded(SignalType::Metrics).await;
             }
         }
         Ok(flushed)
@@ -362,7 +436,7 @@ impl IngestionService {
         let _ = rotator.flush(contention.as_deref()).await;
         drop(rotator);
         if let Some(ref buf) = self.memory_buffer {
-            buf.drain_metrics().await;
+            buf.drain_offloaded(SignalType::Metrics).await;
         }
         Ok(())
     }
@@ -408,9 +482,13 @@ impl LogIngestionService {
 
     pub async fn ingest_proto(&self, body: Bytes) -> Result<u64> {
         self.stats.total_batches.fetch_add(1, Ordering::Relaxed);
-        let req = ExportLogsServiceRequest::decode(body)
-            .map_err(|e| Error::Validation(format!("Protobuf decode error: {}", e)))?;
-        let logs = OtlpDecoder::decode_logs(req).inspect_err(|_| {
+        let logs = decode_offloading(move || {
+            let req = ExportLogsServiceRequest::decode(body)
+                .map_err(|e| Error::Validation(format!("Protobuf decode error: {e}")))?;
+            OtlpDecoder::decode_logs(req)
+        })
+        .await
+        .inspect_err(|_| {
             self.stats.failed_batches.fetch_add(1, Ordering::Relaxed);
         })?;
         self.process_logs(logs).await
@@ -418,9 +496,13 @@ impl LogIngestionService {
 
     pub async fn ingest_json(&self, body: Bytes) -> Result<u64> {
         self.stats.total_batches.fetch_add(1, Ordering::Relaxed);
-        let json: serde_json::Value = serde_json::from_slice(&body)
-            .map_err(|e| Error::Validation(format!("JSON parse error: {}", e)))?;
-        let logs = OtlpDecoder::decode_logs_json(json).inspect_err(|_| {
+        let logs = decode_offloading(move || {
+            let json: serde_json::Value = serde_json::from_slice(&body)
+                .map_err(|e| Error::Validation(format!("JSON parse error: {e}")))?;
+            OtlpDecoder::decode_logs_json(json)
+        })
+        .await
+        .inspect_err(|_| {
             self.stats.failed_batches.fetch_add(1, Ordering::Relaxed);
         })?;
         self.process_logs(logs).await
@@ -447,7 +529,7 @@ impl LogIngestionService {
         drop(rotator);
         if flushed {
             if let Some(ref buf) = self.memory_buffer {
-                buf.drain_logs().await;
+                buf.drain_offloaded(SignalType::Logs).await;
             }
         }
         self.stats
@@ -472,7 +554,7 @@ impl LogIngestionService {
             .await?;
         if flushed {
             if let Some(ref buf) = self.memory_buffer {
-                buf.drain_logs().await;
+                buf.drain_offloaded(SignalType::Logs).await;
             }
         }
         Ok(flushed)
@@ -485,7 +567,7 @@ impl LogIngestionService {
         let _ = rotator.flush(contention.as_deref()).await;
         drop(rotator);
         if let Some(ref buf) = self.memory_buffer {
-            buf.drain_logs().await;
+            buf.drain_offloaded(SignalType::Logs).await;
         }
         Ok(())
     }
@@ -520,16 +602,25 @@ impl TraceRotator {
         }
     }
 
+    /// Pushes a span, closing the block first when it is full.
+    ///
+    /// Returns `true` if a flush happened, so the caller drains the memory
+    /// buffer.
+    fn publish(&self, meta: BlockMetadata, contention: Option<&ContentionMetrics>) {
+        record_block_written(&meta, contention, SignalType::Traces);
+        let _ = self.metadata_tx.send(meta);
+    }
+
     pub async fn push(
         &mut self,
         span: Span,
         contention: Option<&ContentionMetrics>,
     ) -> Result<bool> {
-        if self.writer.len() + 1 > self.config.max_rows_per_block {
-            self.flush(contention).await?;
-            return self.writer.push(span).map(|_| true);
+        if let Some(meta) = self.writer.push(span)? {
+            self.publish(meta, contention);
+            return Ok(true);
         }
-        self.writer.push(span).map(|_| false)
+        Ok(false)
     }
 
     pub async fn check_and_flush(
@@ -628,9 +719,13 @@ impl TraceIngestionService {
 
     pub async fn ingest_proto(&self, body: Bytes) -> Result<u64> {
         self.stats.total_batches.fetch_add(1, Ordering::Relaxed);
-        let req = ExportTraceServiceRequest::decode(body)
-            .map_err(|e| Error::Validation(format!("Protobuf decode error: {}", e)))?;
-        let spans = OtlpDecoder::decode_traces(req).inspect_err(|_| {
+        let spans = decode_offloading(move || {
+            let req = ExportTraceServiceRequest::decode(body)
+                .map_err(|e| Error::Validation(format!("Protobuf decode error: {e}")))?;
+            OtlpDecoder::decode_traces(req)
+        })
+        .await
+        .inspect_err(|_| {
             self.stats.failed_batches.fetch_add(1, Ordering::Relaxed);
         })?;
         self.process_traces(spans).await
@@ -638,9 +733,13 @@ impl TraceIngestionService {
 
     pub async fn ingest_json(&self, body: Bytes) -> Result<u64> {
         self.stats.total_batches.fetch_add(1, Ordering::Relaxed);
-        let json: serde_json::Value = serde_json::from_slice(&body)
-            .map_err(|e| Error::Validation(format!("JSON parse error: {}", e)))?;
-        let spans = OtlpDecoder::decode_traces_json(json).inspect_err(|_| {
+        let spans = decode_offloading(move || {
+            let json: serde_json::Value = serde_json::from_slice(&body)
+                .map_err(|e| Error::Validation(format!("JSON parse error: {e}")))?;
+            OtlpDecoder::decode_traces_json(json)
+        })
+        .await
+        .inspect_err(|_| {
             self.stats.failed_batches.fetch_add(1, Ordering::Relaxed);
         })?;
         self.process_traces(spans).await
@@ -681,7 +780,7 @@ impl TraceIngestionService {
         drop(rotator);
         if flushed {
             if let Some(ref buf) = self.memory_buffer {
-                buf.drain_spans().await;
+                buf.drain_offloaded(SignalType::Traces).await;
             }
         }
         self.stats
@@ -706,7 +805,7 @@ impl TraceIngestionService {
             .await?;
         if flushed {
             if let Some(ref buf) = self.memory_buffer {
-                buf.drain_spans().await;
+                buf.drain_offloaded(SignalType::Traces).await;
             }
         }
         Ok(flushed)
@@ -719,7 +818,7 @@ impl TraceIngestionService {
         let _ = rotator.flush(contention.as_deref()).await;
         drop(rotator);
         if let Some(ref buf) = self.memory_buffer {
-            buf.drain_spans().await;
+            buf.drain_offloaded(SignalType::Traces).await;
         }
         Ok(())
     }
@@ -856,6 +955,253 @@ mod tests {
         assert_eq!(contention.flush_duration_count(SignalType::Metrics), 1);
         assert_eq!(contention.flush_rows(SignalType::Metrics), 10);
         assert_eq!(contention.flush_inflight(SignalType::Metrics), 0);
+    }
+
+    /// A single metric larger than a whole block must be split across blocks
+    /// and ingested in full — not partially accepted and then reported as an
+    /// error, which made clients retry a batch that was already half-ingested.
+    #[tokio::test]
+    async fn test_oversized_metric_is_split_across_blocks() {
+        let dir = tempdir().unwrap();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let contention = ContentionMetrics::new();
+        let mut rotator = BlockRotator::new(tiny_metrics_config(dir.path()), tx);
+
+        // 25 points into a block that holds 10: three blocks, no error.
+        let points: Vec<_> = (0..25)
+            .map(|i| {
+                parqtel_core::DataPoint::new(
+                    1000 + i,
+                    parqtel_core::MetricValue::Double(i as f64),
+                    parqtel_core::LabelSet::default(),
+                )
+                .unwrap()
+            })
+            .collect();
+        let flushed = rotator
+            .push(
+                Metric {
+                    name: "big".into(),
+                    kind: parqtel_core::MetricKind::Gauge,
+                    data_points: points,
+                    ..Default::default()
+                },
+                Some(&contention),
+            )
+            .await
+            .unwrap();
+        assert!(flushed, "splitting a metric must report the flush");
+
+        rotator.flush(Some(&contention)).await.unwrap();
+
+        let mut metas = Vec::new();
+        while let Ok(meta) = rx.try_recv() {
+            metas.push(meta);
+        }
+        let total: usize = metas.iter().map(|m| m.row_count).sum();
+        assert_eq!(
+            total, 25,
+            "every point must land exactly once across the split blocks"
+        );
+        assert!(
+            metas.len() >= 3,
+            "25 points at 10 per block needs at least 3 blocks, got {}",
+            metas.len()
+        );
+        // Split blocks must be published, not orphaned: the index only learns
+        // about blocks whose metadata reaches the channel.
+        assert_eq!(
+            contention.flush_rows(SignalType::Metrics),
+            25,
+            "rows from the split blocks must be accounted for"
+        );
+    }
+
+    /// Every block written — including the ones the writer closes mid-push —
+    /// must publish its metadata, or the data becomes unqueryable even though
+    /// the bytes are on disk.
+    #[tokio::test]
+    async fn test_split_blocks_are_published_to_the_index() {
+        let dir = tempdir().unwrap();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut rotator = BlockRotator::new(tiny_metrics_config(dir.path()), tx);
+
+        let points: Vec<_> = (0..25)
+            .map(|i| {
+                parqtel_core::DataPoint::new(
+                    1000 + i,
+                    parqtel_core::MetricValue::Double(i as f64),
+                    parqtel_core::LabelSet::default(),
+                )
+                .unwrap()
+            })
+            .collect();
+        rotator
+            .push(
+                Metric {
+                    name: "big".into(),
+                    kind: parqtel_core::MetricKind::Gauge,
+                    data_points: points,
+                    ..Default::default()
+                },
+                None,
+            )
+            .await
+            .unwrap();
+
+        // The two closed blocks must already be in the channel before any
+        // explicit flush; the tail is still buffered.
+        let mut published = 0usize;
+        while let Ok(meta) = rx.try_recv() {
+            assert!(meta.path.exists(), "published block must exist on disk");
+            published += meta.row_count;
+        }
+        assert_eq!(
+            published, 20,
+            "the two blocks closed by the split must be published"
+        );
+    }
+
+    /// A log/trace record arriving at a full buffer closes the block and starts
+    /// the next one, rather than failing the request.
+    #[tokio::test]
+    async fn test_full_log_buffer_rolls_over_instead_of_failing() {
+        let dir = tempdir().unwrap();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let contention = ContentionMetrics::new();
+        let mut rotator = LogRotator::new(
+            LogBlockConfig {
+                data_dir: dir.path().to_path_buf(),
+                max_rows_per_block: 3,
+                block_duration_secs: 3600,
+                ..Default::default()
+            },
+            tx,
+        );
+
+        let make = |ts: i64| {
+            parqtel_core::LogRecord::new(
+                ts,
+                ts,
+                9,
+                "INFO".into(),
+                "msg".into(),
+                parqtel_core::LabelSet::default(),
+                parqtel_core::LabelSet::default(),
+                [0u8; 16],
+                [0u8; 8],
+                0,
+                "".into(),
+                "".into(),
+            )
+        };
+
+        for i in 0..3 {
+            assert!(
+                !rotator
+                    .push(make(100 + i), Some(&contention))
+                    .await
+                    .unwrap(),
+                "no flush expected while the buffer has room"
+            );
+        }
+        // Fourth record crosses the cap: must roll over, not error.
+        assert!(rotator.push(make(103), Some(&contention)).await.unwrap());
+
+        let meta = rx.recv().await.unwrap();
+        assert_eq!(meta.row_count, 3, "the full block is written");
+        assert_eq!(
+            contention.flush_rows(SignalType::Logs),
+            3,
+            "the rolled-over block must be accounted for"
+        );
+    }
+
+    /// Decode runs on the blocking pool, so the failure counter must still be
+    /// incremented exactly once for a bad payload — including when the decode
+    /// task itself fails.
+    #[tokio::test]
+    async fn test_malformed_payloads_still_count_as_failures_once() {
+        let dir = tempdir().unwrap();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let service = IngestionService::new(tiny_metrics_config(dir.path()), tx);
+
+        // Protobuf: garbage bytes.
+        assert!(service
+            .ingest_proto(Bytes::from_static(&[0xff, 0xfe, 0xfd]))
+            .await
+            .is_err());
+        // JSON: not an object.
+        assert!(service
+            .ingest_json(Bytes::from_static(b"not json"))
+            .await
+            .is_err());
+
+        let (batches, failed, points) = service.stats();
+        assert_eq!(batches, 2, "both attempts counted as batches");
+        assert_eq!(failed, 2, "both counted as failures exactly once");
+        assert_eq!(points, 0, "nothing ingested");
+    }
+
+    /// A large payload must decode off the runtime thread and still arrive
+    /// intact, so the offload is exercised end to end rather than only on the
+    /// error path.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_concurrent_large_payloads_decode_and_ingest() {
+        let dir = tempdir().unwrap();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let contention = Arc::new(ContentionMetrics::new());
+        let service = Arc::new(
+            IngestionService::new(
+                BlockConfig {
+                    max_rows_per_block: 50,
+                    block_duration_secs: 0,
+                    ..tiny_metrics_config(dir.path())
+                },
+                tx,
+            )
+            .with_contention(contention.clone()),
+        );
+
+        let points = 40;
+        let json = serde_json::json!({
+            "resourceMetrics": [{
+                "resource": {"attributes": [
+                    {"key": "service.name", "value": {"stringValue": "svc"}}
+                ]},
+                "scopeMetrics": [{
+                    "metrics": [{
+                        "name": "cpu",
+                        "unit": "1",
+                        "gauge": {"dataPoints": (0..points).map(|i| json!({
+                            "asInt": i.to_string(),
+                            "timeUnixNano": (1000 + i).to_string()
+                        })).collect::<Vec<_>>()}
+                    }]
+                }]
+            }]
+        });
+        let body = Bytes::from(serde_json::to_vec(&json).unwrap());
+
+        // Two concurrent decodes on a 2-worker runtime: with inline decoding one
+        // would occupy a whole worker for its duration.
+        let mut handles = Vec::new();
+        for _ in 0..2 {
+            let service = service.clone();
+            let body = body.clone();
+            handles.push(tokio::spawn(async move {
+                service.ingest_json(body).await.unwrap()
+            }));
+        }
+        for h in handles {
+            assert_eq!(h.await.unwrap(), points as u64);
+        }
+
+        service.shutdown().await.unwrap();
+        let total: usize = std::iter::from_fn(|| rx.try_recv().ok())
+            .map(|m: parqtel_core::BlockMetadata| m.row_count)
+            .sum();
+        assert_eq!(total, points * 2, "both batches must be written in full");
     }
 
     /// Every ingest request for a signal must record exactly one lock-wait

@@ -19,15 +19,30 @@ Effort: S ≤ 2d, M ≤ 1w, L > 1w.
 
 Note: `tokio::sync::Mutex` is the correct primitive here (there is an `.await` inside), but its *scope* is wrong, and there is no `try_lock` fast path, no queue-depth metric and no sharding.
 
-**Resolution.**
-1. Decouple: `flush()` should `mem::take` the writer, hand ownership to a dedicated **flush worker task** over a bounded channel, and release the lock immediately. The rotator then guards only an in-memory `Vec` push (nanoseconds). Return 200 without waiting for the encode.
-2. Preserve crash-safety ordering: the flush worker must publish `BlockMetadata` to the index **after** the rename, and shutdown must drain the channel before exit (`IngestionService::shutdown`, `service.rs:284-291`).
-3. Add `ingest.max_inflight_flushes` (`Semaphore`) for backpressure, plus a `parqtel_ingest_flush_lock_wait_seconds` histogram so lock contention is observable.
-4. If synchronous flush must remain as a fallback (WAL disabled), shard the rotator into N buckets keyed by `metric_name` hash so unrelated metrics do not contend, and only block the flushing bucket.
+**Resolution.** Split into two parts, because they trade against each other and
+the trade is not mine to make unilaterally:
 
-**Acceptance.** Ingest p99 < 250 ms for a 10k-point batch while a flush is in flight; no endpoint observes a stall > 100 ms during a 1M-row flush; lock-wait p99 < 10 ms.
+- **BL-01-01a (landed, durability preserved)** — shard the rotator into N
+  buckets keyed by `metric_name` hash so unrelated metrics do not contend, and
+  only the flushing bucket blocks. The flush stays synchronous, so a request
+  is still not acknowledged until its data is on disk. Configurable via
+  `ingest.rotator_shards`; the per-shard row budget is divided down so the
+  total buffered rows per rotation round is unchanged.
+- **BL-01-01b (deferred, see BL-01-14)** — hand the writer to a dedicated
+  flush worker over a bounded channel and release the lock immediately, so
+  even the flushing bucket does not block. This acknowledges a request before
+  its data is durable and is therefore gated on the WAL (BL-03-12).
 
-**Effort** L · **Risk** Medium (durability semantics change; gated by WAL work BL-03-12)
+Both parts also add `ingest.max_inflight_flushes` (`Semaphore`) for
+backpressure, and the `parqtel_ingest_lock_wait_seconds` histogram so lock
+contention is observable.
+
+**Acceptance.** Ingest p99 < 250 ms for a 10k-point batch while a flush is in
+flight; no endpoint observes a stall > 100 ms during a 1M-row flush;
+lock-wait p99 < 10 ms.
+
+**Effort** L (01a) + L (01b) · **Risk** Low for 01a (no durability change);
+Medium for 01b (durability semantics change, gated on BL-03-12)
 
 ---
 
@@ -231,6 +246,50 @@ Note: `tokio::sync::Mutex` is the correct primitive here (there is an `.await` i
 | e | `fs::create_dir_all` + `fs::metadata` per flush | `writer.rs:131`, `:139` (and `:269`/`:277`, `:360`/`:368`) — directory is already created at `main.rs:150-151` | Create once at startup; take size from the writer's byte counter |
 | f | `/v1/traces` wired to the JSON handler only | `parqtel-server/src/router.rs:45` vs. content negotiation for metrics/logs (`:41`, `:43`; `handlers/ingest.rs:255-278`) | Wire content negotiation for traces too — currently protobuf exporters hitting `/v1/traces` fail at `service.rs:523` and are pushed onto slower paths |
 | g | `TraceWriter::buffer` growth cycle | `writer.rs:302-312` — fresh multi-hundred-MB `Vec` allocation per flush | Reuse the allocation across flushes (swap-and-clear with retained capacity) |
+
+---
+
+## BL-01-14 (M, deferred) — Async flush worker: acknowledge before durable
+
+**Status:** deliberately deferred, not scheduled. Recorded so the option is not
+lost, and so nobody re-derives it from BL-01-01 later.
+
+**What it would do.** `flush()` takes the writer (`mem::take`), sends it to a
+dedicated flush task over a bounded channel, and returns. The rotator then
+guards only a `Vec` push. Ordering rules:
+
+- the flush worker publishes `BlockMetadata` to the index **after** the rename;
+- `shutdown` drains the channel and joins outstanding flushes before exit;
+- `ingest.max_inflight_flushes` (a `Semaphore`) bounds how many encodes may be
+  in flight, and rejections/backpressure are counted rather than dropped
+  silently.
+
+**Why it is deferred.** A request that triggers a flush would return 200 before
+its data reaches disk, widening the loss window from "whatever is in the
+memory buffer" to "whatever is in the memory buffer **plus** every in-flight
+flush". With `storage.wal_enabled = false` (`config/ingest.rs:58`) and a
+duration-based block window, that can be hours. That is a durability
+regression, and taking it silently would be the wrong call for an SRE tool.
+
+**Prerequisite.** BL-03-12 (WAL). With a WAL, an unacknowledged flush is
+recoverable — the data is already in the log — so acknowledgement can be
+decoupled from durability. Until then, BL-01-01a gets most of the contention
+win without weakening the guarantee that PR #44 was careful to preserve.
+
+**Expected additional gain over BL-01-01a.** Sharding removes cross-metric
+contention but a flushing shard is still blocked for its flush duration, so
+ingest p99 is bounded below by flush duration / shards. Removing the block
+entirely is the only way past that.
+
+**Acceptance when taken.** Ingest p99 during a flush unchanged (< 250 ms);
+`parqtel_flush_inflight` bounded by the configured limit; a SIGKILL mid-flush
+loses < 5 s with the WAL enabled (BL-03-12's criterion), and the loss window
+is documented in `docs/BEST_PRACTICES.md` for the WAL-disabled case.
+
+**Effort** L · **Risk** Medium
+
+
+---
 
 ---
 

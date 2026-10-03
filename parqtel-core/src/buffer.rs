@@ -4,6 +4,7 @@
 
 use crate::models::logs::LogRecord;
 use crate::models::metrics::DataPoint;
+use crate::models::storage::SignalType;
 use crate::models::traces::Span;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -108,8 +109,13 @@ impl MemoryBuffer {
         labels
     }
 
-    /// Drain all metrics (called after flush).
-    pub async fn drain_metrics(&self) -> Vec<(String, Vec<DataPoint>)> {
+    /// Empties the metric buffer and hands the value back for the caller to
+    /// hand to [`Self::offload_drop`].
+    ///
+    /// Dropping the value under the lock is safe: the lock is released
+    /// immediately afterwards, and a concurrent `mem::take` would win the same
+    /// race anyway.
+    pub async fn take_metrics(&self) -> Vec<(String, Vec<DataPoint>)> {
         let drained: Vec<(String, Vec<DataPoint>)> = {
             let mut buf = self.metrics.write().await;
             std::mem::take(&mut *buf).into_iter().collect()
@@ -123,8 +129,9 @@ impl MemoryBuffer {
         drained
     }
 
-    /// Drain all logs (called after flush).
-    pub async fn drain_logs(&self) -> Vec<LogRecord> {
+    /// Empties the log buffer and hands the value back for the caller to hand
+    /// to [`Self::offload_drop`].
+    pub async fn take_logs(&self) -> Vec<LogRecord> {
         let drained = {
             let mut buf = self.logs.write().await;
             std::mem::take(&mut *buf)
@@ -137,8 +144,9 @@ impl MemoryBuffer {
         drained
     }
 
-    /// Drain all spans (called after trace flush).
-    pub async fn drain_spans(&self) -> Vec<Span> {
+    /// Empties the span buffer and hands the value back for the caller to hand
+    /// to [`Self::offload_drop`].
+    pub async fn take_spans(&self) -> Vec<Span> {
         let drained = {
             let mut buf = self.spans.write().await;
             std::mem::take(&mut *buf)
@@ -149,6 +157,45 @@ impl MemoryBuffer {
             "buffer drained after flush"
         );
         drained
+    }
+
+    /// Drains one signal and frees the drained records on the blocking pool
+    /// rather than on the caller's runtime thread.
+    ///
+    /// Freeing up to `max_rows_per_block` records is millions of `free()`
+    /// calls in one uninterruptible burst, and it lands immediately after the
+    /// flush that already blocked the runtime — a latency spike on whichever
+    /// worker happened to trigger it. Spawning one task per drain is cheap
+    /// relative to the flush that preceded it.
+    ///
+    /// `signal` selects which buffer to drain.
+    pub async fn drain_offloaded(&self, signal: SignalType) {
+        match signal {
+            SignalType::Metrics => {
+                let drained = self.take_metrics().await;
+                Self::offload_drop(drained).await;
+            }
+            SignalType::Logs => {
+                let drained = self.take_logs().await;
+                Self::offload_drop(drained).await;
+            }
+            SignalType::Traces => {
+                let drained = self.take_spans().await;
+                Self::offload_drop(drained).await;
+            }
+        }
+    }
+
+    /// Frees a drained value on the blocking pool instead of the caller's
+    /// runtime thread.
+    pub async fn offload_drop<T: Send + 'static>(value: T) {
+        tokio::task::spawn_blocking(move || {
+            // Explicitly dropped on the blocking thread.
+            drop(value);
+        })
+        .await
+        .map_err(|e| tracing::warn!(error = %e, "buffer teardown task panicked"))
+        .ok();
     }
 
     /// Buffer stats for monitoring: (metrics, logs, spans).
@@ -261,10 +308,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn drain_spans_empties_buffer() {
+    async fn take_spans_empties_buffer() {
         let buf = MemoryBuffer::new();
         buf.push_spans(&[test_span(1, 1_000, 2_000)]).await;
-        let drained = buf.drain_spans().await;
+        let drained = buf.take_spans().await;
         assert_eq!(drained.len(), 1);
         assert_eq!(buf.scan_spans(0, i64::MAX).await.len(), 0);
     }
