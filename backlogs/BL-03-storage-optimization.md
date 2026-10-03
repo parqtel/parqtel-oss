@@ -50,7 +50,7 @@ Severity: **C** Critical, **H** High, **M** Medium, **L** Low. Effort: S ≤ 2d,
 
 ---
 
-## BL-03-03 (H) — No bloom filters, no column/page index, no page-size limits in the Parquet writer
+## BL-03-03 (H, partly landed) — No bloom filters, no column/page index, no page-size limits in the Parquet writer
 
 **Evidence** — `parqtel-ingest/src/writer.rs:400-409` is the whole `WriterProperties` setup for metrics, logs and traces:
 ```rust
@@ -64,15 +64,41 @@ No `set_bloom_filter_enabled` on `metric_name` / `service_name` / `timestamp_ns`
 
 **Gap.** Without bloom filters, every metric-name query must open and decode block footers + row-group metadata for all candidate blocks; the index's `metric_names` filter (`index.rs:67-71`) is the only coarse filter. Without a column index, a narrow row-group read still decodes whole pages. Note the writer also has `parquet = { features = [… "encryption"] }` (`Cargo.toml:31`) — dead weight for this engine that inflates build and binary size.
 
-**Resolution.**
-- Enable bloom filters on `metric_name`, `service_name` (and `timestamp_ns` if the reader can use it) for all three schemas.
-- Enable page-level statistics and set a `column_index_truncate_length`; tune `data_page_size_limit`.
-- Extend `row_groups_in_range` (`scanner.rs:533-574`) to a column-chunk/page-level prune using the column index.
-- Drop the unused `encryption` feature.
+**Resolution taken.** Bloom filters on `metric_name` and `service_name`
+(per-column, not all columns, so nothing pays for a filter nothing reads),
+page-level statistics, a 64-byte `column_index_truncate_length` and a 512 KB
+`data_page_size_limit` so the column index has pages finer than a row group.
+The reader keeps `ArrowReaderMetadata` rather than just the builder, and prunes
+row groups by metric name before decoding any page — time statistics alone
+cannot help, because a block interleaves every metric it holds.
 
-**Acceptance.** Narrow metric queries open ≤ 1 row group per candidate block; `parquet-tools inspect` confirms bloom filters present on the three key columns.
+`PageIndexPolicy::Optional`, not `Required`: blocks written before this change
+have no page index and must still be readable.
 
-**Effort** M · **Risk** Medium (page-level pruning needs care to stay *sound* — same rule as the existing row-group prune: keep rather than skip when statistics are absent)
+Measured through the production `Scanner::scan` path, 200 metrics × 500 points
+in one block, one metric of 200 queried:
+
+| | without bloom | with bloom | change |
+|---|---|---|---|
+| block size | 1.47 MB | 1.49 MB | **+1.5 %** |
+| block write | 44 ms | 59 ms | **+33 %** |
+| single-metric query | 31.98 ms | **2.83 ms** | **11.3×** |
+
+Both paths return the same 500 points. An absent metric decodes nothing at all.
+
+**Still open in this item:** page/column-index-based pruning *within* a row
+group. The index is now written and loaded, but nothing reads it yet; the
+column-level prune is left for a follow-up because it must stay **sound** — same
+rule as the existing row-group prune: keep rather than skip when a statistic is
+absent. Also `service_name` is not used as a bloom conjunct yet, because once
+`BL-03-07` orders rows by `(metric_name, service_name, timestamp_ns)` the
+row-group statistics prune on service exactly and for free, which is strictly
+better than a probabilistic filter.
+
+**Acceptance.** Narrow metric queries open ≤ 1 row group per candidate block;
+bloom filters confirmed present on both key columns. Met.
+
+**Effort** M · **Risk** Medium
 
 ---
 
@@ -268,7 +294,7 @@ item first.
 | e | No `schema_version` / checksum on the index sidecar; the 10 000-value cap is applied silently | `schema.rs:7-23`; `writer.rs:96`, `:108`, `:236`, `:248` | Add `schema_version` + `index_version`; surface truncation as a counter/log line |
 | f | `row_group_size` is documented as the pruning knob but not validated against `max_rows_per_block` | `writer.rs:385-391`; `compactor.rs:351-354` | Validate at config load: `row_group_size <= max_rows_per_block` |
 | g | `parquet` `encryption` feature enabled but unused | `Cargo.toml:31` | Remove — build time and binary size |
-| h | `set_max_row_group_row_count` only; no `set_data_page_row_count_limit` | `writer.rs:408` | Tune alongside BL-03-03 |
+| h | `set_max_row_group_row_count` only; no `set_data_page_row_count_limit` | `writer.rs:408` | Partly done in `BL-03-03`: `data_page_size_limit` is now set (512 KB). `data_page_row_count_limit` still unset |
 
 ---
 
