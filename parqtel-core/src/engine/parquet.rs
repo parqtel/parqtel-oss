@@ -231,7 +231,7 @@ impl StorageEngine for ParquetStorageEngine {
             size_bytes: meta.size_bytes,
             storage_backend: "parquet-local".into(),
         };
-        self.metrics_index.write().await.add(meta)?;
+        self.metrics_index.write().await.add(meta);
         Ok(written)
     }
 
@@ -251,7 +251,7 @@ impl StorageEngine for ParquetStorageEngine {
             size_bytes: meta.size_bytes,
             storage_backend: "parquet-local".into(),
         };
-        self.logs_index.write().await.add(meta)?;
+        self.logs_index.write().await.add(meta);
         Ok(written)
     }
 
@@ -304,8 +304,10 @@ impl StorageEngine for ParquetStorageEngine {
                 true
             }
         });
+        drop(idx);
         if deleted > 0 {
-            idx.save()?;
+            // Unlink off the index lock: the file writes must not extend the
+            // window in which queries are blocked.
             for path in to_delete {
                 let _ = fs::remove_file(path);
             }
@@ -326,8 +328,10 @@ impl StorageEngine for ParquetStorageEngine {
                 true
             }
         });
+        drop(idx);
         if deleted > 0 {
-            idx.save()?;
+            // Unlink off the index lock: the file writes must not extend the
+            // window in which queries are blocked.
             for path in to_delete {
                 let _ = fs::remove_file(path);
             }

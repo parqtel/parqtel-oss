@@ -19,5 +19,7 @@ pub use config::{
 pub use engine::StorageEngine;
 pub use error::{Error, Result};
 pub use models::*;
-pub use storage::{start_maintenance, BlockIndex, RetentionPolicy, Scanner};
+pub use storage::{
+    start_maintenance, BlockIndex, BlockIndexStore, MaintenanceHandle, RetentionPolicy, Scanner,
+};
 pub use telemetry::{ContentionMetrics, FlushGuard, Histogram};

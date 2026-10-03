@@ -29,6 +29,13 @@ pub struct ServerConfig {
     /// ingest mutex that HTTP exporters also queue on.
     #[serde(default = "default_grpc_concurrency_limit")]
     pub grpc_concurrency_limit: usize,
+    /// Seconds between block-index sidecar writes. Mutations mark the index
+    /// dirty; this bounds how long a block can sit in memory before the
+    /// sidecar catches up, and amortises many flushes into one write.
+    /// Lower it if you restart often and want the index written sooner; raise
+    /// it to reduce filesystem writes on a write-heavy ingest.
+    #[serde(default = "default_index_persist_interval_secs")]
+    pub index_persist_interval_secs: u64,
 }
 
 fn default_grpc_bind_address() -> String {
@@ -51,6 +58,10 @@ fn default_grpc_concurrency_limit() -> usize {
     64
 }
 
+fn default_index_persist_interval_secs() -> u64 {
+    2
+}
+
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
@@ -62,6 +73,7 @@ impl Default for ServerConfig {
             alert_interval_secs: default_alert_interval_secs(),
             retention_interval_secs: default_retention_interval_secs(),
             grpc_concurrency_limit: default_grpc_concurrency_limit(),
+            index_persist_interval_secs: default_index_persist_interval_secs(),
         }
     }
 }
@@ -80,6 +92,7 @@ mod tests {
         assert_eq!(c.alert_interval_secs, 15);
         assert_eq!(c.retention_interval_secs, 3600);
         assert_eq!(c.grpc_concurrency_limit, 64);
+        assert_eq!(c.index_persist_interval_secs, 2);
     }
 
     #[test]
@@ -89,6 +102,7 @@ mod tests {
             alert_interval_secs: 60,
             retention_interval_secs: 900,
             grpc_concurrency_limit: 8,
+            index_persist_interval_secs: 30,
             ..Default::default()
         };
         let json = serde_json::to_string(&c).unwrap();
@@ -97,6 +111,7 @@ mod tests {
         assert_eq!(back.alert_interval_secs, 60);
         assert_eq!(back.retention_interval_secs, 900);
         assert_eq!(back.grpc_concurrency_limit, 8);
+        assert_eq!(back.index_persist_interval_secs, 30);
     }
 
     #[test]
@@ -109,5 +124,6 @@ mod tests {
         assert_eq!(c.alert_interval_secs, 15);
         assert_eq!(c.retention_interval_secs, 3600);
         assert_eq!(c.grpc_concurrency_limit, 64);
+        assert_eq!(c.index_persist_interval_secs, 2);
     }
 }

@@ -1,4 +1,4 @@
-use parqtel_core::{BlockIndex, ContentionMetrics, Histogram};
+use parqtel_core::{BlockIndex, BlockIndexStore, ContentionMetrics, Histogram, SignalType};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::RwLock;
@@ -17,6 +17,9 @@ pub struct ServerMetrics {
     /// Lock-wait and flush-shape counters, shared with the ingestion services
     /// and the block-index tasks.
     pub contention: Arc<ContentionMetrics>,
+    /// Index sidecar stores for metrics, logs and traces, so `/metrics` can
+    /// report sidecar size and block counts without reading the files.
+    pub index_stores: [Arc<BlockIndexStore>; 3],
     /// Process RSS in bytes, sampled by the background tick rather than read
     /// from `/proc` on every `/metrics` scrape.
     process_rss_bytes: AtomicU64,
@@ -35,6 +38,11 @@ impl Default for ServerMetrics {
             ])),
             rates: RatesSnapshot::default(),
             contention: Arc::new(ContentionMetrics::new()),
+            index_stores: std::array::from_fn(|_| {
+                Arc::new(BlockIndexStore::at_path(std::path::PathBuf::from(
+                    "index.json",
+                )))
+            }),
             process_rss_bytes: AtomicU64::new(0),
         }
     }
@@ -48,6 +56,17 @@ impl ServerMetrics {
             contention,
             ..Self::default()
         }
+    }
+
+    /// Attaches the index sidecar stores so `/metrics` can report sidecar
+    /// size and per-signal block counts.
+    ///
+    /// Index size is the number that predicts "disk full in N days" and it is
+    /// invisible without this: nothing else reports how large the sidecar has
+    /// grown with the retention window.
+    pub fn with_index_stores(mut self, stores: [Arc<BlockIndexStore>; 3]) -> Self {
+        self.index_stores = stores;
+        self
     }
 
     /// Samples process memory and caches it for [`Self::render`].
@@ -458,6 +477,28 @@ impl ServerMetrics {
             ));
         }
 
+        out.push_str(
+            "# HELP parqtel_index_sidecar_bytes Size of the block-index sidecar on disk\n",
+        );
+        out.push_str("# TYPE parqtel_index_sidecar_bytes gauge\n");
+        for (i, signal) in SignalType::ALL.iter().enumerate() {
+            out.push_str(&format!(
+                "parqtel_index_sidecar_bytes{{signal=\"{}\"}} {}\n",
+                signal.as_str(),
+                self.index_stores[i].size_bytes()
+            ));
+        }
+
+        out.push_str("# HELP parqtel_index_pending_writes Index sidecars with unwritten changes\n");
+        out.push_str("# TYPE parqtel_index_pending_writes gauge\n");
+        for (i, signal) in SignalType::ALL.iter().enumerate() {
+            out.push_str(&format!(
+                "parqtel_index_pending_writes{{signal=\"{}\"}} {}\n",
+                signal.as_str(),
+                i32::from(self.index_stores[i].is_dirty())
+            ));
+        }
+
         // Lock waits, flush shape and index contention.
         out.push_str(&self.contention.render());
 
@@ -491,6 +532,8 @@ fn read_rss_bytes() -> u64 {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
+    #[allow(unused_imports)]
+    use parqtel_core::SignalType;
     use std::sync::atomic::Ordering;
     use tempfile::tempdir;
 
@@ -562,18 +605,22 @@ mod tests {
     /// The `/metrics` body must carry the shared contention counters, so the
     /// ingest lock-wait and flush histograms are actually scrapeable.
     #[tokio::test]
-    async fn test_render_includes_contention_metrics() {
+    async fn test_render_includes_contention_and_index_metrics() {
         let dir = tempdir().unwrap();
         let index = Arc::new(RwLock::new(BlockIndex::new(dir.path())));
         let contention = Arc::new(ContentionMetrics::new());
-        contention.record_ingest_lock_wait(
-            parqtel_core::SignalType::Metrics,
-            std::time::Duration::from_millis(250),
-        );
+        contention
+            .record_ingest_lock_wait(SignalType::Metrics, std::time::Duration::from_millis(250));
         {
-            let _guard = contention.flush_started(parqtel_core::SignalType::Metrics);
+            let _guard = contention.flush_started(SignalType::Metrics);
         }
-        let metrics = ServerMetrics::with_contention(contention);
+        let metrics_store = Arc::new(BlockIndexStore::at_path(dir.path().join("index.json")));
+        metrics_store.mark_dirty();
+        let metrics = ServerMetrics::with_contention(contention).with_index_stores([
+            metrics_store,
+            Arc::new(BlockIndexStore::at_path(dir.path().join("logs.json"))),
+            Arc::new(BlockIndexStore::at_path(dir.path().join("traces.json"))),
+        ]);
 
         let output = metrics.render(&index).await;
         assert!(output.contains("parqtel_ingest_lock_wait_seconds{signal=\"metrics\"}_count 1"));
@@ -583,6 +630,13 @@ mod tests {
         assert!(output.contains("parqtel_ingest_lock_wait_seconds{signal=\"logs\"}_count 0"));
         assert!(output.contains("parqtel_flush_inflight{signal=\"traces\"} 0"));
         assert!(output.contains("parqtel_index_lock_wait_seconds_count 0"));
+
+        // Sidecar gauges: an absent file is 0, and an unwritten change is
+        // visible so an operator can see persistence falling behind.
+        assert!(output.contains("parqtel_index_sidecar_bytes{signal=\"metrics\"} 0"));
+        assert!(output.contains("parqtel_index_pending_writes{signal=\"metrics\"} 1"));
+        assert!(output.contains("parqtel_index_pending_writes{signal=\"logs\"} 0"));
+        assert!(output.contains("parqtel_index_pending_writes{signal=\"traces\"} 0"));
     }
 
     #[test]

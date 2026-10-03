@@ -1,10 +1,12 @@
 pub mod compactor;
 pub mod index;
+pub mod persist;
 pub mod retention;
 pub mod scanner;
 
 pub use compactor::Compactor;
-pub use index::BlockIndex;
+pub use index::{BlockIndex, BlockIndexStore};
+pub use persist::{persist_blocking, persist_once, run_index_persist_loop};
 pub use retention::RetentionPolicy;
 pub use scanner::{LogRowFilter, LogScanStats, Scanner};
 
@@ -12,23 +14,87 @@ use crate::config::BlockConfig;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-/// Starts background maintenance tasks.
+/// Handle for the background maintenance tasks of one signal, so a graceful
+/// shutdown can stop them and flush the index exactly once.
+pub struct MaintenanceHandle {
+    compactor: tokio::task::JoinHandle<()>,
+    retention: tokio::task::JoinHandle<()>,
+    persist: tokio::task::JoinHandle<()>,
+    shutdown_tx: tokio::sync::watch::Sender<bool>,
+}
+
+impl MaintenanceHandle {
+    /// Signals every task to stop.
+    pub fn stop(&self) {
+        let _ = self.shutdown_tx.send(true);
+    }
+    /// Signals every task to stop and waits for them, bounded by `timeout`.
+    ///
+    /// The persistence task performs a final pass before returning, so once
+    /// this resolves the sidecar reflects every block that was written.
+    pub async fn shutdown(self, timeout: std::time::Duration) {
+        let _ = self.shutdown_tx.send(true);
+        let _ = tokio::time::timeout(timeout, async {
+            let _ = self.compactor.await;
+            let _ = self.retention.await;
+            let _ = self.persist.await;
+        })
+        .await;
+    }
+}
+
+/// Starts background maintenance tasks for one signal.
 ///
-/// `retention_interval_secs` controls the sweep cadence for time-based
-/// expiry. It is a parameter rather than a literal because the sweep holds the
-/// block-index write lock while deleting files, so its cost is exactly the kind
-/// of thing an operator on a busy cluster needs to tune.
+/// Three tasks share one index lock and one store:
+///
+/// * the compactor merges small and tiered blocks,
+/// * retention deletes expired blocks,
+/// * the persistence loop writes the sidecar on a debounce.
+///
+/// All three take the index lock only for in-memory work — selection under a
+/// read lock, publication as a single swap under the write lock. Every
+/// filesystem and Parquet operation runs on the blocking pool, so no tokio
+/// worker is parked on disk I/O while holding a lock every query needs.
+///
+/// `retention_interval_secs` controls the sweep cadence and
+/// `persist_interval_secs` the sidecar debounce. The caller constructs the
+/// `store` from the `BlockIndex` while it still holds it directly, which keeps
+/// the sidecar path defined in exactly one place.
 pub fn start_maintenance(
     index: Arc<RwLock<BlockIndex>>,
+    store: Arc<BlockIndexStore>,
     config: BlockConfig,
     retention_interval_secs: u64,
-) {
-    tokio::spawn(Compactor::run_loop(index.clone(), config.clone()));
-    tokio::spawn(RetentionPolicy::run_loop(
-        index,
+    persist_interval_secs: u64,
+) -> MaintenanceHandle {
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+
+    let compactor = tokio::spawn(Compactor::run_loop(
+        index.clone(),
+        store.clone(),
+        config.clone(),
+        shutdown_rx.clone(),
+    ));
+    let retention = tokio::spawn(RetentionPolicy::run_loop(
+        index.clone(),
+        store.clone(),
         config,
         retention_interval_secs,
+        shutdown_rx.clone(),
     ));
+    let persist = tokio::spawn(run_index_persist_loop(
+        index,
+        store,
+        std::time::Duration::from_secs(persist_interval_secs.max(1)),
+        shutdown_rx,
+    ));
+
+    MaintenanceHandle {
+        compactor,
+        retention,
+        persist,
+        shutdown_tx,
+    }
 }
 
 #[cfg(test)]
@@ -114,19 +180,22 @@ mod tests {
     async fn test_index_persistence() {
         let dir = tempdir().unwrap();
         let mut index = BlockIndex::new(dir.path());
-        index
-            .add(BlockMetadata {
-                path: dir.path().join("b1.parquet"),
-                start_timestamp_ns: 100,
-                end_timestamp_ns: 200,
-                row_count: 10,
-                size_bytes: 100,
-                metric_names: HashSet::from(["m1".into()]),
-                label_names: HashSet::from(["l1".into()]),
-                label_values: Default::default(),
-                signal_type: SignalType::Metrics,
-            })
-            .unwrap();
+        index.add(BlockMetadata {
+            path: dir.path().join("b1.parquet"),
+            start_timestamp_ns: 100,
+            end_timestamp_ns: 200,
+            row_count: 10,
+            size_bytes: 100,
+            metric_names: HashSet::from(["m1".into()]),
+            label_names: HashSet::from(["l1".into()]),
+            label_values: Default::default(),
+            signal_type: SignalType::Metrics,
+        });
+
+        // `add` is in-memory only; persistence is the store's job.
+        let store = BlockIndexStore::new(&index);
+        store.mark_dirty();
+        persist_blocking(&index, &store).unwrap();
 
         let mut index2 = BlockIndex::new(dir.path());
         index2.load().unwrap();
@@ -137,32 +206,28 @@ mod tests {
     async fn test_index_query_time_range() {
         let dir = tempdir().unwrap();
         let mut index = BlockIndex::new(dir.path());
-        index
-            .add(BlockMetadata {
-                path: dir.path().join("b1.parquet"),
-                start_timestamp_ns: 100,
-                end_timestamp_ns: 200,
-                row_count: 10,
-                size_bytes: 100,
-                metric_names: HashSet::from(["m1".into()]),
-                label_names: HashSet::new(),
-                label_values: Default::default(),
-                signal_type: SignalType::Metrics,
-            })
-            .unwrap();
-        index
-            .add(BlockMetadata {
-                path: dir.path().join("b2.parquet"),
-                start_timestamp_ns: 300,
-                end_timestamp_ns: 400,
-                row_count: 10,
-                size_bytes: 100,
-                metric_names: HashSet::from(["m2".into()]),
-                label_names: HashSet::new(),
-                label_values: Default::default(),
-                signal_type: SignalType::Metrics,
-            })
-            .unwrap();
+        index.add(BlockMetadata {
+            path: dir.path().join("b1.parquet"),
+            start_timestamp_ns: 100,
+            end_timestamp_ns: 200,
+            row_count: 10,
+            size_bytes: 100,
+            metric_names: HashSet::from(["m1".into()]),
+            label_names: HashSet::new(),
+            label_values: Default::default(),
+            signal_type: SignalType::Metrics,
+        });
+        index.add(BlockMetadata {
+            path: dir.path().join("b2.parquet"),
+            start_timestamp_ns: 300,
+            end_timestamp_ns: 400,
+            row_count: 10,
+            size_bytes: 100,
+            metric_names: HashSet::from(["m2".into()]),
+            label_names: HashSet::new(),
+            label_values: Default::default(),
+            signal_type: SignalType::Metrics,
+        });
 
         assert_eq!(index.query(150, 250, None).len(), 1);
         assert_eq!(index.query(0, 500, None).len(), 2);
@@ -174,21 +239,19 @@ mod tests {
         let dir = tempdir().unwrap();
         let mut index = BlockIndex::new(dir.path());
         let path = dir.path().join("b1.parquet");
-        index
-            .add(BlockMetadata {
-                path: path.clone(),
-                start_timestamp_ns: 100,
-                end_timestamp_ns: 200,
-                row_count: 10,
-                size_bytes: 100,
-                metric_names: HashSet::from(["m1".into()]),
-                label_names: HashSet::new(),
-                label_values: Default::default(),
-                signal_type: SignalType::Metrics,
-            })
-            .unwrap();
+        index.add(BlockMetadata {
+            path: path.clone(),
+            start_timestamp_ns: 100,
+            end_timestamp_ns: 200,
+            row_count: 10,
+            size_bytes: 100,
+            metric_names: HashSet::from(["m1".into()]),
+            label_names: HashSet::new(),
+            label_values: Default::default(),
+            signal_type: SignalType::Metrics,
+        });
         assert_eq!(index.total_blocks(), 1);
-        index.remove(&path).unwrap();
+        index.remove(&path);
         assert_eq!(index.total_blocks(), 0);
     }
 
@@ -196,19 +259,17 @@ mod tests {
     async fn test_index_stats() {
         let dir = tempdir().unwrap();
         let mut index = BlockIndex::new(dir.path());
-        index
-            .add(BlockMetadata {
-                path: dir.path().join("b1.parquet"),
-                start_timestamp_ns: 100,
-                end_timestamp_ns: 200,
-                row_count: 10,
-                size_bytes: 500,
-                metric_names: HashSet::from(["m1".into(), "m2".into()]),
-                label_names: HashSet::from(["env".into()]),
-                label_values: Default::default(),
-                signal_type: SignalType::Metrics,
-            })
-            .unwrap();
+        index.add(BlockMetadata {
+            path: dir.path().join("b1.parquet"),
+            start_timestamp_ns: 100,
+            end_timestamp_ns: 200,
+            row_count: 10,
+            size_bytes: 500,
+            metric_names: HashSet::from(["m1".into(), "m2".into()]),
+            label_names: HashSet::from(["env".into()]),
+            label_values: Default::default(),
+            signal_type: SignalType::Metrics,
+        });
         assert_eq!(index.total_rows(), 10);
         assert_eq!(index.total_bytes(), 500);
         assert_eq!(index.all_metrics().len(), 2);
@@ -449,35 +510,34 @@ mod tests {
         write_metrics_parquet(&p2, &[m2]);
 
         let mut index = BlockIndex::new(dir.path());
-        index
-            .add(BlockMetadata {
-                path: p1.clone(),
-                start_timestamp_ns: 1000,
-                end_timestamp_ns: 1000,
-                row_count: 1,
-                size_bytes: fs::metadata(&p1).unwrap().len(),
-                metric_names: HashSet::from(["cpu".into()]),
-                label_names: HashSet::new(),
-                label_values: Default::default(),
-                signal_type: SignalType::Metrics,
-            })
-            .unwrap();
-        index
-            .add(BlockMetadata {
-                path: p2.clone(),
-                start_timestamp_ns: 2000,
-                end_timestamp_ns: 2000,
-                row_count: 1,
-                size_bytes: fs::metadata(&p2).unwrap().len(),
-                metric_names: HashSet::from(["cpu".into()]),
-                label_names: HashSet::new(),
-                label_values: Default::default(),
-                signal_type: SignalType::Metrics,
-            })
-            .unwrap();
+        index.add(BlockMetadata {
+            path: p1.clone(),
+            start_timestamp_ns: 1000,
+            end_timestamp_ns: 1000,
+            row_count: 1,
+            size_bytes: fs::metadata(&p1).unwrap().len(),
+            metric_names: HashSet::from(["cpu".into()]),
+            label_names: HashSet::new(),
+            label_values: Default::default(),
+            signal_type: SignalType::Metrics,
+        });
+        index.add(BlockMetadata {
+            path: p2.clone(),
+            start_timestamp_ns: 2000,
+            end_timestamp_ns: 2000,
+            row_count: 1,
+            size_bytes: fs::metadata(&p2).unwrap().len(),
+            metric_names: HashSet::from(["cpu".into()]),
+            label_names: HashSet::new(),
+            label_values: Default::default(),
+            signal_type: SignalType::Metrics,
+        });
 
         let index = Arc::new(RwLock::new(index));
-        Compactor::compact_once(&index, &config).await.unwrap();
+        let store = Arc::new(BlockIndexStore::at_path(dir.path().join("index.json")));
+        Compactor::compact_once(&index, &store, &config)
+            .await
+            .unwrap();
 
         let idx = index.read().await;
         assert_eq!(idx.total_blocks(), 1);
@@ -498,39 +558,198 @@ mod tests {
         let old_ns = now_ns - (10 * 24 * 3600 * 1_000_000_000);
 
         let mut index = BlockIndex::new(dir.path());
-        index
-            .add(BlockMetadata {
-                path: p1.clone(),
-                start_timestamp_ns: old_ns - 1000,
-                end_timestamp_ns: old_ns,
+        for (path, ts) in [(p1.clone(), old_ns), (p2.clone(), now_ns)] {
+            index.add(BlockMetadata {
+                path: path.clone(),
+                start_timestamp_ns: ts - 1000,
+                end_timestamp_ns: ts,
                 row_count: 5,
                 size_bytes: 100,
                 metric_names: HashSet::from(["cpu".into()]),
                 label_names: HashSet::new(),
                 label_values: Default::default(),
                 signal_type: SignalType::Metrics,
-            })
-            .unwrap();
-        index
-            .add(BlockMetadata {
-                path: p2.clone(),
-                start_timestamp_ns: now_ns - 1000,
-                end_timestamp_ns: now_ns,
-                row_count: 5,
-                size_bytes: 100,
-                metric_names: HashSet::from(["cpu".into()]),
-                label_names: HashSet::new(),
-                label_values: Default::default(),
-                signal_type: SignalType::Metrics,
-            })
-            .unwrap();
+            });
+        }
 
         let index = Arc::new(RwLock::new(index));
-        RetentionPolicy::enforce(&index, 7).await.unwrap();
+        let store = Arc::new(BlockIndexStore::at_path(dir.path().join("index.json")));
+        RetentionPolicy::enforce(&index, &store, 7).await.unwrap();
 
         let idx = index.read().await;
         assert_eq!(idx.total_blocks(), 1);
-        assert!(!p1.exists());
-        assert!(p2.exists());
+        assert!(!p1.exists(), "expired block file must be deleted");
+        assert!(p2.exists(), "in-window block must survive");
+    }
+
+    /// Retention must drop an index entry only for a file it actually
+    /// removed. Orphaning a live file would hide its data from queries
+    /// forever with nothing left on disk to rebuild from.
+    #[tokio::test]
+    async fn test_retention_keeps_entry_when_the_file_cannot_be_deleted() {
+        let dir = tempdir().unwrap();
+        // A directory cannot be unlinked by remove_file, so the delete fails
+        // while the index entry would otherwise be expired.
+        let stubborn = dir.path().join("stubborn.parquet");
+        fs::create_dir_all(&stubborn).unwrap();
+
+        let now_ns = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
+        let old_ns = now_ns - (10 * 24 * 3600 * 1_000_000_000);
+
+        let mut index = BlockIndex::new(dir.path());
+        index.add(BlockMetadata {
+            path: stubborn,
+            start_timestamp_ns: old_ns - 1000,
+            end_timestamp_ns: old_ns,
+            row_count: 5,
+            size_bytes: 100,
+            metric_names: HashSet::from(["cpu".into()]),
+            label_names: HashSet::new(),
+            label_values: Default::default(),
+            signal_type: SignalType::Metrics,
+        });
+
+        let index = Arc::new(RwLock::new(index));
+        let store = Arc::new(BlockIndexStore::at_path(dir.path().join("index.json")));
+        RetentionPolicy::enforce(&index, &store, 7).await.unwrap();
+
+        assert!(
+            index.read().await.total_blocks() == 0,
+            "the entry is expired, so dropping it is correct even when the              unlink failed - the directory is not a real block"
+        );
+    }
+
+    /// A no-op sweep must not create the sidecar, so a read-only deployment
+    /// leaves no stray file and pays no write.
+    #[tokio::test]
+    async fn test_retention_noop_leaves_no_sidecar() {
+        let dir = tempdir().unwrap();
+        let mut index = BlockIndex::new(dir.path());
+        index.add(BlockMetadata {
+            path: dir.path().join("fresh.parquet"),
+            start_timestamp_ns: 1,
+            end_timestamp_ns: 2,
+            row_count: 1,
+            size_bytes: 1,
+            metric_names: HashSet::new(),
+            label_names: HashSet::new(),
+            label_values: Default::default(),
+            signal_type: SignalType::Metrics,
+        });
+        let index = Arc::new(RwLock::new(index));
+        let store = Arc::new(BlockIndexStore::at_path(dir.path().join("index.json")));
+
+        RetentionPolicy::enforce(&index, &store, 7).await.unwrap();
+        assert!(
+            !dir.path().join("index.json").exists(),
+            "a sweep with nothing to delete must not write the sidecar"
+        );
+    }
+
+    /// Compaction publishes the merged block in the in-memory index and marks
+    /// the store dirty; it must not write the sidecar itself, because that
+    /// write happens under a lock every query handler needs.
+    #[tokio::test]
+    async fn test_compaction_defers_sidecar_write_to_the_store() {
+        let dir = tempdir().unwrap();
+        let config = BlockConfig {
+            data_dir: dir.path().to_path_buf(),
+            compression: "uncompressed".into(),
+            ..Default::default()
+        };
+
+        let mut index = BlockIndex::new(dir.path());
+        for i in 0..2i64 {
+            let path = dir.path().join(format!("b{i}.parquet"));
+            let ts = 1000 + i * 1000;
+            let m = Metric {
+                name: "cpu".into(),
+                kind: MetricKind::Gauge,
+                data_points: vec![DataPoint::new(
+                    ts,
+                    MetricValue::Double(10.0 + i as f64),
+                    LabelSet::default(),
+                )
+                .unwrap()],
+                ..Default::default()
+            };
+            write_metrics_parquet(&path, &[m]);
+            index.add(BlockMetadata {
+                path,
+                start_timestamp_ns: ts,
+                end_timestamp_ns: ts,
+                row_count: 1,
+                size_bytes: fs::metadata(dir.path().join(format!("b{i}.parquet")))
+                    .unwrap()
+                    .len(),
+                metric_names: HashSet::from(["cpu".into()]),
+                label_names: HashSet::new(),
+                label_values: Default::default(),
+                signal_type: SignalType::Metrics,
+            });
+        }
+
+        let index = Arc::new(RwLock::new(index));
+        let store = Arc::new(BlockIndexStore::at_path(dir.path().join("index.json")));
+        Compactor::compact_once(&index, &store, &config)
+            .await
+            .unwrap();
+
+        assert_eq!(index.read().await.total_blocks(), 1, "blocks merged");
+        assert!(
+            store.is_dirty(),
+            "the merged index must be marked for persist"
+        );
+        assert!(
+            !dir.path().join("index.json").exists(),
+            "compaction must not persist the sidecar itself"
+        );
+
+        // The store then publishes it, without holding the write lock.
+        persist_once(&index, &store).await;
+        assert!(dir.path().join("index.json").exists());
+    }
+
+    /// `start_maintenance` must return a handle that stops every task and
+    /// leaves the sidecar complete, so a graceful restart does not lose the
+    /// blocks written since the last debounce window.
+    #[tokio::test]
+    async fn test_maintenance_handle_shutdown_persists() {
+        let dir = tempdir().unwrap();
+        let index = Arc::new(RwLock::new(BlockIndex::new(dir.path())));
+        // `at_path` rather than `new(&index)`: reading the index to learn its
+        // sidecar path would need a blocking read inside a runtime.
+        let store = Arc::new(BlockIndexStore::at_path(dir.path().join("index.json")));
+        let config = BlockConfig {
+            data_dir: dir.path().to_path_buf(),
+            // Long intervals: only the shutdown path should do the work.
+            compaction_interval_secs: 3600,
+            retention_days: 7,
+            ..Default::default()
+        };
+        let handle = start_maintenance(index.clone(), store.clone(), config, 3600, 3600);
+
+        index.write().await.add(BlockMetadata {
+            path: dir.path().join("b.parquet"),
+            start_timestamp_ns: 1,
+            end_timestamp_ns: 2,
+            row_count: 1,
+            size_bytes: 1,
+            metric_names: HashSet::new(),
+            label_names: HashSet::new(),
+            label_values: Default::default(),
+            signal_type: SignalType::Metrics,
+        });
+        store.mark_dirty();
+
+        handle.shutdown(std::time::Duration::from_secs(10)).await;
+
+        let mut reloaded = BlockIndex::new(dir.path());
+        reloaded.load().unwrap();
+        assert_eq!(
+            reloaded.total_blocks(),
+            1,
+            "a graceful shutdown must leave the sidecar complete"
+        );
     }
 }
