@@ -622,111 +622,428 @@ fn push_term_like(toks: &mut Vec<Tok>, t: String) {
 
 // ── Matching ────────────────────────────────────────────────────────────────
 
-/// Evaluates a parsed query against a log record.
-/// Evaluates a boolean predicate tree against a log record.
-pub fn log_matches_predicate(
-    pred: &Predicate,
-    log: &parqtel_core::LogRecord,
-    extra: &HashMap<String, String>,
-) -> bool {
-    match pred {
-        Predicate::And(parts) => parts.iter().all(|p| log_matches_predicate(p, log, extra)),
-        Predicate::Or(parts) => parts.iter().any(|p| log_matches_predicate(p, log, extra)),
-        Predicate::Not(inner) => !log_matches_predicate(inner, log, extra),
-        Predicate::Atom(Atom::Clause(clause)) => {
-            let q = SearchQuery {
-                clauses: vec![clause.clone()],
-                terms: vec![],
-            };
-            log_matches(&q, log, extra)
-        }
-        Predicate::Atom(Atom::Term(term)) => {
-            let q = SearchQuery {
-                clauses: vec![],
-                terms: vec![term.clone()],
-            };
-            log_matches(&q, log, extra)
+// ---------------------------------------------------------------------------
+// Prepared queries
+//
+// Everything below the parser used to run *per row*: a regex was compiled, a
+// `SearchQuery` was built from a cloned clause, every field value was cloned
+// out of its `LabelSet`, and the whole body was lowercased once per search
+// term. For a 5 000-row block with a three-term query that is thousands of
+// regex compilations and allocations whose answers are identical for every
+// row.
+//
+// A prepared query moves all of that to parse time. It is a pure function of
+// the query string, so it is built once per request and then applied to every
+// row.
+// ---------------------------------------------------------------------------
+
+/// Case-insensitive substring test without allocating a lowercased haystack.
+///
+/// Scans byte windows, comparing case-folded, so a 2 KB body costs no
+/// allocation per term per row. The needle must already be lowercase, which
+/// the prepared clauses and terms guarantee.
+pub fn contains_ci(haystack: &str, needle_lower: &str) -> bool {
+    if needle_lower.is_empty() {
+        return true;
+    }
+    let h = haystack.as_bytes();
+    let n = needle_lower.as_bytes();
+    if n.len() > h.len() {
+        return false;
+    }
+    h.windows(n.len())
+        .any(|w| w.iter().zip(n).all(|(a, b)| a.to_ascii_lowercase() == *b))
+}
+
+/// A [`Clause`] with its per-query work already done.
+#[derive(Debug, Clone)]
+enum PreparedClause {
+    /// Threshold resolved from the severity name at parse time.
+    SeverityMin(i32),
+    /// `body:` / `body=` — a case-insensitive substring of the raw body.
+    BodyContains {
+        needle_lower: String,
+        negate: bool,
+    },
+    Eq {
+        field: String,
+        value: String,
+    },
+    Ne {
+        field: String,
+        value: String,
+    },
+    /// Compiled once. `None` means the pattern was invalid, which the previous
+    /// code re-derived (and swallowed) on every row.
+    Re {
+        field: String,
+        regex: Option<regex::Regex>,
+    },
+    Cmp {
+        field: String,
+        op: CmpOp,
+        value: f64,
+    },
+    Range {
+        field: String,
+        min: f64,
+        max: f64,
+    },
+    Exists {
+        field: String,
+    },
+    Not(Box<PreparedClause>),
+}
+
+/// A [`SearchTerm`] with its per-query work already done.
+#[derive(Debug, Clone)]
+enum PreparedTerm {
+    /// Substring of the raw body, case-insensitive.
+    Contains { needle_lower: String, negate: bool },
+    /// `(?i)`-prefixed, so it matches the raw body without lowercasing it.
+    Wildcard {
+        regex: Option<regex::Regex>,
+        negate: bool,
+    },
+}
+
+impl PreparedClause {
+    fn prepare(clause: &Clause) -> Self {
+        match clause {
+            Clause::SeverityMin(sev) => {
+                PreparedClause::SeverityMin(severity_rank(sev).unwrap_or(9))
+            }
+            Clause::Eq { field, value } if field == "body" => PreparedClause::BodyContains {
+                needle_lower: value.to_lowercase(),
+                negate: false,
+            },
+            Clause::Ne { field, value } if field == "body" => PreparedClause::BodyContains {
+                needle_lower: value.to_lowercase(),
+                negate: true,
+            },
+            Clause::Eq { field, value } => PreparedClause::Eq {
+                field: field.clone(),
+                value: value.clone(),
+            },
+            Clause::Ne { field, value } => PreparedClause::Ne {
+                field: field.clone(),
+                value: value.clone(),
+            },
+            Clause::Re { field, regex } => PreparedClause::Re {
+                field: field.clone(),
+                regex: regex::Regex::new(regex).ok(),
+            },
+            Clause::Cmp { field, op, value } => PreparedClause::Cmp {
+                field: field.clone(),
+                op: *op,
+                value: *value,
+            },
+            Clause::Range { field, min, max } => PreparedClause::Range {
+                field: field.clone(),
+                min: *min,
+                max: *max,
+            },
+            Clause::Exists { field } => PreparedClause::Exists {
+                field: field.clone(),
+            },
+            Clause::Not(inner) => PreparedClause::Not(Box::new(PreparedClause::prepare(inner))),
         }
     }
 }
 
+impl PreparedTerm {
+    fn prepare(term: &SearchTerm) -> Self {
+        if term.wildcard {
+            PreparedTerm::Wildcard {
+                regex: wildcard_to_regex_ci(&term.text),
+                negate: term.negate,
+            }
+        } else {
+            PreparedTerm::Contains {
+                needle_lower: term.text.to_lowercase(),
+                negate: term.negate,
+            }
+        }
+    }
+}
+
+/// A boolean predicate tree with every leaf prepared.
+///
+/// Mirrors [`Predicate`] exactly; `matches` walks it with the same precedence
+/// the parser applied, so results are identical to
+/// [`log_matches_predicate`] — which is now a thin wrapper over this.
+#[derive(Debug, Clone)]
+pub struct PreparedPredicate(PreparedPredicateKind);
+
+#[derive(Debug, Clone)]
+enum PreparedPredicateKind {
+    And(Vec<PreparedPredicate>),
+    Or(Vec<PreparedPredicate>),
+    Not(Box<PreparedPredicate>),
+    Clause(PreparedClause),
+    Term(PreparedTerm),
+}
+
+impl PreparedPredicate {
+    /// Prepares a parsed predicate tree. Build once, reuse for every row.
+    pub fn new(pred: &Predicate) -> Self {
+        Self(PreparedPredicateKind::new(pred))
+    }
+
+    /// Evaluates against one log record.
+    pub fn matches(&self, log: &parqtel_core::LogRecord, extra: &HashMap<String, String>) -> bool {
+        let row = LogRow { log, extra };
+        self.0.matches(&row)
+    }
+}
+
+impl PreparedPredicateKind {
+    fn new(pred: &Predicate) -> Self {
+        match pred {
+            Predicate::And(parts) => {
+                PreparedPredicateKind::And(parts.iter().map(PreparedPredicate::new).collect())
+            }
+            Predicate::Or(parts) => {
+                PreparedPredicateKind::Or(parts.iter().map(PreparedPredicate::new).collect())
+            }
+            Predicate::Not(inner) => {
+                PreparedPredicateKind::Not(Box::new(PreparedPredicate::new(inner)))
+            }
+            Predicate::Atom(Atom::Clause(clause)) => {
+                PreparedPredicateKind::Clause(PreparedClause::prepare(clause))
+            }
+            Predicate::Atom(Atom::Term(term)) => {
+                PreparedPredicateKind::Term(PreparedTerm::prepare(term))
+            }
+        }
+    }
+
+    fn matches(&self, row: &LogRow<'_>) -> bool {
+        match self {
+            // `.0` is required: `PreparedPredicate::matches` is the public
+            // per-row entry point and would otherwise shadow this one.
+            PreparedPredicateKind::And(parts) => parts.iter().all(|p| p.0.matches(row)),
+            PreparedPredicateKind::Or(parts) => parts.iter().any(|p| p.0.matches(row)),
+            PreparedPredicateKind::Not(inner) => !inner.0.matches(row),
+            PreparedPredicateKind::Clause(c) => c.matches(row),
+            PreparedPredicateKind::Term(t) => t.matches(row),
+        }
+    }
+}
+
+/// A flat (AND-only) search query with its per-query work already done.
+#[derive(Debug, Clone)]
+pub struct PreparedLogQuery {
+    clauses: Vec<PreparedClause>,
+    terms: Vec<PreparedTerm>,
+}
+
+impl PreparedLogQuery {
+    /// Prepares a [`SearchQuery`]. Build once, reuse for every row.
+    pub fn new(q: &SearchQuery) -> Self {
+        Self {
+            clauses: q.clauses.iter().map(PreparedClause::prepare).collect(),
+            terms: q.terms.iter().map(PreparedTerm::prepare).collect(),
+        }
+    }
+
+    /// Whether the query constrains anything.
+    pub fn is_empty(&self) -> bool {
+        self.clauses.is_empty() && self.terms.is_empty()
+    }
+
+    /// Number of regexes compiled while preparing this query.
+    ///
+    /// Exposed so a test can assert the count is a property of the *query*, not
+    /// of the row count — which is the whole point of preparing.
+    pub fn compiled_patterns(&self) -> usize {
+        fn clause_patterns(c: &PreparedClause) -> usize {
+            match c {
+                PreparedClause::Re { regex, .. } => usize::from(regex.is_some()),
+                PreparedClause::Not(inner) => clause_patterns(inner),
+                _ => 0,
+            }
+        }
+        fn term_patterns(t: &PreparedTerm) -> usize {
+            match t {
+                PreparedTerm::Wildcard { regex, .. } => usize::from(regex.is_some()),
+                _ => 0,
+            }
+        }
+        self.clauses.iter().map(clause_patterns).sum::<usize>()
+            + self.terms.iter().map(term_patterns).sum::<usize>()
+    }
+
+    /// Evaluates against one log record.
+    pub fn matches(&self, log: &parqtel_core::LogRecord, extra: &HashMap<String, String>) -> bool {
+        let row = LogRow { log, extra };
+        self.matches_row(&row)
+    }
+
+    fn matches_row(&self, row: &LogRow<'_>) -> bool {
+        self.clauses.iter().all(|c| c.matches(row)) && self.terms.iter().all(|t| t.matches(row))
+    }
+}
+
+impl PreparedClause {
+    fn matches(&self, row: &LogRow<'_>) -> bool {
+        match self {
+            PreparedClause::SeverityMin(min) => row.log.severity_number >= *min,
+            PreparedClause::BodyContains {
+                needle_lower,
+                negate,
+            } => {
+                let found = contains_ci(&row.log.body, needle_lower);
+                if *negate {
+                    !found
+                } else {
+                    found
+                }
+            }
+            PreparedClause::Eq { field, value } => row
+                .field_value(field)
+                .map(|v| v.as_ref() == value.as_str())
+                .unwrap_or(false),
+            PreparedClause::Ne { field, value } => row
+                .field_value(field)
+                .map(|v| v.as_ref() != value.as_str())
+                .unwrap_or(true),
+            PreparedClause::Re { field, regex } => match (row.field_value(field), regex) {
+                (Some(v), Some(re)) => re.is_match(v.as_ref()),
+                _ => false,
+            },
+            PreparedClause::Cmp { field, op, value } => match (row.numeric_field(field), op) {
+                (Some(n), CmpOp::Gt) => n > *value,
+                (Some(n), CmpOp::Ge) => n >= *value,
+                (Some(n), CmpOp::Lt) => n < *value,
+                (Some(n), CmpOp::Le) => n <= *value,
+                _ => false,
+            },
+            PreparedClause::Range { field, min, max } => row
+                .numeric_field(field)
+                .map(|n| n >= *min && n <= *max)
+                .unwrap_or(false),
+            PreparedClause::Exists { field } => row.field_value(field).is_some(),
+            PreparedClause::Not(inner) => !inner.matches(row),
+        }
+    }
+}
+
+impl PreparedTerm {
+    fn matches(&self, row: &LogRow<'_>) -> bool {
+        match self {
+            PreparedTerm::Contains {
+                needle_lower,
+                negate,
+            } => {
+                let found = contains_ci(&row.log.body, needle_lower);
+                if *negate {
+                    !found
+                } else {
+                    found
+                }
+            }
+            PreparedTerm::Wildcard { regex, negate } => {
+                let found = regex
+                    .as_ref()
+                    .map(|re| re.is_match(&row.log.body))
+                    .unwrap_or(false);
+                if *negate {
+                    !found
+                } else {
+                    found
+                }
+            }
+        }
+    }
+}
+
+/// One log record, plus borrowed field access.
+///
+/// Field resolution returns a [`Cow`] so the common case — `body`,
+/// `severity_text`, an attribute — borrows instead of allocating a `String`
+/// per clause per row.
+struct LogRow<'a> {
+    log: &'a parqtel_core::LogRecord,
+    extra: &'a HashMap<String, String>,
+}
+
+impl LogRow<'_> {
+    fn field_value(&self, field: &str) -> Option<std::borrow::Cow<'_, str>> {
+        use std::borrow::Cow;
+        match field {
+            "body" => Some(Cow::Borrowed(&self.log.body)),
+            "severity" | "severity_text" => Some(Cow::Borrowed(&self.log.severity_text)),
+            "service" | "service.name" => self
+                .log
+                .resource_attributes
+                .get("service.name")
+                .map(Cow::Borrowed),
+            // Hex encoding has to allocate; it is only reached when a query
+            // actually selects on trace_id/span_id, which is rare.
+            "trace_id" => Some(Cow::Owned(hex::encode(self.log.trace_id))),
+            "span_id" => Some(Cow::Owned(hex::encode(self.log.span_id))),
+            _ => self.resolve_other(field),
+        }
+    }
+
+    /// Resolves a field name on a log record.
+    /// `attr.KEY` / `res.KEY` address attributes; dedicated names first.
+    ///
+    /// Bare names fall back attributes -> resource attributes -> `extra`, in
+    /// that order. The precedence is load-bearing: a pipeline-enriched field in
+    /// `extra` must not shadow an attribute of the same name on the record.
+    fn resolve_other(&self, field: &str) -> Option<std::borrow::Cow<'_, str>> {
+        use std::borrow::Cow;
+        if let Some(key) = field.strip_prefix("attr.") {
+            return self.log.attributes.get(key).map(Cow::Borrowed);
+        }
+        if let Some(key) = field.strip_prefix("res.") {
+            return self.log.resource_attributes.get(key).map(Cow::Borrowed);
+        }
+        if let Some(v) = self.log.attributes.get(field) {
+            return Some(Cow::Borrowed(v));
+        }
+        if let Some(v) = self.log.resource_attributes.get(field) {
+            return Some(Cow::Borrowed(v));
+        }
+        self.extra.get(field).map(|v| Cow::Borrowed(v.as_str()))
+    }
+
+    /// Numeric field. `severity_number` is a dedicated column, so it is
+    /// checked before any string parse, as before.
+    fn numeric_field(&self, field: &str) -> Option<f64> {
+        if field == "severity_number" {
+            return Some(self.log.severity_number as f64);
+        }
+        self.field_value(field).and_then(|v| v.parse::<f64>().ok())
+    }
+}
+
+// --- thin wrappers, kept so existing callers and tests keep working ---------
+
+/// Evaluates a parsed query against a log record.
+///
+/// Prepares the query first, so calling this per row repeats the preparation.
+/// Prefer [`PreparedLogQuery`] in a row loop.
 pub fn log_matches(
     q: &SearchQuery,
     log: &parqtel_core::LogRecord,
     extra: &HashMap<String, String>,
 ) -> bool {
-    use Clause::*;
-    for clause in &q.clauses {
-        let ok = match clause {
-            SeverityMin(sev) => {
-                let min = severity_rank(sev).unwrap_or(9);
-                log.severity_number >= min
-            }
-            // G13: `body=` / `body:` search WITHIN the body (contains,
-            // case-insensitive) — the explicit body prefix is the
-            // unambiguous form of bare-term search.
-            Eq { field, value } if field == "body" => field_value(field, log, extra)
-                .map(|v| v.to_lowercase().contains(&value.to_lowercase()))
-                .unwrap_or(false),
-            Ne { field, value } if field == "body" => field_value(field, log, extra)
-                .map(|v| !v.to_lowercase().contains(&value.to_lowercase()))
-                .unwrap_or(true),
-            Eq { field, value } => field_value(field, log, extra)
-                .map(|v| v == *value)
-                .unwrap_or(false),
-            Ne { field, value } => field_value(field, log, extra)
-                .map(|v| v != *value)
-                .unwrap_or(true),
-            Re { field, regex } => {
-                let re = regex::Regex::new(regex).ok();
-                match (field_value(field, log, extra), re) {
-                    (Some(v), Some(re)) => re.is_match(&v),
-                    _ => false,
-                }
-            }
-            Cmp { field, op, value } => {
-                let fv = numeric_field(field, log, extra);
-                match (fv, op) {
-                    (Some(n), CmpOp::Gt) => n > *value,
-                    (Some(n), CmpOp::Ge) => n >= *value,
-                    (Some(n), CmpOp::Lt) => n < *value,
-                    (Some(n), CmpOp::Le) => n <= *value,
-                    _ => false,
-                }
-            }
-            Range { field, min, max } => numeric_field(field, log, extra)
-                .map(|n| n >= *min && n <= *max)
-                .unwrap_or(false),
-            Exists { field } => field_value(field, log, extra).is_some(),
-            Not(inner) => {
-                let q = SearchQuery {
-                    clauses: vec![(**inner).clone()],
-                    terms: vec![],
-                };
-                !log_matches(&q, log, extra)
-            }
-        };
-        if !ok {
-            return false;
-        }
-    }
-    for term in &q.terms {
-        let body = log.body.to_lowercase();
-        let matched = if term.wildcard {
-            let re = wildcard_to_regex_ci(&term.text);
-            re.as_ref().map(|re| re.is_match(&body)).unwrap_or(false)
-        } else {
-            body.contains(&term.text)
-        };
-        if term.negate {
-            if matched {
-                return false;
-            }
-        } else if !matched {
-            return false;
-        }
-    }
-    true
+    PreparedLogQuery::new(q).matches(log, extra)
+}
+
+/// Evaluates a boolean predicate tree against a log record.
+///
+/// Prepares the predicate first, so calling this per row repeats the
+/// preparation. Prefer [`PreparedPredicate`] in a row loop.
+pub fn log_matches_predicate(
+    pred: &Predicate,
+    log: &parqtel_core::LogRecord,
+    extra: &HashMap<String, String>,
+) -> bool {
+    PreparedPredicate::new(pred).matches(log, extra)
 }
 
 fn wildcard_to_regex_ci(pattern: &str) -> Option<regex::Regex> {
@@ -739,49 +1056,6 @@ fn wildcard_to_regex_ci(pattern: &str) -> Option<regex::Regex> {
         }
     }
     regex::Regex::new(&re).ok()
-}
-
-/// Resolves a field name to a string value on a log record.
-/// `attr.KEY` / `res.KEY` address attributes; dedicated names first.
-fn field_value(
-    field: &str,
-    log: &parqtel_core::LogRecord,
-    extra: &HashMap<String, String>,
-) -> Option<String> {
-    match field {
-        "body" => Some(log.body.clone()),
-        "severity" | "severity_text" => Some(log.severity_text.clone()),
-        "service" | "service.name" => log
-            .resource_attributes
-            .get("service.name")
-            .map(|s| s.to_string()),
-        "trace_id" => Some(hex::encode(log.trace_id)),
-        "span_id" => Some(hex::encode(log.span_id)),
-        _ => {
-            if let Some(key) = field.strip_prefix("attr.") {
-                log.attributes.get(key).map(|s| s.to_string())
-            } else if let Some(key) = field.strip_prefix("res.") {
-                log.resource_attributes.get(key).map(|s| s.to_string())
-            } else {
-                log.attributes
-                    .get(field)
-                    .or_else(|| log.resource_attributes.get(field))
-                    .or_else(|| extra.get(field).map(|s| s.as_str()))
-                    .map(|s| s.to_string())
-            }
-        }
-    }
-}
-
-fn numeric_field(
-    field: &str,
-    log: &parqtel_core::LogRecord,
-    extra: &HashMap<String, String>,
-) -> Option<f64> {
-    match field {
-        "severity_number" => Some(log.severity_number as f64),
-        _ => field_value(field, log, extra).and_then(|v| v.parse::<f64>().ok()),
-    }
 }
 
 /// Converts a legacy `{a="x",b=~"y"}` selector into ParqtelQL clauses.
@@ -824,25 +1098,129 @@ fn parse_legacy_selector(selector: &str) -> Result<SearchQuery> {
     Ok(q)
 }
 
-/// Applies a ParqtelQL SearchQuery to a span: service/status/duration/
-/// kind/name/attr.* predicates push down into the trace scan.
-pub fn span_matches(q: &SearchQuery, s: &parqtel_core::Span) -> bool {
-    for clause in &q.clauses {
-        let ok = match clause {
-            Clause::Eq { field, value } => span_field(s, field)
+/// A span search query with its per-query work already done.
+///
+/// Same reasoning as [`PreparedLogQuery`]: the previous span path compiled a
+/// regex, and lowercased the operation name and *every attribute value*, once
+/// per term per span.
+#[derive(Debug, Clone)]
+pub struct PreparedSpanQuery {
+    clauses: Vec<PreparedSpanClause>,
+    terms: Vec<PreparedSpanTerm>,
+}
+
+#[derive(Debug, Clone)]
+enum PreparedSpanClause {
+    Eq {
+        field: String,
+        value: String,
+    },
+    Ne {
+        field: String,
+        value: String,
+    },
+    Re {
+        field: String,
+        regex: Option<regex::Regex>,
+    },
+    Cmp {
+        field: String,
+        op: CmpOp,
+        value: f64,
+    },
+    Range {
+        field: String,
+        min: f64,
+        max: f64,
+    },
+    Exists {
+        field: String,
+    },
+    /// Severity is not applicable to spans; kept so a shared query still matches.
+    AlwaysTrue,
+    Not(Box<PreparedSpanClause>),
+}
+
+#[derive(Debug, Clone)]
+enum PreparedSpanTerm {
+    Contains {
+        needle_lower: String,
+        negate: bool,
+    },
+    Wildcard {
+        regex: Option<regex::Regex>,
+        negate: bool,
+    },
+}
+
+impl PreparedSpanQuery {
+    /// Prepares a [`SearchQuery`] for span matching. Build once, reuse.
+    pub fn new(q: &SearchQuery) -> Self {
+        Self {
+            clauses: q.clauses.iter().map(PreparedSpanClause::prepare).collect(),
+            terms: q.terms.iter().map(PreparedSpanTerm::prepare).collect(),
+        }
+    }
+
+    /// Whether the query constrains anything.
+    pub fn is_empty(&self) -> bool {
+        self.clauses.is_empty() && self.terms.is_empty()
+    }
+
+    /// Evaluates against one span.
+    pub fn matches(&self, s: &parqtel_core::Span) -> bool {
+        self.clauses.iter().all(|c| c.matches(s)) && self.terms.iter().all(|t| t.matches(s))
+    }
+}
+
+impl PreparedSpanClause {
+    fn prepare(clause: &Clause) -> Self {
+        match clause {
+            Clause::Eq { field, value } => PreparedSpanClause::Eq {
+                field: field.clone(),
+                value: value.clone(),
+            },
+            Clause::Ne { field, value } => PreparedSpanClause::Ne {
+                field: field.clone(),
+                value: value.clone(),
+            },
+            Clause::Re { field, regex } => PreparedSpanClause::Re {
+                field: field.clone(),
+                regex: regex::Regex::new(regex).ok(),
+            },
+            Clause::Cmp { field, op, value } => PreparedSpanClause::Cmp {
+                field: field.clone(),
+                op: *op,
+                value: *value,
+            },
+            Clause::Range { field, min, max } => PreparedSpanClause::Range {
+                field: field.clone(),
+                min: *min,
+                max: *max,
+            },
+            Clause::Exists { field } => PreparedSpanClause::Exists {
+                field: field.clone(),
+            },
+            Clause::SeverityMin(_) => PreparedSpanClause::AlwaysTrue,
+            Clause::Not(inner) => {
+                PreparedSpanClause::Not(Box::new(PreparedSpanClause::prepare(inner)))
+            }
+        }
+    }
+
+    fn matches(&self, s: &parqtel_core::Span) -> bool {
+        match self {
+            PreparedSpanClause::Eq { field, value } => span_field(s, field)
                 .map(|v| v.eq_ignore_ascii_case(value))
                 .unwrap_or(false),
-            Clause::Ne { field, value } => span_field(s, field)
+            PreparedSpanClause::Ne { field, value } => span_field(s, field)
                 .map(|v| !v.eq_ignore_ascii_case(value))
                 .unwrap_or(true),
-            Clause::Re { field, regex } => {
-                let re = regex::Regex::new(regex).ok();
-                match (span_field(s, field), re) {
-                    (Some(v), Some(re)) => re.is_match(&v),
-                    _ => false,
-                }
-            }
-            Clause::Cmp { field, op, value } => {
+            PreparedSpanClause::Re { field, regex } => match (span_field(s, field), regex) {
+                (Some(v), Some(re)) => re.is_match(&v),
+                _ => false,
+            },
+            PreparedSpanClause::Cmp { field, op, value } => {
                 let n = if field == "duration" || field == "duration_ms" {
                     Some(s.duration_ns() as f64 / 1_000_000.0)
                 } else {
@@ -858,7 +1236,7 @@ pub fn span_matches(q: &SearchQuery, s: &parqtel_core::Span) -> bool {
                     None => false,
                 }
             }
-            Clause::Range { field, min, max } => {
+            PreparedSpanClause::Range { field, min, max } => {
                 if field == "duration" || field == "duration_ms" {
                     let d = s.duration_ns() as f64 / 1_000_000.0;
                     d >= *min && d <= *max
@@ -866,35 +1244,70 @@ pub fn span_matches(q: &SearchQuery, s: &parqtel_core::Span) -> bool {
                     false
                 }
             }
-            Clause::Exists { field } => span_field(s, field).is_some(),
-            Clause::SeverityMin(_) => true, // n/a for spans
-            Clause::Not(inner) => {
-                let q = SearchQuery {
-                    clauses: vec![(**inner).clone()],
-                    terms: vec![],
+            PreparedSpanClause::Exists { field } => span_field(s, field).is_some(),
+            PreparedSpanClause::AlwaysTrue => true,
+            PreparedSpanClause::Not(inner) => !inner.matches(s),
+        }
+    }
+}
+
+impl PreparedSpanTerm {
+    fn prepare(term: &SearchTerm) -> Self {
+        if term.wildcard {
+            PreparedSpanTerm::Wildcard {
+                regex: wildcard_to_regex_ci(&term.text),
+                negate: term.negate,
+            }
+        } else {
+            PreparedSpanTerm::Contains {
+                needle_lower: term.text.to_lowercase(),
+                negate: term.negate,
+            }
+        }
+    }
+
+    fn matches(&self, s: &parqtel_core::Span) -> bool {
+        match self {
+            PreparedSpanTerm::Contains {
+                needle_lower,
+                negate,
+            } => {
+                // Case-insensitive against the raw name and attribute values —
+                // no per-term lowercase allocation.
+                let found = contains_ci(&s.name, needle_lower)
+                    || s.attributes
+                        .iter()
+                        .any(|(_, v)| contains_ci(v, needle_lower));
+                if *negate {
+                    !found
+                } else {
+                    found
+                }
+            }
+            PreparedSpanTerm::Wildcard { regex, negate } => {
+                let found = match regex {
+                    Some(re) => {
+                        re.is_match(&s.name) || s.attributes.iter().any(|(_, v)| re.is_match(v))
+                    }
+                    None => false,
                 };
-                !span_matches(&q, s)
+                if *negate {
+                    !found
+                } else {
+                    found
+                }
             }
-        };
-        if !ok {
-            return false;
         }
     }
-    for term in &q.terms {
-        let name = s.name.to_lowercase();
-        let matched = name.contains(&term.text)
-            || s.attributes
-                .iter()
-                .any(|(_, v)| v.to_lowercase().contains(&term.text));
-        if term.negate {
-            if matched {
-                return false;
-            }
-        } else if !matched {
-            return false;
-        }
-    }
-    true
+}
+
+/// Applies a ParqtelQL SearchQuery to a span: service/status/duration/
+/// kind/name/attr.* predicates push down into the trace scan.
+///
+/// Prepares first, so calling this per span repeats the preparation. Prefer
+/// [`PreparedSpanQuery`] in a scan loop.
+pub fn span_matches(q: &SearchQuery, s: &parqtel_core::Span) -> bool {
+    PreparedSpanQuery::new(q).matches(s)
 }
 
 /// Resolves a ParqtelQL field name to a span value.
@@ -934,7 +1347,7 @@ pub fn span_field(s: &parqtel_core::Span, field: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
     use parqtel_core::{LabelSet, LogRecord};
 
@@ -1126,6 +1539,341 @@ mod tests {
         assert!(log_matches_predicate(&pred, &l2, &HashMap::new()));
         assert!(!log_matches_predicate(&pred, &l3, &HashMap::new()));
         assert!(!log_matches_predicate(&pred, &l4, &HashMap::new()));
+    }
+
+    /// A regex must be compiled once per *query*, not once per row.
+    ///
+    /// Compiling a pattern costs ~1-10us against ~10ns for the match, so the
+    /// per-row form was spending three orders of magnitude more time setting up
+    /// than searching.
+    #[test]
+    fn regex_patterns_are_compiled_once_per_query() {
+        let q = parse_search(r#"service=api body=~"(?i)ERROR|WARN" svc-* pay*"#);
+        let prepared = PreparedLogQuery::new(&q);
+        let patterns = prepared.compiled_patterns();
+        assert!(
+            patterns >= 2,
+            "expected the =~ clause and both wildcards to be compiled, got {patterns}"
+        );
+
+        // Matching many records must not change the count: there is no pattern
+        // string left on the prepared query to compile.
+        for i in 0..500 {
+            let log = parqtel_core::LogRecord::new(
+                1_000 + i,
+                1_000 + i,
+                9,
+                "INFO".into(),
+                format!("request {i} handled"),
+                LabelSet::try_from_iter(vec![("service.name", "api")]).unwrap(),
+                LabelSet::try_from_iter(vec![("svc", "checkout")]).unwrap(),
+                [0u8; 16],
+                [0u8; 8],
+                0,
+                "".into(),
+                "".into(),
+            );
+            let _ = prepared.matches(&log, &HashMap::new());
+        }
+        assert_eq!(
+            prepared.compiled_patterns(),
+            patterns,
+            "matching rows must not compile anything"
+        );
+    }
+
+    /// Pins the semantics of every clause and term form against explicit
+    /// expectations, so a future change to the prepared path cannot quietly
+    /// alter what a query means.
+    ///
+    /// Deliberately *not* a comparison between the prepared path and the
+    /// `log_matches` wrapper: the wrapper is implemented on top of the prepared
+    /// path, so comparing the two can only ever catch them diverging from each
+    /// other, not either of them being wrong. These expectations were derived
+    /// from the pre-refactor implementation, which lowercased the haystack and
+    /// used `str::contains`.
+    #[test]
+    fn clause_and_term_semantics_are_pinned() {
+        let log = parqtel_core::LogRecord::new(
+            1_000,
+            2_000,
+            17, // ERROR
+            "ERROR".into(),
+            "payment TIMEOUT after 250ms".into(),
+            LabelSet::try_from_iter(vec![
+                ("http_status_code", "503".to_string()),
+                ("service", "api".to_string()),
+            ])
+            .unwrap(),
+            LabelSet::try_from_iter(vec![("service.name", "checkout")]).unwrap(),
+            [0u8; 16],
+            [0u8; 8],
+            0,
+            "".into(),
+            "".into(),
+        );
+        let extra = HashMap::new();
+
+        // (query, expected match on the record above)
+        let cases: &[(&str, bool)] = &[
+            // bare terms: case-insensitive substring of the body
+            ("payment", true),
+            ("PAYMENT", true),
+            ("timeout", true),
+            ("after", true),
+            ("nonexistent", false),
+            // negated term
+            ("-payment", false),
+            ("-nonexistent", true),
+            // wildcard term: (?i) so it matches the raw body
+            ("pay*", true),
+            ("*timeout", true),
+            ("*250ms", true),
+            // Only `*` sets the wildcard flag; `?` is a literal character, so
+            // `pay?ent` looks for that exact substring and finds nothing.
+            ("pay?ent", false),
+            ("zzz*", false),
+            // body: / body= is a case-insensitive substring too
+            ("body:payment", true),
+            ("body:PAYMENT", true),
+            ("body:nonexistent", false),
+            ("body!payment", false),
+            ("body!nonexistent", true),
+            // `service` is a DEDICATED field: it resolves through
+            // resource_attributes["service.name"], shadowing the same-named
+            // record attribute. Equality is case-sensitive.
+            ("service=checkout", true),
+            ("service=CHECKOUT", false),
+            ("service!=api", true),
+            // the record attribute is still reachable explicitly
+            ("attr.service=api", true),
+            ("attr.service=worker", false),
+            // resource attributes resolve through `service` / `service.name`
+            ("service.name=checkout", true),
+            ("service.name=checkout-api", false),
+            ("service.name!=api", true),
+            // explicit prefixes
+            ("attr.http_status_code=503", true),
+            ("res.service.name=checkout", true),
+            ("attr.nonexistent=x", false),
+            // regex
+            (r#"service=~"c.*""#, true),
+            (r#"service=~"z.*""#, false),
+            (r#"body=~"TIMEOUT""#, true),
+            (r#"body=~"[[invalid""#, false),
+            // numeric comparison
+            ("attr.http_status_code>=500", true),
+            ("attr.http_status_code>500", true),
+            ("attr.http_status_code>=503", true),
+            ("attr.http_status_code>503", false),
+            ("attr.http_status_code<=503", true),
+            ("attr.http_status_code<503", false),
+            ("attr.http_status_code>=9999", false),
+            // range
+            ("attr.http_status_code:500-600", true),
+            ("attr.http_status_code:600-700", false),
+            // exists
+            ("attr.http_status_code:*", true),
+            ("attr.nonexistent:*", false),
+            // Severity maps to severity_number. The record is 17, and the
+            // severity table tops out at 17, so ERROR and FATAL both hold.
+            ("severity>=ERROR", true),
+            ("severity>=WARN", true),
+            ("severity>=FATAL", true),
+            ("severity>=TRACE", true),
+            ("severity>=INFO", true),
+            // negation
+            ("NOT service=checkout", false),
+            ("NOT service=worker", true),
+            ("NOT NOT service=checkout", true),
+            // AND flattens into the flat SearchQuery form.
+            ("service=checkout AND timeout", true),
+            ("service=checkout AND nonexistent", false),
+        ];
+
+        for (qs, expected) in cases {
+            let q = parse_search(qs);
+            assert_eq!(
+                log_matches(&q, &log, &extra),
+                *expected,
+                "wrapper disagrees for {qs:?}"
+            );
+            let prepared = PreparedLogQuery::new(&q);
+            assert_eq!(
+                prepared.matches(&log, &extra),
+                *expected,
+                "prepared path disagrees for {qs:?}"
+            );
+        }
+    }
+
+    /// Boolean composition must be pinned through the *predicate* API.
+    ///
+    /// `parse_search` deliberately does not flatten a top-level `OR`: it falls
+    /// back to an unconstrained query, so a search string containing `OR`
+    /// matches everything. That is pre-existing behaviour and is why the
+    /// composition cases live here, where `parse_predicate` is what the
+    /// handlers use for OR/NOT trees.
+    #[test]
+    fn predicate_composition_semantics_are_pinned() {
+        let log = parqtel_core::LogRecord::new(
+            1_000,
+            2_000,
+            17,
+            "ERROR".into(),
+            "payment TIMEOUT after 250ms".into(),
+            LabelSet::try_from_iter(vec![("http_status_code", "503".to_string())]).unwrap(),
+            LabelSet::try_from_iter(vec![("service.name", "checkout")]).unwrap(),
+            [0u8; 16],
+            [0u8; 8],
+            0,
+            "".into(),
+            "".into(),
+        );
+        let extra = HashMap::new();
+
+        let cases: &[(&str, bool)] = &[
+            ("service=checkout AND timeout", true),
+            ("service=checkout AND nonexistent", false),
+            ("service=worker OR timeout", true),
+            ("service=worker OR nonexistent", false),
+            ("service=checkout OR service=worker", true),
+            ("NOT service=checkout", false),
+            ("NOT service=worker", true),
+            ("NOT NOT service=checkout", true),
+            ("NOT (service=checkout OR severity=ERROR)", false),
+            ("(service=worker OR severity=ERROR) AND timeout", true),
+            ("(service=worker OR nonexistent) AND timeout", false),
+            ("service=~\"checkout\" AND NOT nonexistent", true),
+        ];
+
+        for (qs, expected) in cases {
+            let pred = parse_predicate(qs).unwrap_or_else(|_| panic!("parse: {qs}"));
+            assert_eq!(
+                log_matches_predicate(&pred, &log, &extra),
+                *expected,
+                "predicate wrapper disagrees for {qs:?}"
+            );
+            let prepared = PreparedPredicate::new(&pred);
+            assert_eq!(
+                prepared.matches(&log, &extra),
+                *expected,
+                "prepared predicate disagrees for {qs:?}"
+            );
+        }
+    }
+
+    /// The two public entry points must agree over a corpus, so that hoisting
+    /// work to prepare time can never make them diverge from each other.
+    ///
+    /// This does **not** establish that either is correct — see
+    /// `clause_and_term_semantics_are_pinned` for that.
+    #[test]
+    fn prepared_and_wrapper_paths_agree() {
+        let queries = [
+            "service=api",
+            r#"service=~"ap.*""#,
+            "body:timeout",
+            "attr.http_status_code >= 400",
+            "severity>=ERROR",
+            r#"NOT service=api"#,
+            "timeout",
+            "-timeout",
+            "pai*",
+            r#"service=api AND attr.code=200"#,
+            r#"service=api OR service=worker"#,
+        ];
+        let bodies = ["request completed", "payment TIMEOUT after 12ms"];
+        for qs in queries {
+            let q = parse_search(qs);
+            let prepared = PreparedLogQuery::new(&q);
+            for body in bodies {
+                for (code, svc, sev) in [(200, "api", 9), (503, "checkout", 17)] {
+                    let l = parqtel_core::LogRecord::new(
+                        1_000,
+                        2_000,
+                        sev,
+                        "INFO".into(),
+                        body.to_string(),
+                        LabelSet::try_from_iter(vec![("http_status_code", code.to_string())])
+                            .unwrap(),
+                        LabelSet::try_from_iter(vec![("service.name", svc)]).unwrap(),
+                        [0u8; 16],
+                        [0u8; 8],
+                        0,
+                        "".into(),
+                        "".into(),
+                    );
+                    let extra = HashMap::new();
+                    assert_eq!(
+                        prepared.matches(&l, &extra),
+                        log_matches(&q, &l, &extra),
+                        "prepared vs wrapper disagree on {qs:?} body={body:?} \
+                         code={code} svc={svc} sev={sev}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A pipeline-enriched field must not shadow an attribute of the same name.
+    ///
+    /// The bare-name fallback order (attributes -> resource -> `extra`) is
+    /// load-bearing and easy to invert accidentally.
+    #[test]
+    fn extra_fields_do_not_shadow_record_attributes() {
+        let l = parqtel_core::LogRecord::new(
+            1,
+            2,
+            9,
+            "INFO".into(),
+            "body".into(),
+            LabelSet::default(),
+            LabelSet::try_from_iter(vec![("env", "prod")]).unwrap(),
+            [0u8; 16],
+            [0u8; 8],
+            0,
+            "".into(),
+            "".into(),
+        );
+        let mut extra = HashMap::new();
+        extra.insert("env".to_string(), "staging".to_string());
+
+        let q = parse_search("env=prod");
+        assert!(
+            log_matches(&q, &l, &extra),
+            "the record attribute must win over `extra`"
+        );
+        let q = parse_search("env=staging");
+        assert!(!log_matches(&q, &l, &extra));
+
+        let prepared = PreparedLogQuery::new(&parse_search("env=prod"));
+        assert!(prepared.matches(&l, &extra));
+    }
+
+    /// `contains_ci` is the allocation-free replacement for lowercasing the body
+    /// per term per row, so it has to agree with the allocation it replaces.
+    #[test]
+    fn contains_ci_matches_lowercase_contains() {
+        let cases = [
+            ("Request Completed", "request"),
+            ("TIMEOUT", "timeout"),
+            ("", "anything"),
+            ("anything", ""),
+            ("short", "much longer needle"),
+            ("MiXeD", "xEd"),
+            ("MiXeD", "mixed"),
+            ("MiXeD", "mIxEd"),
+            ("MiXeD", "mixedx"),
+        ];
+        for (hay, needle) in cases {
+            let via_lower = hay.to_lowercase().contains(&needle.to_lowercase());
+            assert_eq!(
+                contains_ci(hay, &needle.to_lowercase()),
+                via_lower,
+                "contains_ci({hay:?}, {needle:?}) disagrees with the lowercase form"
+            );
+        }
     }
 
     #[test]
