@@ -171,3 +171,57 @@ exactly that test and it was worthless; the expectation tables above replace it.
 ```bash
 cargo run --release -p parqtel-query --example bench_logql
 ```
+
+## Query CPU off the async runtime (`BL-02-04a`)
+
+`execute_ast` did its per-step evaluation inline. A wide range query is
+hundreds of milliseconds of aggregation with no `await` in it, so it pinned
+the tokio worker for its whole duration — on a single-threaded runtime that
+means every other request waits, and on a multi-worker one it means every
+request multiplexed onto that worker waits.
+
+The CPU half (`eval_steps` plus the conversion to `TimeSeries`) is now the free
+function `evaluate_steps_to_series`, called through one `spawn_blocking`.
+Everything above it — block scan, buffer scan — is I/O and stays on the worker.
+The AST is cloned so the closure can be `'static`; that is a few dozen nodes
+against a CPU cost orders of magnitude larger.
+
+### Result
+
+Single-threaded runtime, 300 series × 400 points, 20 000 evaluation steps:
+
+| build | single query | 4 sequential | 4 concurrent | speedup from concurrency |
+|---|---|---|---|---|
+| evaluation inline | 2.92 s | 11.71 s | 11.48 s | **1.02×** (no overlap) |
+| evaluation offloaded | 2.87 s | 11.41 s | 3.26 s | **3.50×** |
+
+Single-query latency is unchanged (2.92 s → 2.87 s): the offload costs nothing,
+it just stops the worker being blocked. All concurrent results are asserted
+identical to the single-query result.
+
+A single-threaded runtime is deliberate — it is the configuration where inline
+CPU does the most damage, and it makes the effect measurable without needing
+several cores.
+
+### The guard
+
+`test_query_evaluation_does_not_block_the_async_worker` runs a 1 ms ticker
+against a heavy query on a current-thread runtime. Verified to **fail with 0
+ticks** when the evaluation is inlined, so it discriminates rather than merely
+passing. Asserting `>= 3` rather than an exact count keeps it off the timing
+floor.
+
+### Not done: sharding the evaluator
+
+The original item also proposed partitioning `SeriesData` across the blocking
+pool to raise parallelism *within* one query. That is split out as
+`BL-02-04b` and deliberately left open: with `04a` in place, concurrent requests
+already overlap, and a single very wide query is dominated by the per-step
+`LabelSet` clone (`BL-02-01`) rather than by scheduling. Fixing the allocation
+count is worth more than splitting the loop.
+
+### Reproducing
+
+```bash
+cargo run --release -p parqtel-query --example bench_query_concurrency
+```

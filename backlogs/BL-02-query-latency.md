@@ -55,7 +55,7 @@ Severity: **C** Critical, **H** High, **M** Medium, **L** Low. Effort: S ≤ 2d,
 
 ---
 
-## BL-02-04 (C) — All query CPU runs on the async runtime thread; the evaluator has no parallelism and no `spawn_blocking`
+## BL-02-04a (C, landed) — All query CPU runs on the async runtime thread; the evaluator has no `spawn_blocking`
 
 **Evidence**
 - `execute_ast` (`executor.rs:193-342`) does the block scan (which *does* use `spawn_blocking`, `parqtel-core/src/storage/scanner.rs:69`) and then the **entire** group/sort/evaluate/serialize pipeline inline in an `async fn` on the axum worker.
@@ -63,13 +63,52 @@ Severity: **C** Critical, **H** High, **M** Medium, **L** Low. Effort: S ≤ 2d,
 
 **Gap.** One query saturates one core and — because it never yields — blocks the runtime worker, and every other request multiplexed onto it, for its full duration. Two concurrent dashboards cost 2× latency; extra cores are idle. This is simultaneously a latency problem and a fairness problem.
 
-**Resolution.** Two stages:
-1. Move the CPU half of `execute_ast` (grouping loop + `eval_steps` + result conversion) into one `spawn_blocking`; the pattern already exists at `parqtel-core/src/storage/scanner.rs:69`.
-2. Partition by series: the evaluator is embarrassingly parallel over series for selectors, range functions and aggregations. Shard `SeriesData` into N chunks by `fingerprint % N`, evaluate each shard on the blocking pool, and merge group results by fingerprint.
+**Resolution taken (04a).** The CPU half of `execute_ast` — `eval_steps` plus
+the conversion to `TimeSeries` — is now the free function
+`evaluate_steps_to_series`, called through one `spawn_blocking`. Everything
+above it is I/O (block scan, buffer scan) and stays on the worker. The AST is
+cloned so the closure is `'static`, which costs a few dozen nodes against a CPU
+cost orders of magnitude larger. Single-query latency is unchanged; what changes
+is that the worker is no longer pinned for the duration.
 
-**Acceptance.** Two concurrent 1 000-series panels complete in ≤ 1.25× the single-panel latency on a 4-core box; query handlers never occupy a tokio worker for more than 1 ms at a time (observable via tokio console / worker park histogram).
+Measured on a **single-threaded** runtime (where inline CPU does the most
+damage), 300 series × 400 points, 20 000 evaluation steps, 4 concurrent queries:
 
-**Effort** L · **Risk** Medium
+| build | single | 4 sequential | 4 concurrent | concurrency speedup |
+|---|---|---|---|---|
+| eval inline | 2.92s | 11.71s | 11.48s | **1.02×** (no overlap) |
+| eval offloaded | 2.87s | 11.41s | 3.26s | **3.50×** |
+
+Reproduce: `cargo run --release -p parqtel-query --example bench_query_concurrency`.
+
+The guard is `test_query_evaluation_does_not_block_the_async_worker`, which runs
+a 1 ms ticker against a heavy query on a current-thread runtime. Verified it
+**fails with 0 ticks** when the evaluation is inlined, so it discriminates
+rather than merely passing.
+
+**Acceptance.** Four concurrent 20 000-step queries complete in ≤ 1.5× the
+single-query time; the worker-starvation test passes. Met.
+
+**Effort** M · **Risk** Low (no behaviour change; the extraction is mechanical)
+
+## BL-02-04b (M, open) — Shard the evaluator across series
+
+The second half of the original BL-02-04: partition `SeriesData` into N chunks
+by `fingerprint % N`, evaluate each shard on the blocking pool, and merge group
+results by fingerprint.
+
+**Why it is still open.** `04a` already lets concurrent *requests* overlap,
+because each one's evaluation is its own `spawn_blocking` job and the blocking
+pool is large. Sharding would raise the parallelism *within* one query, which
+matters only for a single very wide query — and that case is dominated by
+`BL-02-01` (a `LabelSet` clone per series per step), not by scheduling. Fixing
+the allocation count first is worth far more than splitting the loop.
+
+**Acceptance when taken.** A single 1 000-series × 20 000-step query uses more
+than one core, and results are identical to the unpartitioned path.
+
+**Effort** L · **Risk** Medium (per-series concat order can change float
+summation order; assert against the existing conformance fixtures)
 
 ---
 
