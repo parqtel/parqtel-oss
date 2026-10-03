@@ -346,29 +346,31 @@ impl QueryExecutor {
             }
         } // refs non-empty
 
-        // Evaluate per step.
+        // Evaluate per step, on the blocking pool. Everything above this line
+        // is I/O (block scan, buffer scan); everything in
+        // `evaluate_steps_to_series` is pure CPU with no await point, so
+        // running it inline parks a tokio worker for its whole duration and
+        // stalls every other request multiplexed onto it.
         let step = step_ns.unwrap_or((end_ns - start_ns).max(1));
-        let eval = crate::eval::Evaluator::with_lookback(&data, self.lookback_ns)
-            .with_hist_data(&hist_data);
-        let steps = eval.eval_steps(expr, start_ns, end_ns, step)?;
-
-        // Convert per-step instant vectors into TimeSeries.
-        use std::collections::BTreeMap;
-        let mut out_series: BTreeMap<u64, TimeSeries> = BTreeMap::new();
-        for (ts, iv) in &steps {
-            for (labels, value) in &iv.series {
-                let fp = labels.fingerprint();
-                let ts_entry = out_series.entry(fp).or_insert_with(|| TimeSeries {
-                    labels: strip_metric_name(labels),
-                    samples: Vec::new(),
-                });
-                ts_entry.samples.push(crate::models::Sample {
-                    timestamp_ns: *ts,
-                    value: *value,
-                });
-            }
-        }
-        let series_vec: Vec<TimeSeries> = out_series.into_values().collect();
+        // The AST is cloned so the closure can be 'static. An expression is a
+        // few dozen nodes, against a CPU cost orders of magnitude larger.
+        let eval_expr = expr.clone();
+        let lookback_ns = self.lookback_ns;
+        let series_vec = tokio::task::spawn_blocking(move || {
+            evaluate_steps_to_series(
+                &eval_expr,
+                &data,
+                &hist_data,
+                lookback_ns,
+                start_ns,
+                end_ns,
+                step,
+            )
+        })
+        .await
+        .map_err(|e| {
+            parqtel_core::Error::Internal(format!("query evaluation task panicked: {e}"))
+        })??;
 
         tracing::debug!(
             metric = %format!("{:?}", expr),
@@ -1834,6 +1836,44 @@ fn apply_post_processing(
 }
 
 /// Collects (metric_name, matchers) for every selector in the tree.
+/// Evaluates a parsed AST across every step and folds the per-step results
+/// into output series.
+///
+/// Pure CPU: no filesystem, no locks, no await points. Called through
+/// `spawn_blocking` so it cannot park an async worker — a wide range query is
+/// tens to hundreds of milliseconds of per-step aggregation, and inline that
+/// blocks every other request sharing the worker for the whole duration.
+fn evaluate_steps_to_series(
+    expr: &crate::ast::Expr,
+    data: &crate::ast::SeriesData,
+    hist_data: &crate::ast::HistData,
+    lookback_ns: i64,
+    start_ns: i64,
+    end_ns: i64,
+    step: i64,
+) -> Result<Vec<TimeSeries>> {
+    let eval = crate::eval::Evaluator::with_lookback(data, lookback_ns).with_hist_data(hist_data);
+    let steps = eval.eval_steps(expr, start_ns, end_ns, step)?;
+
+    // Convert per-step instant vectors into TimeSeries.
+    use std::collections::BTreeMap;
+    let mut out_series: BTreeMap<u64, TimeSeries> = BTreeMap::new();
+    for (ts, iv) in &steps {
+        for (labels, value) in &iv.series {
+            let fp = labels.fingerprint();
+            let ts_entry = out_series.entry(fp).or_insert_with(|| TimeSeries {
+                labels: strip_metric_name(labels),
+                samples: Vec::new(),
+            });
+            ts_entry.samples.push(crate::models::Sample {
+                timestamp_ns: *ts,
+                value: *value,
+            });
+        }
+    }
+    Ok(out_series.into_values().collect())
+}
+
 fn collect_metric_refs(
     expr: &crate::ast::Expr,
     out: &mut Vec<(String, Vec<crate::matcher::LabelMatcher>)>,
@@ -2045,6 +2085,79 @@ mod tests {
             res.volume_summary.iter().sum::<u64>(),
             1,
             "only the ts=3000 point lies within [2500, 4000]"
+        );
+    }
+
+    /// The evaluator must not run on an async worker.
+    ///
+    /// On a current-thread runtime there is exactly one worker, so a CPU-bound
+    /// stretch with no yield point starves every other task for its whole
+    /// duration. A background ticker therefore measures directly whether the
+    /// evaluation was offloaded: inline it would get ~no ticks for the length of
+    /// the query, offloaded it gets one per millisecond.
+    #[tokio::test]
+    async fn test_query_evaluation_does_not_block_the_async_worker() {
+        let dir = tempdir().unwrap();
+        let index = Arc::new(RwLock::new(BlockIndex::new(dir.path())));
+        let log_index = Arc::new(RwLock::new(BlockIndex::new(dir.path())));
+        let exec = QueryExecutor::new(index, log_index, dir.path().join("traces"));
+
+        // Buffer-only data: enough series and steps that evaluation is
+        // measurable, with no Parquet decode in the way.
+        const SERIES: usize = 300;
+        const POINTS: usize = 400;
+        let buffer = exec.memory_buffer();
+        for s in 0..SERIES {
+            let points: Vec<parqtel_core::DataPoint> = (0..POINTS)
+                .map(|i| {
+                    parqtel_core::DataPoint::new(
+                        // Timestamps must be > 0; start at 1s and step 1s.
+                        (i as i64 + 1) * 1_000_000_000,
+                        MetricValue::Double(i as f64),
+                        LabelSet::try_from_iter(vec![
+                            ("host", format!("h{}", s % 20)),
+                            ("idx", s.to_string()),
+                        ])
+                        .unwrap(),
+                    )
+                    .unwrap()
+                })
+                .collect();
+            buffer.push_metrics("bench", &points).await;
+        }
+
+        let expr = crate::parser::parse_expr("sum by (host) (bench)").unwrap();
+
+        // 1ms ticker on the same single-threaded runtime.
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let ticks = Arc::new(AtomicUsize::new(0));
+        let ticker = {
+            let ticks = ticks.clone();
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                    ticks.fetch_add(1, Ordering::Relaxed);
+                }
+            })
+        };
+
+        // Run the query inline on this task: the ticker can only advance when
+        // the runtime gets control back, which is exactly what is being tested.
+        let result = exec
+            .execute_ast(&expr, 1_000_000_000, 500_000_000_000, Some(1_000_000_000))
+            .await
+            .unwrap();
+        let observed = ticks.load(Ordering::Relaxed);
+        ticker.abort();
+
+        assert!(!result.series.is_empty(), "query must return data");
+        // Threshold 3: measured at 0 ticks with the evaluation inlined, so this
+        // discriminates rather than merely passing. Avoids asserting an exact
+        // count, which would be timing-dependent.
+        assert!(
+            observed >= 3,
+            "the async worker was starved during query evaluation: a 1ms ticker \
+             only advanced {observed} times, so the CPU half is not offloaded"
         );
     }
 

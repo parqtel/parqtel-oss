@@ -12,11 +12,11 @@
 | Doc | Domain | Items | Theme |
 |-----|--------|-------|-------|
 | [BL-01-ingest-throughput.md](./BL-01-ingest-throughput.md) | Ingestion hot path | 15 | Lock serialization, allocator pressure, batching, backpressure |
-| [BL-02-query-latency.md](./BL-02-query-latency.md) | Query execution | 19 | Label cloning, per-step work, single-thread evaluation, pushdown |
+| [BL-02-query-latency.md](./BL-02-query-latency.md) | Query execution | 21 | Label cloning, per-step work, single-thread evaluation, pushdown |
 | [BL-03-storage-optimization.md](./BL-03-storage-optimization.md) | Storage format & lifecycle | 15 | Parquet layout, bloom filters, series encoding, index, compaction |
 | [BL-04-runtime-observability.md](./BL-04-runtime-observability.md) | Runtime, middleware, config | 14 | Scheduler hygiene, limits, caching, CI perf gates |
 
-**Total: 63 items** — 13 Critical/High, 28 Medium, 22 Low.
+**Total: 65 items** — 13 Critical/High, 30 Medium, 22 Low.
 
 ---
 
@@ -95,6 +95,7 @@ Removes the seconds-long global stalls. Largely mechanical, low risk, high payof
 - **BL-01-11** split batches across the block boundary (no partial push + client error)
 - **BL-01-01a** shard the rotator's locks by metric-name hash, merging on flush
   so block count is unchanged — flush stays synchronous
+- **BL-02-04a** move the query CPU half onto the blocking pool
 - BL-02-04 move the query CPU half into one `spawn_blocking`
 - BL-04-07 explicit tokio worker sizing; BL-04-04 global blocking semaphore
 
