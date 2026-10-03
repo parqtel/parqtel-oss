@@ -1,4 +1,4 @@
-use super::index::BlockIndex;
+use super::index::{BlockIndex, BlockIndexStore};
 use crate::config::{compression_from_name, BlockConfig};
 use crate::error::{Error, Result};
 use crate::models::labels::LabelSet;
@@ -10,6 +10,7 @@ use parquet::arrow::arrow_writer::ArrowWriter;
 use parquet::file::properties::{WriterProperties, WriterVersion};
 use std::collections::{BTreeMap, HashSet};
 use std::fs::{self, File};
+
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
@@ -30,18 +31,31 @@ type DecodedBlocks = (
 pub struct Compactor;
 
 impl Compactor {
-    pub async fn run_loop(index: Arc<RwLock<BlockIndex>>, config: BlockConfig) {
+    pub async fn run_loop(
+        index: Arc<RwLock<BlockIndex>>,
+        store: Arc<BlockIndexStore>,
+        config: BlockConfig,
+        mut shutdown: tokio::sync::watch::Receiver<bool>,
+    ) {
         let interval = Duration::from_secs(config.compaction_interval_secs.max(60));
         tracing::debug!(interval_secs = interval.as_secs(), "compactor started");
         loop {
-            tokio::time::sleep(interval).await;
+            tokio::select! {
+                _ = tokio::time::sleep(interval) => {}
+                changed = shutdown.changed() => {
+                    if changed.is_err() || *shutdown.borrow() {
+                        tracing::debug!("compactor stopping");
+                        return;
+                    }
+                }
+            }
             tracing::debug!("compaction cycle starting");
             let cycle_start = std::time::Instant::now();
-            if let Err(e) = Self::compact_once(&index, &config).await {
+            if let Err(e) = Self::compact_once(&index, &store, &config).await {
                 tracing::error!("Compaction failed: {}", e);
             }
             // Tiered compaction for warm/cold data
-            if let Err(e) = Self::compact_tiered(&index, &config).await {
+            if let Err(e) = Self::compact_tiered(&index, &store, &config).await {
                 tracing::error!("Tiered compaction failed: {}", e);
             }
             tracing::debug!(
@@ -53,6 +67,7 @@ impl Compactor {
 
     pub(crate) async fn compact_once(
         index: &Arc<RwLock<BlockIndex>>,
+        store: &BlockIndexStore,
         config: &BlockConfig,
     ) -> Result<()> {
         let (to_compact, original_paths, signal_type) = {
@@ -74,38 +89,60 @@ impl Compactor {
             (small_blocks, paths, signal)
         };
 
-        let (all_points, all_logs) = Self::read_source_blocks(&to_compact, signal_type)?;
-
-        if all_points.is_empty() && all_logs.is_empty() {
-            let mut idx = index.write().await;
-            for path in &original_paths {
-                idx.blocks.retain(|b| &b.path != path);
+        // Decode + merge + encode are CPU and filesystem work; running them
+        // inline parks a tokio worker for the whole cycle, stalling every
+        // request multiplexed onto it. The index lock is not held here.
+        let config = config.clone();
+        let paths_for_merge = original_paths.clone();
+        let merged = tokio::task::spawn_blocking(move || -> Result<Option<BlockMetadata>> {
+            let (all_points, all_logs) = Self::read_source_blocks(&to_compact, signal_type)?;
+            if all_points.is_empty() && all_logs.is_empty() {
+                return Ok(None);
             }
-            idx.save()?;
-            tracing::debug!(
-                signal = ?signal_type,
-                blocks_removed = original_paths.len(),
-                "compaction: empty blocks removed"
-            );
-            return Ok(());
+            Ok(Some(Self::write_merged(
+                &config,
+                signal_type,
+                all_points,
+                all_logs,
+            )?))
+        })
+        .await
+        .map_err(|e| Error::Internal(format!("compaction task panicked: {e}")))??;
+
+        // Publish under the write lock: a single swap, no I/O, and the sidecar
+        // write is deferred to the persist task rather than done under lock.
+        {
+            let mut idx = index.write().await;
+            idx.replace(&original_paths, merged.clone());
+            store.mark_dirty();
         }
 
-        let new_meta = Self::write_merged(config, signal_type, all_points, all_logs)?;
+        let new_meta = match merged {
+            Some(meta) => meta,
+            None => {
+                tracing::debug!(
+                    signal = ?signal_type,
+                    blocks_removed = original_paths.len(),
+                    "compaction: empty blocks removed"
+                );
+                return Ok(());
+            }
+        };
 
-        let mut idx = index.write().await;
-        for path in &original_paths {
-            idx.blocks.retain(|b| &b.path != path);
-        }
-        idx.blocks.push(new_meta);
-        idx.blocks.sort_by_key(|b| b.start_timestamp_ns);
-        idx.save()?;
+        // Delete the sources after the merge is published and durable in the
+        // in-memory index, so a crash here leaves redundant blocks (harmless)
+        // rather than a dangling index entry (a query error).
+        let _ = tokio::task::spawn_blocking(move || {
+            for path in paths_for_merge {
+                let _ = fs::remove_file(path);
+            }
+        })
+        .await;
 
-        for path in original_paths {
-            let _ = fs::remove_file(path);
-        }
         tracing::debug!(
             signal = ?signal_type,
-            merged_blocks = to_compact.len(),
+            merged_blocks = original_paths.len(),
+            row_count = new_meta.row_count,
             "compaction: small blocks merged"
         );
         Ok(())
@@ -113,7 +150,11 @@ impl Compactor {
 
     /// Tiered compaction: merge adjacent blocks of the same signal type into larger time frames.
     /// Warm tier (>6h old): target 6h blocks. Cold tier (>24h old): target 24h blocks.
-    async fn compact_tiered(index: &Arc<RwLock<BlockIndex>>, config: &BlockConfig) -> Result<()> {
+    async fn compact_tiered(
+        index: &Arc<RwLock<BlockIndex>>,
+        store: &BlockIndexStore,
+        config: &BlockConfig,
+    ) -> Result<()> {
         let now_ns = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
         let six_hours_ns = 6 * 3600 * 1_000_000_000i64;
         let twenty_four_hours_ns = 24 * 3600 * 1_000_000_000i64;
@@ -180,25 +221,48 @@ impl Compactor {
                     continue;
                 }
 
-                let (all_points, all_logs) = Self::read_source_blocks(&group, *signal_type)?;
-                if all_points.is_empty() && all_logs.is_empty() {
-                    continue;
+                let config = config.clone();
+                let source_group = group.clone();
+                let merge_paths = paths.clone();
+                let merged =
+                    tokio::task::spawn_blocking(move || -> Result<Option<BlockMetadata>> {
+                        let (all_points, all_logs) =
+                            Self::read_source_blocks(&source_group, *signal_type)?;
+                        if all_points.is_empty() && all_logs.is_empty() {
+                            return Ok(None);
+                        }
+                        Ok(Some(Self::write_merged(
+                            &config,
+                            *signal_type,
+                            all_points,
+                            all_logs,
+                        )?))
+                    })
+                    .await
+                    .map_err(|e| {
+                        Error::Internal(format!("tiered compaction task panicked: {e}"))
+                    })??;
+
+                {
+                    let mut idx = index.write().await;
+                    idx.replace(&paths, merged.clone());
+                    store.mark_dirty();
                 }
 
-                let new_meta = Self::write_merged(config, *signal_type, all_points, all_logs)?;
-
-                let mut idx = index.write().await;
-                for path in &paths {
-                    idx.blocks.retain(|b| &b.path != path);
+                if merged.is_some() {
+                    // Delete only after the merged block is published in the
+                    // in-memory index: a crash in between leaves redundant
+                    // blocks (harmless) rather than a dangling index entry
+                    // (a query error).
+                    let _ = tokio::task::spawn_blocking(move || {
+                        for path in merge_paths {
+                            let _ = fs::remove_file(path);
+                        }
+                    })
+                    .await;
                 }
-                idx.blocks.push(new_meta);
-                idx.blocks.sort_by_key(|b| b.start_timestamp_ns);
-                idx.save()?;
 
-                for path in paths {
-                    let _ = fs::remove_file(path);
-                }
-                // Only one merge per signal per pass to avoid holding the lock too long
+                // One merge per signal per pass to avoid holding the lock too long
                 break;
             }
         }

@@ -183,7 +183,7 @@ async fn main() {
         for m in decode(&gen_batch(base, POINTS_PER_BLOCK)) {
             seeder.push(m).unwrap();
         }
-        index.add(seeder.flush().unwrap()).unwrap();
+        index.add(seeder.flush().unwrap());
     }
 
     // ── Setup ─────────────────────────────────────────────────────────────
@@ -486,7 +486,7 @@ async fn bench_logs(dir: &Path) {
         for log in decode_logs(json) {
             w.push(log).unwrap();
         }
-        index.add(w.flush().unwrap()).unwrap();
+        index.add(w.flush().unwrap());
     }
     let all = index.query(0, i64::MAX, None);
     let (n_start, n_end) = sig_narrow();
@@ -593,7 +593,7 @@ async fn bench_traces(dir: &Path) {
         for span in decode_traces(json) {
             w.push(span).unwrap();
         }
-        index.add(w.flush().unwrap()).unwrap();
+        index.add(w.flush().unwrap());
     }
     let all = index.query(0, i64::MAX, None);
     let (n_start, n_end) = sig_narrow();

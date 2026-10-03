@@ -1893,14 +1893,35 @@ mod tests {
     use tempfile::tempdir;
 
     /// Helper: create a ParquetStorageEngine-backed executor with real parquet files.
+    /// Persists one of the storage engine's in-memory indexes to its sidecar.
+    ///
+    /// `BlockIndex::add` is in-memory only — the sidecar write belongs to
+    /// `BlockIndexStore` so it never runs under the query read path — so a
+    /// test that loads an index back from disk must persist it explicitly,
+    /// exactly as the server's persist loop does at runtime.
+    async fn persist_engine_index(index: &Arc<RwLock<BlockIndex>>) {
+        let index = index.clone();
+        tokio::task::spawn_blocking(move || {
+            let idx = index.blocking_read();
+            let store = parqtel_core::BlockIndexStore::new(&idx);
+            store.mark_dirty();
+            parqtel_core::storage::persist_blocking(&idx, &store)
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    }
+
     async fn setup_with_data() -> (QueryExecutor, tempfile::TempDir) {
         let dir = tempdir().unwrap();
         let config = BlockConfig {
             data_dir: dir.path().to_path_buf(),
             ..Default::default()
         };
-        let engine = ParquetStorageEngine::new(config);
-        let storage: Arc<dyn StorageEngine> = Arc::new(engine);
+        // Kept as a concrete handle so the test can reach the engine's own
+        // indexes to persist them before loading them back from disk.
+        let engine = Arc::new(ParquetStorageEngine::new(config));
+        let storage: Arc<dyn StorageEngine> = engine.clone();
 
         // Write metrics
         let m1 = parqtel_core::Metric {
@@ -1959,12 +1980,13 @@ mod tests {
         );
         storage.write_logs_batch(vec![log]).await.unwrap();
 
-        // Load indexes from what the engine wrote
         let _snapshot = storage.metric_index_snapshot().await.unwrap();
+        persist_engine_index(engine.metrics_index()).await;
         let mut index = BlockIndex::new(dir.path());
         index.load().unwrap();
 
         let log_dir = dir.path().join("logs");
+        persist_engine_index(engine.logs_index()).await;
         let mut log_index = BlockIndex::new(&log_dir);
         log_index.load().unwrap();
 

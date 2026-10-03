@@ -49,6 +49,7 @@ impl AppState {
         ui_content: Vec<u8>,
         ui_etag: String,
         contention: Arc<parqtel_core::ContentionMetrics>,
+        index_stores: [Arc<parqtel_core::BlockIndexStore>; 3],
     ) -> Self {
         let data_dir = config.storage.data_dir.clone();
         let saved_search_dir = config.storage.data_dir.clone();
@@ -80,7 +81,8 @@ impl AppState {
                 config,
                 ui_content,
                 ui_etag,
-                metrics: crate::metrics::ServerMetrics::with_contention(contention),
+                metrics: crate::metrics::ServerMetrics::with_contention(contention)
+                    .with_index_stores(index_stores),
                 alert_registry,
                 alert_store,
                 alert_engine,
@@ -105,15 +107,27 @@ impl AppState {
         let log_index = Arc::new(RwLock::new(BlockIndex::new(&dir.path().join("logs"))));
         let trace_dir = config.storage.data_dir.join("traces");
         let trace_index = Arc::new(RwLock::new(BlockIndex::new(&trace_dir)));
+        let index_stores: [Arc<parqtel_core::BlockIndexStore>; 3] = [
+            Arc::new(parqtel_core::BlockIndexStore::at_path(
+                dir.path().join("index.json"),
+            )),
+            Arc::new(parqtel_core::BlockIndexStore::at_path(
+                dir.path().join("logs/index.json"),
+            )),
+            Arc::new(parqtel_core::BlockIndexStore::at_path(
+                dir.path().join("traces/index.json"),
+            )),
+        ];
         // Index-update task (mirrors main.rs wiring): flushed-block metadata
         // flows into the shared BlockIndex so block-backed queries work in
         // tests exactly as in production.
         {
             let idx = index.clone();
+            let store = index_stores[0].clone();
             tokio::spawn(async move {
                 while let Some(meta) = metadata_rx.recv().await {
-                    let mut guard = idx.write().await;
-                    let _ = guard.add(meta);
+                    idx.write().await.add(meta);
+                    store.mark_dirty();
                 }
             });
         }
@@ -126,6 +140,18 @@ impl AppState {
         );
         let memory_buffer = executor.memory_buffer();
         let contention = Arc::new(parqtel_core::ContentionMetrics::new());
+        let dir = dir.path().to_path_buf();
+        let index_stores: [Arc<parqtel_core::BlockIndexStore>; 3] = [
+            Arc::new(parqtel_core::BlockIndexStore::at_path(
+                dir.join("index.json"),
+            )),
+            Arc::new(parqtel_core::BlockIndexStore::at_path(
+                dir.join("logs/index.json"),
+            )),
+            Arc::new(parqtel_core::BlockIndexStore::at_path(
+                dir.join("traces/index.json"),
+            )),
+        ];
 
         Self::new(
             IngestionService::new(config.storage.clone(), tx)
@@ -143,6 +169,7 @@ impl AppState {
             vec![],
             "".into(),
             contention,
+            index_stores,
         )
         .await
     }

@@ -69,6 +69,8 @@ requiring a profiler:
 | `parqtel_flush_inflight{signal}` | Flushes currently running. Normally 0 or 1. |
 | `parqtel_flush_rows_total{signal}` | Rows written to blocks since start — tells you how much work each flush is doing. |
 | `parqtel_index_lock_wait_seconds` | How long the block-index writer waited for the write lock. Every query handler reads that lock, so this is why a query tail latency tracks the index. |
+| `parqtel_index_sidecar_bytes{signal}` | Size of the block-index sidecar on disk. This is the number that predicts "disk full in N days", and it grows with the retention window. |
+| `parqtel_index_pending_writes{signal}` | 1 when the in-memory index has changes not yet written to the sidecar. Persist runs on a debounce (`server.index_persist_interval_secs`); persistently stuck at 1 means writes are failing — check the logs for `failed to persist block index`. |
 
 ```promql
 # p99 time an ingest request spent waiting for the mutex
@@ -87,9 +89,12 @@ Lower `PARQTEL__STORAGE__MAX_ROWS_PER_BLOCK` (and `PARQTEL__LOGS__...` for
 logs) to flush more often with less work each time.
 
 **If `parqtel_index_lock_wait_seconds` is high:** the index is being
-re-serialised and rewritten on every flush while holding the write lock, so
-its cost scales with the total index size — that is, with your retention
-window.
+re-serialised and rewritten while holding the write lock, so its cost scales
+with the total index size — that is, with your retention window. Index writes
+are debounced and happen off the lock, so sustained contention means either a
+very large index or contending background maintenance (compaction/retention).
+Raise `PARQTEL__SERVER__INDEX_PERSIST_INTERVAL_SECS` to write less often, and
+`PARQTEL__SERVER__RETENTION_INTERVAL_SECS` to sweep less often.
 
 ### "Invalid timestamp column" / arrow2-era blocks
 After the arrow2 → arrow 59 migration, Parquet blocks written by older builds are unreadable: compaction and scans log `Arrow error: Invalid timestamp column`. **Wipe the data directory** (`data/`, `data/logs/`, `data/traces/`) when upgrading across that boundary — old blocks cannot be converted in place.

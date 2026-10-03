@@ -19,6 +19,7 @@ flush_interval_secs = 5
 alert_interval_secs = 15
 retention_interval_secs = 3600
 grpc_concurrency_limit = 64
+index_persist_interval_secs = 2
 
 [storage]
 backend = "parquet"
@@ -140,6 +141,7 @@ tls_secret_name = "parqtel-provider-tls"
 | `alert_interval_secs` | Integer | `15` | Seconds between alert-rule evaluation cycles |
 | `retention_interval_secs` | Integer | `3600` | Seconds between retention sweeps. Lower it if the sweep visibly stalls endpoints; raise it on very large indexes |
 | `grpc_concurrency_limit` | Integer | `64` | Maximum concurrent OTLP exports per gRPC connection. Without it a single client can monopolise the ingest mutex that HTTP exporters also queue on |
+| `index_persist_interval_secs` | Integer | `2` | How often the block-index sidecar is written. Mutations mark the index dirty and are batched into one write per interval, so this bounds how long a block can sit in memory before the sidecar catches up. Lower it if you restart often; raise it to cut filesystem writes on write-heavy ingest |
 
 ### `[storage]`
 
@@ -311,6 +313,7 @@ export PARQTEL__SERVER__MAX_CONNECTIONS=2048
 export PARQTEL__SERVER__GRPC_BIND_ADDRESS="0.0.0.0:4317"
 export PARQTEL__SERVER__FLUSH_INTERVAL_SECS=10
 export PARQTEL__SERVER__RETENTION_INTERVAL_SECS=1800
+export PARQTEL__SERVER__INDEX_PERSIST_INTERVAL_SECS=5
 
 # Storage
 export PARQTEL__STORAGE__DATA_DIR="/var/lib/parqtel/data"

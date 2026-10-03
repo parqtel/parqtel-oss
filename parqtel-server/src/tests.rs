@@ -55,6 +55,11 @@ async fn setup_test_app() -> axum::Router {
         ui_content,
         ui_etag,
         Arc::new(parqtel_core::ContentionMetrics::new()),
+        std::array::from_fn(|_| {
+            Arc::new(parqtel_core::BlockIndexStore::at_path(
+                dir.path().join("index.json"),
+            ))
+        }),
     )
     .await;
 

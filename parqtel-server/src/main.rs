@@ -7,7 +7,7 @@ use figment::{
 };
 use flate2::write::GzEncoder;
 use flate2::Compression;
-use parqtel_core::{start_maintenance, BlockIndex, Config, RetentionPolicy};
+use parqtel_core::{start_maintenance, BlockIndex, BlockIndexStore, Config, RetentionPolicy};
 use parqtel_ingest::{IngestionService, LogIngestionService, TraceIngestionService};
 use parqtel_query::QueryExecutor;
 use sha2::{Digest, Sha256};
@@ -150,19 +150,33 @@ async fn main() -> anyhow::Result<()> {
     std::fs::create_dir_all(&config.storage.data_dir)?;
     std::fs::create_dir_all(&config.logs.data_dir)?;
 
+    // The store is built while the index is still held directly, so the
+    // sidecar path is defined in exactly one place (BlockIndex::new).
     let mut index = BlockIndex::new(&config.storage.data_dir);
     index.load().unwrap_or_default();
     tracing::debug!(blocks = index.blocks.len(), "metrics block index loaded");
+    let index_store = Arc::new(BlockIndexStore::new(&index));
     let index = Arc::new(tokio::sync::RwLock::new(index));
 
     let mut log_index = BlockIndex::new(&config.logs.data_dir);
     log_index.load().unwrap_or_default();
     tracing::debug!(blocks = log_index.blocks.len(), "logs block index loaded");
+    let log_index_store = Arc::new(BlockIndexStore::new(&log_index));
     let log_index = Arc::new(tokio::sync::RwLock::new(log_index));
 
     // 4. Handle Subcommands
     match cli.command.unwrap_or(Commands::Serve) {
-        Commands::Serve => run_server(config, index, log_index, telemetry_guard).await?,
+        Commands::Serve => {
+            run_server(
+                config,
+                index,
+                index_store,
+                log_index,
+                log_index_store,
+                telemetry_guard,
+            )
+            .await?
+        }
         Commands::Compact => run_compact(config, index, log_index).await?,
         Commands::Inspect => run_inspect(index, log_index).await?,
         Commands::Export {
@@ -176,10 +190,13 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_server(
     config: Config,
     index: Arc<tokio::sync::RwLock<BlockIndex>>,
+    index_store: Arc<BlockIndexStore>,
     log_index: Arc<tokio::sync::RwLock<BlockIndex>>,
+    log_index_store: Arc<BlockIndexStore>,
     telemetry_guard: telemetry::TelemetryGuard,
 ) -> anyhow::Result<()> {
     // Prepare UI assets
@@ -202,14 +219,17 @@ async fn run_server(
     let (tx, mut rx) = mpsc::unbounded_channel();
     let idx_clone = index.clone();
     let idx_contention = contention.clone();
+    let idx_store = index_store.clone();
     let index_task = tokio::spawn(async move {
         while let Some(meta) = rx.recv().await {
             let started = std::time::Instant::now();
             let mut idx = idx_clone.write().await;
             idx_contention.record_index_lock_wait(started.elapsed());
-            if let Err(e) = idx.add(meta) {
-                tracing::error!("Failed to add block to index: {}", e);
-            }
+            // In-memory only: the write lock must never be held across a
+            // serialise + write + rename of the whole index.
+            idx.add(meta);
+            // Cheap flag set; the persist task does the I/O.
+            idx_store.mark_dirty();
         }
     });
 
@@ -217,14 +237,14 @@ async fn run_server(
     let (log_tx, mut log_rx) = mpsc::unbounded_channel();
     let log_idx_clone = log_index.clone();
     let log_idx_contention = contention.clone();
+    let log_idx_store = log_index_store.clone();
     let log_index_task = tokio::spawn(async move {
         while let Some(meta) = log_rx.recv().await {
             let started = std::time::Instant::now();
             let mut idx = log_idx_clone.write().await;
             log_idx_contention.record_index_lock_wait(started.elapsed());
-            if let Err(e) = idx.add(meta) {
-                tracing::error!("Failed to add log block to index: {}", e);
-            }
+            idx.add(meta);
+            log_idx_store.mark_dirty();
         }
     });
 
@@ -258,6 +278,7 @@ async fn run_server(
         blocks = trace_index.blocks.len(),
         "trace block index loaded"
     );
+    let trace_index_store = Arc::new(BlockIndexStore::new(&trace_index));
     let trace_index = Arc::new(tokio::sync::RwLock::new(trace_index));
 
     let trace_idx_clone = trace_index.clone();
@@ -267,9 +288,7 @@ async fn run_server(
             let started = std::time::Instant::now();
             let mut idx = trace_idx_clone.write().await;
             trace_idx_contention.record_index_lock_wait(started.elapsed());
-            if let Err(e) = idx.add(meta) {
-                tracing::error!("Failed to add trace block to index: {}", e);
-            }
+            idx.add(meta);
         }
     });
 
@@ -284,15 +303,20 @@ async fn run_server(
     .with_result_limits(config.query.max_series, config.query.max_samples_per_series);
 
     let retention_interval_secs = config.server.retention_interval_secs;
-    start_maintenance(
+    let persist_interval_secs = config.server.index_persist_interval_secs;
+    let metrics_maintenance = start_maintenance(
         index.clone(),
+        index_store.clone(),
         config.storage.clone(),
         retention_interval_secs,
+        persist_interval_secs,
     );
-    start_maintenance(
+    let logs_maintenance = start_maintenance(
         log_index.clone(),
+        log_index_store.clone(),
         config.logs.clone().into(),
         retention_interval_secs,
+        persist_interval_secs,
     );
     // Traces: retention only. Trace blocks share the metrics BlockConfig
     // (TraceWriter is built from config.storage), but the compactor's
@@ -300,10 +324,13 @@ async fn run_server(
     // maintenance would attempt trace merges and fail on schema mismatch.
     // Without retention the trace index grows without bound (observed:
     // 62 blocks/700K rows in ~8h on the OOM-affected deployment).
-    tokio::spawn(RetentionPolicy::run_loop(
+    let (trace_shutdown_tx, trace_shutdown_rx) = tokio::sync::watch::channel(false);
+    let trace_retention = tokio::spawn(RetentionPolicy::run_loop(
         trace_index.clone(),
+        trace_index_store.clone(),
         config.storage.clone(),
         retention_interval_secs,
+        trace_shutdown_rx,
     ));
 
     let state = AppState::new(
@@ -316,6 +343,11 @@ async fn run_server(
         ui_content,
         ui_etag,
         contention,
+        [
+            index_store.clone(),
+            log_index_store.clone(),
+            trace_index_store.clone(),
+        ],
     )
     .await;
     tracing::debug!(
@@ -651,14 +683,26 @@ async fn run_server(
     state.inner.log_ingestion_service.shutdown().await?;
     state.inner.trace_ingestion_service.shutdown().await?;
 
+    // Let the index tasks drain the block metadata the flushes above just
+    // published, so the final persist pass sees every block.
     drop(state);
     let _ = index_task.await;
     let _ = log_index_task.await;
     let _ = trace_index_task.await;
 
-    index.read().await.save()?;
-    log_index.read().await.save()?;
-    trace_index.read().await.save()?;
+    // Maintenance tasks stop and each perform a final persist pass before
+    // returning, so the sidecars are complete without anyone writing the
+    // index from under a lock here.
+    let stop_timeout = std::time::Duration::from_secs(config.server.shutdown_timeout_secs.max(1));
+    metrics_maintenance.shutdown(stop_timeout).await;
+    logs_maintenance.shutdown(stop_timeout).await;
+    let _ = trace_shutdown_tx.send(true);
+    let _ = tokio::time::timeout(stop_timeout, trace_retention).await;
+
+    // The trace index has no persist loop (retention only), so it is written
+    // explicitly here — synchronously, after all other writers are stopped.
+    let trace_snapshot = trace_index.read().await.serialize()?;
+    tokio::task::spawn_blocking(move || trace_index_store.write_payload(&trace_snapshot)).await??;
 
     // Flush any buffered OTLP spans/metrics before the process exits so the
     // final self-telemetry batch is not silently dropped.
