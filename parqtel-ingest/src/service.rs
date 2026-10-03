@@ -10,7 +10,7 @@ use parqtel_core::{
     SignalType, Span, TailSamplingConfig,
 };
 use prost::Message;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, Mutex};
@@ -38,25 +38,103 @@ fn record_block_written(
     );
 }
 
+/// Milliseconds since the unix epoch. Saturates to 0 if the clock is before it.
+fn unix_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Routes a metric to one of `shard_count` writer shards.
+///
+/// Cheap and stable for the process lifetime, which is all that matters: a
+/// metric must always land in the same shard so its points stay together, but
+/// the mapping itself is an implementation detail and never persisted.
+fn shard_for(metric_name: &str, shard_count: usize) -> usize {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    metric_name.hash(&mut hasher);
+    (hasher.finish() % shard_count as u64) as usize
+}
+
 /// Handles automatic rotation and flushing of metric blocks.
+///
+/// # Sharding
+///
+/// Ingest is serialised on one lock per signal, and a block flush runs while
+/// that lock is held, so a flush of a full block stalls *every* request for
+/// that signal for the encode duration. Sharding the writers removes that
+/// cross-metric contention.
+///
+/// The shards are deliberately **not** independent blocks: a flush takes the
+/// buffers from all shards and writes **one** block, so a given ingest rate
+/// still produces the same number of files. Sharding only the locks gets the
+/// concurrency win without multiplying query fan-out, which independent
+/// per-shard blocks would do.
+///
+/// # Durability
+///
+/// Unchanged. A flush still runs inline on the request that triggered it and
+/// that request is not acknowledged until the block is on disk. Only the
+/// *other* requests stop waiting. Making even the triggering request return
+/// early is BL-01-14, deferred behind the WAL (BL-03-12).
 pub struct BlockRotator {
-    writer: BlockWriter,
+    /// One writer per shard. Each is locked only for the duration of a push,
+    /// never across an encode.
+    shards: Vec<Mutex<BlockWriter>>,
+    /// Rows currently buffered across all shards.
+    ///
+    /// Maintained as an atomic so the capacity check on the hot push path is a
+    /// single load rather than a lock per shard. Kept exactly in step with the
+    /// writers: `push` adds the rows it accepted, and the flush subtracts each
+    /// shard's rows at the moment it swaps that shard out — inside the shard's
+    /// own lock, so a concurrent push can never have its count erased by a
+    /// later `store(0)`.
+    buffered: AtomicUsize,
+    /// Serialises flushes so two requests cannot each swap the buffers and
+    /// write overlapping blocks. Held across the encode, but no shard lock is.
+    flush_lock: tokio::sync::Mutex<()>,
     config: BlockConfig,
-    last_flush: Instant,
-    max_duration: Duration,
+    /// Unix time of the last completed flush, in milliseconds. An atomic so
+    /// the duration check needs no lock — flushes are serialised by
+    /// `flush_lock`, so exactly one writer updates this at a time.
+    last_flush_unix_ms: AtomicU64,
+    max_duration_ms: u64,
     metadata_tx: mpsc::UnboundedSender<BlockMetadata>,
 }
 
 impl BlockRotator {
     pub fn new(config: BlockConfig, metadata_tx: mpsc::UnboundedSender<BlockMetadata>) -> Self {
-        let max_duration = Duration::from_secs(config.block_duration_secs);
+        Self::with_shards(config, metadata_tx, 1)
+    }
+
+    /// Creates a rotator with `shards` independent writer shards.
+    ///
+    /// `shards` is clamped to at least 1, so a zero-valued config yields the
+    /// previous single-writer behaviour rather than an unusable rotator.
+    pub fn with_shards(
+        config: BlockConfig,
+        metadata_tx: mpsc::UnboundedSender<BlockMetadata>,
+        shards: usize,
+    ) -> Self {
+        let shards = shards.clamp(1, 256);
         Self {
-            writer: BlockWriter::new(config.clone()),
+            shards: (0..shards)
+                .map(|_| Mutex::new(BlockWriter::new(config.clone())))
+                .collect(),
+            flush_lock: tokio::sync::Mutex::new(()),
+            buffered: AtomicUsize::new(0),
+            max_duration_ms: config.block_duration_secs.saturating_mul(1000),
             config,
-            last_flush: Instant::now(),
-            max_duration,
+            last_flush_unix_ms: AtomicU64::new(unix_millis()),
             metadata_tx,
         }
+    }
+
+    /// Number of writer shards. Exported so `/metrics` can show it.
+    pub fn shard_count(&self) -> usize {
+        self.shards.len()
     }
 
     fn publish(&self, meta: BlockMetadata, contention: Option<&ContentionMetrics>) {
@@ -64,64 +142,160 @@ impl BlockRotator {
         let _ = self.metadata_tx.send(meta);
     }
 
-    /// Pushes a metric, closing a block first if it would not fit whole.
+    /// Total rows currently buffered, from the atomic counter.
+    ///
+    /// Only used for logging and tests; the hot capacity check reads the
+    /// atomic directly.
+    pub fn buffered_rows(&self) -> usize {
+        self.buffered.load(Ordering::Relaxed)
+    }
+
+    /// Sum of the shard writers' actual row counts. Test/diagnostic only:
+    /// comparing this against [`Self::buffered_rows`] proves the counter
+    /// tracks reality.
+    pub async fn actual_rows(&self) -> usize {
+        let mut total = 0;
+        for shard in &self.shards {
+            total += shard.lock().await.len();
+        }
+        total
+    }
+
+    /// Pushes a metric, flushing first if it would overflow the block cap.
+    ///
+    /// Checking *before* the push bounds each block at
+    /// `max_rows_per_block` plus at most one request, which is what
+    /// `max_rows_per_block` is documented to mean. Checking only afterwards
+    /// let concurrent requests overshoot: with 16 shards and 40 clients, one
+    /// block was measured at twice the cap.
     ///
     /// A metric larger than a whole block is split across as many blocks as it
     /// needs rather than being partially accepted and then reported as an
-    /// error (which made clients retry a batch that was already half-ingested).
+    /// error (which made clients retry a batch already half-ingested).
     ///
     /// Returns `true` if any flush happened, so the caller drains the memory
     /// buffer and the flushed rows are not read twice.
     pub async fn push(
-        &mut self,
+        &self,
         metric: Metric,
         contention: Option<&ContentionMetrics>,
     ) -> Result<bool> {
+        let idx = shard_for(&metric.name, self.shards.len());
+        let points = metric.data_points.len();
         let mut flushed = false;
-        if self.writer.len() + metric.data_points.len() > self.config.max_rows_per_block {
-            self.flush(contention).await?;
+
+        let cap = self.config.max_rows_per_block;
+        // `buffered + points > cap`, rearranged so neither side can overflow.
+        let would_overflow = points > cap || self.buffered.load(Ordering::Relaxed) > cap - points;
+        if would_overflow {
+            self.flush_if_over_capacity(contention).await?;
             flushed = true;
         }
-        // `push` may still have had to close a block mid-metric; publish
-        // whatever it wrote so no block is orphaned.
-        for meta in self.writer.push(metric)? {
-            flushed = true;
-            self.publish(meta, contention);
+
+        let mut closed = 0usize;
+        {
+            let waited = Instant::now();
+            let mut shard = self.shards[idx].lock().await;
+            if let Some(c) = contention {
+                c.record_ingest_lock_wait(SignalType::Metrics, waited.elapsed());
+            }
+            // A single shard may be near its own capacity; let the writer
+            // close a block rather than reject the points.
+            for meta in shard.push(metric)? {
+                closed += meta.row_count;
+                flushed = true;
+                self.publish(meta, contention);
+            }
+            // Adjust the counter while still holding the shard lock: a flush
+            // subtracts a shard's rows and swaps the writer under the same
+            // lock, so counting after releasing it could count the same rows
+            // twice.
+            //
+            // The two adjustments are deliberately separate. Every pushed point
+            // is now in the writer, so all `points` are added. Separately, `closed`
+            // rows left through the writer's own capacity split — and those were
+            // added by *earlier* pushes, so they must be subtracted.
+            //
+            // Folding these into one `points - closed` was wrong whenever
+            // `closed > points`, which is exactly the common case of pushing
+            // into a full writer: a 20-point push into a full 2000-row writer
+            // closed 2000 and added 20, so the subtraction saturated to zero and
+            // neither the 20 new rows nor the 2000 departing rows were tracked.
+            // The counter then drifted upward by a block's worth on every such
+            // push, pinned itself above the cap, and turned every subsequent
+            // push into a flush of a single metric — 2263 blocks of ~20 rows
+            // instead of 24 of 2000.
+            self.buffered.fetch_add(points, Ordering::Relaxed);
+            self.buffered.fetch_sub(closed, Ordering::Relaxed);
         }
         Ok(flushed)
     }
 
-    pub async fn check_and_flush(
-        &mut self,
-        contention: Option<&ContentionMetrics>,
-    ) -> Result<bool> {
-        if Instant::now().duration_since(self.last_flush) >= self.max_duration {
+    pub async fn check_and_flush(&self, contention: Option<&ContentionMetrics>) -> Result<bool> {
+        if unix_millis().saturating_sub(self.last_flush_unix_ms.load(Ordering::Relaxed))
+            >= self.max_duration_ms
+        {
             self.flush(contention).await?;
             return Ok(true);
         }
         Ok(false)
     }
 
-    /// Writes buffered rows to Parquet on the blocking thread pool so Parquet
-    /// encoding/compression/disk I/O never stalls a tokio worker while the
-    /// ingest mutex is held. Idempotent on an empty buffer (the old code
-    /// returned a spurious "Cannot flush empty buffer" error).
+    /// Flushes if the buffered rows have reached the cap.
     ///
-    /// The whole encode happens while the caller still holds the ingest mutex,
-    /// which is why the guard below exists: it makes flush wall time and the
-    /// in-flight gauge observable without a profiler. The idle no-op path
-    /// returns before creating a guard, so an empty flush cannot dilute the
-    /// histogram.
-    pub async fn flush(&mut self, contention: Option<&ContentionMetrics>) -> Result<()> {
-        if self.writer.is_empty() {
-            tracing::debug!("metric block flush skipped: buffer empty");
+    /// Takes the flush lock *before* re-checking, so two requests that both
+    /// crossed the cap produce one flush rather than two.
+    async fn flush_if_over_capacity(&self, contention: Option<&ContentionMetrics>) -> Result<()> {
+        let _permit = self.flush_lock.lock().await;
+        if self.buffered.load(Ordering::Relaxed) < self.config.max_rows_per_block {
+            // Another request's flush already covered the cap.
             return Ok(());
         }
-        let row_count = self.writer.len();
+        self.flush_locked(contention).await
+    }
+
+    /// Writes every shard's buffered rows to one Parquet block.
+    ///
+    /// The shard buffers are taken by swapping each writer out under its own
+    /// short-lived lock; the encode then runs on the blocking pool with **no
+    /// lock held**, which is the whole point of the sharding: concurrent
+    /// requests keep pushing into the fresh buffers while this encodes.
+    ///
+    /// Idempotent on an empty set of shards.
+    pub async fn flush(&self, contention: Option<&ContentionMetrics>) -> Result<()> {
+        let _permit = self.flush_lock.lock().await;
+        self.flush_locked(contention).await
+    }
+
+    /// Flush body, with the flush lock already held.
+    async fn flush_locked(&self, contention: Option<&ContentionMetrics>) -> Result<()> {
+        let mut writers = Vec::with_capacity(self.shards.len());
+        let mut row_count = 0usize;
+        for shard in &self.shards {
+            let mut guard = shard.lock().await;
+            if guard.is_empty() {
+                continue;
+            }
+            let taken = guard.len();
+            row_count += taken;
+            // Subtract while still holding this shard's lock, so a concurrent
+            // push either lands before this (and is subtracted here) or after
+            // (and counts up from the decremented total). A `store(0)` after
+            // the loop would erase the latter.
+            self.buffered.fetch_sub(taken, Ordering::Relaxed);
+            writers.push(std::mem::replace(
+                &mut *guard,
+                BlockWriter::new(self.config.clone()),
+            ));
+        }
+        if writers.is_empty() {
+            tracing::debug!("metric block flush skipped: all shards empty");
+            return Ok(());
+        }
+
         let started = std::time::Instant::now();
-        let mut writer = std::mem::replace(&mut self.writer, BlockWriter::new(self.config.clone()));
         let flush_guard = contention.map(|c| c.flush_started(SignalType::Metrics));
-        let encoded = tokio::task::spawn_blocking(move || writer.flush()).await;
+        let encoded = tokio::task::spawn_blocking(move || merge_and_flush(writers)).await;
         // Unwrap the JoinError separately from the writer's own Result so the
         // row count can still be attributed when the flush succeeded.
         let metadata = match encoded {
@@ -134,7 +308,10 @@ impl BlockRotator {
             guard.count_rows(meta.row_count as u64);
         }
         let metadata = metadata?;
-        self.last_flush = Instant::now();
+        // Only one flush runs at a time (flush_lock), so one relaxed store is
+        // enough to publish the new flush time.
+        self.last_flush_unix_ms
+            .store(unix_millis(), Ordering::Relaxed);
         let _ = self.metadata_tx.send(metadata);
         tracing::debug!(
             signal = "metrics",
@@ -144,6 +321,12 @@ impl BlockRotator {
         );
         Ok(())
     }
+}
+
+/// Merges every shard writer's rows into one block and encodes it.
+fn merge_and_flush(writers: Vec<BlockWriter>) -> Result<BlockMetadata> {
+    let mut merged = BlockWriter::merge(writers)?;
+    merged.flush()
 }
 
 /// Handles automatic rotation and flushing of log blocks.
@@ -283,7 +466,7 @@ async fn lock_rotator<'a, T>(
 
 /// Public service for ingesting OTLP metrics.
 pub struct IngestionService {
-    rotator: Arc<Mutex<BlockRotator>>,
+    rotator: Arc<BlockRotator>,
     stats: Arc<IngestionStats>,
     memory_buffer: Option<MemoryBuffer>,
     contention: Option<Arc<ContentionMetrics>>,
@@ -291,12 +474,29 @@ pub struct IngestionService {
 
 impl IngestionService {
     pub fn new(config: BlockConfig, metadata_tx: mpsc::UnboundedSender<BlockMetadata>) -> Self {
+        Self::with_shards(config, metadata_tx, 1)
+    }
+
+    /// Creates a service whose rotator uses `shards` writer shards.
+    ///
+    /// See [`BlockRotator`] for why the shards are merged into one block
+    /// rather than each producing their own.
+    pub fn with_shards(
+        config: BlockConfig,
+        metadata_tx: mpsc::UnboundedSender<BlockMetadata>,
+        shards: usize,
+    ) -> Self {
         Self {
-            rotator: Arc::new(Mutex::new(BlockRotator::new(config, metadata_tx))),
+            rotator: Arc::new(BlockRotator::with_shards(config, metadata_tx, shards)),
             stats: Arc::new(IngestionStats::default()),
             memory_buffer: None,
             contention: None,
         }
+    }
+
+    /// Number of writer shards in use.
+    pub fn rotator_shards(&self) -> usize {
+        self.rotator.shard_count()
     }
 
     /// Set the shared memory buffer for stream-queryable data.
@@ -384,18 +584,18 @@ impl IngestionService {
             }
         }
         let contention = self.contention.clone();
-        let mut rotator =
-            lock_rotator(&self.rotator, SignalType::Metrics, contention.as_deref()).await;
         for m in metrics {
             count += m.data_points.len() as u64;
-            if rotator.push(m, contention.as_deref()).await? {
+            // The rotator measures its own per-shard lock wait, so the push is
+            // not wrapped in the service-level measurement the single-lock
+            // design needed.
+            if self.rotator.push(m, contention.as_deref()).await? {
                 flushed = true;
             }
         }
-        if rotator.check_and_flush(contention.as_deref()).await? {
+        if self.rotator.check_and_flush(contention.as_deref()).await? {
             flushed = true;
         }
-        drop(rotator);
         if flushed {
             if let Some(ref buf) = self.memory_buffer {
                 buf.drain_offloaded(SignalType::Metrics).await;
@@ -417,10 +617,7 @@ impl IngestionService {
     /// (the shared memory buffer is drained so flushed rows aren't double-read).
     pub async fn check_and_flush(&self) -> Result<bool> {
         let contention = self.contention.clone();
-        let flushed = lock_rotator(&self.rotator, SignalType::Metrics, contention.as_deref())
-            .await
-            .check_and_flush(contention.as_deref())
-            .await?;
+        let flushed = self.rotator.check_and_flush(contention.as_deref()).await?;
         if flushed {
             if let Some(ref buf) = self.memory_buffer {
                 buf.drain_offloaded(SignalType::Metrics).await;
@@ -431,10 +628,7 @@ impl IngestionService {
 
     pub async fn shutdown(&self) -> Result<()> {
         let contention = self.contention.clone();
-        let mut rotator =
-            lock_rotator(&self.rotator, SignalType::Metrics, contention.as_deref()).await;
-        let _ = rotator.flush(contention.as_deref()).await;
-        drop(rotator);
+        let _ = self.rotator.flush(contention.as_deref()).await;
         if let Some(ref buf) = self.memory_buffer {
             buf.drain_offloaded(SignalType::Metrics).await;
         }
@@ -868,7 +1062,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let config = tiny_metrics_config(dir.path());
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let mut rotator = BlockRotator::new(config, tx);
+        let rotator = BlockRotator::new(config, tx);
 
         rotator
             .push(one_point_metric("m1", 100), None)
@@ -888,7 +1082,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let (tx, mut rx) = mpsc::unbounded_channel();
         let contention = ContentionMetrics::new();
-        let mut rotator = BlockRotator::new(tiny_metrics_config(dir.path()), tx);
+        let rotator = BlockRotator::new(tiny_metrics_config(dir.path()), tx);
 
         rotator.flush(Some(&contention)).await.unwrap();
         assert!(rx.try_recv().is_err(), "no block should be written");
@@ -904,7 +1098,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let (tx, mut rx) = mpsc::unbounded_channel();
         let contention = ContentionMetrics::new();
-        let mut rotator = BlockRotator::new(tiny_metrics_config(dir.path()), tx);
+        let rotator = BlockRotator::new(tiny_metrics_config(dir.path()), tx);
 
         rotator
             .push(one_point_metric("m1", 100), Some(&contention))
@@ -931,19 +1125,24 @@ mod tests {
         let dir = tempdir().unwrap();
         let (tx, mut rx) = mpsc::unbounded_channel();
         let contention = ContentionMetrics::new();
-        let mut rotator = BlockRotator::new(tiny_metrics_config(dir.path()), tx);
+        let rotator = BlockRotator::new(tiny_metrics_config(dir.path()), tx);
 
-        // Fill to exactly max_rows_per_block (10).
+        // Ten points exactly fill the cap: no flush, because the check is
+        // "would this push overflow it" — so a block is never larger than the
+        // cap plus one request.
         for i in 0..10 {
-            rotator
+            let flushed = rotator
                 .push(one_point_metric("m1", 100 + i), Some(&contention))
                 .await
                 .unwrap();
+            assert!(!flushed, "no flush while the batch still fits");
         }
         assert_eq!(contention.flush_duration_count(SignalType::Metrics), 0);
+        assert_eq!(rotator.buffered_rows(), 10, "the counter tracks the rows");
 
-        // The 11th point crosses the cap: `push` must flush first and report
-        // that it did, so the caller drains the memory buffer.
+        // The 11th point would overflow, so the block is closed first. That
+        // push must report the flush so the caller drains the memory buffer and
+        // the flushed rows are not read twice.
         let flushed = rotator
             .push(one_point_metric("m1", 200), Some(&contention))
             .await
@@ -957,6 +1156,378 @@ mod tests {
         assert_eq!(contention.flush_inflight(SignalType::Metrics), 0);
     }
 
+    /// The shards exist to remove cross-metric contention, so a metric must
+    /// always route to the same shard — otherwise one metric's rows scatter
+    /// across buffers and the merge becomes order-dependent.
+    #[tokio::test]
+    async fn test_shard_routing_is_stable_and_bounded() {
+        for count in [1usize, 2, 4, 8] {
+            for name in ["cpu", "memory_used", "http_requests_total", "a", "zzz"] {
+                let a = shard_for(name, count);
+                assert!(a < count, "shard {a} out of range for {count} shards");
+                assert_eq!(
+                    shard_for(name, count),
+                    a,
+                    "routing for {name} must be stable across calls"
+                );
+            }
+        }
+        // Distinct metrics must be able to land on different shards, or the
+        // sharding buys nothing.
+        let spread: std::collections::HashSet<usize> = (0..64)
+            .map(|i| shard_for(&format!("metric_{i}"), 8))
+            .collect();
+        assert!(spread.len() > 1, "shards must actually spread load");
+    }
+
+    /// Zero or absurd shard counts must degrade gracefully: 1 restores the
+    /// previous single-writer behaviour and the upper bound keeps a bad config
+    /// from allocating hundreds of writer buffers.
+    #[tokio::test]
+    async fn test_shard_count_is_clamped() {
+        let dir = tempfile::tempdir().unwrap();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        for (configured, expected) in [(0usize, 1usize), (1, 1), (4, 4), (10_000, 256)] {
+            let rotator =
+                BlockRotator::with_shards(tiny_metrics_config(dir.path()), tx.clone(), configured);
+            assert_eq!(
+                rotator.shard_count(),
+                expected,
+                "configured {configured} should clamp to {expected}"
+            );
+        }
+    }
+
+    /// The whole point of sharding the locks without sharding the blocks: a
+    /// flush must still write **one** file, no matter how many shards the rows
+    /// came from. If this regresses to one block per shard, query fan-out
+    /// multiplies silently.
+    #[tokio::test]
+    async fn test_sharded_flush_writes_one_block() {
+        let dir = tempdir().unwrap();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let contention = ContentionMetrics::new();
+        // A cap comfortably above the row count, so no rotation is triggered
+        // by the cap check and the explicit flush below is the only writer.
+        let rotator = BlockRotator::with_shards(
+            BlockConfig {
+                max_rows_per_block: 100,
+                row_group_size: 50,
+                block_duration_secs: 3600,
+                ..tiny_metrics_config(dir.path())
+            },
+            tx,
+            4,
+        );
+        assert_eq!(rotator.shard_count(), 4);
+
+        // 16 distinct metric names spread over 4 shards.
+        for i in 0..16 {
+            rotator
+                .push(
+                    one_point_metric(&format!("m{i}"), 100 + i),
+                    Some(&contention),
+                )
+                .await
+                .unwrap();
+        }
+        rotator.flush(Some(&contention)).await.unwrap();
+
+        let mut metas = Vec::new();
+        while let Ok(meta) = rx.try_recv() {
+            metas.push(meta);
+        }
+        assert_eq!(
+            metas.len(),
+            1,
+            "shards must merge into a single block, got {} blocks",
+            metas.len()
+        );
+        assert_eq!(
+            metas[0].row_count, 16,
+            "every shard's rows must be in the merged block"
+        );
+        assert_eq!(contention.flush_rows(SignalType::Metrics), 16);
+    }
+
+    /// A shard must not rotate its own block just because *its* slice of the
+    /// cap is full — the cap is a whole-block budget. Rotating per shard would
+    /// put back the block-count multiplication the merge exists to avoid.
+    #[tokio::test]
+    async fn test_shards_do_not_rotate_early_on_their_own_slice() {
+        let dir = tempdir().unwrap();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        // Cap 16, 4 shards: each shard's share is 4 rows. Filling all four to
+        // exactly the share must not produce four blocks.
+        let rotator = BlockRotator::with_shards(
+            BlockConfig {
+                max_rows_per_block: 16,
+                row_group_size: 8,
+                block_duration_secs: 3600,
+                ..tiny_metrics_config(dir.path())
+            },
+            tx,
+            4,
+        );
+
+        // 15 of 16 rows: below the cap, so nothing may be written even though
+        // each shard already holds more than a quarter of it.
+        for i in 0..15 {
+            rotator
+                .push(one_point_metric(&format!("m{i}"), 100 + i), None)
+                .await
+                .unwrap();
+        }
+        assert!(
+            rx.try_recv().is_err(),
+            "no block may be written before the whole-block cap is reached"
+        );
+
+        // The 16th row reaches the cap: exactly one merged block.
+        rotator
+            .push(one_point_metric("m15", 115), None)
+            .await
+            .unwrap();
+        rotator.flush(None).await.unwrap();
+        let mut metas = Vec::new();
+        while let Ok(meta) = rx.try_recv() {
+            metas.push(meta);
+        }
+        assert_eq!(metas.len(), 1, "the four shards must merge into one block");
+        assert_eq!(metas[0].row_count, 16);
+    }
+
+    /// The buffered-row counter is what gates rotation, so it must track the
+    /// writers exactly. A drift upward would mean the cap never fires again and
+    /// blocks grow without bound; a drift downward would mean constant
+    /// pointless flushes.
+    #[tokio::test]
+    async fn test_buffered_counter_tracks_the_writers() {
+        let dir = tempdir().unwrap();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let rotator = BlockRotator::with_shards(
+            BlockConfig {
+                max_rows_per_block: 1000,
+                row_group_size: 500,
+                block_duration_secs: 3600,
+                ..tiny_metrics_config(dir.path())
+            },
+            tx,
+            4,
+        );
+
+        assert_eq!(rotator.buffered_rows(), 0);
+        for i in 0..37 {
+            rotator
+                .push(one_point_metric(&format!("m{}", i % 8), 100 + i), None)
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            rotator.buffered_rows(),
+            37,
+            "counter must equal pushed rows"
+        );
+
+        rotator.flush(None).await.unwrap();
+        assert_eq!(rotator.buffered_rows(), 0, "a flush must zero the counter");
+
+        // A mid-metric split inside the writer must not leave the counter high:
+        // those rows left through the writer, not through `flush_locked`.
+        let split = BlockRotator::with_shards(
+            BlockConfig {
+                max_rows_per_block: 5,
+                row_group_size: 5,
+                block_duration_secs: 3600,
+                ..tiny_metrics_config(dir.path())
+            },
+            tx2(),
+            1,
+        );
+        let points: Vec<_> = (0..13)
+            .map(|i| {
+                parqtel_core::DataPoint::new(
+                    100 + i,
+                    parqtel_core::MetricValue::Double(1.0),
+                    parqtel_core::LabelSet::default(),
+                )
+                .unwrap()
+            })
+            .collect();
+        split
+            .push(
+                Metric {
+                    name: "split".into(),
+                    kind: parqtel_core::MetricKind::Gauge,
+                    data_points: points,
+                    ..Default::default()
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            split.buffered_rows(),
+            13 - 10,
+            "the 10 rows the writer closed mid-metric must not stay counted"
+        );
+    }
+
+    fn tx2() -> mpsc::UnboundedSender<BlockMetadata> {
+        mpsc::unbounded_channel().0
+    }
+
+    /// Regression test for a counter bug that only appeared under contention.
+    ///
+    /// The buffered-row counter drives rotation, so a drift in either
+    /// direction is serious: upward pins it above the cap and turns every push
+    /// into a flush (measured: 2263 blocks of ~20 rows instead of 24 of 2000);
+    /// downward rotates constantly for no reason. An earlier implementation
+    /// folded "rows added" and "rows the writer flushed internally" into one
+    /// `points - closed`, which saturated to zero whenever a push landed in a
+    /// full writer and silently lost both adjustments.
+    ///
+    /// Compares the counter against the shard writers' real contents at the cap
+    /// boundary, for one shard and several.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_buffered_counter_matches_writers_under_contention() {
+        for shards in [1usize, 4] {
+            let dir = tempfile::tempdir().unwrap();
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            let rotator = Arc::new(BlockRotator::with_shards(
+                BlockConfig {
+                    max_rows_per_block: 2000,
+                    row_group_size: 1000,
+                    block_duration_secs: 3600,
+                    ..tiny_metrics_config(dir.path())
+                },
+                tx,
+                shards,
+            ));
+
+            let mut handles = Vec::new();
+            for w in 0..40 {
+                let rotator = rotator.clone();
+                handles.push(tokio::spawn(async move {
+                    for i in 0..60 {
+                        let dps: Vec<_> = (0..20)
+                            .map(|k| {
+                                parqtel_core::DataPoint::new(
+                                    1_000_000 * (i as i64 + 1) + k,
+                                    parqtel_core::MetricValue::Double(1.0),
+                                    parqtel_core::LabelSet::default(),
+                                )
+                                .unwrap()
+                            })
+                            .collect();
+                        rotator
+                            .push(
+                                Metric {
+                                    name: format!("metric_{}", (w * 60 + i) % 60),
+                                    kind: parqtel_core::MetricKind::Gauge,
+                                    data_points: dps,
+                                    ..Default::default()
+                                },
+                                None,
+                            )
+                            .await
+                            .unwrap();
+                    }
+                }));
+            }
+            for h in handles {
+                h.await.unwrap();
+            }
+
+            assert_eq!(
+                rotator.buffered_rows(),
+                rotator.actual_rows().await,
+                "shards={shards}: counter must equal the writers' real contents"
+            );
+
+            rotator.flush(None).await.unwrap();
+            assert_eq!(
+                rotator.buffered_rows(),
+                0,
+                "shards={shards}: a flush must zero the counter"
+            );
+            assert_eq!(rotator.actual_rows().await, 0);
+
+            // Blocks must respect the cap rather than degenerating into one
+            // per push, and no block may exceed it by more than one request.
+            const TOTAL: usize = 40 * 60 * 20;
+            const REQUEST: usize = 60 * 20;
+            let mut blocks = Vec::new();
+            while let Ok(m) = rx.try_recv() {
+                blocks.push(m.row_count);
+            }
+            let written: usize = blocks.iter().sum();
+            assert_eq!(written, TOTAL, "shards={shards}: no rows may be lost");
+            assert!(
+                blocks.len() <= TOTAL / 1000 + 40,
+                "shards={shards}: {} blocks for {TOTAL} rows indicates a flush per push",
+                blocks.len()
+            );
+            assert!(
+                blocks.iter().all(|&b| b <= 2000 + REQUEST),
+                "shards={shards}: a block may exceed the cap by at most one request"
+            );
+        }
+    }
+
+    /// Concurrent pushes across shards must not lose or duplicate rows, and a
+    /// concurrent flush must not swallow a push that arrives mid-encode.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_concurrent_sharded_pushes_lose_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let contention = Arc::new(ContentionMetrics::new());
+        let rotator = Arc::new(BlockRotator::with_shards(
+            BlockConfig {
+                max_rows_per_block: 50,
+                row_group_size: 50,
+                block_duration_secs: 3600,
+                ..tiny_metrics_config(dir.path())
+            },
+            tx,
+            4,
+        ));
+
+        const WORKERS: usize = 8;
+        const PER_WORKER: usize = 25;
+        let mut handles = Vec::new();
+        for w in 0..WORKERS {
+            let rotator = rotator.clone();
+            let contention = contention.clone();
+            handles.push(tokio::spawn(async move {
+                for i in 0..PER_WORKER {
+                    // Distinct names route to distinct shards.
+                    let name = format!("m{}_{i}", w % 4);
+                    rotator
+                        .push(
+                            one_point_metric(&name, 1000 * (i as i64 + 1)),
+                            Some(&contention),
+                        )
+                        .await
+                        .unwrap();
+                }
+            }));
+        }
+        for h in handles {
+            h.await.unwrap();
+        }
+        rotator.flush(Some(&contention)).await.unwrap();
+
+        let total: usize = std::iter::from_fn(|| rx.try_recv().ok())
+            .map(|m: BlockMetadata| m.row_count)
+            .sum();
+        assert_eq!(
+            total,
+            WORKERS * PER_WORKER,
+            "every concurrently pushed point must be written exactly once"
+        );
+    }
+
     /// A single metric larger than a whole block must be split across blocks
     /// and ingested in full — not partially accepted and then reported as an
     /// error, which made clients retry a batch that was already half-ingested.
@@ -965,7 +1536,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let (tx, mut rx) = mpsc::unbounded_channel();
         let contention = ContentionMetrics::new();
-        let mut rotator = BlockRotator::new(tiny_metrics_config(dir.path()), tx);
+        let rotator = BlockRotator::new(tiny_metrics_config(dir.path()), tx);
 
         // 25 points into a block that holds 10: three blocks, no error.
         let points: Vec<_> = (0..25)
@@ -1024,7 +1595,7 @@ mod tests {
     async fn test_split_blocks_are_published_to_the_index() {
         let dir = tempdir().unwrap();
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let mut rotator = BlockRotator::new(tiny_metrics_config(dir.path()), tx);
+        let rotator = BlockRotator::new(tiny_metrics_config(dir.path()), tx);
 
         let points: Vec<_> = (0..25)
             .map(|i| {
@@ -1665,7 +2236,7 @@ mod tests {
             ..Default::default()
         };
         let (tx, _rx) = mpsc::unbounded_channel();
-        let mut rotator = BlockRotator::new(config, tx);
+        let rotator = BlockRotator::new(config, tx);
 
         rotator
             .push(

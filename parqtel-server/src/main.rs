@@ -251,9 +251,18 @@ async fn run_server(
     // Create shared in-memory buffer for stream-queryable data
     let memory_buffer = parqtel_core::MemoryBuffer::new();
 
-    let ingestion_service = IngestionService::new(config.storage.clone(), tx)
-        .with_memory_buffer(memory_buffer.clone())
-        .with_contention(contention.clone());
+    let ingestion_service =
+        IngestionService::with_shards(config.storage.clone(), tx, config.ingest.rotator_shards)
+            .with_memory_buffer(memory_buffer.clone())
+            .with_contention(contention.clone());
+    // Report the shard count so an operator can correlate lock-wait behaviour
+    // with the configured concurrency. 0 means "not reported", so the gauge is
+    // only meaningful once this runs.
+    contention.set_ingest_rotator_shards(ingestion_service.rotator_shards());
+    tracing::debug!(
+        shards = ingestion_service.rotator_shards(),
+        "metrics ingest rotator shard count"
+    );
     let log_ingestion_service = LogIngestionService::new(config.logs.clone(), log_tx)
         .with_memory_buffer(memory_buffer.clone())
         .with_contention(contention.clone());

@@ -175,6 +175,7 @@ tls_secret_name = "parqtel-provider-tls"
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `max_body_size` | Integer | `10485760` | Maximum request body size in bytes (10 MB) |
+| `rotator_shards` | Integer | `4` | Writer shards for the metrics ingest rotator. Every ingest request serialises on one lock per signal and a block flush runs while that lock is held, so one flush stalls every metric request for its encode duration. Sharding lets unrelated metrics be ingested concurrently during a flush. **The shards are not independent blocks** — a flush merges them into one file, so block count and query fan-out are unchanged, and durability is unchanged. Clamped to 1–256. Raise only where `parqtel_ingest_lock_wait_seconds` shows real contention; it costs one writer buffer per shard |
 | `wal_enabled` | Boolean | `false` | Enable write-ahead log for metrics |
 | `log_wal_enabled` | Boolean | `true` | Enable write-ahead log for logs |
 
@@ -331,6 +332,7 @@ export PARQTEL__LOGS__BLOCK_DURATION_SECS=1800
 
 # Ingest
 export PARQTEL__INGEST__MAX_BODY_SIZE=20971520
+export PARQTEL__INGEST__ROTATOR_SHARDS=8
 export PARQTEL__INGEST__WAL_ENABLED=true
 export PARQTEL__INGEST__LOG_WAL_ENABLED=true
 export PARQTEL__INGEST__TAIL_SAMPLING__KEEP_ERRORS=true
