@@ -105,6 +105,37 @@ parqtel-mcp-{slack,pagerduty,jira,notion,discord,gdocs,parqtel}
 
 ### Query Path
 
+A query resolves in three stages, each with its own pruning mechanism:
+
+1. **Index lookup** — `BlockIndex::query` filters by time range and by metric
+   name. A block recovered by reconciliation carries an *empty* name set, which
+   means "unknown" rather than "matches nothing", so it stays visible.
+2. **Row-group pruning** — inside each candidate block, timestamp statistics
+   skip whole row groups, and `metric_name` / `service_name` statistics skip the
+   rest. Exact, and free: rows are written grouped by metric, so a row group's
+   min and max on those columns are usually the same value. Page statistics and a
+   column index are also written and loaded, but not yet read.
+3. **Column projection** — the metrics scan reads 7 of 15 columns
+   (`timestamp_ns`, `metric_name`, `service_name`, `labels`, and the three value
+   columns). The eight skipped are `metric_kind`, the six k8s dictionaries and
+   `resource_attributes`, all per-row data a range query never touches.
+
+Evaluation is then handed to the blocking pool. Series labels are shared behind
+an `Arc` (`ast::SharedLabels`), so a series' labels are cloned once per block
+rather than once per *step* — at 1 000 series × 1 000 steps that was ~20 M string
+allocations producing identical answers 1 000 times over. Aggregation groups are
+keyed by a fingerprint with the group's label set built once per distinct group
+for the whole query.
+
+Log and trace search build a *prepared* query once per request — regexes and
+wildcards compiled, needles lowercased — instead of per row. Substring matching
+uses an allocation-free ASCII-case-folded scan, so no per-row lowercase is
+needed at all.
+
+The original step path remains (`eval_steps`); the streaming path
+(`eval_steps_into`) folds each step into the result as it is produced, so peak
+memory is one step's vector rather than every step's.
+
 Parqtel ships **three query surfaces** over one storage engine (see [PQL_GUIDE.md](PQL_GUIDE.md)):
 
 1. **ParQL (PromQL-compatible, metrics)** — a Pratt parser builds an expression AST (selectors, calls, aggregations with `by/without`, binary ops with `on()/ignoring()/group_left`, subqueries, `offset`). The evaluator runs **per step** over pre-loaded series data: instant selectors use the 5-minute lookback (`query.lookback_delta_ns`); range functions (`rate/increase/irate/delta`, the `_over_time` family, `predict_linear`, `double_exponential_smoothing`) evaluate windows `[t-range, t+step)` with per-segment counter-reset accumulation. Simple single-function shapes keep the legacy plan path (`needs_ast` dispatch); an 88→98-case **conformance corpus** (`parqtel-query/src/conformance.rs`) gates semantic changes.
@@ -223,17 +254,39 @@ The console at `/ui` is a single-file vanilla-JS app (`parqtel-server/src/ui.htm
 - **Budget**: ≤1000 KB gzipped (soft, keep lean)
 - **Features**: Overview pane is a three-row dashboard — per-signal stat cards, storage + a 6-hour ingest-volume chart, and live ingestion-rate cards (one per signal: 60s average, per-second spike/gap sparkline, status dot, wire bytes/sec) backed by `/api/v1/ingest_rates`. The metrics query builder is a 92-function catalog covering the entire engine function surface, with typed argument editors, `by`/`without` grouping, window-function wrapping, a live PromQL preview, and label filters backed by bounded high-cardinality autocomplete (top-10 recent values with server-side prefix match). The Builder⇄Code toggle reverse-parses a typed query on open, preserving the metric and its filters. Also: hash-based deep-linkable URLs, log facets sidebar, trace-grouped browse list + waterfall, alert stream with Evidence tab (metric chart + correlated logs), form-based rule editor with YAML escape hatch, saved views (localStorage), keyboard shortcuts with `?` help modal, WCAG AA contrast, reduced-motion support
 
-See [UI_UX_IMPROVEMENT_PLAN.md](UI_UX_IMPROVEMENT_PLAN.md) for the design audit and phased plan that produced the current console.
+The console is a single embedded file (`parqtel-server/src/ui.html`), served gzipped at `/ui` with an ETag, with no external requests and no framework.
 
 ## Concurrency Model
 
 - **Async runtime**: Tokio with `features = ["full"]`
 - **Shared state**: `Arc<Inner>` wrapped in `AppState` (cheaply cloneable)
-- **Ingestion services**: Protected by `tokio::sync::Mutex` (async-aware)
+- **Ingestion services**: Log and trace services are protected by a
+  `tokio::sync::Mutex`. The **metrics** service is not: its rotator holds one
+  writer buffer per shard (`ingest.rotator_shards`, default 4) behind per-shard
+  locks, so unrelated metrics ingest concurrently.
 - **Block index**: Protected by `tokio::sync::RwLock` (readers don't block each other)
-- **Background tasks**: Spawned via `tokio::spawn` for flush (5s), alert evaluation (15s), compaction, retention, and index updates
-- **Channel communication**: `mpsc::unbounded_channel` for metadata propagation from writers to index
-- **Blocking pool**: Parquet encode/compress/IO and block scans run on `spawn_blocking` with a semaphore acquired before spawning (bounded concurrency, never starving async workers)
+- **Background tasks**: `tokio::spawn` for the flush tick
+  (`server.flush_interval_secs`, 5 s), alert evaluation
+  (`server.alert_interval_secs`, 15 s), compaction, retention, index persistence
+  and the flush worker.
+- **Channel communication**: `mpsc::unbounded_channel` for metadata propagation
+  from writers to the index; `mpsc::channel(max_inflight_flushes)` for the
+  background flush worker.
+- **Blocking pool**: Parquet encode/compress/IO, block scans and OTLP decode run
+  on `spawn_blocking` with a semaphore acquired before spawning, so async workers
+  are never parked on disk or on CPU.
+- **Query evaluation** runs on the blocking pool (`evaluate_steps_to_series`), so
+  a wide range query cannot starve an async worker.
+- **Flush**: a request that crosses the block cap swaps the shard writers out
+  under their own short locks and hands the encode to a background worker,
+  bounded by `ingest.max_inflight_flushes`. A full queue encodes inline, so
+  backpressure degrades to synchronous rather than growing a backlog. The
+  worker only starts when a WAL is attached — acknowledging before the block is
+  durable is only sound when the rows are already logged.
+- **Buffer draining**: the memory buffer is drained by the rotator when a block
+  becomes **durable**, never when a flush is merely scheduled. Draining early
+  would leave rows in neither the buffer nor any block, and they would be
+  invisible to every query until the encode landed.
 
 ## Error Handling
 

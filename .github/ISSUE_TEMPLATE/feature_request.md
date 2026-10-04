@@ -17,4 +17,4 @@ Any alternative solutions or features you've considered.
 **Additional context**
 Any other context (diagrams, references, etc.)
 
-**Note**: Features that require enterprise-only capabilities (auth, clustering, AI, tiered storage) are out of scope for this repository. See the [enterprise boundary](CONTRIBUTING.md) guidelines.
+**Note**: Features that require enterprise-only capabilities (auth, clustering, AI, tiered storage) are out of scope for this repository. See the [enterprise boundary](../../CONTRIBUTING.md) guidelines.

@@ -57,10 +57,10 @@ Parqtel is a single-binary observability backend written in Rust that ingests Op
 
 | Area | Guides |
 |------|--------|
-| **Onboarding** | [Getting Started](docs/GETTING_STARTED.md) • [Glossary](docs/GLOSSARY.md) • [FAQ](docs/FAQ.md) |
+| **Onboarding** | [Getting Started](docs/GETTING_STARTED.md) • [Docs index](docs/README.md) • [Glossary](docs/GLOSSARY.md) • [FAQ](docs/FAQ.md) |
 | **Learning** | [Tutorials](docs/TUTORIALS.md) • [Use Cases](#common-use-cases) |
 | **Querying** | [**PQL Guide**](docs/PQL_GUIDE.md) — ParQL metrics, ParqtelQL log/trace search, cross-signal pipelines |
-| **Deep Dive** | [Architecture](docs/ARCHITECTURE.md) • [Configuration](docs/CONFIGURATION.md) • [Developer Guide](docs/DEVELOPER_GUIDE.md) • [MCP Integrations](docs/MCP.md) • [Query Functions](docs/QUERY_FUNCTIONS.md) • [UI/UX Plan](docs/UI_UX_IMPROVEMENT_PLAN.md) • [CI/CD](docs/CI_CD.md) |
+| **Deep Dive** | [Architecture](docs/ARCHITECTURE.md) • [Configuration](docs/CONFIGURATION.md) • [Developer Guide](docs/DEVELOPER_GUIDE.md) • [MCP Integrations](docs/MCP.md) • [Query Functions](docs/QUERY_FUNCTIONS.md) • [Performance](docs/benchmarks/PERFORMANCE.md) • [CI/CD](docs/CI_CD.md) |
 | **Operations** | [Deployment](docs/DEPLOYMENT.md) • [Troubleshooting](docs/TROUBLESHOOTING.md) • [Best Practices](docs/BEST_PRACTICES.md) • [Testing & Validation](docs/TESTING.md) |
 | **Community** | [Contributing](CONTRIBUTING.md) • [Code of Conduct](CODE_OF_CONDUCT.md) • [Security](SECURITY.md) |
 
@@ -97,7 +97,6 @@ Parqtel ships with a zero-dependency embedded web console at `/ui` — no CDNs, 
 
 **Features:** Overview pane with live per-signal ingestion-rate cards (60s average, spike/gap sparkline, status dot — backed by `/api/v1/ingest_rates`), deep-linkable URLs (share the exact query + time range), a metrics query builder with a **92-function catalog** covering the full engine surface — typed argument editors, `by`/`without` grouping, window-function wrapping, live PromQL preview, and label filters with bounded high-cardinality autocomplete — plus a Builder⇄Code toggle that reverse-parses a typed query, log field facets, trace-grouped browse list + waterfall, alert stream with Evidence tab (incident-window metric chart + correlated logs), form-based rule editor with YAML escape hatch, saved views, keyboard shortcuts (`?` for the reference), WCAG AA contrast and reduced-motion support.
 
-The design system and phased modernization plan live in [docs/UI_UX_IMPROVEMENT_PLAN.md](docs/UI_UX_IMPROVEMENT_PLAN.md).
 
 ## Performance
 
@@ -116,7 +115,7 @@ Benchmarked with sustained 1000 samples/sec (metrics + logs + traces) for 15 min
 
 Hot-path optimizations (non-blocking flushes, row-group pruning, label caching) are detailed in [docs/benchmarks/PERFORMANCE.md](docs/benchmarks/PERFORMANCE.md) — scan throughput +39%, narrow-range queries decode only matching row groups, and Parquet writes no longer stall async workers.
 
-The identified performance and storage-efficiency gaps, with prioritised resolutions, target service levels and a phased delivery plan, are tracked in [backlogs/README.md](backlogs/README.md).
+What changed, and what was measured rather than assumed, is in [docs/benchmarks/PERFORMANCE.md](docs/benchmarks/PERFORMANCE.md).
 
 ## Architecture
 

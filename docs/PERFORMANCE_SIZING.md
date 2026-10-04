@@ -1,9 +1,16 @@
 # Parqtel Performance & Memory Sizing
 
-Measured on **oman-stg** (RKE2, cgroup limit 1 CPU / 3Gi) with the built-in
-self-telemetry (`parqtel_process_rss_bytes`, `parqtel_flush_rows`) and the
-embedded CPU profiler (`/debug/pprof/summary`). Re-measure after any engine
-change to the buffer or flush path and update the ratios below.
+> **Status: partially superseded.** The per-point string cloning diagnosed below
+> was fixed — label sets are now shared behind an `Arc` in the query evaluator
+> and block index, and the write-ahead log removes the pre-flush buffering cliff.
+> See [benchmarks/PERFORMANCE.md](benchmarks/PERFORMANCE.md) for current,
+> re-measured numbers.
+>
+> The sizing **method** below is still the right way to reason about a
+> deployment, and §5 has been refreshed. The absolute figures were measured on
+> one staging cluster (RKE2, 1 CPU / 3 GiB cgroup) with the built-in
+> self-telemetry (`parqtel_process_rss_bytes`) and the embedded CPU profiler
+> (`/debug/pprof/summary`); re-measure rather than reusing them.
 
 ## 1. Root cause of the >2 GiB RSS (measured, not guessed)
 
@@ -16,10 +23,24 @@ are **cloned per point** — the CPU profile confirms it:
 | Steady state (99 Hz) | 12 s | **100 % of CPU samples in `__clone` (memcpy)** |
 | Threads | — | 4 (Tokio sized to the 1-CPU cgroup — not a thread explosion) |
 
-So memory and CPU share one root cause: per-point string cloning. Until the
-interning fix in `docs/STORAGE_BLOCK_COMPACTION_PLAN.md` (Phase 2) lands, RAM
-scales linearly with **buffered points**, and buffered points scale with
-**ingest rate × block duration**.
+So memory and CPU shared one root cause: per-point string cloning. That is
+fixed — `LabelSet` is shared behind an `Arc` throughout the evaluator, so a
+series' labels are cloned once per block rather than once per step
+(`ast::SharedLabels`).
+
+The structural point still holds: RAM scales with **buffered points**, and
+buffered points scale with **ingest rate × block duration**. Two consequences
+that were *not* addressed and remain the live risk:
+
+- The memory buffer is still unbounded — no max size, no byte accounting and no
+  eviction. See the sizing rule below before raising the ingest rate.
+- `storage.block_duration_secs` (default **2 h**) sets how long points sit
+  buffered. Shortening it trades query freshness (points become visible on
+  flush) against resident memory.
+
+The WAL added for durability does not add per-point cost: one record per metric,
+and every append is flushed to the OS (an `fsync` happens on
+`ingest.wal_sync_interval_ms`).
 
 ### Measured data points (oman-stg, ~840 pts/s metrics ingest)
 
@@ -139,13 +160,17 @@ Profiling is gated by `parqtel.telemetry.profiling_enabled` (default **false**;
 oman-stg enables it) and serialized by a process-wide lock — a second capture
 while one runs returns 429.
 
-## 5. Open items (tracked in STORAGE_BLOCK_COMPACTION_PLAN.md)
+## 5. Open items
 
-* **Phase 2 (interning + streaming merge)** targets the 6.3 KiB/point slope —
-  expected ≥ 5× reduction (to ~1 KiB/point), which drops the 1 k pts/s @ 120 s
-  footprint from ~2 GiB to ~450 MiB.
-* `parqtel_flush_rows` / `parqtel_flush_duration_seconds` histograms are exported via
-  OTLP but not yet rendered in `/metrics`; add scrape rendering when the
-  hot-tier compaction work touches the flush path.
-* Re-validate the `KiB_PER_POINT` constant after the Phase 2 merge and update
-  §1–§2 in the same PR.
+* **The memory buffer is unbounded.** This is now the dominant sizing risk:
+  `MemoryBuffer` has no cap, no byte accounting and no eviction, so resident
+  memory is a function of ingest rate × block duration with no ceiling. Until it
+  is bounded, size the data directory and the container limit from the formula
+  in §3 and alert on `parqtel_process_rss_bytes`.
+* **`KiB_PER_POINT` needs re-measuring.** The 6.3 KiB/point slope predates the
+  `Arc` label spine and the write-ahead log; re-run
+  `parqtel-server/examples/perf_bench.rs` and update §1–§2 in the same change
+  that revises the constant.
+* **`parqtel_flush_duration_seconds` and `parqtel_flush_inflight`** are rendered
+  in `/metrics`; `parqtel_flush_rows_total` is the cheaper per-signal counter
+  for dashboards. See [Troubleshooting](TROUBLESHOOTING.md#4-ingest-latency-contention).
