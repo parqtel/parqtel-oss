@@ -493,98 +493,80 @@ steady-state lock-wait impact negligible. Both met.
 
 ---
 
-## BL-03-06 (H) — Block index size is O(blocks × fields × values) and label-value lookups re-merge per block
+## BL-03-06 (M — **measured, real but moderate; build is a format change**)
 
-**Evidence** — `BlockMetadata` (`schema.rs:7-23`) carries, per block: `metric_names: HashSet<String>`, `label_names: HashSet<String>`, `label_values: BTreeMap<String, BTreeSet<String>>`. These are rebuilt per row at flush (`writer.rs:91-118` metrics, `:232-257` logs) and serialised wholesale on every save (`index.rs:34`). Lookups merge across blocks per call (`executor.rs:1297`, `:1324`, `:1513`). `metric_names` and `label_names` are **unbounded per block**.
+**Status: measured. Not built.**
 
-**Gap.** A 30-day retention at, say, 300 blocks/signal with 50 label fields at 10 000 values each produces an index measured in hundreds of MB — serialised in full on **every flush** (BL-03-01). Per-block `HashSet<String>` of metric names also duplicates information that is trivially derivable from the block's Parquet dictionary page.
+### What it claims
 
-**Status: landed for all three signals.** Verified end-to-end by SIGKILLing a
-container and restarting it.
+Block index size is O(blocks × fields × values), and label-value lookups
+re-merge per block. Each `BlockMetadata` carries its own `metric_names`,
+`label_names` and `label_values` (capped at 10 000 values per field), and the
+whole sidecar is re-serialised on every debounced pass.
 
-**Resolution.**
+### Measured
 
-`parqtel_core::wal` implements the log, with the crash-ordering contract as the
-central design decision. A flush and the WAL must agree or a crash either
-duplicates or loses data, so the sequence is:
+On the load-generator stack after a ~10 minute run:
 
-1. rows appended to the WAL, then the request acknowledged;
-2. a flush takes rows, snapshotting the WAL position it is about to cover;
-3. the block is written and renamed;
-4. the **commit file** is advanced to the snapshotted position;
-5. segments entirely below the commit are deleted.
-
-The commit file is the single source of truth and is advanced *after* the
-rename, so every crash point is safe:
-
-| crash after | result |
+| | |
 |---|---|
-| (1) append | replayed, nothing on disk yet — correct |
-| (2) snapshot | replayed, no block written — correct |
-| (3) rename, before (4) | block exists but is not committed, so it is *not* in the index; the WAL still holds the rows and replay rewrites them. The orphan is invisible, so there is exactly one copy |
-| (4) commit, before (5) | rows are covered; replay skips everything at or below the commit, so the leftover segments are discarded rather than duplicated |
+| blocks | 1 226 |
+| data (`storage_bytes`) | 35.6 MB — **29 064 B/block** |
+| `index.json` | 8.20 MB — **6 688 B/block** |
+| ratio | **the sidecar is 23 % of the data it describes** |
 
-Advancing the commit *before* the rename would instead be able to lose a
-block, which is the one failure a WAL exists to prevent.
+Growth is linear in block count — ~32 blocks/min in that run, i.e. **~0.3 GB of
+`index.json` per day** at those settings, re-serialised whole on every pass.
 
-Framing is `[u32 len][u32 CRC32][JSON payload]`, with segments named
-`%020d.wal` so lexical order is sequence order. Positions are
-`(segment << 32) | (offset + 1)` — **1-based**, because a 0-based first record
-would collide with `START` and be silently skipped on replay. That was a real
-bug caught by the round-trip test.
+So the premise is **correct** — unlike `BL-03-04`, where measurement killed it.
+It is simply moderate rather than the 2–5× originally assumed, and unlike the
+data it is not bounded by retention.
 
-Twelve unit tests cover: ordered positions, round trip, commit-point skipping,
-covered-segment deletion, torn-tail recovery and truncation, bad-CRC handling,
-segment reuse across restart, commit persistence, writer poisoning, CRC
-sensitivity, and record preservation across segment rollover.
+### Where the bytes go
 
-**Ingest wiring.** The WAL is appended **while the shard lock is held**, so WAL
-order and writer order are the same total order — that is what makes the
-position a flush commits correct. Each shard carries the highest WAL position
-among the rows in its writer, taken and reset under that shard's own lock as
-its writer is swapped, so a block can only ever commit positions for rows it
-actually contains.
+Per-block breakdown on a representative block (600 series, 4 label fields):
 
-Replay runs before the listener binds and feeds `ingest_metrics`, so recovered
-telemetry is indistinguishable from data that was never lost.
+| field | bytes/block | share |
+|---|---|---|
+| `metric_names` (30 entries) | ~500 | **55 %** |
+| `label_values` (4 fields, 4 entries) | ~107 | 12 % |
+| `label_names` (4 entries) | ~57 | 6 % |
+| rest (path, sizes, timestamps) | ~243 | 27 % |
 
-**A bug the crash test caught, which the unit tests did not.** The first
-version buffered appends in a 64 KB `BufWriter` and only flushed on the fsync
-interval. A `SIGKILL` therefore lost every record still sitting in *userspace*
-— 4 of 5 in the first run. The module docs had claimed "the page cache survives
-a process crash", which is true of `write` and false of an unflushed userspace
-buffer. Every append is now flushed to the OS; `fsync` remains governed by
-`WalSyncMode`. Verified by re-running the same crash: **5 of 5 recovered**.
+`metric_names` dominates *because the same name is stored once per block*. On the
+load stack, where a block spans 50–100 distinct metric names, it is more still.
 
-The same test run also showed the record type must be a single `Metric`, not
-the batch `Vec<Metric>` — the rotator appends per metric. Both the unit test and
-the replay helper were wrong in the same way and would have recovered nothing.
+### Why it is not simply built
 
-**Verified against a real container, not only unit tests:**
+The obvious fix — a per-block **bloom filter** over metric names, ~10 bits per
+name instead of a repeated string — is sound (a false positive costs one extra
+block read, never a missing result) and would cut ~55 % of a sidecar that is
+itself 23 % of storage: **~13 % of total storage**.
 
-| scenario | outcome |
-|---|---|
-| ingest 5 points, nothing flushed, `SIGKILL`, restart | replay `records=5`; all 5 queryable again |
-| ingest 3 points, graceful stop (flushes + commits), restart | replay `records=0 skipped=3`; 1 block / 3 rows; all 3 queryable, **not duplicated** |
+But it is an **on-disk format change to the sidecar** needing a read-old /
+write-new story, and `BL-03-04` is a standing reminder that this class of change
+can cost more than it returns. The backlog should not carry an unmeasured
+"slim the index" instruction; it now carries a measured, sized one.
 
-**Cost.** The flagged trade-off — a file write under the ingest lock — measured
-as **54 ns average lock wait over 9,695 acquisitions** (0.52 ms total) under
-the load generator, so it is not material. `WalSyncMode::default()` is
-`Interval` rather than `None`, because a default that quietly means "do not
-sync" is a footgun in a durability feature.
+### If it is built
 
-Acceptance: crash (SIGKILL) mid-ingest loses **0 of 5** acknowledged points;
-steady-state lock-wait impact negligible. Both met.
+1. Add `metric_name_filter` to `BlockMetadata`, `#[serde(default, skip_serializing_if)]`
+   so an old sidecar still loads. `query` prefers the filter and falls back to
+   `metric_names` when absent.
+2. A bloom hit is a *maybe*, so `BlockIndex::query` still has to open the block
+   and let the scanner's row-group statistics do the final exact narrowing. That
+   is already how the row-group metric prune works, so no new correctness surface.
+3. A block recovered by `reconcile` has an **empty** name set, which already
+   means "unknown" and keeps the block visible; it would build a filter from the
+   footer statistics or keep the empty-set behaviour.
+4. `label_values` (~12 % here, larger at high cardinality) is read only by
+   `/api/v1/label/:name/values` and rebuilt on compaction, so splitting it into a
+   sibling file is a low-risk half of this item needing **no** format change.
 
-**Resolution (original plan).**
-- Replace per-block `metric_names`/`label_names` with a compact **series-dictionary side table**: one global `series_id → {metric, labels}` map plus a per-block `Vec<u32>` of the series it contains (falls out of BL-03-04).
-- Keep `label_values` only in a **separate**, independently-loaded autocomplete structure with its own cap and eviction, not in the hot `index.json`.
-- Persist the autocomplete structure lazily (it is rebuilt from blocks if lost) — `/api/v1/label/:name/values` already merges with the memory buffer (`buffer.rs:196-207`).
-- Add an index size guard: warn and prune `label_values` when the serialised index exceeds a configured threshold.
+**Acceptance when built.** `index.json` under 10 % of `storage_bytes` at
+comparable ingest, and `parqtel_index_sidecar_bytes` growth per block down ≥ 50 %.
 
-**Acceptance.** `index.json` < 20 MB at 30 days retention with 10 000 blocks; index save duration independent of label cardinality.
-
-**Effort** L · **Risk** Medium
+**Effort** M · **Risk** Medium (sidecar format)
 
 ---
 
