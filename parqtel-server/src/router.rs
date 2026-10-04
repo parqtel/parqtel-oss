@@ -26,6 +26,9 @@ pub fn build_router(state: AppState) -> Router {
     let routes = Router::new()
         // Health & UI
         .route("/health", get(handlers::misc::health))
+        // Readiness is separate from liveness: /health is a static liveness
+        // probe, /ready checks the storage path is actually usable.
+        .route("/ready", get(handlers::misc::ready))
         .route("/metrics", get(handlers::misc::metrics))
         .route("/api/v1/stats", get(handlers::misc::stats))
         .route("/api/v1/ingest_rates", get(handlers::misc::ingest_rates))

@@ -433,11 +433,39 @@ paths:
   /health:
     get:
       tags: [Health]
-      summary: Health check
+      summary: Liveness check
+      description: >
+        Static liveness probe. Returns 200 whenever the process can serve
+        HTTP at all. It does not check storage or the ingest path, so a busy
+        or degraded instance is not restarted. Use /ready to decide whether to
+        send traffic.
       operationId: healthCheck
       responses:
         "200":
-          description: Service is healthy
+          description: Process is alive
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+
+  /ready:
+    get:
+      tags: [Health]
+      summary: Readiness check
+      description: >
+        Checks that the storage path is usable, by reading block-index
+        metadata (no Parquet decode, no buffer mutation). Use this for the
+        Kubernetes readiness probe and for load-balancer checks.
+      operationId: readyCheck
+      responses:
+        "200":
+          description: Ready to receive traffic
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+        "503":
+          description: Storage unreachable or index unreadable
           content:
             application/json:
               schema:

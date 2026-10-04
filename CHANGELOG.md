@@ -70,6 +70,17 @@ a running build. Full method and caveats in
 
 ### Fixes
 
+- **Credentials nested in an array reached the MCP audit log in the clear.**
+  The parameter sanitiser recursed into arrays, but the function it called
+  returns non-objects unchanged — so `[{ "token": … }]` was logged verbatim.
+  Recursion now handles arrays and objects uniformly, and the sensitive-key
+  list covers `authorization`, `auth`, `session`, `cookie` and `private`, which
+  it previously did not.
+- **The Kubernetes readiness probe did not check anything.** `/health` is a
+  static `200` and was wired to liveness, readiness *and* startup, so a pod was
+  marked ready while its storage was failing. Added `/ready`, which reads
+  block-index metadata, and pointed readiness at it.
+
 - **Oversized ingest batches lost half their data.** A batch larger than the
   block cap was rejected with `400 Block writer buffer is full` *after* part of
   it had been accepted. It is now split across blocks and ingested in full.
@@ -103,9 +114,8 @@ no longer reads `/proc`.
 
 ### Known limitations
 
-Recorded deliberately rather than left to be discovered. See
-[docs/PERFORMANCE_SIZING.md](docs/PERFORMANCE_SIZING.md) and
-[docs/PQL_GUIDE.md](docs/PQL_GUIDE.md).
+Collected in [docs/KNOWN_ISSUES.md](docs/KNOWN_ISSUES.md), with a workaround for
+each. They are recorded deliberately rather than left to be discovered.
 
 - The in-memory buffer is unbounded — there is no max size, no byte accounting
   and no eviction. Resident memory is a function of ingest rate ×

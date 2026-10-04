@@ -7,9 +7,39 @@ use axum::{
 };
 use serde::Deserialize;
 
-/// Handler for GET /health.
+/// Handler for GET /health — **liveness**.
+///
+/// Deliberately static. Liveness answers "is this process wedged?", and a
+/// process that is merely busy ingesting is not wedged: restarting it would drop
+/// the in-flight work and replay it. Anything that could make this fail
+/// transiently belongs in [`ready`], not here.
 pub async fn health() -> impl IntoResponse {
     Json(serde_json::json!({"status": "ok"}))
+}
+
+/// Handler for GET /ready — **readiness**.
+///
+/// Answers "should this instance receive traffic?", which is a different
+/// question and was previously answered with the same static 200. That marked
+/// a pod ready while storage was failing, so collectors and MCP clients were
+/// routed to an instance that could not serve them.
+///
+/// The check is deliberately cheap and non-destructive: it reads block-index
+/// metadata only, with no Parquet decode and no buffer mutation. It needs the
+/// index lock, so a process that cannot reach its own storage reports
+/// unready rather than claiming health.
+pub async fn ready(State(state): State<AppState>) -> Response {
+    match state.inner.query_executor.storage_stats().await {
+        Ok(_) => Json(serde_json::json!({"status": "ready"})).into_response(),
+        Err(e) => {
+            tracing::warn!(error = %e, "readiness check failed");
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"status": "not ready", "error": e.to_string()})),
+            )
+                .into_response()
+        }
+    }
 }
 
 /// Handler for GET /api/v1/stats — storage, block, buffer, and config

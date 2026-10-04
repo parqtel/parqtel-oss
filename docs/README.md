@@ -26,6 +26,7 @@ Documentation for Parqtel, an open-source SRE telemetry store.
 | [Deployment](DEPLOYMENT.md) | Docker, Kubernetes, Helm |
 | [Argo Rollouts](ARGO_ROLLOUTS.md) | Progressive delivery on Kubernetes |
 | [Troubleshooting](TROUBLESHOOTING.md) | Symptoms, metrics to check, fixes |
+| [Known issues](KNOWN_ISSUES.md) | Beta caveats worth knowing before you deploy |
 | [Best Practices](BEST_PRACTICES.md) | Sizing and operating guidance |
 | [Performance & Sizing](PERFORMANCE_SIZING.md) | How to reason about memory for your ingest rate |
 

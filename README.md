@@ -61,7 +61,7 @@ Parqtel is a single-binary observability backend written in Rust that ingests Op
 | **Learning** | [Tutorials](docs/TUTORIALS.md) • [Use Cases](#common-use-cases) |
 | **Querying** | [**PQL Guide**](docs/PQL_GUIDE.md) — ParQL metrics, ParqtelQL log/trace search, cross-signal pipelines |
 | **Deep Dive** | [Architecture](docs/ARCHITECTURE.md) • [Configuration](docs/CONFIGURATION.md) • [Developer Guide](docs/DEVELOPER_GUIDE.md) • [MCP Integrations](docs/MCP.md) • [Query Functions](docs/QUERY_FUNCTIONS.md) • [Performance](docs/benchmarks/PERFORMANCE.md) • [CI/CD](docs/CI_CD.md) |
-| **Operations** | [Deployment](docs/DEPLOYMENT.md) • [Troubleshooting](docs/TROUBLESHOOTING.md) • [Best Practices](docs/BEST_PRACTICES.md) • [Testing & Validation](docs/TESTING.md) |
+| **Operations** | [Deployment](docs/DEPLOYMENT.md) • [Known Issues](docs/KNOWN_ISSUES.md) • [Troubleshooting](docs/TROUBLESHOOTING.md) • [Best Practices](docs/BEST_PRACTICES.md) • [Testing & Validation](docs/TESTING.md) |
 | **Community** | [Contributing](CONTRIBUTING.md) • [Support](SUPPORT.md) • [Code of Conduct](CODE_OF_CONDUCT.md) • [Security](SECURITY.md) • [Changelog](CHANGELOG.md) |
 
 ## Features
@@ -430,6 +430,8 @@ and [docs/benchmarks/PERFORMANCE.md](docs/benchmarks/PERFORMANCE.md).
 
 `0.2.0` is the initial **public beta**. It has **no authentication or
 authorization** — do not expose the HTTP (`8080`) or OTLP gRPC (`4317`) ports
-publicly without a reverse proxy that provides it. Known limitations are listed
-in [docs/PERFORMANCE_SIZING.md](docs/PERFORMANCE_SIZING.md) and
-[docs/PQL_GUIDE.md](docs/PQL_GUIDE.md).
+publicly without a reverse proxy that provides it.
+
+Start at [docs/KNOWN_ISSUES.md](docs/KNOWN_ISSUES.md): the unbounded in-memory
+buffer, the 5-minute instant-query lookback, and the range-query final step are
+the three that surprise people most.
