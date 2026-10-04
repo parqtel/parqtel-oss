@@ -1164,14 +1164,73 @@ Verified against the exact reproduction that previously lost everything:
 directly: a deliberately slow index task stands in for a slow sidecar write, and
 the commit point must still be `START` at the moment the task releases the flush.
 
-**Still worth doing (not required for correctness now):** make the sidecar
-self-healing by rebuilding it from block footers on startup when it is missing or
-stale. That would also cover any *other* way the index can be lost.
+**Follow-on (landed):** `reconcile` in `BL-03-17a` below now rebuilds the sidecar
+from block footers, covering any way the index can be lost.
 
 `parqtel_index_pending_writes` remains the metric to watch: a value that never
 returns to 0 means the sidecar has stopped keeping up.
 
 **Effort** M · **Risk** Medium (taken)
+
+---
+
+## BL-03-17a (H, landed) — Block index is not self-healing
+
+**Status: landed.** The follow-on to `BL-03-16`.
+
+The sidecar is a cache of on-disk state, so a lost, stale or hand-restored
+index hides blocks that are present and perfectly readable. `reconcile` walks
+the difference in both directions at startup: it adopts block files the index
+does not know about, and drops entries whose file has gone.
+
+```rust
+pub fn reconcile(index: &mut BlockIndex, signal: SignalType) -> Result<ReconcileStats>
+```
+
+**Cost is one `read_dir` when the index already agrees** — the normal case —
+with footers parsed only for files the index has not seen. The sidecar is
+rewritten only when something actually changed, and a `WARN` is logged so a
+repair is never silent.
+
+Verified: deleting `index.json` with four blocks (64 000 rows) on disk, then
+restarting:
+
+```
+reconcile: adopted=4 dropped=0 unreadable=0
+after: blocks=4 rows=64000   sidecar rebuilt (1164 bytes)
+big_0, big_3, big_7 -> all READABLE
+```
+
+### Three things a footer cannot give, and what happens instead
+
+1. **`metric_names`.** The `metric_name` column's statistics describe the
+   lexicographic min and max, which is a *range*, not the set of names present.
+   An earlier version recorded just those two — and `BlockIndex::query` tests
+   **set membership**, so every other metric in the block became unfindable.
+   Recovered blocks now carry an **empty** set, which `query` treats as
+   "unknown" so the block stays visible. Name-based pruning returns when
+   compaction rewrites the block with a real flush-time index.
+2. **`label_names` / `label_values`.** Built at flush time and stored only in the
+   sidecar, so a recovered block loses its autocomplete entry until rewritten.
+   Queries are unaffected.
+3. **Row-group-level timestamps.** Statistics are aggregated across **all** row
+   groups, not just the first. Reading only row group 0 made a recovered block
+   claim to end where its first group ends, so it was pruned for any later query
+   — present in the index and silently returning nothing.
+
+### Signal detection
+
+Metrics and traces share a data directory, so adoption is per signal. The
+**schema** is authoritative, not the filename: a column only that signal's
+schema has — `severity_text` (logs), `metric_kind` (metrics), `start_time_ns`
+(traces). The filename prefix is a cheap pre-filter *before* opening the file,
+purely so startup does not re-parse the other signals' footers; a wrong name can
+only cause a block to be **missed**, never wrongly adopted.
+
+Order matters and is the reverse of the obvious: the log schema has a `span_id`
+column too, so testing for `span_id` first classifies log blocks as traces.
+
+**Effort** M · **Risk** Low
 
 ---
 

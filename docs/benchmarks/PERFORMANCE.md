@@ -883,3 +883,43 @@ setting changed nothing and the `413` pointed nowhere useful.
 
 This also raises the ingest throughput ceiling, since throughput is
 batch-size-limited.
+
+## Self-healing block index (`BL-03-17a`)
+
+The sidecar is a cache of on-disk state. `reconcile` walks the difference in
+both directions at startup — adopting block files the index has not seen, and
+dropping entries whose file has gone — then persists the repair and logs a
+`WARN` so it is never silent.
+
+Cost when the index already agrees, which is the normal case, is **one
+`read_dir`**; footers are parsed only for unknown files and the sidecar is
+rewritten only on change.
+
+Verified by deleting `index.json` with four blocks (64 000 rows) on disk:
+
+```
+reconcile: adopted=4 dropped=0 unreadable=0
+after: blocks=4 rows=64000    sidecar rebuilt (1164 bytes)
+big_0, big_3, big_7 -> all READABLE
+```
+
+### Three things a Parquet footer cannot give, and what happens instead
+
+| field | recoverable? | resolution |
+|---|---|---|
+| `metric_names` | min/max only — a *range*, not the set | left **empty**, and `query` treats empty as "unknown" so the block stays visible. An earlier version recorded just min and max, which made every other metric in the block unfindable because `query` tests set membership. |
+| `label_names`, `label_values` | no — flush-time only, stored solely in the sidecar | lost until compaction rewrites the block; queries unaffected, only `/api/v1/label/:name/values` degrades for it |
+| timestamps | yes, but per row group | aggregated across **all** row groups. Reading only row group 0 made a block claim to end where its first group ends, so it was pruned for any later query — indexed, and silently returning nothing. |
+
+### Signal detection uses the schema, not the filename
+
+Metrics and traces share a data directory, so adoption is per signal. The
+authoritative test is a column only that signal's schema has — `severity_text`
+(logs), `metric_kind` (metrics), `start_time_ns` (traces). The filename prefix is
+a cheap pre-filter *before* opening the file, so startup does not re-parse the
+other signals' footers; a wrong name can only cause a block to be **missed**,
+never wrongly adopted.
+
+The order is the reverse of the obvious, and the multi-signal test caught it: the
+**log schema has a `span_id` column too**, so testing for `span_id` first
+classified log blocks as traces.

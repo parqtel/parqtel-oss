@@ -1,5 +1,5 @@
 use crate::error::{Error, Result};
-use crate::models::storage::BlockMetadata;
+use crate::models::storage::{BlockMetadata, SignalType};
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -102,9 +102,16 @@ impl BlockIndex {
             .iter()
             .take_while(|b| b.start_timestamp_ns <= end_ns)
             .filter(|b| {
+                // An **empty** `metric_names` means "this block's metrics are not
+                // known", not "it has none": a block recovered by `reconcile`
+                // can only learn the min and max from its footer, so listing
+                // just those two would make every other metric in the block
+                // unfindable. Treating empty as unknown keeps the block
+                // visible and only loses the name-based pruning until the block
+                // is rewritten by compaction.
                 metric_name
                     .as_ref()
-                    .is_none_or(|n| b.metric_names.contains(*n))
+                    .is_none_or(|n| b.metric_names.is_empty() || b.metric_names.contains(*n))
             })
             .cloned()
             .collect()
@@ -143,6 +150,245 @@ impl BlockIndex {
         }
         names
     }
+}
+
+/// What a reconcile pass found.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ReconcileStats {
+    /// Block files present on disk but absent from the index, adopted.
+    pub adopted: usize,
+    /// Index entries whose file no longer exists, dropped.
+    pub dropped: usize,
+    /// Footers actually read. Zero when the index already matched the disk,
+    /// which is the normal case — the common path is one `read_dir`.
+    pub scanned: usize,
+    /// Files whose footer could not be read.
+    pub unreadable: usize,
+}
+
+/// Whether a filename suggests it could hold `signal`.
+///
+/// A cheap pre-filter only. See the caller for why it is safe: the schema is
+/// still checked before anything is adopted.
+fn filename_may_hold_signal(path: &Path, signal: SignalType) -> bool {
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_default();
+    match signal {
+        SignalType::Metrics => !(name.starts_with("logs_") || name.starts_with("traces_")),
+        SignalType::Logs => name.starts_with("logs_"),
+        SignalType::Traces => name.starts_with("traces_"),
+    }
+}
+
+/// Identifies which signal a Parquet file holds, from its schema.
+///
+/// The data directory is shared by the metrics and trace writers, and relying
+/// on the filename prefix to tell them apart would break on a rename or an older
+/// naming scheme. Each schema has a column nothing else has, so the footer is
+/// authoritative.
+fn detect_signal(schema: &parquet::schema::types::SchemaDescriptor) -> Option<SignalType> {
+    let names: Vec<&str> = schema.columns().iter().map(|c| c.name()).collect();
+    // Order matters, and it is the reverse of what you would guess: the log
+    // schema has a `span_id` column too (OTLP logs are correlated to spans), so
+    // testing for `span_id` first classifies log blocks as traces. These are
+    // each checked for a column only that signal's schema has:
+    // `severity_text` only logs, `metric_kind` only metrics, `start_time_ns`
+    // only traces (logs use `timestamp_ns`).
+    if names.contains(&"severity_text") {
+        Some(SignalType::Logs)
+    } else if names.contains(&"metric_kind") {
+        Some(SignalType::Metrics)
+    } else if names.contains(&"start_time_ns") {
+        Some(SignalType::Traces)
+    } else {
+        None
+    }
+}
+
+/// Rebuilds missing index entries from the block files on disk, and drops
+/// entries whose file has gone.
+///
+/// The sidecar is a cache of on-disk state, so any crash, restore-from-backup or
+/// manual deletion can leave it disagreeing with the directory. Reading back only
+/// from the sidecar means a lost index silently hides blocks that are present and
+/// perfectly readable. This walks the difference in both directions.
+///
+/// Cost is one `read_dir` when the index already agrees with the disk, which is
+/// the normal case; footers are parsed only for files the index does not know
+/// about.
+///
+/// Two things cannot be recovered from a footer and come back empty:
+///
+/// - `label_names` / `label_values`. These are built at flush time and stored
+///   only in the sidecar, so a recovered block loses its autocomplete entry
+///   until it is rewritten by compaction. Queries are unaffected; only
+///   `/api/v1/label/:name/values` degrades for that block.
+/// - the set of `metric_names`. The column's min/max statistics describe a
+///   *range*, not the names present, and `query` tests set membership — so
+///   recording just those two would hide every other metric in the block.
+///   Recovered blocks therefore carry an **empty** set, which `query` treats as
+///   "unknown" so the block stays visible. Name-based pruning is lost until
+///   compaction rewrites the block with a real flush-time index.
+pub fn reconcile(index: &mut BlockIndex, signal: SignalType) -> Result<ReconcileStats> {
+    let mut stats = ReconcileStats::default();
+    let Some(dir) = index.sidecar_path().parent() else {
+        return Ok(stats);
+    };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Ok(stats);
+    };
+
+    let mut on_disk: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().is_some_and(|e| e == "parquet") {
+            on_disk.insert(path);
+        }
+    }
+
+    // Drop entries whose file is gone (deleted by retention or compaction that
+    // crashed before publishing).
+    let before = index.blocks.len();
+    index.blocks.retain(|b| on_disk.contains(&b.path));
+    stats.dropped = before - index.blocks.len();
+
+    // Adopt files the index does not know about.
+    let known: std::collections::HashSet<PathBuf> =
+        index.blocks.iter().map(|b| b.path.clone()).collect();
+    for path in on_disk {
+        if known.contains(&path) {
+            continue;
+        }
+        // Cheap pre-filter before touching the file. Without it every startup
+        // re-parses the footer of every *other* signal's blocks, since metrics
+        // and traces share a directory. The filename is only a hint here; the
+        // schema below remains the authority, so a wrong name can cause a block
+        // to be missed (a lost recovery) but never a wrong adoption.
+        if !filename_may_hold_signal(&path, signal) {
+            continue;
+        }
+        stats.scanned += 1;
+        match read_block_metadata(&path, signal) {
+            Ok(Some(meta)) => {
+                index.blocks.push(meta);
+                stats.adopted += 1;
+            }
+            Ok(None) => {}
+            Err(_) => stats.unreadable += 1,
+        }
+    }
+
+    // `query` binary-searches on this ordering, so it must hold afterwards.
+    index.blocks.sort_by_key(|b| b.start_timestamp_ns);
+    Ok(stats)
+}
+
+/// Parses `{start}_{end}_{uuid}.parquet` (the metrics/logs/trace naming), or
+/// the `logs_`/`traces_` prefixed variants.
+///
+/// A last resort for a block whose timestamp statistics are missing, so a
+/// recovered block is not left claiming a zero-width range.
+fn timestamps_from_filename(path: &Path) -> Option<(i64, i64)> {
+    let name = path.file_name()?.to_str()?;
+    let stem = name.strip_suffix(".parquet")?;
+    let stem = stem
+        .strip_prefix("logs_")
+        .or_else(|| stem.strip_prefix("traces_"))
+        .unwrap_or(stem);
+    let mut parts = stem.split('_');
+    let start = parts.next()?.parse().ok()?;
+    let end = parts.next()?.parse().ok()?;
+    Some((start, end))
+}
+
+/// Reads what a block's footer can tell us, or `None` if it is not this signal.
+fn read_block_metadata(path: &Path, signal: SignalType) -> Result<Option<BlockMetadata>> {
+    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+    let file = std::fs::File::open(path)?;
+    let builder = ParquetRecordBatchReaderBuilder::try_new(file)
+        .map_err(|e| crate::error::Error::Parquet(e.to_string()))?;
+    let md = builder.metadata().clone();
+    let schema = md.file_metadata().schema_descr();
+    if detect_signal(schema) != Some(signal) {
+        return Ok(None);
+    }
+
+    let size_bytes = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    let mut meta = BlockMetadata {
+        path: path.to_path_buf(),
+        start_timestamp_ns: 0,
+        end_timestamp_ns: 0,
+        // A single record batch per row group, so summing the row groups'
+        // row counts is the file's row count.
+        row_count: (0..md.num_row_groups())
+            .map(|rg| md.row_group(rg).num_rows() as usize)
+            .sum(),
+        size_bytes,
+        metric_names: HashSet::new(),
+        label_names: HashSet::new(),
+        label_values: Default::default(),
+        signal_type: signal,
+    };
+
+    let columns = schema.columns();
+    // Aggregate across **every** row group. Reading only row group 0 makes a
+    // recovered block claim to end where its first group ends, which prunes it
+    // for any later query - the block looks present in the index and silently
+    // returns nothing.
+    let column_range = |name: &str| -> Option<(i64, i64)> {
+        let idx = columns.iter().position(|c| c.name() == name)?;
+        let mut lo = i64::MAX;
+        let mut hi = i64::MIN;
+        let mut seen = false;
+        for rg in 0..md.num_row_groups() {
+            let Some(stats) = md.row_group(rg).column(idx).statistics() else {
+                continue;
+            };
+            let (Some(min), Some(max)) = (stats.min_bytes_opt(), stats.max_bytes_opt()) else {
+                continue;
+            };
+            let (Some(min_bytes), Some(max_bytes)) = (min.get(..8), max.get(..8)) else {
+                continue;
+            };
+            let (Ok(min_arr), Ok(max_arr)) = (
+                <[u8; 8]>::try_from(min_bytes),
+                <[u8; 8]>::try_from(max_bytes),
+            ) else {
+                continue;
+            };
+            let (min, max) = (i64::from_le_bytes(min_arr), i64::from_le_bytes(max_arr));
+            lo = lo.min(min);
+            hi = hi.max(max);
+            seen = true;
+        }
+        seen.then_some((lo, hi))
+    };
+
+    // Metrics sort by `timestamp_ns`; trace rows carry `start_time_ns` instead.
+    if let Some((lo, hi)) = column_range("timestamp_ns").or_else(|| column_range("start_time_ns")) {
+        meta.start_timestamp_ns = lo;
+        meta.end_timestamp_ns = hi;
+    } else {
+        // No usable statistics: fall back to the filename, which encodes
+        // `{start}_{end}_...`, so the block at least gets a sane range.
+        if let Some((start, end)) = timestamps_from_filename(path) {
+            meta.start_timestamp_ns = start;
+            meta.end_timestamp_ns = end;
+        }
+    }
+
+    // `metric_names` is deliberately left **empty**. The metric_name column's
+    // statistics describe the lexicographic min and max, which is a *range*,
+    // not the set of names present - and `query` tests set membership, so
+    // recording just those two would make every other metric in the block
+    // unfindable. Empty means "unknown", which keeps the block visible; the
+    // name-based pruning returns when compaction rewrites the block with a real
+    // flush-time index.
+    let _ = signal;
+
+    Ok(Some(meta))
 }
 
 /// A block being handed to the index, plus an optional signal to fire once

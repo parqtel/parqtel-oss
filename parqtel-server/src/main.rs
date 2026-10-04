@@ -154,14 +154,29 @@ async fn main() -> anyhow::Result<()> {
     // sidecar path is defined in exactly one place (BlockIndex::new).
     let mut index = BlockIndex::new(&config.storage.data_dir);
     index.load().unwrap_or_default();
-    tracing::debug!(blocks = index.blocks.len(), "metrics block index loaded");
     let index_store = Arc::new(BlockIndexStore::new(&index));
+    // The sidecar is a cache of on-disk state, so a lost, stale or
+    // hand-restored index would otherwise hide blocks that are present and
+    // perfectly readable. Reconcile, then persist so the repair sticks.
+    reconcile_and_persist(
+        &mut index,
+        &index_store,
+        parqtel_core::SignalType::Metrics,
+        "metrics",
+    );
+    tracing::debug!(blocks = index.blocks.len(), "metrics block index loaded");
     let index = Arc::new(tokio::sync::RwLock::new(index));
 
     let mut log_index = BlockIndex::new(&config.logs.data_dir);
     log_index.load().unwrap_or_default();
-    tracing::debug!(blocks = log_index.blocks.len(), "logs block index loaded");
     let log_index_store = Arc::new(BlockIndexStore::new(&log_index));
+    reconcile_and_persist(
+        &mut log_index,
+        &log_index_store,
+        parqtel_core::SignalType::Logs,
+        "logs",
+    );
+    tracing::debug!(blocks = log_index.blocks.len(), "logs block index loaded");
     let log_index = Arc::new(tokio::sync::RwLock::new(log_index));
 
     // 4. Handle Subcommands
@@ -217,6 +232,35 @@ fn open_wal(
         config.ingest.wal_max_segment_bytes,
     )?;
     Ok(Some(wal))
+}
+
+/// Reconciles a block index against its data directory and persists the repair.
+///
+/// No-op in the normal case, where the sidecar already matches the disk: one
+/// `read_dir`, and the sidecar is only rewritten when something actually
+/// changed.
+fn reconcile_and_persist(
+    index: &mut BlockIndex,
+    store: &BlockIndexStore,
+    signal: parqtel_core::SignalType,
+    label: &str,
+) {
+    match parqtel_core::storage::reconcile(index, signal) {
+        Ok(stats) if stats.adopted > 0 || stats.dropped > 0 => {
+            tracing::warn!(
+                signal = label,
+                adopted = stats.adopted,
+                dropped = stats.dropped,
+                unreadable = stats.unreadable,
+                "block index did not match the data directory; reconciled from the                  block files. Metric names may be a range until the block is                  rewritten by compaction, and recovered blocks have no label                  dictionary until then."
+            );
+            if let Err(e) = parqtel_core::storage::persist_blocking(index, store) {
+                tracing::warn!(signal = label, error = %e, "failed to persist the reconciled index");
+            }
+        }
+        Ok(_) => {}
+        Err(e) => tracing::warn!(signal = label, error = %e, "block index reconcile failed"),
+    }
 }
 
 /// What a WAL replay did, for the startup log and `/api/v1/stats`.
@@ -538,6 +582,13 @@ async fn run_server(
     std::fs::create_dir_all(&trace_data_dir).unwrap_or_default();
     let mut trace_index = BlockIndex::new(&trace_data_dir);
     trace_index.load().unwrap_or_default();
+    let trace_index_store = Arc::new(BlockIndexStore::new(&trace_index));
+    reconcile_and_persist(
+        &mut trace_index,
+        &trace_index_store,
+        parqtel_core::SignalType::Traces,
+        "traces",
+    );
     tracing::debug!(
         blocks = trace_index.blocks.len(),
         "trace block index loaded"
