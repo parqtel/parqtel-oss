@@ -1,0 +1,59 @@
+name: CodeQL
+
+# The `main` ruleset has a `code_scanning` rule requiring CodeQL to report no
+# `errors` and no security alerts of `high_or_higher`. Until this workflow
+# existed, `codeql-action` was only ever used as an *uploader* — for Trivy
+# results in the release workflow and Scorecard results in the Scorecard
+# workflow — so no analysis ever ran and the rule was satisfied vacuously.
+#
+# Alerts surface in the Security tab. They do not fail this workflow: the
+# ruleset's `code_scanning` rule is what gates a merge, which keeps a new
+# finding from breaking unrelated PRs the moment it lands.
+#
+# To turn CodeQL off without editing the ruleset, delete the `code_scanning`
+# rule; the ruleset then stops requiring a tool that is not running.
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    # Weekly, Monday 06:00 UTC. Catches advisories published after a commit.
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Only one analysis per push; a rebased branch should not queue a second run.
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    name: Analyze (Rust)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [rust]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          language: ${{ matrix.language }}
+          # No `build-mode: none` - parqtel is a Cargo workspace, so the normal
+          # autobuild gives CodeQL a compiled program to analyse. A no-build
+          # run would only see the source.
+
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: /language:${{ matrix.language }}
