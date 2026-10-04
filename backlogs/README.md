@@ -126,7 +126,10 @@ The largest single latency win available. Requires a type change with a wide bla
 **Exit criteria:** instant query p99 < 1 s at 1 000 × 1 000; query RSS < 150 MB; logs query p99 < 300 ms.
 
 ### Phase 3 — Storage efficiency (3–4 weeks)
-Writes are cheaper and files are 2–5× smaller, which also makes Phase 2's scans cheaper.
+**Note:** the "2–5× smaller files" goal below was an estimate, and measurement
+has now disproved the largest item behind it (`BL-03-04`). What Phase 3 actually
+delivered is *read* performance — pruning, projection and compaction coverage —
+not size. Treat remaining size claims as unverified until measured.
 
 - BL-03-04 series-ID dictionary encoding for `labels` (kills per-row JSON)
 - BL-03-03 bloom filters + column/page index + data page limits
