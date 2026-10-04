@@ -12,6 +12,13 @@ pub struct IngestConfig {
     /// block window — with the 2 h default that is the difference between
     /// losing two hours of the data you wanted during an incident and losing
     /// seconds.
+    ///
+    /// Also gates the background flush worker (`max_inflight_flushes`). The
+    /// worker acknowledges a request once the WAL has its rows rather than once
+    /// the block is on disk, which is only sound **with** a WAL: without one, an
+    /// acknowledged-but-unwritten flush is unrecoverable. Disabling the WAL
+    /// therefore disables the worker too, and flushing falls back to
+    /// synchronous — still acknowledged only once the block is durable.
     pub wal_enabled: bool,
     /// Whether to enable the Write-Ahead Log (WAL) for logs.
     pub log_wal_enabled: bool,

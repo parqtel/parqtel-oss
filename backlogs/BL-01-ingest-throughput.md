@@ -383,9 +383,19 @@ entirely is the only way past that.
 never invisible to queries across the schedule→durability window, and a graceful
 shutdown drains queued encodes.
 
-**Still open:** the loss window when the WAL is *disabled*. With
-`ingest.wal_enabled = false` an unacknowledged flush is unrecoverable again, so
-either document it or refuse to start the worker without a WAL.
+**The WAL is now a precondition, not just a recommendation.** The worker's
+contract is "the rows are already logged, so nothing is lost if this process
+dies before the encode lands". With `ingest.wal_enabled = false` that contract is
+void, so `start_flush_worker` **refuses to start** and `flush_locked` takes the
+synchronous path - still acknowledged only once the block is on disk. A `WARN`
+says so at startup.
+
+Refusing rather than failing startup is deliberate: `wal_enabled = false` is a
+legitimate operator choice, it just cannot also have a background flush. Falling
+back to the safe behaviour beats silently weakening durability.
+
+Pinned by `test_flush_worker_refuses_to_start_without_a_wal` and
+`test_flush_worker_starts_with_a_wal`.
 
 **Effort** L · **Risk** Medium
 

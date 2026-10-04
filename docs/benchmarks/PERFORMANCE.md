@@ -974,8 +974,21 @@ Shutdown drops the channel sender, then awaits every in-flight encode, so a
 graceful stop cannot leave a block half-written or skip a WAL commit. Verified:
 after a restart, `storage_rows` is preserved and the data queryable.
 
-### Still open
+### The WAL is a precondition, not a recommendation
 
-The loss window when `ingest.wal_enabled = false`. With the WAL off, an
-unacknowledged flush is unrecoverable again — so either document it or refuse to
-start the worker without a WAL.
+The worker's contract is *"the rows are already logged, so nothing is lost if
+this process dies before the encode lands"*. With `ingest.wal_enabled = false`
+that contract is **void**, so `start_flush_worker` refuses to start and
+`flush_locked` takes the synchronous path — still acknowledged only once the
+block is on disk. A `WARN` says so at startup.
+
+Refusing rather than failing startup is deliberate: `wal_enabled = false` is a
+legitimate operator choice, it just cannot also have a background flush. Falling
+back to the safe behaviour beats silently weakening durability.
+
+Verified with the WAL disabled: the refusal warning fires, and a
+flush-triggering request returns in 390 ms with its block already written — the
+encode happened inline.
+
+Pinned by `test_flush_worker_refuses_to_start_without_a_wal` and
+`test_flush_worker_starts_with_a_wal`.

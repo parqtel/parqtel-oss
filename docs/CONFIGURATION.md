@@ -179,7 +179,8 @@ tls_secret_name = "parqtel-provider-tls"
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `max_body_size` | Integer | `10485760` | Maximum request body size in bytes (10 MB) |
-| `wal_enabled` | Boolean | `true` | Write-ahead log for metrics. Bounds crash loss to the sync interval instead of the whole block window. A WAL that cannot be opened **fails startup** rather than silently accepting unrecoverable data |
+| `wal_enabled` | Boolean | `true` | Write-ahead log for metrics. Bounds crash loss to the sync interval instead of the whole block window. A WAL that cannot be opened **fails startup** rather than silently accepting unrecoverable data. **Also gates the background flush worker**: the worker acknowledges a request once the WAL has its rows rather than once the block is on disk, which is only sound with a WAL. Setting this `false` disables the worker too and flushing falls back to synchronous — still acknowledged only once the block is durable |
+| `max_inflight_flushes` | Integer | `4` | Max block encodes in flight for the background flush worker, which also bounds its queue. When the queue is full a flush encodes inline, so backpressure degrades to synchronous rather than growing a backlog. Requires `wal_enabled` |
 | `wal_sync_mode` | String | `interval` | `none` (write only — survives a *process* crash, not a machine loss), `interval` (periodic `fsync`, the default), `always` (fsync per batch) |
 | `wal_sync_interval_ms` | Integer | `1000` | How often the WAL is `fsync`ed in `interval` mode |
 | `wal_max_segment_bytes` | Integer | `67108864` | Size at which the WAL rolls to a new segment. Segments are deleted once the commit point passes them, so the on-disk WAL stays bounded |
