@@ -802,10 +802,34 @@ So it is not material, which is worth having measured rather than assumed.
 `WalSyncMode::default()` is `Interval`, not the fastest option: a default that
 quietly means "do not sync" is a footgun in a durability feature.
 
-### Not yet
+### All three signals
 
-Logs and traces have no WAL (`log_wal_enabled` exists but is unused). The
-mechanism is per-signal, so they follow the same shape.
+`LogRotator` and `TraceRotator` now carry the same `wal`/`covered` pair,
+appended under the rotator lock (which the caller already holds) and committed
+only after the block is renamed. `log_wal_enabled` is genuinely wired rather
+than being a dead flag.
+
+Verified in a single crash — 3 metrics, 3 logs and 3 server spans ingested with
+nothing flushed, then `SIGKILL` and restart:
+
+```
+recovered telemetry from the write-ahead log  signal="metrics" records=12
+recovered telemetry from the write-ahead log  signal="logs"    records=3
+recovered telemetry from the write-ahead log  signal="traces"  records=3
+```
+
+`metrics=12` is 9 RED-derived metrics (the server spans derive the RED bridge)
+plus the 3 originals. After recovery `m1`/`m2`/`m3` each returned exactly
+**one** sample — no duplication — and the log bodies and span operation names
+came back intact.
+
+Lock-wait cost on all three signals under the load generator:
+
+| signal | acquisitions | total wait | mean |
+|---|---|---|---|
+| metrics | 9 555 | 0.51 ms | 53 ns |
+| logs | 56 | 0.007 ms | 126 ns |
+| traces | 56 | 0.065 ms | 1.2 µs |
 
 ### Configuration
 
