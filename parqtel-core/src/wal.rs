@@ -59,15 +59,19 @@ const RECORD_HEADER_LEN: u64 = 8;
 pub const DEFAULT_MAX_SEGMENT_BYTES: u64 = 64 * 1024 * 1024;
 
 /// How durably a WAL append is persisted.
+///
+/// The default is [`Self::Interval`], not the fastest option: a default that
+/// quietly means "do not sync" is a footgun in a durability feature, and the
+/// cost of `Interval` is one `fsync` per interval rather than one per batch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum WalSyncMode {
-    /// `write` only. Fastest; a crash can lose whatever the OS had not
-    /// flushed. Still bounded, because the page cache survives a process crash
-    /// — only a machine loss loses data.
-    #[default]
+    /// `write` only, no `fsync`. Survives a **process** crash, because every
+    /// append is flushed to the OS and the page cache outlives the process; a
+    /// machine loss can still lose whatever the kernel had not written.
     None,
-    /// `fsync` every `sync_interval_ms`. The intended default.
+    /// `fsync` every `sync_interval_ms`. The default.
+    #[default]
     Interval,
     /// `fsync` every append. Slowest, and for a 100k points/sec ingest it is
     /// one syscall per batch.
@@ -231,6 +235,13 @@ impl WalWriter {
             return Err(Error::Io(std::io::Error::other(msg)));
         }
         self.offset += record.len() as u64;
+        // Flush to the OS on **every** append. The `BufWriter` holds records in
+        // userspace, so without this a process kill loses everything still
+        // buffered - which is exactly the case the WAL exists for. `write` is
+        // one syscall per batch and survives a process crash, because the page
+        // cache outlives the process; only a machine loss needs `fsync`, which
+        // `WalSyncMode` governs.
+        self.file.flush()?;
         let pos = self.position();
         // Roll before the next append so a record is never split across files.
         if self.offset >= self.max_segment_bytes {

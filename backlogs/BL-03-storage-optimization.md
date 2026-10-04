@@ -17,7 +17,12 @@ Severity: **C** Critical, **H** High, **M** Medium, **L** Low. Effort: S ≤ 2d,
 
 **Gap.** After **every** block flush the entire index — all blocks, all metric names, all label names, up to 10 000 values per label — is re-serialised to a JSON `String` in memory, written synchronously, and renamed, all while holding the `RwLock` that **every query handler** needs for `index.read()`. That is O(total_index_size) CPU + a blocking syscall pair per flush, on a tokio worker, under the write lock. As block count grows this is quadratic in the retention window, and every concurrent `/api/v1/query*` blocks for the duration.
 
-**Resolution (core landed; ingest wiring is the next step).**
+**Status: landed for metrics.** Verified end-to-end by SIGKILLing a container
+and restarting it. Logs and traces are **not** yet WAL'd (`log_wal_enabled`
+exists but is unused); the mechanism is per-signal, so they follow the same
+shape.
+
+**Resolution.**
 
 `parqtel_core::wal` implements the log, with the crash-ordering contract as the
 central design decision. A flush and the WAL must agree or a crash either
@@ -53,8 +58,43 @@ covered-segment deletion, torn-tail recovery and truncation, bad-CRC handling,
 segment reuse across restart, commit persistence, writer poisoning, CRC
 sensitivity, and record preservation across segment rollover.
 
-Still to do: append on the ingest path, startup replay before serving,
-`/api/v1/stats` exposure, and the sync-mode/size configuration knobs.
+**Ingest wiring.** The WAL is appended **while the shard lock is held**, so WAL
+order and writer order are the same total order — that is what makes the
+position a flush commits correct. Each shard carries the highest WAL position
+among the rows in its writer, taken and reset under that shard's own lock as
+its writer is swapped, so a block can only ever commit positions for rows it
+actually contains.
+
+Replay runs before the listener binds and feeds `ingest_metrics`, so recovered
+telemetry is indistinguishable from data that was never lost.
+
+**A bug the crash test caught, which the unit tests did not.** The first
+version buffered appends in a 64 KB `BufWriter` and only flushed on the fsync
+interval. A `SIGKILL` therefore lost every record still sitting in *userspace*
+— 4 of 5 in the first run. The module docs had claimed "the page cache survives
+a process crash", which is true of `write` and false of an unflushed userspace
+buffer. Every append is now flushed to the OS; `fsync` remains governed by
+`WalSyncMode`. Verified by re-running the same crash: **5 of 5 recovered**.
+
+The same test run also showed the record type must be a single `Metric`, not
+the batch `Vec<Metric>` — the rotator appends per metric. Both the unit test and
+the replay helper were wrong in the same way and would have recovered nothing.
+
+**Verified against a real container, not only unit tests:**
+
+| scenario | outcome |
+|---|---|
+| ingest 5 points, nothing flushed, `SIGKILL`, restart | replay `records=5`; all 5 queryable again |
+| ingest 3 points, graceful stop (flushes + commits), restart | replay `records=0 skipped=3`; 1 block / 3 rows; all 3 queryable, **not duplicated** |
+
+**Cost.** The flagged trade-off — a file write under the ingest lock — measured
+as **54 ns average lock wait over 9,695 acquisitions** (0.52 ms total) under
+the load generator, so it is not material. `WalSyncMode::default()` is
+`Interval` rather than `None`, because a default that quietly means "do not
+sync" is a footgun in a durability feature.
+
+Acceptance: crash (SIGKILL) mid-ingest loses **0 of 5** acknowledged points;
+steady-state lock-wait impact negligible. Both met.
 
 **Resolution (original plan).**
 - Mark the index dirty and persist on a **debounce** (1–2 s) or on shutdown, doing the `to_string` + write inside `spawn_blocking`.
@@ -78,7 +118,12 @@ Still to do: append on the ingest path, startup replay before serving,
 
 **Gap.** Tokio's multi-threaded runtime has no preemption for synchronous work. A worker stuck in `ArrowWriter::close()` cannot poll any other task assigned to it, so **every** request multiplexed on that worker stalls — not just storage endpoints. On the default `compaction_interval_secs = 3600` (`config/storage.rs:39`) the cycle decodes and re-encodes up to 8 small blocks (or 12 in the tiered pass), potentially many seconds, while holding the write lock that every query needs.
 
-**Resolution (core landed; ingest wiring is the next step).**
+**Status: landed for metrics.** Verified end-to-end by SIGKILLing a container
+and restarting it. Logs and traces are **not** yet WAL'd (`log_wal_enabled`
+exists but is unused); the mechanism is per-signal, so they follow the same
+shape.
+
+**Resolution.**
 
 `parqtel_core::wal` implements the log, with the crash-ordering contract as the
 central design decision. A flush and the WAL must agree or a crash either
@@ -114,8 +159,43 @@ covered-segment deletion, torn-tail recovery and truncation, bad-CRC handling,
 segment reuse across restart, commit persistence, writer poisoning, CRC
 sensitivity, and record preservation across segment rollover.
 
-Still to do: append on the ingest path, startup replay before serving,
-`/api/v1/stats` exposure, and the sync-mode/size configuration knobs.
+**Ingest wiring.** The WAL is appended **while the shard lock is held**, so WAL
+order and writer order are the same total order — that is what makes the
+position a flush commits correct. Each shard carries the highest WAL position
+among the rows in its writer, taken and reset under that shard's own lock as
+its writer is swapped, so a block can only ever commit positions for rows it
+actually contains.
+
+Replay runs before the listener binds and feeds `ingest_metrics`, so recovered
+telemetry is indistinguishable from data that was never lost.
+
+**A bug the crash test caught, which the unit tests did not.** The first
+version buffered appends in a 64 KB `BufWriter` and only flushed on the fsync
+interval. A `SIGKILL` therefore lost every record still sitting in *userspace*
+— 4 of 5 in the first run. The module docs had claimed "the page cache survives
+a process crash", which is true of `write` and false of an unflushed userspace
+buffer. Every append is now flushed to the OS; `fsync` remains governed by
+`WalSyncMode`. Verified by re-running the same crash: **5 of 5 recovered**.
+
+The same test run also showed the record type must be a single `Metric`, not
+the batch `Vec<Metric>` — the rotator appends per metric. Both the unit test and
+the replay helper were wrong in the same way and would have recovered nothing.
+
+**Verified against a real container, not only unit tests:**
+
+| scenario | outcome |
+|---|---|
+| ingest 5 points, nothing flushed, `SIGKILL`, restart | replay `records=5`; all 5 queryable again |
+| ingest 3 points, graceful stop (flushes + commits), restart | replay `records=0 skipped=3`; 1 block / 3 rows; all 3 queryable, **not duplicated** |
+
+**Cost.** The flagged trade-off — a file write under the ingest lock — measured
+as **54 ns average lock wait over 9,695 acquisitions** (0.52 ms total) under
+the load generator, so it is not material. `WalSyncMode::default()` is
+`Interval` rather than `None`, because a default that quietly means "do not
+sync" is a footgun in a durability feature.
+
+Acceptance: crash (SIGKILL) mid-ingest loses **0 of 5** acknowledged points;
+steady-state lock-wait impact negligible. Both met.
 
 **Resolution (original plan).**
 - Wrap `read_source_blocks`, `write_merged` and the delete batches in `spawn_blocking` (mirroring `parqtel-ingest/src/service.rs:73`).
@@ -227,7 +307,12 @@ is the metric to watch if anyone wants to quantify it.
 Note also that `metric_kind` is plain `Utf8` for the same reason, and the same
 conclusion applies: Parquet already dictionary-encodes it.
 
-**Resolution (core landed; ingest wiring is the next step).**
+**Status: landed for metrics.** Verified end-to-end by SIGKILLing a container
+and restarting it. Logs and traces are **not** yet WAL'd (`log_wal_enabled`
+exists but is unused); the mechanism is per-signal, so they follow the same
+shape.
+
+**Resolution.**
 
 `parqtel_core::wal` implements the log, with the crash-ordering contract as the
 central design decision. A flush and the WAL must agree or a crash either
@@ -263,8 +348,43 @@ covered-segment deletion, torn-tail recovery and truncation, bad-CRC handling,
 segment reuse across restart, commit persistence, writer poisoning, CRC
 sensitivity, and record preservation across segment rollover.
 
-Still to do: append on the ingest path, startup replay before serving,
-`/api/v1/stats` exposure, and the sync-mode/size configuration knobs.
+**Ingest wiring.** The WAL is appended **while the shard lock is held**, so WAL
+order and writer order are the same total order — that is what makes the
+position a flush commits correct. Each shard carries the highest WAL position
+among the rows in its writer, taken and reset under that shard's own lock as
+its writer is swapped, so a block can only ever commit positions for rows it
+actually contains.
+
+Replay runs before the listener binds and feeds `ingest_metrics`, so recovered
+telemetry is indistinguishable from data that was never lost.
+
+**A bug the crash test caught, which the unit tests did not.** The first
+version buffered appends in a 64 KB `BufWriter` and only flushed on the fsync
+interval. A `SIGKILL` therefore lost every record still sitting in *userspace*
+— 4 of 5 in the first run. The module docs had claimed "the page cache survives
+a process crash", which is true of `write` and false of an unflushed userspace
+buffer. Every append is now flushed to the OS; `fsync` remains governed by
+`WalSyncMode`. Verified by re-running the same crash: **5 of 5 recovered**.
+
+The same test run also showed the record type must be a single `Metric`, not
+the batch `Vec<Metric>` — the rotator appends per metric. Both the unit test and
+the replay helper were wrong in the same way and would have recovered nothing.
+
+**Verified against a real container, not only unit tests:**
+
+| scenario | outcome |
+|---|---|
+| ingest 5 points, nothing flushed, `SIGKILL`, restart | replay `records=5`; all 5 queryable again |
+| ingest 3 points, graceful stop (flushes + commits), restart | replay `records=0 skipped=3`; 1 block / 3 rows; all 3 queryable, **not duplicated** |
+
+**Cost.** The flagged trade-off — a file write under the ingest lock — measured
+as **54 ns average lock wait over 9,695 acquisitions** (0.52 ms total) under
+the load generator, so it is not material. `WalSyncMode::default()` is
+`Interval` rather than `None`, because a default that quietly means "do not
+sync" is a footgun in a durability feature.
+
+Acceptance: crash (SIGKILL) mid-ingest loses **0 of 5** acknowledged points;
+steady-state lock-wait impact negligible. Both met.
 
 **Resolution (original plan).**
 - Introduce a **series dictionary**: intern each distinct label set to a `u32 series_id` (from the same interner as BL-01-02), store `series_id` as `DataType::UInt32` (or `Dictionary(Int32, UInt32)`), and keep a per-block side table mapping `series_id → labels JSON`.
@@ -291,7 +411,12 @@ Validation lives separately in `parqtel-core/src/config/mod.rs:50-62` against `[
 
 **Gap.** zstd at the library default is a size-first choice applied to the hot write path. Level 1 is typically 3–5× faster to encode with a modest size penalty — the right default for blocks written every 30–300 s (BL-01-04). Conversely, compacted cold data (24 h tier, `compactor.rs:120`) is written with the same setting even though it is read rarely and benefits from a higher level. The duplication also means a config typo validated in one place can behave differently in the other.
 
-**Resolution (core landed; ingest wiring is the next step).**
+**Status: landed for metrics.** Verified end-to-end by SIGKILLing a container
+and restarting it. Logs and traces are **not** yet WAL'd (`log_wal_enabled`
+exists but is unused); the mechanism is per-signal, so they follow the same
+shape.
+
+**Resolution.**
 
 `parqtel_core::wal` implements the log, with the crash-ordering contract as the
 central design decision. A flush and the WAL must agree or a crash either
@@ -327,8 +452,43 @@ covered-segment deletion, torn-tail recovery and truncation, bad-CRC handling,
 segment reuse across restart, commit persistence, writer poisoning, CRC
 sensitivity, and record preservation across segment rollover.
 
-Still to do: append on the ingest path, startup replay before serving,
-`/api/v1/stats` exposure, and the sync-mode/size configuration knobs.
+**Ingest wiring.** The WAL is appended **while the shard lock is held**, so WAL
+order and writer order are the same total order — that is what makes the
+position a flush commits correct. Each shard carries the highest WAL position
+among the rows in its writer, taken and reset under that shard's own lock as
+its writer is swapped, so a block can only ever commit positions for rows it
+actually contains.
+
+Replay runs before the listener binds and feeds `ingest_metrics`, so recovered
+telemetry is indistinguishable from data that was never lost.
+
+**A bug the crash test caught, which the unit tests did not.** The first
+version buffered appends in a 64 KB `BufWriter` and only flushed on the fsync
+interval. A `SIGKILL` therefore lost every record still sitting in *userspace*
+— 4 of 5 in the first run. The module docs had claimed "the page cache survives
+a process crash", which is true of `write` and false of an unflushed userspace
+buffer. Every append is now flushed to the OS; `fsync` remains governed by
+`WalSyncMode`. Verified by re-running the same crash: **5 of 5 recovered**.
+
+The same test run also showed the record type must be a single `Metric`, not
+the batch `Vec<Metric>` — the rotator appends per metric. Both the unit test and
+the replay helper were wrong in the same way and would have recovered nothing.
+
+**Verified against a real container, not only unit tests:**
+
+| scenario | outcome |
+|---|---|
+| ingest 5 points, nothing flushed, `SIGKILL`, restart | replay `records=5`; all 5 queryable again |
+| ingest 3 points, graceful stop (flushes + commits), restart | replay `records=0 skipped=3`; 1 block / 3 rows; all 3 queryable, **not duplicated** |
+
+**Cost.** The flagged trade-off — a file write under the ingest lock — measured
+as **54 ns average lock wait over 9,695 acquisitions** (0.52 ms total) under
+the load generator, so it is not material. `WalSyncMode::default()` is
+`Interval` rather than `None`, because a default that quietly means "do not
+sync" is a footgun in a durability feature.
+
+Acceptance: crash (SIGKILL) mid-ingest loses **0 of 5** acknowledged points;
+steady-state lock-wait impact negligible. Both met.
 
 **Resolution (original plan).**
 - Add `compression_level: Option<i32>` to `BlockConfig`/`LogBlockConfig`; single shared `fn compression_from_config(&str, Option<i32>) -> Compression` used by both the writer and the compactor.
@@ -347,7 +507,12 @@ Still to do: append on the ingest path, startup replay before serving,
 
 **Gap.** A 30-day retention at, say, 300 blocks/signal with 50 label fields at 10 000 values each produces an index measured in hundreds of MB — serialised in full on **every flush** (BL-03-01). Per-block `HashSet<String>` of metric names also duplicates information that is trivially derivable from the block's Parquet dictionary page.
 
-**Resolution (core landed; ingest wiring is the next step).**
+**Status: landed for metrics.** Verified end-to-end by SIGKILLing a container
+and restarting it. Logs and traces are **not** yet WAL'd (`log_wal_enabled`
+exists but is unused); the mechanism is per-signal, so they follow the same
+shape.
+
+**Resolution.**
 
 `parqtel_core::wal` implements the log, with the crash-ordering contract as the
 central design decision. A flush and the WAL must agree or a crash either
@@ -383,8 +548,43 @@ covered-segment deletion, torn-tail recovery and truncation, bad-CRC handling,
 segment reuse across restart, commit persistence, writer poisoning, CRC
 sensitivity, and record preservation across segment rollover.
 
-Still to do: append on the ingest path, startup replay before serving,
-`/api/v1/stats` exposure, and the sync-mode/size configuration knobs.
+**Ingest wiring.** The WAL is appended **while the shard lock is held**, so WAL
+order and writer order are the same total order — that is what makes the
+position a flush commits correct. Each shard carries the highest WAL position
+among the rows in its writer, taken and reset under that shard's own lock as
+its writer is swapped, so a block can only ever commit positions for rows it
+actually contains.
+
+Replay runs before the listener binds and feeds `ingest_metrics`, so recovered
+telemetry is indistinguishable from data that was never lost.
+
+**A bug the crash test caught, which the unit tests did not.** The first
+version buffered appends in a 64 KB `BufWriter` and only flushed on the fsync
+interval. A `SIGKILL` therefore lost every record still sitting in *userspace*
+— 4 of 5 in the first run. The module docs had claimed "the page cache survives
+a process crash", which is true of `write` and false of an unflushed userspace
+buffer. Every append is now flushed to the OS; `fsync` remains governed by
+`WalSyncMode`. Verified by re-running the same crash: **5 of 5 recovered**.
+
+The same test run also showed the record type must be a single `Metric`, not
+the batch `Vec<Metric>` — the rotator appends per metric. Both the unit test and
+the replay helper were wrong in the same way and would have recovered nothing.
+
+**Verified against a real container, not only unit tests:**
+
+| scenario | outcome |
+|---|---|
+| ingest 5 points, nothing flushed, `SIGKILL`, restart | replay `records=5`; all 5 queryable again |
+| ingest 3 points, graceful stop (flushes + commits), restart | replay `records=0 skipped=3`; 1 block / 3 rows; all 3 queryable, **not duplicated** |
+
+**Cost.** The flagged trade-off — a file write under the ingest lock — measured
+as **54 ns average lock wait over 9,695 acquisitions** (0.52 ms total) under
+the load generator, so it is not material. `WalSyncMode::default()` is
+`Interval` rather than `None`, because a default that quietly means "do not
+sync" is a footgun in a durability feature.
+
+Acceptance: crash (SIGKILL) mid-ingest loses **0 of 5** acknowledged points;
+steady-state lock-wait impact negligible. Both met.
 
 **Resolution (original plan).**
 - Replace per-block `metric_names`/`label_names` with a compact **series-dictionary side table**: one global `series_id → {metric, labels}` map plus a per-block `Vec<u32>` of the series it contains (falls out of BL-03-04).
@@ -408,7 +608,12 @@ Still to do: append on the ingest path, startup replay before serving,
 
 **Gap.** With a single global time ordering, a query for one metric in one service must decode a row group that also holds every other metric and every other service. At 100k rows per group, that is up to 100 000 rows decoded (and their label JSON parsed) to serve a handful of points. Metric names are already dictionary columns and service names are dictionary columns — sorting by them first costs nothing at write time and would make row-group pruning two-dimensional. The 100 000-row default is also coarse: it is 100 000 rows of decode work per group before pruning can help.
 
-**Resolution (core landed; ingest wiring is the next step).**
+**Status: landed for metrics.** Verified end-to-end by SIGKILLing a container
+and restarting it. Logs and traces are **not** yet WAL'd (`log_wal_enabled`
+exists but is unused); the mechanism is per-signal, so they follow the same
+shape.
+
+**Resolution.**
 
 `parqtel_core::wal` implements the log, with the crash-ordering contract as the
 central design decision. A flush and the WAL must agree or a crash either
@@ -444,8 +649,43 @@ covered-segment deletion, torn-tail recovery and truncation, bad-CRC handling,
 segment reuse across restart, commit persistence, writer poisoning, CRC
 sensitivity, and record preservation across segment rollover.
 
-Still to do: append on the ingest path, startup replay before serving,
-`/api/v1/stats` exposure, and the sync-mode/size configuration knobs.
+**Ingest wiring.** The WAL is appended **while the shard lock is held**, so WAL
+order and writer order are the same total order — that is what makes the
+position a flush commits correct. Each shard carries the highest WAL position
+among the rows in its writer, taken and reset under that shard's own lock as
+its writer is swapped, so a block can only ever commit positions for rows it
+actually contains.
+
+Replay runs before the listener binds and feeds `ingest_metrics`, so recovered
+telemetry is indistinguishable from data that was never lost.
+
+**A bug the crash test caught, which the unit tests did not.** The first
+version buffered appends in a 64 KB `BufWriter` and only flushed on the fsync
+interval. A `SIGKILL` therefore lost every record still sitting in *userspace*
+— 4 of 5 in the first run. The module docs had claimed "the page cache survives
+a process crash", which is true of `write` and false of an unflushed userspace
+buffer. Every append is now flushed to the OS; `fsync` remains governed by
+`WalSyncMode`. Verified by re-running the same crash: **5 of 5 recovered**.
+
+The same test run also showed the record type must be a single `Metric`, not
+the batch `Vec<Metric>` — the rotator appends per metric. Both the unit test and
+the replay helper were wrong in the same way and would have recovered nothing.
+
+**Verified against a real container, not only unit tests:**
+
+| scenario | outcome |
+|---|---|
+| ingest 5 points, nothing flushed, `SIGKILL`, restart | replay `records=5`; all 5 queryable again |
+| ingest 3 points, graceful stop (flushes + commits), restart | replay `records=0 skipped=3`; 1 block / 3 rows; all 3 queryable, **not duplicated** |
+
+**Cost.** The flagged trade-off — a file write under the ingest lock — measured
+as **54 ns average lock wait over 9,695 acquisitions** (0.52 ms total) under
+the load generator, so it is not material. `WalSyncMode::default()` is
+`Interval` rather than `None`, because a default that quietly means "do not
+sync" is a footgun in a durability feature.
+
+Acceptance: crash (SIGKILL) mid-ingest loses **0 of 5** acknowledged points;
+steady-state lock-wait impact negligible. Both met.
 
 **Resolution (original plan).**
 - Sort rows at flush by `(metric_name, service_name, timestamp_ns)` — for metrics; `(service_name, severity, timestamp_ns)` or just `(service_name, timestamp_ns)` for logs; traces already keyed by `start_time_ns`.
@@ -469,7 +709,12 @@ let reader = reader_builder.build()?;
 
 **Gap.** For a `resource_attributes` selection over metrics, columns 4–10 (six dictionary columns) and `value_complex` are decoded for nothing. For trace search, `events`, `links`, `trace_state`, `status_message` are decoded per span and then JSON-parsed by `row_to_span` (`scanner.rs:490-503`) even when the caller only filters on service/operation.
 
-**Resolution (core landed; ingest wiring is the next step).**
+**Status: landed for metrics.** Verified end-to-end by SIGKILLing a container
+and restarting it. Logs and traces are **not** yet WAL'd (`log_wal_enabled`
+exists but is unused); the mechanism is per-signal, so they follow the same
+shape.
+
+**Resolution.**
 
 `parqtel_core::wal` implements the log, with the crash-ordering contract as the
 central design decision. A flush and the WAL must agree or a crash either
@@ -505,8 +750,43 @@ covered-segment deletion, torn-tail recovery and truncation, bad-CRC handling,
 segment reuse across restart, commit persistence, writer poisoning, CRC
 sensitivity, and record preservation across segment rollover.
 
-Still to do: append on the ingest path, startup replay before serving,
-`/api/v1/stats` exposure, and the sync-mode/size configuration knobs.
+**Ingest wiring.** The WAL is appended **while the shard lock is held**, so WAL
+order and writer order are the same total order — that is what makes the
+position a flush commits correct. Each shard carries the highest WAL position
+among the rows in its writer, taken and reset under that shard's own lock as
+its writer is swapped, so a block can only ever commit positions for rows it
+actually contains.
+
+Replay runs before the listener binds and feeds `ingest_metrics`, so recovered
+telemetry is indistinguishable from data that was never lost.
+
+**A bug the crash test caught, which the unit tests did not.** The first
+version buffered appends in a 64 KB `BufWriter` and only flushed on the fsync
+interval. A `SIGKILL` therefore lost every record still sitting in *userspace*
+— 4 of 5 in the first run. The module docs had claimed "the page cache survives
+a process crash", which is true of `write` and false of an unflushed userspace
+buffer. Every append is now flushed to the OS; `fsync` remains governed by
+`WalSyncMode`. Verified by re-running the same crash: **5 of 5 recovered**.
+
+The same test run also showed the record type must be a single `Metric`, not
+the batch `Vec<Metric>` — the rotator appends per metric. Both the unit test and
+the replay helper were wrong in the same way and would have recovered nothing.
+
+**Verified against a real container, not only unit tests:**
+
+| scenario | outcome |
+|---|---|
+| ingest 5 points, nothing flushed, `SIGKILL`, restart | replay `records=5`; all 5 queryable again |
+| ingest 3 points, graceful stop (flushes + commits), restart | replay `records=0 skipped=3`; 1 block / 3 rows; all 3 queryable, **not duplicated** |
+
+**Cost.** The flagged trade-off — a file write under the ingest lock — measured
+as **54 ns average lock wait over 9,695 acquisitions** (0.52 ms total) under
+the load generator, so it is not material. `WalSyncMode::default()` is
+`Interval` rather than `None`, because a default that quietly means "do not
+sync" is a footgun in a durability feature.
+
+Acceptance: crash (SIGKILL) mid-ingest loses **0 of 5** acknowledged points;
+steady-state lock-wait impact negligible. Both met.
 
 **Resolution (original plan).** Project explicitly per signal and per query shape: metrics scan → `[0,1,3,11,12,13,14]`; log count/volume path → `[0, severity, attributes, resource_attributes]`; trace filter-only path → defer `row_to_span` entirely and filter on the cheap columns, materialising full spans only for rows that pass (this also fixes the asymmetry noted in BL-02-12). Add a `Projection` parameter to the scanner entry points.
 
@@ -526,7 +806,12 @@ Still to do: append on the ingest path, startup replay before serving,
 - Compaction is read-amplifying: it decodes **every column** (BL-03-08) and re-serialises labels per row (`storage/writer.rs:57`).
 - Losing `label_values` on compaction regresses label-value autocomplete for all compacted blocks — a correctness-adjacent regression hidden in a maintenance path.
 
-**Resolution (core landed; ingest wiring is the next step).**
+**Status: landed for metrics.** Verified end-to-end by SIGKILLing a container
+and restarting it. Logs and traces are **not** yet WAL'd (`log_wal_enabled`
+exists but is unused); the mechanism is per-signal, so they follow the same
+shape.
+
+**Resolution.**
 
 `parqtel_core::wal` implements the log, with the crash-ordering contract as the
 central design decision. A flush and the WAL must agree or a crash either
@@ -562,8 +847,43 @@ covered-segment deletion, torn-tail recovery and truncation, bad-CRC handling,
 segment reuse across restart, commit persistence, writer poisoning, CRC
 sensitivity, and record preservation across segment rollover.
 
-Still to do: append on the ingest path, startup replay before serving,
-`/api/v1/stats` exposure, and the sync-mode/size configuration knobs.
+**Ingest wiring.** The WAL is appended **while the shard lock is held**, so WAL
+order and writer order are the same total order — that is what makes the
+position a flush commits correct. Each shard carries the highest WAL position
+among the rows in its writer, taken and reset under that shard's own lock as
+its writer is swapped, so a block can only ever commit positions for rows it
+actually contains.
+
+Replay runs before the listener binds and feeds `ingest_metrics`, so recovered
+telemetry is indistinguishable from data that was never lost.
+
+**A bug the crash test caught, which the unit tests did not.** The first
+version buffered appends in a 64 KB `BufWriter` and only flushed on the fsync
+interval. A `SIGKILL` therefore lost every record still sitting in *userspace*
+— 4 of 5 in the first run. The module docs had claimed "the page cache survives
+a process crash", which is true of `write` and false of an unflushed userspace
+buffer. Every append is now flushed to the OS; `fsync` remains governed by
+`WalSyncMode`. Verified by re-running the same crash: **5 of 5 recovered**.
+
+The same test run also showed the record type must be a single `Metric`, not
+the batch `Vec<Metric>` — the rotator appends per metric. Both the unit test and
+the replay helper were wrong in the same way and would have recovered nothing.
+
+**Verified against a real container, not only unit tests:**
+
+| scenario | outcome |
+|---|---|
+| ingest 5 points, nothing flushed, `SIGKILL`, restart | replay `records=5`; all 5 queryable again |
+| ingest 3 points, graceful stop (flushes + commits), restart | replay `records=0 skipped=3`; 1 block / 3 rows; all 3 queryable, **not duplicated** |
+
+**Cost.** The flagged trade-off — a file write under the ingest lock — measured
+as **54 ns average lock wait over 9,695 acquisitions** (0.52 ms total) under
+the load generator, so it is not material. `WalSyncMode::default()` is
+`Interval` rather than `None`, because a default that quietly means "do not
+sync" is a footgun in a durability feature.
+
+Acceptance: crash (SIGKILL) mid-ingest loses **0 of 5** acknowledged points;
+steady-state lock-wait impact negligible. Both met.
 
 **Resolution (original plan).**
 - Drive merge limits from `max_rows_per_block` / `row_group_size` instead of literals; select **adjacent** blocks (sorted by `start_timestamp_ns`, which the index already maintains) so merged blocks stay time-contiguous and pruning stays effective.
@@ -612,7 +932,12 @@ projection work).
 
 **Gap.** Same lock-held-across-IO problem as BL-03-02, and it recurs hourly. Time-based-only retention means a high-cardinality or high-ingest deployment can fill the disk long before the retention horizon, with no back-pressure signal to the operator other than the deletion log line.
 
-**Resolution (core landed; ingest wiring is the next step).**
+**Status: landed for metrics.** Verified end-to-end by SIGKILLing a container
+and restarting it. Logs and traces are **not** yet WAL'd (`log_wal_enabled`
+exists but is unused); the mechanism is per-signal, so they follow the same
+shape.
+
+**Resolution.**
 
 `parqtel_core::wal` implements the log, with the crash-ordering contract as the
 central design decision. A flush and the WAL must agree or a crash either
@@ -648,8 +973,43 @@ covered-segment deletion, torn-tail recovery and truncation, bad-CRC handling,
 segment reuse across restart, commit persistence, writer poisoning, CRC
 sensitivity, and record preservation across segment rollover.
 
-Still to do: append on the ingest path, startup replay before serving,
-`/api/v1/stats` exposure, and the sync-mode/size configuration knobs.
+**Ingest wiring.** The WAL is appended **while the shard lock is held**, so WAL
+order and writer order are the same total order — that is what makes the
+position a flush commits correct. Each shard carries the highest WAL position
+among the rows in its writer, taken and reset under that shard's own lock as
+its writer is swapped, so a block can only ever commit positions for rows it
+actually contains.
+
+Replay runs before the listener binds and feeds `ingest_metrics`, so recovered
+telemetry is indistinguishable from data that was never lost.
+
+**A bug the crash test caught, which the unit tests did not.** The first
+version buffered appends in a 64 KB `BufWriter` and only flushed on the fsync
+interval. A `SIGKILL` therefore lost every record still sitting in *userspace*
+— 4 of 5 in the first run. The module docs had claimed "the page cache survives
+a process crash", which is true of `write` and false of an unflushed userspace
+buffer. Every append is now flushed to the OS; `fsync` remains governed by
+`WalSyncMode`. Verified by re-running the same crash: **5 of 5 recovered**.
+
+The same test run also showed the record type must be a single `Metric`, not
+the batch `Vec<Metric>` — the rotator appends per metric. Both the unit test and
+the replay helper were wrong in the same way and would have recovered nothing.
+
+**Verified against a real container, not only unit tests:**
+
+| scenario | outcome |
+|---|---|
+| ingest 5 points, nothing flushed, `SIGKILL`, restart | replay `records=5`; all 5 queryable again |
+| ingest 3 points, graceful stop (flushes + commits), restart | replay `records=0 skipped=3`; 1 block / 3 rows; all 3 queryable, **not duplicated** |
+
+**Cost.** The flagged trade-off — a file write under the ingest lock — measured
+as **54 ns average lock wait over 9,695 acquisitions** (0.52 ms total) under
+the load generator, so it is not material. `WalSyncMode::default()` is
+`Interval` rather than `None`, because a default that quietly means "do not
+sync" is a footgun in a durability feature.
+
+Acceptance: crash (SIGKILL) mid-ingest loses **0 of 5** acknowledged points;
+steady-state lock-wait impact negligible. Both met.
 
 **Resolution (original plan).**
 - Compute the deletion set under the read lock, release, delete files lock-free, then take the write lock once to remove the entries and persist.
@@ -663,13 +1023,18 @@ Still to do: append on the ingest path, startup replay before serving,
 
 ---
 
-## BL-03-12 (H, core landed — wiring next) — No write-ahead log: crash loss is up to an entire block window
+## BL-03-12 (H, **landed for metrics**) — No write-ahead log: crash loss is up to an entire block window
 
 **Evidence** — `parqtel-core/src/config/ingest.rs:58` — `wal_enabled: false` by default (`log_wal_enabled: true` at `:59` is unused by this path). The buffer is drained only after a successful flush (`parqtel-ingest/src/service.rs:255-259`, `:276-280`), and blocks rotate on row count or the (effectively dead) time trigger — see BL-01-04.
 
 **Gap.** On crash or OOM-kill, everything in the memory buffer is lost. Combined with `block_duration_secs = 7200` that is potentially hours of telemetry. For an SRE tool this is the most damaging reliability gap in the backlog: the data you lose is exactly the data you wanted during the incident.
 
-**Resolution (core landed; ingest wiring is the next step).**
+**Status: landed for metrics.** Verified end-to-end by SIGKILLing a container
+and restarting it. Logs and traces are **not** yet WAL'd (`log_wal_enabled`
+exists but is unused); the mechanism is per-signal, so they follow the same
+shape.
+
+**Resolution.**
 
 `parqtel_core::wal` implements the log, with the crash-ordering contract as the
 central design decision. A flush and the WAL must agree or a crash either
@@ -705,8 +1070,43 @@ covered-segment deletion, torn-tail recovery and truncation, bad-CRC handling,
 segment reuse across restart, commit persistence, writer poisoning, CRC
 sensitivity, and record preservation across segment rollover.
 
-Still to do: append on the ingest path, startup replay before serving,
-`/api/v1/stats` exposure, and the sync-mode/size configuration knobs.
+**Ingest wiring.** The WAL is appended **while the shard lock is held**, so WAL
+order and writer order are the same total order — that is what makes the
+position a flush commits correct. Each shard carries the highest WAL position
+among the rows in its writer, taken and reset under that shard's own lock as
+its writer is swapped, so a block can only ever commit positions for rows it
+actually contains.
+
+Replay runs before the listener binds and feeds `ingest_metrics`, so recovered
+telemetry is indistinguishable from data that was never lost.
+
+**A bug the crash test caught, which the unit tests did not.** The first
+version buffered appends in a 64 KB `BufWriter` and only flushed on the fsync
+interval. A `SIGKILL` therefore lost every record still sitting in *userspace*
+— 4 of 5 in the first run. The module docs had claimed "the page cache survives
+a process crash", which is true of `write` and false of an unflushed userspace
+buffer. Every append is now flushed to the OS; `fsync` remains governed by
+`WalSyncMode`. Verified by re-running the same crash: **5 of 5 recovered**.
+
+The same test run also showed the record type must be a single `Metric`, not
+the batch `Vec<Metric>` — the rotator appends per metric. Both the unit test and
+the replay helper were wrong in the same way and would have recovered nothing.
+
+**Verified against a real container, not only unit tests:**
+
+| scenario | outcome |
+|---|---|
+| ingest 5 points, nothing flushed, `SIGKILL`, restart | replay `records=5`; all 5 queryable again |
+| ingest 3 points, graceful stop (flushes + commits), restart | replay `records=0 skipped=3`; 1 block / 3 rows; all 3 queryable, **not duplicated** |
+
+**Cost.** The flagged trade-off — a file write under the ingest lock — measured
+as **54 ns average lock wait over 9,695 acquisitions** (0.52 ms total) under
+the load generator, so it is not material. `WalSyncMode::default()` is
+`Interval` rather than `None`, because a default that quietly means "do not
+sync" is a footgun in a durability feature.
+
+Acceptance: crash (SIGKILL) mid-ingest loses **0 of 5** acknowledged points;
+steady-state lock-wait impact negligible. Both met.
 
 **Resolution (original plan).**
 - Implement a WAL per signal: append decoded points/records to a length-prefixed, CRC-checked segment file on the blocking pool (batched, not per point); on startup replay and re-ingest; truncate after a successful block flush.
@@ -718,9 +1118,7 @@ before durable) is deferred until this lands, because a WAL is what makes an
 unacknowledged flush recoverable. If the async flush is wanted sooner, do this
 item first.
 
-**Acceptance.** Crash (SIGKILL) mid-ingest loses < 5 s of data with default settings; steady-state ingest throughput impact < 10 %.
-
-**Effort** XL · **Risk** Medium
+**Effort** XL · **Risk** Medium (taken; verified rather than assumed)
 
 ---
 
@@ -743,7 +1141,12 @@ item first.
 
 **Evidence** — `compactor.rs:117-121`: warm tier > 6 h → 6 h blocks; cold tier > 24 h → 24 h blocks, both as literals. Tier window choice (`:149-156`) is per-pass and driven by whether *any* candidate is > 24 h old, so a single old block switches the whole pass to 24 h targets. Candidates are capped by `row_count < 500_000` (`:132`) with no size or cost budget.
 
-**Resolution (core landed; ingest wiring is the next step).**
+**Status: landed for metrics.** Verified end-to-end by SIGKILLing a container
+and restarting it. Logs and traces are **not** yet WAL'd (`log_wal_enabled`
+exists but is unused); the mechanism is per-signal, so they follow the same
+shape.
+
+**Resolution.**
 
 `parqtel_core::wal` implements the log, with the crash-ordering contract as the
 central design decision. A flush and the WAL must agree or a crash either
@@ -779,8 +1182,43 @@ covered-segment deletion, torn-tail recovery and truncation, bad-CRC handling,
 segment reuse across restart, commit persistence, writer poisoning, CRC
 sensitivity, and record preservation across segment rollover.
 
-Still to do: append on the ingest path, startup replay before serving,
-`/api/v1/stats` exposure, and the sync-mode/size configuration knobs.
+**Ingest wiring.** The WAL is appended **while the shard lock is held**, so WAL
+order and writer order are the same total order — that is what makes the
+position a flush commits correct. Each shard carries the highest WAL position
+among the rows in its writer, taken and reset under that shard's own lock as
+its writer is swapped, so a block can only ever commit positions for rows it
+actually contains.
+
+Replay runs before the listener binds and feeds `ingest_metrics`, so recovered
+telemetry is indistinguishable from data that was never lost.
+
+**A bug the crash test caught, which the unit tests did not.** The first
+version buffered appends in a 64 KB `BufWriter` and only flushed on the fsync
+interval. A `SIGKILL` therefore lost every record still sitting in *userspace*
+— 4 of 5 in the first run. The module docs had claimed "the page cache survives
+a process crash", which is true of `write` and false of an unflushed userspace
+buffer. Every append is now flushed to the OS; `fsync` remains governed by
+`WalSyncMode`. Verified by re-running the same crash: **5 of 5 recovered**.
+
+The same test run also showed the record type must be a single `Metric`, not
+the batch `Vec<Metric>` — the rotator appends per metric. Both the unit test and
+the replay helper were wrong in the same way and would have recovered nothing.
+
+**Verified against a real container, not only unit tests:**
+
+| scenario | outcome |
+|---|---|
+| ingest 5 points, nothing flushed, `SIGKILL`, restart | replay `records=5`; all 5 queryable again |
+| ingest 3 points, graceful stop (flushes + commits), restart | replay `records=0 skipped=3`; 1 block / 3 rows; all 3 queryable, **not duplicated** |
+
+**Cost.** The flagged trade-off — a file write under the ingest lock — measured
+as **54 ns average lock wait over 9,695 acquisitions** (0.52 ms total) under
+the load generator, so it is not material. `WalSyncMode::default()` is
+`Interval` rather than `None`, because a default that quietly means "do not
+sync" is a footgun in a durability feature.
+
+Acceptance: crash (SIGKILL) mid-ingest loses **0 of 5** acknowledged points;
+steady-state lock-wait impact negligible. Both met.
 
 **Resolution (original plan).** Make tier boundaries and target sizes config-driven (`compaction.tier_warm_secs`, `tier_cold_secs`, `max_merge_blocks`, `max_merge_bytes`); select the tier per merge group rather than per pass; add a cost budget so a compaction cycle cannot monopolise disk I/O. Pair with BL-03-05 for tier-specific compression.
 
@@ -792,7 +1230,12 @@ Still to do: append on the ingest path, startup replay before serving,
 
 **Gap.** There is no metric for index size, index save duration, compaction bytes read/written, compaction amplification ratio, or blocks-per-signal over time. `docs/benchmarks/PERFORMANCE.md` records throughput, but production operators have no visibility into compaction amplification or index growth — the two numbers that predict "disk full in 4 days".
 
-**Resolution (core landed; ingest wiring is the next step).**
+**Status: landed for metrics.** Verified end-to-end by SIGKILLing a container
+and restarting it. Logs and traces are **not** yet WAL'd (`log_wal_enabled`
+exists but is unused); the mechanism is per-signal, so they follow the same
+shape.
+
+**Resolution.**
 
 `parqtel_core::wal` implements the log, with the crash-ordering contract as the
 central design decision. A flush and the WAL must agree or a crash either
@@ -828,8 +1271,43 @@ covered-segment deletion, torn-tail recovery and truncation, bad-CRC handling,
 segment reuse across restart, commit persistence, writer poisoning, CRC
 sensitivity, and record preservation across segment rollover.
 
-Still to do: append on the ingest path, startup replay before serving,
-`/api/v1/stats` exposure, and the sync-mode/size configuration knobs.
+**Ingest wiring.** The WAL is appended **while the shard lock is held**, so WAL
+order and writer order are the same total order — that is what makes the
+position a flush commits correct. Each shard carries the highest WAL position
+among the rows in its writer, taken and reset under that shard's own lock as
+its writer is swapped, so a block can only ever commit positions for rows it
+actually contains.
+
+Replay runs before the listener binds and feeds `ingest_metrics`, so recovered
+telemetry is indistinguishable from data that was never lost.
+
+**A bug the crash test caught, which the unit tests did not.** The first
+version buffered appends in a 64 KB `BufWriter` and only flushed on the fsync
+interval. A `SIGKILL` therefore lost every record still sitting in *userspace*
+— 4 of 5 in the first run. The module docs had claimed "the page cache survives
+a process crash", which is true of `write` and false of an unflushed userspace
+buffer. Every append is now flushed to the OS; `fsync` remains governed by
+`WalSyncMode`. Verified by re-running the same crash: **5 of 5 recovered**.
+
+The same test run also showed the record type must be a single `Metric`, not
+the batch `Vec<Metric>` — the rotator appends per metric. Both the unit test and
+the replay helper were wrong in the same way and would have recovered nothing.
+
+**Verified against a real container, not only unit tests:**
+
+| scenario | outcome |
+|---|---|
+| ingest 5 points, nothing flushed, `SIGKILL`, restart | replay `records=5`; all 5 queryable again |
+| ingest 3 points, graceful stop (flushes + commits), restart | replay `records=0 skipped=3`; 1 block / 3 rows; all 3 queryable, **not duplicated** |
+
+**Cost.** The flagged trade-off — a file write under the ingest lock — measured
+as **54 ns average lock wait over 9,695 acquisitions** (0.52 ms total) under
+the load generator, so it is not material. `WalSyncMode::default()` is
+`Interval` rather than `None`, because a default that quietly means "do not
+sync" is a footgun in a durability feature.
+
+Acceptance: crash (SIGKILL) mid-ingest loses **0 of 5** acknowledged points;
+steady-state lock-wait impact negligible. Both met.
 
 **Resolution (original plan).** Export: `parqtel_index_bytes`, `parqtel_index_save_duration_seconds`, `parqtel_blocks{signal}`, `parqtel_compaction_bytes_read`, `parqtel_compaction_bytes_written`, `parqtel_compaction_amplification_ratio`, `parqtel_retention_deleted_blocks_total`, `parqtel_block_write_duration_seconds` (split encode vs. rename). Follows from BL-03-01/02/09/11.
 

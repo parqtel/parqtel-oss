@@ -4,6 +4,7 @@ use crate::otel::collector::metrics::v1::ExportMetricsServiceRequest;
 use crate::otel::collector::trace::v1::ExportTraceServiceRequest;
 use crate::writer::{BlockMetadata, BlockWriter, LogWriter, TraceWriter};
 use bytes::Bytes;
+use parqtel_core::wal::{WalPosition, WalWriter};
 use parqtel_core::MemoryBuffer;
 use parqtel_core::{
     BlockConfig, ContentionMetrics, DataPoint, Error, LogBlockConfig, LogRecord, Metric, Result,
@@ -95,6 +96,28 @@ pub struct BlockRotator {
     /// Serialises flushes so two requests cannot each swap the buffers and
     /// write overlapping blocks. Held across the encode, but no shard lock is.
     flush_lock: tokio::sync::Mutex<()>,
+    /// WAL for this signal, when enabled.
+    ///
+    /// Appended to **while a shard lock is held**, so WAL order and writer
+    /// order are the same total order. That is what makes the position a flush
+    /// commits correct: every row in the writers was logged before it was
+    /// written, and no row can be written without having been logged.
+    ///
+    /// The trade-off is a file write under the ingest lock. The writer is
+    /// buffered (64 KB) so that is a memcpy, and `fsync` only happens on the
+    /// sync interval — but it will show up in
+    /// `parqtel_ingest_lock_wait_seconds` and is worth watching.
+    wal: Option<Arc<tokio::sync::Mutex<WalWriter>>>,
+    /// Per-shard: the highest WAL position among the rows currently in that
+    /// shard's writer. Taken and reset under the shard lock at swap time, so a
+    /// block can only ever commit positions for rows it actually contains.
+    ///
+    /// A mutex rather than a plain `Vec` because `push` and `flush_locked`
+    /// take `&self` — the rotator is shared behind an `Arc` and sharding
+    /// deliberately made it lock-free for callers. Always taken *while holding
+    /// the shard lock*, so the value it holds is always consistent with the
+    /// writer it describes.
+    covered: Vec<std::sync::Mutex<WalPosition>>,
     config: BlockConfig,
     /// Unix time of the last completed flush, in milliseconds. An atomic so
     /// the duration check needs no lock — flushes are serialised by
@@ -123,6 +146,10 @@ impl BlockRotator {
             shards: (0..shards)
                 .map(|_| Mutex::new(BlockWriter::new(config.clone())))
                 .collect(),
+            wal: None,
+            covered: (0..shards)
+                .map(|_| std::sync::Mutex::new(WalPosition::START))
+                .collect(),
             flush_lock: tokio::sync::Mutex::new(()),
             buffered: AtomicUsize::new(0),
             max_duration_ms: config.block_duration_secs.saturating_mul(1000),
@@ -135,6 +162,21 @@ impl BlockRotator {
     /// Number of writer shards. Exported so `/metrics` can show it.
     pub fn shard_count(&self) -> usize {
         self.shards.len()
+    }
+
+    /// Attaches a WAL. After this, every accepted metric is logged before it
+    /// reaches a writer, and every flush commits the positions it covered.
+    pub fn with_wal(mut self, wal: WalWriter) -> Self {
+        self.wal = Some(Arc::new(Mutex::new(wal)));
+        self
+    }
+
+    /// Bytes the WAL currently occupies.
+    pub async fn wal_bytes(&self) -> u64 {
+        match &self.wal {
+            Some(w) => w.lock().await.size_bytes(),
+            None => 0,
+        }
     }
 
     fn publish(&self, meta: BlockMetadata, contention: Option<&ContentionMetrics>) {
@@ -199,9 +241,18 @@ impl BlockRotator {
             if let Some(c) = contention {
                 c.record_ingest_lock_wait(SignalType::Metrics, waited.elapsed());
             }
+            // Logged while the shard lock is held, so WAL order and writer
+            // order are the same total order. A failure here is propagated:
+            // acknowledging data we could not log would make the WAL a lie.
+            if let Some(wal) = &self.wal {
+                // The shard lock is held across this append so that WAL order
+                // and writer order are the same total order.
+                let pos = wal.lock().await.append(&metric)?;
+                *self.covered[idx].lock().unwrap_or_else(|e| e.into_inner()) = pos;
+            }
             // A single shard may be near its own capacity; let the writer
             // close a block rather than reject the points.
-            for meta in shard.push(metric)? {
+            for meta in shard.push(metric.clone())? {
                 closed += meta.row_count;
                 flushed = true;
                 self.publish(meta, contention);
@@ -271,13 +322,23 @@ impl BlockRotator {
     async fn flush_locked(&self, contention: Option<&ContentionMetrics>) -> Result<()> {
         let mut writers = Vec::with_capacity(self.shards.len());
         let mut row_count = 0usize;
-        for shard in &self.shards {
+        // Highest WAL position among the rows this block will actually
+        // contain. Taken per shard under that shard's own lock, at the moment
+        // its writer is swapped, so it can never include a row that lands in
+        // the *next* block.
+        let mut covered = WalPosition::START;
+        for (i, shard) in self.shards.iter().enumerate() {
             let mut guard = shard.lock().await;
             if guard.is_empty() {
                 continue;
             }
             let taken = guard.len();
             row_count += taken;
+            // Taken and reset while this shard's lock is held, so the value
+            // always matches the writer being swapped.
+            let mut slot = self.covered[i].lock().unwrap_or_else(|e| e.into_inner());
+            covered = covered.max(*slot);
+            *slot = WalPosition::START;
             // Subtract while still holding this shard's lock, so a concurrent
             // push either lands before this (and is subtracted here) or after
             // (and counts up from the decremented total). A `store(0)` after
@@ -313,6 +374,12 @@ impl BlockRotator {
         self.last_flush_unix_ms
             .store(unix_millis(), Ordering::Relaxed);
         let _ = self.metadata_tx.send(metadata);
+        // Committed only now that the block is renamed. A crash before this
+        // leaves the block unindexed and its WAL rows intact, so replay
+        // rewrites them with no duplicate — see the ordering table in wal.rs.
+        if let Some(wal) = &self.wal {
+            wal.lock().await.commit(covered)?;
+        }
         tracing::debug!(
             signal = "metrics",
             rows = row_count,
@@ -474,10 +541,11 @@ pub struct IngestionService {
 
 impl IngestionService {
     pub fn new(config: BlockConfig, metadata_tx: mpsc::UnboundedSender<BlockMetadata>) -> Self {
-        Self::with_shards(config, metadata_tx, 1)
+        Self::with_shards(config, metadata_tx, 1, None)
     }
 
-    /// Creates a service whose rotator uses `shards` writer shards.
+    /// Creates a service whose rotator uses `shards` writer shards, with an
+    /// optional write-ahead log.
     ///
     /// See [`BlockRotator`] for why the shards are merged into one block
     /// rather than each producing their own.
@@ -485,9 +553,14 @@ impl IngestionService {
         config: BlockConfig,
         metadata_tx: mpsc::UnboundedSender<BlockMetadata>,
         shards: usize,
+        wal: Option<WalWriter>,
     ) -> Self {
+        let mut rotator = BlockRotator::with_shards(config, metadata_tx, shards);
+        if let Some(wal) = wal {
+            rotator = rotator.with_wal(wal);
+        }
         Self {
-            rotator: Arc::new(BlockRotator::with_shards(config, metadata_tx, shards)),
+            rotator: Arc::new(rotator),
             stats: Arc::new(IngestionStats::default()),
             memory_buffer: None,
             contention: None,
@@ -1030,6 +1103,7 @@ impl TraceIngestionService {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
+    use parqtel_core::wal::WalSyncMode;
     use serde_json::json;
     use tempfile::tempdir;
 
@@ -1039,6 +1113,21 @@ mod tests {
             data_dir: dir.to_path_buf(),
             max_rows_per_block: 10,
             block_duration_secs: 1,
+            ..Default::default()
+        }
+    }
+
+    /// A one-point metric at `ts` nanoseconds, named `name`.
+    fn metric_named(name: &str, ts: i64) -> Metric {
+        Metric {
+            name: name.into(),
+            kind: parqtel_core::MetricKind::Gauge,
+            data_points: vec![parqtel_core::DataPoint::new(
+                ts.max(1),
+                parqtel_core::MetricValue::Double(ts as f64),
+                parqtel_core::LabelSet::default(),
+            )
+            .unwrap()],
             ..Default::default()
         }
     }
@@ -1904,6 +1993,126 @@ mod tests {
 
     /// The service must still work with no contention sink attached, so an
     /// embedder that does not build telemetry pays nothing.
+    /// The property the WAL exists for: a crash must lose nothing that was
+    /// acknowledged, and must not duplicate anything that was already
+    /// flushed.
+    ///
+    /// Simulated by dropping the service without flushing (a crash) and then
+    /// replaying into a fresh one, which is exactly what startup does.
+    #[tokio::test]
+    async fn test_wal_recovers_acknowledged_but_unflushed_points() {
+        let dir = tempdir().unwrap();
+        let data_dir = dir.path().to_path_buf();
+        let config = BlockConfig {
+            data_dir: data_dir.clone(),
+            max_rows_per_block: 10_000, // nothing flushes on the cap
+            block_duration_secs: 3600,  // nor on the timer
+            ..Default::default()
+        };
+
+        // First "process": accept points, acknowledge, then crash.
+        {
+            let (tx, _rx) = mpsc::unbounded_channel();
+            let svc = IngestionService::with_shards(
+                config.clone(),
+                tx,
+                2,
+                Some(
+                    WalWriter::open_with_segment_limit(
+                        &data_dir,
+                        "metrics",
+                        WalSyncMode::Always,
+                        Duration::from_millis(0),
+                        64 * 1024 * 1024,
+                    )
+                    .unwrap(),
+                ),
+            );
+            for i in 0..5i64 {
+                let n = svc
+                    .ingest_metrics(vec![metric_named(&format!("m{i}"), i)])
+                    .await
+                    .unwrap();
+                assert_eq!(n, 1, "the request must be acknowledged");
+            }
+            // Dropped without shutdown(): no flush, no commit.
+        }
+
+        // The WAL must hold the acknowledged points.
+        let commit = parqtel_core::wal::read_commit(&data_dir, "metrics");
+        let mut recovered = Vec::new();
+        // One record per metric: the rotator appends while it holds the shard
+        // lock so WAL order and writer order are the same total order.
+        let stats = parqtel_core::wal::replay::<Metric, _>(&data_dir, "metrics", commit, |m| {
+            recovered.push(m)
+        })
+        .unwrap();
+        for e in std::fs::read_dir(dir.path().join("wal").join("metrics"))
+            .unwrap()
+            .flatten()
+        {
+            eprintln!(
+                "  file {:?} size {:?}",
+                e.path(),
+                e.metadata().map(|m| m.len())
+            );
+        }
+        assert_eq!(stats.records, 5, "every acknowledged batch must replay");
+        assert_eq!(stats.skipped, 0);
+        let names: Vec<String> = recovered.iter().map(|m| m.name.clone()).collect();
+        assert_eq!(names, vec!["m0", "m1", "m2", "m3", "m4"]);
+    }
+
+    /// After a successful flush the WAL must be committed, so a replay finds
+    /// nothing to redo. Without this every restart would re-ingest every block
+    /// ever written.
+    #[tokio::test]
+    async fn test_wal_is_committed_once_the_block_is_durable() {
+        let dir = tempdir().unwrap();
+        let data_dir = dir.path().to_path_buf();
+        let config = BlockConfig {
+            data_dir: data_dir.clone(),
+            max_rows_per_block: 10_000,
+            block_duration_secs: 3600,
+            ..Default::default()
+        };
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let svc = IngestionService::with_shards(
+            config.clone(),
+            tx,
+            2,
+            Some(
+                WalWriter::open_with_segment_limit(
+                    &data_dir,
+                    "metrics",
+                    WalSyncMode::Always,
+                    Duration::from_millis(0),
+                    64 * 1024 * 1024,
+                )
+                .unwrap(),
+            ),
+        );
+
+        for i in 0..4i64 {
+            svc.ingest_metrics(vec![metric_named(&format!("m{i}"), i)])
+                .await
+                .unwrap();
+        }
+        svc.shutdown().await.unwrap();
+        let meta = rx.try_recv().expect("a block must have been written");
+        assert_eq!(meta.row_count, 4);
+        assert!(meta.path.exists(), "the block must be renamed into place");
+
+        let commit = parqtel_core::wal::read_commit(&data_dir, "metrics");
+        let mut seen = 0u64;
+        let stats =
+            parqtel_core::wal::replay::<Metric, _>(&data_dir, "metrics", commit, |_| seen += 1)
+                .unwrap();
+        assert_eq!(seen, 0, "flushed rows must not be replayed");
+        assert!(stats.records == 0);
+        assert!(stats.skipped > 0, "they must be counted as skipped");
+    }
+
     #[tokio::test]
     async fn test_services_work_without_contention_metrics() {
         let dir = tempdir().unwrap();
