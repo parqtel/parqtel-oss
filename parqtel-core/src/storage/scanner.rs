@@ -7,6 +7,7 @@ use arrow_array::{Array, TimestampNanosecondArray};
 use parquet::arrow::arrow_reader::{
     ArrowReaderMetadata, ArrowReaderOptions, ParquetRecordBatchReaderBuilder,
 };
+use parquet::arrow::ProjectionMask;
 use parquet::file::metadata::PageIndexPolicy;
 use parquet::file::metadata::ParquetMetaData;
 use parquet::file::statistics::Statistics;
@@ -30,6 +31,58 @@ pub struct LogScanStats {
     pub total_matched: usize,
     pub volume_buckets: Vec<u64>,
 }
+/// Columns the metrics scan decodes, in schema order.
+///
+/// A metrics block has 15 columns and this path reads 7. The other 8 -
+/// `metric_kind`, the six k8s dictionaries and `resource_attributes` - are
+/// per-row data that a range query never touches, and decoding them costs
+/// bandwidth and CPU on every block the query opens.
+///
+/// Projection is intersected with the file's own schema before being applied,
+/// so a block written by an older build that lacks one of these columns still
+/// reads (see [`project_present`]).
+pub const METRIC_SCAN_COLUMNS: [&str; 7] = [
+    "timestamp_ns",
+    "metric_name",
+    "service_name",
+    "labels",
+    "value_float",
+    "value_int",
+    "value_complex",
+];
+
+/// Leaf indices of `columns` that the file's schema actually has.
+///
+/// Blocks written by older builds may lack a column, and a projection naming an
+/// absent column errors, so the projection is intersected with the file rather
+/// than applied blindly. Leaf indices are correct here because every parqtel
+/// schema is flat - no nested groups - so a leaf index equals its root index.
+pub fn project_present(
+    schema: &parquet::schema::types::SchemaDescriptor,
+    columns: &[&str],
+) -> Vec<usize> {
+    columns
+        .iter()
+        .filter_map(|name| schema.columns().iter().position(|c| c.name() == *name))
+        .collect()
+}
+
+/// Positional indices of the projected columns within a projected batch.
+///
+/// The decoders index columns positionally, and a projection renumbers them,
+/// so every index is resolved **by name** from the batch's own schema. Looking
+/// an index up once per batch is free; hard-coding positions against a
+/// projection is how a projection silently starts returning the wrong column.
+pub fn metric_scan_indices(schema: &std::sync::Arc<arrow_schema::Schema>) -> Result<[usize; 7]> {
+    let mut idx = [usize::MAX; 7];
+    for (slot, name) in idx.iter_mut().zip(METRIC_SCAN_COLUMNS) {
+        *slot = schema
+            .index_of(name)
+            .map_err(|_| Error::Arrow(format!("metrics scan is missing the {name} column")))?;
+    }
+    Ok(idx)
+}
+
 /// Label-cache size ceiling per chunk before it is cleared.
 /// ponytail: naive bound — clear-on-overflow instead of LRU; revisit if
 /// high-cardinality queries dominate profiles.
@@ -95,7 +148,7 @@ impl Scanner {
         Ok(all_points)
     }
 
-    fn scan_block(
+    pub fn scan_block(
         meta: BlockMetadata,
         metric_name: String,
         start_ns: i64,
@@ -148,8 +201,15 @@ impl Scanner {
         if groups.is_empty() {
             return Ok(Vec::new());
         }
+        // Read only the seven columns this path decodes; the other eight are
+        // per-row data a range query never touches.
+        let mask = ProjectionMask::leaves(
+            reader_builder.parquet_schema(),
+            project_present(reader_builder.parquet_schema(), &METRIC_SCAN_COLUMNS),
+        );
         let reader = reader_builder
             .with_row_groups(groups)
+            .with_projection(mask)
             .build()
             .map_err(|e| Error::Parquet(e.to_string()))?;
 
@@ -160,13 +220,16 @@ impl Scanner {
 
             // Cache keys borrow from this chunk — recreate per chunk.
             let mut labels_cache: HashMap<(&str, &str), crate::LabelSet> = HashMap::new();
+            // Resolved by name because the projection renumbers positions.
+            let [c_ts, c_name, c_svc, c_labels, c_vf, c_vi, c_vc] =
+                metric_scan_indices(&record_batch.schema())?;
             let ts_arr = record_batch
-                .column(0)
+                .column(c_ts)
                 .as_any()
                 .downcast_ref::<TimestampNanosecondArray>()
                 .ok_or_else(|| Error::Arrow("Invalid timestamp column".into()))?;
             let name_arr = record_batch
-                .column(1)
+                .column(c_name)
                 .as_any()
                 .downcast_ref::<arrow_array::DictionaryArray<arrow_array::types::Int32Type>>()
                 .ok_or_else(|| Error::Arrow("Invalid metric_name column".into()))?;
@@ -176,12 +239,12 @@ impl Scanner {
                 .downcast_ref::<arrow_array::StringArray>()
                 .ok_or_else(|| Error::Arrow("Invalid metric_name values".into()))?;
             let labels_col = record_batch
-                .column(11)
+                .column(c_labels)
                 .as_any()
                 .downcast_ref::<arrow_array::StringArray>()
                 .ok_or_else(|| Error::Arrow("Invalid labels column".into()))?;
             let svc_arr = record_batch
-                .column(3)
+                .column(c_svc)
                 .as_any()
                 .downcast_ref::<arrow_array::DictionaryArray<arrow_array::types::Int32Type>>()
                 .ok_or_else(|| Error::Arrow("Invalid service_name column".into()))?;
@@ -191,17 +254,17 @@ impl Scanner {
                 .downcast_ref::<arrow_array::StringArray>()
                 .ok_or_else(|| Error::Arrow("Invalid service_name values".into()))?;
             let vf_arr = record_batch
-                .column(12)
+                .column(c_vf)
                 .as_any()
                 .downcast_ref::<arrow_array::Float64Array>()
                 .ok_or_else(|| Error::Arrow("Invalid value_float column".into()))?;
             let vi_arr = record_batch
-                .column(13)
+                .column(c_vi)
                 .as_any()
                 .downcast_ref::<arrow_array::Int64Array>()
                 .ok_or_else(|| Error::Arrow("Invalid value_int column".into()))?;
             let vc_arr = record_batch
-                .column(14)
+                .column(c_vc)
                 .as_any()
                 .downcast_ref::<arrow_array::StringArray>()
                 .ok_or_else(|| Error::Arrow("Invalid value_complex column".into()))?;

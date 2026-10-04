@@ -189,7 +189,7 @@ Validation lives separately in `parqtel-core/src/config/mod.rs:50-62` against `[
 
 ---
 
-## BL-03-08 (M) — No column projection: scans decode every column of every candidate block
+## BL-03-08 (M, partly landed) — No column projection: scans decode every column of every candidate block
 
 **Evidence** — `scanner.rs:123-126` (metrics), `:350-352` (logs), `:475-477` (traces) build the reader with no projection mask:
 ```rust

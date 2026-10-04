@@ -557,3 +557,69 @@ follow row counts, not series boundaries.
 ```bash
 cargo run --release -p parqtel-core --example bench_bloom
 ```
+
+## Column projection on the metrics scan (`BL-03-08`, partial)
+
+A metrics block has 15 columns; the scan decoded all 15 to use 7. The eight
+skipped — `metric_kind`, the six k8s dictionaries and `resource_attributes` —
+are per-row data a range query never touches.
+
+The scan now projects to `timestamp_ns`, `metric_name`, `service_name`,
+`labels`, `value_float`, `value_int`, `value_complex`.
+
+### Result
+
+200 metrics × 500 points in one block:
+
+| query shape | no projection | projected | change |
+|---|---|---|---|
+| single metric of 200 (1 row group) | 2.47 ms | 2.33 ms | −6 % |
+| one service of 8 (1 row group) | 0.40 ms | 0.34 ms | −15 % |
+| **full-block scan, 100 000 rows** | **53.10 ms** | **38.13 ms** | **−28 %** |
+
+The backlog target was "≥ 30 % for all three signals". **It is not met, and the
+reason is that the target was written before #52 and #53.** Metric and service
+pruning now means a typical query decodes a *single* row group, so the skipped
+columns were never where the time went. Projection pays in proportion to how
+many row groups a query must read — a wide panel or an old block — which is
+the −28 % row.
+
+### Two things that made it safe
+
+**Indices resolved by name.** The decoder indexes columns positionally, and a
+projection renumbers them. Every index is now looked up from the batch's own
+schema once per batch. Hard-coded positions against a projection is exactly how
+a projection silently starts reading the wrong column.
+
+**The projection is intersected with the file's schema.** `with_projection`
+errors on a column the block does not have, and blocks written by older builds
+may lack one — so intersecting keeps them readable.
+
+### The failure mode is silent, so the test is adversarial
+
+A wrong mask does not crash: `labels` and `value_complex` are both `Utf8`, so
+swapping them type-checks and returns wrong data. `projection_does_not_change_decoded_points`
+compares timestamps and values against a full unprojected decode and asserts
+each point's `host` label matches the series it came from.
+
+Verified to **fail** for both a plain type mismatch and the same-typed
+`labels`/`value_complex` swap.
+
+Labels are compared by content rather than by fingerprint against
+`StorageModel::row_to_point`, because the two decoders legitimately differ
+there: the scan merges the dedicated `service_name` column back into the series
+labels, while `row_to_point` leaves it in the resource attributes. Comparing
+them would have asserted a difference that was already there.
+
+### Not done
+
+Logs and traces. Their decoders (`row_to_log`, `row_to_span`) index positionally
+and would need a per-batch index struct passed in rather than resolved per row.
+Worth doing for the log count and trace filter paths, where `events`, `links`
+and the k8s dictionaries are likewise unused.
+
+### Reproducing
+
+```bash
+cargo run --release -p parqtel-core --example bench_bloom
+```
