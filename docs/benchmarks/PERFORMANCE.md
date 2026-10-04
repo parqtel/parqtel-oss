@@ -923,3 +923,59 @@ never wrongly adopted.
 The order is the reverse of the obvious, and the multi-signal test caught it: the
 **log schema has a `span_id` column too**, so testing for `span_id` first
 classified log blocks as traces.
+
+## Async flush worker (`BL-01-14`)
+
+A request that crossed the block cap used to wait for the Parquet encode before
+being acknowledged. It no longer does: the shard writers are swapped out under
+their own short locks and the encode runs on a background task. The rows are
+already in the WAL, so durability is unchanged.
+
+Measured with the body limit fixed to its configured 10 MiB (`BL-03-17`), on
+130 000-point batches with the block cap set to 130 000 so every request
+triggers exactly one ~125 ms encode:
+
+| | before | after |
+|---|---|---|
+| single flush-triggering request | ~330 ms | **~280 ms** |
+| 4 concurrent flush-triggering requests | 1.291 s | **0.932 s** |
+
+Modest — and the reason is that **OTLP decode dominates**: a 7 MiB batch costs
+~175 ms to decode against ~125 ms to encode, so taking the encode off the
+request path can only remove about 40 % of it. The larger relative gain is
+under concurrency, where encodes used to serialise behind the flush lock.
+
+### A sequential worker was worse than no worker at all
+
+The first version ran one worker loop that processed jobs one at a time. That
+serialised the encodes exactly as the flush lock had, and made four concurrent
+requests **slower**: 1.461 s versus the 1.291 s baseline. The worker now spawns
+one task per job, bounded by a semaphore, so encodes genuinely overlap. That
+change is what produced 0.932 s — without it the whole idea was a regression.
+
+### The correctness point: when the buffer is drained
+
+The memory-buffer drain moved from the service into `run_flush_job`, and now
+happens only after the block is **durable**. Draining when a flush was merely
+*scheduled* would leave rows in neither the buffer nor any block — invisible to
+every query until the encode landed. This is the easiest thing in the change to
+get wrong and the hardest to notice, so
+`test_background_flush_keeps_rows_visible_throughout` drives the real service and
+asserts rows stay in the buffer until a block file exists, then leave it.
+
+### Bounds and shutdown
+
+`ingest.max_inflight_flushes` (default 4) caps concurrent encodes and bounds the
+queue. A full queue makes a flush encode inline rather than queueing further, so
+backpressure degrades to the previous synchronous behaviour instead of growing an
+unbounded backlog.
+
+Shutdown drops the channel sender, then awaits every in-flight encode, so a
+graceful stop cannot leave a block half-written or skip a WAL commit. Verified:
+after a restart, `storage_rows` is preserved and the data queryable.
+
+### Still open
+
+The loss window when `ingest.wal_enabled = false`. With the WAL off, an
+unacknowledged flush is unrecoverable again — so either document it or refuse to
+start the worker without a WAL.

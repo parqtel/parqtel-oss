@@ -538,6 +538,11 @@ async fn run_server(
     )
     .with_memory_buffer(memory_buffer.clone())
     .with_contention(contention.clone());
+    // Background flush: a request that crosses the block cap is acknowledged
+    // once the WAL has its rows rather than after the Parquet encode. Measured
+    // on a 7 MiB batch the encode is ~125 ms of a ~300 ms request, and it
+    // serialises concurrent requests behind the flush lock.
+    ingestion_service.start_flush_worker(config.ingest.max_inflight_flushes);
     // Report the shard count so an operator can correlate lock-wait behaviour
     // with the configured concurrency. 0 means "not reported", so the gauge is
     // only meaningful once this runs.
