@@ -5,6 +5,7 @@ use crate::models::labels::LabelSet;
 use crate::models::logs::LogRecord;
 use crate::models::metrics::{DataPoint, Metric, MetricKind};
 use crate::models::storage::{BlockMetadata, SignalType, StorageModel};
+use crate::models::traces::Span;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::arrow::arrow_writer::ArrowWriter;
 use parquet::file::properties::{WriterProperties, WriterVersion};
@@ -16,12 +17,43 @@ use std::time::Duration;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
-/// Points grouped with their metric metadata, plus log records — the decoded
-/// contents of source blocks awaiting compaction.
+/// Points grouped with their metric metadata, plus log records and spans — the
+/// decoded contents of source blocks awaiting compaction.
 type DecodedBlocks = (
     Vec<(String, MetricKind, LabelSet, DataPoint)>,
     Vec<LogRecord>,
+    Vec<Span>,
 );
+
+/// Per-field cap on the label-value dictionary, matching the flush path.
+const MAX_LABEL_VALUES_PER_FIELD: usize = 10_000;
+
+/// Label-value dictionaries of the blocks being merged, unioned.
+///
+/// Compaction used to emit an empty dictionary, so merging silently dropped
+/// the flush-time index that `/api/v1/label/:name/values` reads from metadata
+/// instead of decoding blocks. Every compaction pass degraded autocomplete until
+/// the source blocks aged out.
+type LabelValues = BTreeMap<String, std::collections::BTreeSet<String>>;
+
+/// Union of several blocks' label-value dictionaries, respecting the same
+/// per-field cap the flush path applies so one high-cardinality label cannot
+/// bloat the index.
+fn union_label_values(blocks: &[BlockMetadata], max_per_field: usize) -> LabelValues {
+    let mut out: LabelValues = BTreeMap::new();
+    for b in blocks {
+        for (field, values) in &b.label_values {
+            let entry = out.entry(field.clone()).or_default();
+            for v in values {
+                if entry.len() >= max_per_field {
+                    break;
+                }
+                entry.insert(v.clone());
+            }
+        }
+    }
+    out
+}
 
 /// Background task that merges small adjacent blocks and implements tiered compaction.
 /// Tier strategy:
@@ -82,7 +114,10 @@ impl Compactor {
                 tracing::debug!("compaction: fewer than 2 small blocks, skipping");
                 return Ok(());
             }
-            let count = std::cmp::min(8, small_blocks.len());
+            let count = std::cmp::min(
+                config.compaction_max_merge_blocks.max(2),
+                small_blocks.len(),
+            );
             small_blocks.truncate(count);
             let paths: Vec<_> = small_blocks.iter().map(|b| b.path.clone()).collect();
             let signal = small_blocks[0].signal_type;
@@ -95,15 +130,19 @@ impl Compactor {
         let config = config.clone();
         let paths_for_merge = original_paths.clone();
         let merged = tokio::task::spawn_blocking(move || -> Result<Option<BlockMetadata>> {
-            let (all_points, all_logs) = Self::read_source_blocks(&to_compact, signal_type)?;
-            if all_points.is_empty() && all_logs.is_empty() {
+            let (all_points, all_logs, all_spans) =
+                Self::read_source_blocks(&to_compact, signal_type)?;
+            if all_points.is_empty() && all_logs.is_empty() && all_spans.is_empty() {
                 return Ok(None);
             }
+            let label_values = union_label_values(&to_compact, MAX_LABEL_VALUES_PER_FIELD);
             Ok(Some(Self::write_merged(
                 &config,
                 signal_type,
                 all_points,
                 all_logs,
+                all_spans,
+                label_values,
             )?))
         })
         .await
@@ -160,6 +199,13 @@ impl Compactor {
         let twenty_four_hours_ns = 24 * 3600 * 1_000_000_000i64;
         tracing::debug!("tiered compaction cycle starting");
 
+        // Bounded per cycle so one pass cannot monopolise the disk. Previously
+        // this was `break` after the first merge per signal, so a cluster with
+        // many small blocks could never converge: the small-block population
+        // grew faster than one merge per hour removed it.
+        let max_merges = config.compaction_max_merges_per_pass.max(1);
+        let mut merges_done = 0usize;
+
         // Process each signal type
         for signal_type in &[SignalType::Metrics, SignalType::Logs, SignalType::Traces] {
             let candidates = {
@@ -210,8 +256,8 @@ impl Compactor {
                 if group.len() < 2 {
                     continue;
                 }
-                // Limit merge group to 12 blocks per pass
-                group.truncate(12);
+                // Bounded by config, and at least 2 or a group can never merge.
+                group.truncate(config.compaction_max_merge_blocks.max(2));
 
                 let paths: Vec<_> = group.iter().map(|b| b.path.clone()).collect();
 
@@ -226,16 +272,20 @@ impl Compactor {
                 let merge_paths = paths.clone();
                 let merged =
                     tokio::task::spawn_blocking(move || -> Result<Option<BlockMetadata>> {
-                        let (all_points, all_logs) =
+                        let (all_points, all_logs, all_spans) =
                             Self::read_source_blocks(&source_group, *signal_type)?;
-                        if all_points.is_empty() && all_logs.is_empty() {
+                        if all_points.is_empty() && all_logs.is_empty() && all_spans.is_empty() {
                             return Ok(None);
                         }
+                        let label_values =
+                            union_label_values(&source_group, MAX_LABEL_VALUES_PER_FIELD);
                         Ok(Some(Self::write_merged(
                             &config,
                             *signal_type,
                             all_points,
                             all_logs,
+                            all_spans,
+                            label_values,
                         )?))
                     })
                     .await
@@ -262,8 +312,10 @@ impl Compactor {
                     .await;
                 }
 
-                // One merge per signal per pass to avoid holding the lock too long
-                break;
+                merges_done += 1;
+                if merges_done >= max_merges {
+                    break;
+                }
             }
         }
         Ok(())
@@ -275,6 +327,7 @@ impl Compactor {
     ) -> Result<DecodedBlocks> {
         let mut all_points = Vec::new();
         let mut all_logs = Vec::new();
+        let mut all_spans = Vec::new();
 
         for meta in blocks {
             let file = match File::open(&meta.path) {
@@ -300,96 +353,134 @@ impl Compactor {
                 let mut attr_cache = std::collections::HashMap::new();
                 let mut res_cache = std::collections::HashMap::new();
                 for row in 0..record_batch.num_rows() {
-                    if signal_type == SignalType::Metrics {
-                        all_points.push(StorageModel::row_to_point(&record_batch, row)?);
-                    } else {
-                        all_logs.push(StorageModel::row_to_log(
-                            &record_batch,
-                            row,
-                            &mut attr_cache,
-                            &mut res_cache,
-                        )?);
+                    match signal_type {
+                        SignalType::Metrics => {
+                            all_points.push(StorageModel::row_to_point(&record_batch, row)?);
+                        }
+                        SignalType::Logs => {
+                            all_logs.push(StorageModel::row_to_log(
+                                &record_batch,
+                                row,
+                                &mut attr_cache,
+                                &mut res_cache,
+                            )?);
+                        }
+                        // Trace blocks used to be skipped entirely, so they
+                        // never merged and accumulated until retention deleted
+                        // them.
+                        SignalType::Traces => {
+                            all_spans.push(StorageModel::row_to_span(&record_batch, row)?);
+                        }
                     }
                 }
             }
         }
-        Ok((all_points, all_logs))
+        Ok((all_points, all_logs, all_spans))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn write_merged(
         config: &BlockConfig,
         signal_type: SignalType,
         mut all_points: Vec<(String, MetricKind, LabelSet, DataPoint)>,
         mut all_logs: Vec<LogRecord>,
+        mut all_spans: Vec<Span>,
+        label_values: LabelValues,
     ) -> Result<BlockMetadata> {
         let (record_batch, start_ts, end_ts, row_count, metric_names, label_names) =
-            if signal_type == SignalType::Metrics {
-                all_points.sort_by_key(|(_, _, _, dp)| dp.timestamp_ns);
-                let start = all_points[0].3.timestamp_ns;
-                let end = all_points
-                    .last()
-                    .ok_or_else(|| Error::Internal("No points".into()))?
-                    .3
-                    .timestamp_ns;
-                let rows = all_points.len();
-                let mut m_names = HashSet::new();
-                let mut l_names = HashSet::new();
-                let mut groups: BTreeMap<(String, MetricKind, LabelSet), Vec<DataPoint>> =
-                    BTreeMap::new();
-                for (name, kind, resource, dp) in all_points {
-                    m_names.insert(name.clone());
-                    for l in resource.keys() {
-                        l_names.insert(l.clone());
+            match signal_type {
+                SignalType::Metrics => {
+                    all_points.sort_by_key(|(_, _, _, dp)| dp.timestamp_ns);
+                    let start = all_points[0].3.timestamp_ns;
+                    let end = all_points
+                        .last()
+                        .ok_or_else(|| Error::Internal("No points".into()))?
+                        .3
+                        .timestamp_ns;
+                    let rows = all_points.len();
+                    let mut m_names = HashSet::new();
+                    let mut l_names = HashSet::new();
+                    let mut groups: BTreeMap<(String, MetricKind, LabelSet), Vec<DataPoint>> =
+                        BTreeMap::new();
+                    for (name, kind, resource, dp) in all_points {
+                        m_names.insert(name.clone());
+                        for l in resource.keys() {
+                            l_names.insert(l.clone());
+                        }
+                        for l in dp.labels.keys() {
+                            l_names.insert(l.clone());
+                        }
+                        groups.entry((name, kind, resource)).or_default().push(dp);
                     }
-                    for l in dp.labels.keys() {
-                        l_names.insert(l.clone());
-                    }
-                    groups.entry((name, kind, resource)).or_default().push(dp);
+                    let metrics: Vec<_> = groups
+                        .into_iter()
+                        .map(|((name, kind, resource), dps)| Metric {
+                            name,
+                            description: "".into(),
+                            unit: "".into(),
+                            kind,
+                            resource_attributes: resource,
+                            data_points: dps,
+                        })
+                        .collect();
+                    (
+                        StorageModel::metrics_to_chunk(&metrics)?,
+                        start,
+                        end,
+                        rows,
+                        m_names,
+                        l_names,
+                    )
                 }
-                let metrics: Vec<_> = groups
-                    .into_iter()
-                    .map(|((name, kind, resource), dps)| Metric {
-                        name,
-                        description: "".into(),
-                        unit: "".into(),
-                        kind,
-                        resource_attributes: resource,
-                        data_points: dps,
-                    })
-                    .collect();
-                (
-                    StorageModel::metrics_to_chunk(&metrics)?,
-                    start,
-                    end,
-                    rows,
-                    m_names,
-                    l_names,
-                )
-            } else {
-                all_logs.sort_by_key(|l| l.timestamp_ns);
-                let start = all_logs[0].timestamp_ns;
-                let end = all_logs
-                    .last()
-                    .ok_or_else(|| Error::Internal("No logs".into()))?
-                    .timestamp_ns;
-                let rows = all_logs.len();
-                let mut l_names = HashSet::new();
-                for log in &all_logs {
-                    for l in log.attributes.keys() {
-                        l_names.insert(l.clone());
+                SignalType::Logs => {
+                    all_logs.sort_by_key(|l| l.timestamp_ns);
+                    let start = all_logs[0].timestamp_ns;
+                    let end = all_logs
+                        .last()
+                        .ok_or_else(|| Error::Internal("No logs".into()))?
+                        .timestamp_ns;
+                    let rows = all_logs.len();
+                    let mut l_names = HashSet::new();
+                    for log in &all_logs {
+                        for l in log.attributes.keys() {
+                            l_names.insert(l.clone());
+                        }
+                        for l in log.resource_attributes.keys() {
+                            l_names.insert(l.clone());
+                        }
                     }
-                    for l in log.resource_attributes.keys() {
-                        l_names.insert(l.clone());
-                    }
+                    (
+                        StorageModel::logs_to_chunk(&all_logs)?,
+                        start,
+                        end,
+                        rows,
+                        HashSet::new(),
+                        l_names,
+                    )
                 }
-                (
-                    StorageModel::logs_to_chunk(&all_logs)?,
-                    start,
-                    end,
-                    rows,
-                    HashSet::new(),
-                    l_names,
-                )
+                SignalType::Traces => {
+                    // Spans sort by start time so the merged block keeps the
+                    // time-ordered layout the scanner's row-group pruning relies on.
+                    all_spans.sort_by_key(|s| s.start_time_ns);
+                    let start = all_spans[0].start_time_ns;
+                    let end = all_spans
+                        .last()
+                        .ok_or_else(|| Error::Internal("No spans".into()))?
+                        .end_time_ns;
+                    let rows = all_spans.len();
+                    let mut l_names = HashSet::new();
+                    for span in &all_spans {
+                        l_names.extend(span.attributes.keys().cloned());
+                    }
+                    (
+                        StorageModel::traces_to_chunk(&all_spans)?,
+                        start,
+                        end,
+                        rows,
+                        HashSet::new(),
+                        l_names,
+                    )
+                }
             };
 
         let filename = format!(
@@ -446,7 +537,7 @@ impl Compactor {
             size_bytes,
             metric_names,
             label_names,
-            label_values: Default::default(),
+            label_values,
             signal_type,
         })
     }
