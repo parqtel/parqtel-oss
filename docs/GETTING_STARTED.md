@@ -4,7 +4,7 @@ Welcome to Parqtel! This guide will walk you through your first 15 minutes with 
 
 ## 1. Installation
 
-The fastest way to get started is using Docker. If you don't have Docker, you can follow the [Building from Source](docs/DEPLOYMENT.md#run-from-source) guide.
+The fastest way to get started is using Docker. If you don't have Docker, you can follow the [Building from Source](DEPLOYMENT.md#run-from-source) guide.
 
 ```bash
 docker run -d \
@@ -152,11 +152,11 @@ For production dashboards, we recommend Grafana.
 
 ## 5. Next Steps
 
-- **Query like a pro:** The full query language guide — ParQL (metrics), ParqtelQL (log/trace search), and cross-signal pipelines — lives in [docs/PQL_GUIDE.md](docs/PQL_GUIDE.md).
-- **Configure Alerting:** Learn how to set up YAML-based rules in [Alerting Guide](docs/CONFIGURATION.md#alerts).
-- **Architecture Deep Dive:** Understand how Parquet blocks work in the [Architecture Doc](docs/ARCHITECTURE.md).
-- **Deployment:** Move to production with [Kubernetes/Helm](docs/DEPLOYMENT.md#kubernetes-helm).
-- **MCP Integrations:** Connect Parqtel to Slack, PagerDuty, and more via [MCP](docs/MCP.md).
+- **Query like a pro:** The full query language guide — ParQL (metrics), ParqtelQL (log/trace search), and cross-signal pipelines — lives in [docs/PQL_GUIDE.md](PQL_GUIDE.md).
+- **Configure Alerting:** Learn how to set up YAML-based rules in [Alerting Guide](CONFIGURATION.md#alerts).
+- **Architecture Deep Dive:** Understand how Parquet blocks work in the [Architecture Doc](ARCHITECTURE.md).
+- **Deployment:** Move to production with [Kubernetes/Helm](DEPLOYMENT.md#kubernetes-helm).
+- **MCP Integrations:** Connect Parqtel to Slack, PagerDuty, and more via [MCP](MCP.md).
 
 ## Need Help?
-Check the [Troubleshooting Guide](docs/TROUBLESHOOTING.md) or open an issue on GitHub.
+Check the [Troubleshooting Guide](TROUBLESHOOTING.md) or open an issue on GitHub.

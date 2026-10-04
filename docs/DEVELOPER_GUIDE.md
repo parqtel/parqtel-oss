@@ -45,7 +45,7 @@ The web console (`parqtel-server/src/ui.html`) is a single-file vanilla-JS app w
     --virtual-time-budget=15000 http://localhost:8080/ui
   ```
   Any `Uncaught SyntaxError`/`ReferenceError` lines in stderr indicate a regression.
-- **Design system**: semantic CSS tokens, inline SVG icon sprite, WCAG AA contrast, `prefers-reduced-motion` support. See [UI_UX_IMPROVEMENT_PLAN.md](UI_UX_IMPROVEMENT_PLAN.md) for the conventions.
+- **Design system**: semantic CSS tokens, inline SVG icon sprite, WCAG AA contrast, `prefers-reduced-motion` support. The console is a single embedded file (`parqtel-server/src/ui.html`) with no external requests and no framework — see [Architecture](ARCHITECTURE.md#console).
 
 ## 4. Adding a New MCP Tool
 

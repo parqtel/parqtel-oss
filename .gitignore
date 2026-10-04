@@ -36,6 +36,10 @@ scripts/bench_results/
 parqtel-server/data/
 .local-parqtel-data/
 
+# Local working notes (not part of the published docs)
+BACKLOG.local.md
+*.local.md
+
 # Agent-local artifacts
 .kiro/
 .rtk/

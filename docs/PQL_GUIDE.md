@@ -294,5 +294,13 @@ lookback_delta_ns = 300000000000     # instant lookback (5m, Prometheus default)
 | `timestamp()` | Not yet (needs per-sample time retention) | Yes |
 | `@` modifier | Rejected with clear error | Yes |
 
-See `docs/QUERY_PHASE_LIMITATIONS.md` for the full fidelity log and
-`docs/LEGACY_ENGINE_RETIREMENT.md` for the engine-unification plan.
+See [Query Functions](QUERY_FUNCTIONS.md) for the supported surface and its
+*Not Yet Supported* section, and [Troubleshooting](TROUBLESHOOTING.md) for
+interpreting an empty result.
+
+**Range queries and the final step.** A range query evaluates steps from `start`
+while `ts < end`, so the last evaluated instant is up to one `step` before
+`end`. Samples newer than that are **not** visible to `/api/v1/query_range`,
+though an instant `/api/v1/query` at the same `end` still sees them through
+the 5-minute lookback. Use `step <= 15` for a window ending at "now", or end
+the window at `now - step`. See [Troubleshooting](TROUBLESHOOTING.md).
