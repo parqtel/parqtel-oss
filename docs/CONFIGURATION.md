@@ -156,6 +156,8 @@ tls_secret_name = "parqtel-provider-tls"
 | `retention_days` | Integer | `7` | Days to retain metric data |
 | `compaction_interval_secs` | Integer | `3600` | Interval between compaction passes |
 | `row_group_size` | Integer | `100000` | Rows per Parquet row group. Must be ≤ `max_rows_per_block` — this is what row-group pruning depends on, so a too-large value silently costs query time |
+| `compaction_max_merge_blocks` | Integer | `12` | Max source blocks merged into one compacted block. Too few and the small-block population grows faster than compaction removes it |
+| `compaction_max_merges_per_pass` | Integer | `8` | Max merges one compaction cycle performs. Bounds the disk I/O a single cycle can take |
 
 ### `[logs]`
 
@@ -169,6 +171,8 @@ tls_secret_name = "parqtel-provider-tls"
 | `retention_days` | Integer | `3` | Days to retain log data |
 | `compaction_interval_secs` | Integer | `3600` | Interval between compaction passes |
 | `row_group_size` | Integer | `20000` | Rows per Parquet row group. Must be ≤ `max_rows_per_block` |
+| `compaction_max_merge_blocks` | Integer | `12` | Max source blocks merged into one compacted block |
+| `compaction_max_merges_per_pass` | Integer | `8` | Max merges one compaction cycle performs |
 
 ### `[ingest]`
 

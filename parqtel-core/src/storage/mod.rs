@@ -102,11 +102,12 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
     use crate::models::storage::{BlockMetadata, SignalType, StorageModel};
-    use crate::models::{DataPoint, LabelSet, LogRecord, Metric, MetricKind, MetricValue};
+    use crate::models::{DataPoint, LabelSet, LogRecord, Metric, MetricKind, MetricValue, Span};
     use parquet::arrow::ArrowWriter;
     use parquet::basic::Compression;
     use parquet::file::properties::{WriterProperties, WriterVersion};
     use std::collections::HashSet;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::fs;
     use tempfile::tempdir;
 
@@ -138,6 +139,169 @@ mod tests {
         let mut writer = ArrowWriter::try_new(file, chunk.schema(), Some(writer_props)).unwrap();
         writer.write(&chunk).unwrap();
         writer.close().unwrap();
+    }
+
+    fn write_traces_parquet(path: &std::path::Path, spans: &[Span]) {
+        let chunk = StorageModel::traces_to_chunk(spans).unwrap();
+        let file = fs::File::create(path).unwrap();
+        let writer_props = WriterProperties::builder()
+            .set_compression(Compression::UNCOMPRESSED)
+            .set_writer_version(WriterVersion::PARQUET_2_0)
+            .build();
+        let mut writer = ArrowWriter::try_new(file, chunk.schema(), Some(writer_props)).unwrap();
+        writer.write(&chunk).unwrap();
+        writer.close().unwrap();
+    }
+
+    fn test_span(start: i64) -> Span {
+        Span {
+            trace_id: [1u8; 16],
+            span_id: [start as u8; 8],
+            trace_state: String::new(),
+            name: "op".into(),
+            kind: 2,
+            start_time_ns: start,
+            end_time_ns: start + 1000,
+            attributes: LabelSet::try_from_iter(vec![(
+                "http.status_code".to_string(),
+                "200".to_string(),
+            )])
+            .unwrap(),
+            events: Vec::new(),
+            links: Vec::new(),
+            status: crate::models::traces::SpanStatus {
+                code: 1,
+                message: String::new(),
+            },
+            parent_span_id: [0u8; 8],
+            flags: 1,
+        }
+    }
+
+    fn trace_meta(path: &std::path::Path, spans: &[Span]) -> BlockMetadata {
+        BlockMetadata {
+            path: path.to_path_buf(),
+            start_timestamp_ns: spans.iter().map(|s| s.start_time_ns).min().unwrap_or(0),
+            end_timestamp_ns: spans.iter().map(|s| s.end_time_ns).max().unwrap_or(0),
+            row_count: spans.len(),
+            size_bytes: fs::metadata(path).map(|m| m.len()).unwrap_or(0),
+            metric_names: HashSet::new(),
+            label_names: HashSet::from(["http.status_code".to_string()]),
+            label_values: BTreeMap::from([(
+                "http.status_code".to_string(),
+                BTreeSet::from(["200".to_string()]),
+            )]),
+            signal_type: SignalType::Traces,
+        }
+    }
+
+    /// Trace blocks used to be skipped by compaction entirely, so they never
+    /// merged and accumulated until retention deleted them.
+    #[tokio::test]
+    async fn test_compactor_merges_trace_blocks() {
+        let dir = tempdir().unwrap();
+        let config = BlockConfig {
+            data_dir: dir.path().to_path_buf(),
+            compression: "uncompressed".into(),
+            compaction_max_merge_blocks: 4,
+            compaction_max_merges_per_pass: 4,
+            ..Default::default()
+        };
+        let store = Arc::new(BlockIndexStore::at_path(dir.path().join("index.json")));
+
+        // Three small trace blocks, time-ordered.
+        let mut index = BlockIndex::new(dir.path());
+        for b in 0..3i64 {
+            let spans: Vec<Span> = (0..3).map(|i| test_span(b * 10 + i + 1)).collect();
+            let path = dir.path().join(format!("t{b}.parquet"));
+            write_traces_parquet(&path, &spans);
+            index.add(trace_meta(&path, &spans));
+        }
+        let index = Arc::new(RwLock::new(index));
+        assert_eq!(index.read().await.total_blocks(), 3);
+
+        Compactor::compact_once(&index, &store, &config)
+            .await
+            .unwrap();
+
+        let after = index.read().await;
+        assert_eq!(
+            after.total_blocks(),
+            1,
+            "three small trace blocks should merge into one"
+        );
+        let merged = &after.blocks[0];
+        assert_eq!(merged.signal_type, SignalType::Traces);
+        assert_eq!(merged.row_count, 9, "every span must survive the merge");
+
+        // And the merged block must still be readable.
+        let spans = Scanner::scan_traces(vec![merged.clone()], 0, i64::MAX, 1000)
+            .await
+            .unwrap();
+        assert_eq!(spans.len(), 9, "merged trace block must decode");
+    }
+
+    /// Compaction used to write an empty label-value dictionary, so merging
+    /// silently destroyed the flush-time index that label-value autocomplete
+    /// reads from metadata instead of decoding blocks. Every compaction pass
+    /// degraded it.
+    #[tokio::test]
+    async fn test_compaction_preserves_label_values() {
+        let dir = tempdir().unwrap();
+        let config = BlockConfig {
+            data_dir: dir.path().to_path_buf(),
+            compression: "uncompressed".into(),
+            ..Default::default()
+        };
+        let store = Arc::new(BlockIndexStore::at_path(dir.path().join("index.json")));
+
+        let mut index = BlockIndex::new(dir.path());
+        for b in 0..2i64 {
+            let m = Metric {
+                name: "cpu".into(),
+                kind: MetricKind::Gauge,
+                data_points: vec![DataPoint::new(
+                    b + 1,
+                    MetricValue::Double(1.0),
+                    LabelSet::try_from_iter(vec![("host", format!("h{b}"))]).unwrap(),
+                )
+                .unwrap()],
+                ..Default::default()
+            };
+            let path = dir.path().join(format!("m{b}.parquet"));
+            write_metrics_parquet(&path, std::slice::from_ref(&m));
+            let mut meta = BlockMetadata {
+                path,
+                start_timestamp_ns: b + 1,
+                end_timestamp_ns: b + 1,
+                row_count: 1,
+                size_bytes: 0,
+                metric_names: HashSet::from(["cpu".to_string()]),
+                label_names: HashSet::from(["host".to_string()]),
+                label_values: BTreeMap::from([(
+                    "host".to_string(),
+                    BTreeSet::from([format!("h{b}")]),
+                )]),
+                signal_type: SignalType::Metrics,
+            };
+            meta.size_bytes = fs::metadata(&meta.path).map(|m| m.len()).unwrap_or(0);
+            index.add(meta);
+        }
+        let index = Arc::new(RwLock::new(index));
+
+        Compactor::compact_once(&index, &store, &config)
+            .await
+            .unwrap();
+
+        let after = index.read().await;
+        assert_eq!(after.total_blocks(), 1, "blocks should have merged");
+        let hosts = &after.blocks[0].label_values["host"];
+        assert_eq!(
+            hosts.len(),
+            2,
+            "the merged block must carry both hosts' values, not an empty dictionary"
+        );
+        assert!(hosts.contains("h0") && hosts.contains("h1"));
     }
 
     #[tokio::test]

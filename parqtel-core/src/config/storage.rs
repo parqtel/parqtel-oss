@@ -26,10 +26,31 @@ pub struct BlockConfig {
     pub compaction_interval_secs: u64,
     /// Number of rows per row group in Parquet files.
     pub row_group_size: usize,
+    /// Maximum number of source blocks merged into one compacted block.
+    ///
+    /// Derived from block size rather than fixed: merging too few leaves the
+    /// small-block population growing faster than compaction removes it, and
+    /// merging too many makes one cycle's cost unbounded.
+    #[serde(default = "default_compaction_max_merge_blocks")]
+    pub compaction_max_merge_blocks: usize,
+    /// Maximum number of merges a single compaction cycle performs.
+    ///
+    /// Bounds the work (and the disk I/O) one cycle can do, so compaction
+    /// cannot monopolise the disk on a busy cluster.
+    #[serde(default = "default_compaction_max_merges_per_pass")]
+    pub compaction_max_merges_per_pass: usize,
 }
 
 fn default_backend() -> String {
     "parquet".into()
+}
+
+fn default_compaction_max_merge_blocks() -> usize {
+    12
+}
+
+fn default_compaction_max_merges_per_pass() -> usize {
+    8
 }
 
 impl Default for BlockConfig {
@@ -44,6 +65,8 @@ impl Default for BlockConfig {
             retention_days: 7,
             compaction_interval_secs: 3600,
             row_group_size: 100_000,
+            compaction_max_merge_blocks: default_compaction_max_merge_blocks(),
+            compaction_max_merges_per_pass: default_compaction_max_merges_per_pass(),
         }
     }
 }
@@ -117,6 +140,12 @@ pub struct LogBlockConfig {
     pub compaction_interval_secs: u64,
     /// Number of rows per row group in Parquet files.
     pub row_group_size: usize,
+    /// Maximum number of source blocks merged into one compacted block.
+    #[serde(default = "default_compaction_max_merge_blocks")]
+    pub compaction_max_merge_blocks: usize,
+    /// Maximum number of merges a single compaction cycle performs.
+    #[serde(default = "default_compaction_max_merges_per_pass")]
+    pub compaction_max_merges_per_pass: usize,
 }
 
 impl Default for LogBlockConfig {
@@ -130,6 +159,8 @@ impl Default for LogBlockConfig {
             retention_days: 3,
             compaction_interval_secs: 3600,
             row_group_size: 20_000,
+            compaction_max_merge_blocks: default_compaction_max_merge_blocks(),
+            compaction_max_merges_per_pass: default_compaction_max_merges_per_pass(),
         }
     }
 }
@@ -146,6 +177,8 @@ impl From<LogBlockConfig> for BlockConfig {
             retention_days: log.retention_days,
             compaction_interval_secs: log.compaction_interval_secs,
             row_group_size: log.row_group_size,
+            compaction_max_merge_blocks: log.compaction_max_merge_blocks,
+            compaction_max_merges_per_pass: log.compaction_max_merges_per_pass,
         }
     }
 }

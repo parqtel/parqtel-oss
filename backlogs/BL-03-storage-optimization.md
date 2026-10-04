@@ -207,7 +207,7 @@ let reader = reader_builder.build()?;
 
 ---
 
-## BL-03-09 (M) — Compaction is a full decode→re-encode with fixed, small merge limits and one merge per signal per pass
+## BL-03-09 (M, partly landed) — Compaction is a full decode→re-encode with fixed, small merge limits and one merge per signal per pass
 
 **Evidence** — `compactor.rs:55-113` (`compact_once`) merges blocks with `row_count < 10000`, up to **8** at a time (`:71`), via full row decode (`read_source_blocks`, `:209-231`) and full re-encode (`write_merged`, `:256-370`). `compact_tiered` (`:117-207`) merges ≤ **12** blocks (`:174`) and then `break`s — **one merge per signal per pass** (`:202-203`). Block selection ignores adjacency for `compact_once` (it takes the first 8 small blocks from an unordered `filter`), and `write_merged` rebuilds `label_names`/`metric_names` but sets `label_values: Default::default()` (`:388`), so **compaction silently discards the label-value index** built at flush.
 
@@ -229,13 +229,28 @@ let reader = reader_builder.build()?;
 
 ---
 
-## BL-03-10 (M) — Trace compaction is skipped entirely
+## BL-03-10 (M, landed) — Trace compaction is skipped entirely
 
 **Evidence** — `compactor.rs:178-182`: for `SignalType::Traces` the tiered pass `continue`s with the comment "skip read_source_blocks (which only handles metrics/logs) and just leave them for now". `read_source_blocks` (`:209-254`) only decodes metrics (`row_to_point`) and logs (`row_to_log`); there is no `row_to_span` branch.
 
 **Gap.** Trace blocks never merge. With `retention_days = 7` for traces and a 30-minute-ish flush cadence, the trace block count grows monotonically until retention deletes them, and every trace query pays the per-block overhead (open, footer decode, page decode) across all of them. Trace search is the query most sensitive to block count because each block read also JSON-parses span attributes.
 
-**Resolution.** Add a `row_to_span` branch to `read_source_blocks` and let traces participate in both passes. Merge on `(service_name, start_time_ns)` ordering to match BL-03-07. Guard with the same row-group-size preservation the metrics path already documents (`compactor.rs:351-354`).
+**Resolution taken.** `read_source_blocks` decodes spans as a third arm
+(`StorageModel::row_to_span`), `write_merged` encodes them with
+`StorageModel::traces_to_chunk` sorted by `start_time_ns` so the merged block
+keeps the time-ordered layout row-group pruning relies on, and the tiered pass
+no longer `continue`s past traces. Both passes therefore handle all three
+signals uniformly.
+
+Row-group-size preservation is inherited: `write_merged` already applied the
+config's `row_group_size` for metrics and logs, and the trace arm goes through
+the same writer.
+
+**Acceptance.** Three small trace blocks merge into one, all spans survive and
+the merged block still decodes — pinned by `test_compactor_merges_trace_blocks`.
+
+**Still open:** trace compaction now reads all 24 span columns (BL-03-08's
+projection work).
 
 **Acceptance.** Trace block count is bounded under sustained ingest; trace search latency flat over a 7-day window rather than degrading linearly.
 
