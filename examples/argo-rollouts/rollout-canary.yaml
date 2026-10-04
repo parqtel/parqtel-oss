@@ -1,0 +1,30 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: parqtel-canary
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: parqtel-canary
+  strategy:
+    canary:
+      canaryService: parqtel-canary-canary
+      stableService: parqtel-canary-stable
+      steps:
+      - analysis:
+          templates: [parqtel-red]
+          args:
+          - name: service
+            value: demo
+      - setWeight: 100
+  template:
+    metadata:
+      labels:
+        app: parqtel-canary
+    spec:
+      containers:
+      - name: app
+        image: nginx:1.25-alpine
+        ports:
+        - containerPort: 80

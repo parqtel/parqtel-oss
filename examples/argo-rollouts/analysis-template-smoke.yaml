@@ -1,0 +1,14 @@
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: parqtel-smoke
+spec:
+  metrics:
+  - name: success-ratio
+    count: 1
+    interval: 10s
+    successCondition: "result[0] >= 0.95"
+    provider:
+      prometheus:
+        address: http://parqtel.parqtel.svc.cluster.local:8080
+        query: "canary_success_ratio{service.name=\"demo\"}"
