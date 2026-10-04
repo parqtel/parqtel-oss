@@ -13,6 +13,89 @@ build cannot reach a registry or the release page.
 
 Nothing yet.
 
+## [0.3.0]
+
+Second public beta.
+
+### Features
+
+- **Built-in alert preset packs.** Five ready-made packs — kubernetes-cluster,
+  coredns, external-secrets, service-red and parqtel-self — are embedded in the
+  binary at compile time and activated by `[alerts.presets]`
+  (`mode = auto|all|off`, default `auto`; `include` wins over `exclude` with a
+  warning). Activation is insert-if-absent, so user rules from `rules_dir` and
+  API disables/deletes always win.
+- **MCP live tools.** The `parqtel-mcp-parqtel` server now serves live data
+  through real tools — PromQL (instant, absolute range, or trailing window),
+  label discovery, logs, ingest rates, alerts, noise statistics and topology —
+  instead of echoing parameters back. The MCP framework gains a spec-compliant
+  Streamable HTTP transport (`POST/GET/DELETE /mcp`), with the legacy
+  `/tools/*` routes kept as deprecated aliases.
+- **Overview console.** The Overview pane is rebuilt around live signal
+  rollups.
+- **OpenTelemetry self-telemetry.** `parqtel-server` exports its own traces
+  and SLI metrics (HTTP golden signals, ingest throughput, flush
+  duration/rows, buffer saturation, RSS high-water mark) over OTLP, with
+  CPU profiling endpoints under `/debug/pprof`. Configured by `telemetry.*`;
+  the parqtel-self preset pack alerts on it.
+
+### Fixes
+
+- **The AST evaluator miscounted series and ignored result limits.**
+  `execute_ast` counted one series per *point* and applied no limits, so
+  `query.max_series` and `query.max_samples_per_series` were silently ignored
+  for nested range selectors and most composed PromQL. It now groups points by
+  fingerprint first and evaluates matchers once per distinct label set, so
+  both query engines report the same `total_series_count` under the same
+  configured memory bound.
+- **`min()` folded the same value twice** — the fold was re-evaluated to
+  produce the value it had just computed.
+- **`/api/v1/label/:name/values` missed buffered series.** The in-memory
+  buffer is now included.
+- **gRPC and HTTP disagreed on batch size.** tonic's 4 MiB default beat
+  `ingest.max_body_size` (10 MiB), so a batch that succeeded over HTTP failed
+  over gRPC with an opaque `ResourceExhausted`. gRPC message limits are now
+  derived from `ingest.max_body_size`.
+- **Alerts evaluated over a hardcoded 300 s window.** They now use
+  `query.lookback_delta_ns`, the same window an operator sees in the UI.
+- **The documented `PARQTEL__SECTION__KEY` env spelling was silently
+  ignored.** `Env::prefixed("PARQTEL_")` left an empty first key segment, so
+  every env example in the docs had no effect; the double-underscore form now
+  works (single-underscore still does).
+- **MCP label matchers rejected dotted label names** via the percent-encoded
+  path segment.
+- **The metrics UI timeline** was corrected.
+- **`compose/parqtel/Dockerfile.dev` never copied `rules/`**, so the dev image
+  could not build once the preset packs were embedded.
+
+### Configuration
+
+New options: `storage.compression_level` and `logs.compression_level` (zstd
+1–22, one shared resolver for the block writers and the compactor),
+`[alerts.presets]` (`mode`, `include`, `exclude`), and `telemetry.*`
+(OTLP export and profiling). Config validation now rejects a `row_group_size`
+of 0 or above `max_rows_per_block` — a combination that silently disabled
+row-group pruning. See
+[docs/CONFIGURATION.md](docs/CONFIGURATION.md).
+
+### Security
+
+- Dropped vulnerable `protobuf` 2.x and `quick-xml` from the pprof feature
+  set.
+
+### Documentation
+
+- [Argo Rollouts integration guide](docs/ARGO_ROLLOUTS.md) with runnable
+  AnalysisTemplate and canary Rollout examples.
+- [PQL guide](docs/PQL_GUIDE.md).
+- Internal working documents pruned; user documentation refreshed against the
+  current build.
+
+### Community
+
+- CODEOWNERS, dependabot, issue and PR templates, SECURITY.md, SUPPORT.md and
+  an OSSF Scorecard workflow.
+
 ## [0.2.0]
 
 Initial public beta.
@@ -134,6 +217,7 @@ each. They are recorded deliberately rather than left to be discovered.
 
 - Initial internal release.
 
-[Unreleased]: https://github.com/parqtel/parqtel-oss/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/parqtel/parqtel-oss/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/parqtel/parqtel-oss/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/parqtel/parqtel-oss/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/parqtel/parqtel-oss/releases/tag/v0.1.0
