@@ -208,6 +208,22 @@ impl BlockRotator {
     /// task, so the triggering request is acknowledged as soon as the WAL has
     /// its rows. Durability is not weakened — the WAL append already happened.
     pub fn start_flush_worker(&self, max_in_flight: usize) {
+        // The worker's whole contract is "the rows are already in the WAL, so
+        // nothing is lost if this process dies before the encode lands". With no
+        // WAL that contract is void, and running the worker would silently
+        // acknowledge data that cannot be recovered.
+        //
+        // So refuse: leave the channel unset and let `flush_locked` take the
+        // synchronous path, which is still acknowledged only once the block is
+        // on disk. Degrading to the safe behaviour beats silently weakening
+        // durability, and `wal_enabled = false` remains a legitimate operator
+        // choice - just not one that can also have a background flush.
+        if self.wal.is_none() {
+            tracing::warn!(
+                "metrics WAL is disabled; flushing synchronously so a request is never acknowledged before its data is recoverable"
+            );
+            return;
+        }
         if self
             .flush_tx
             .lock()
@@ -1702,6 +1718,62 @@ mod tests {
                     .count()
             })
             .unwrap_or(0)
+    }
+
+    /// Without a WAL the worker must refuse to start.
+    ///
+    /// Its contract is "the rows are already logged, so nothing is lost if this
+    /// process dies before the encode lands". With no WAL that is void, and
+    /// running it would silently acknowledge unrecoverable data. So the channel
+    /// stays unset and `flush_locked` takes the synchronous path - still
+    /// acknowledged only once the block is on disk.
+    #[tokio::test]
+    async fn test_flush_worker_refuses_to_start_without_a_wal() {
+        let dir = tempdir().unwrap();
+        let (tx, rx) = mpsc::unbounded_channel::<PendingIndex>();
+        let _index = spawn_index_task(rx);
+        let rotator = BlockRotator::with_shards(tiny_metrics_config(dir.path()), tx, 2);
+        rotator.start_flush_worker(4);
+
+        assert!(
+            rotator.flush_tx.lock().unwrap().is_none(),
+            "no worker may be started without a WAL"
+        );
+
+        // And a flush is therefore synchronous: the block exists by the time it
+        // returns, with no waiting for a background task.
+        rotator.push(metric_named("nowal", 1), None).await.unwrap();
+        rotator.flush(None).await.unwrap();
+        assert!(
+            block_file_count(dir.path()) >= 1,
+            "the flush must have written its block before returning"
+        );
+    }
+
+    /// With a WAL the worker does start, and a flush is scheduled rather than
+    /// encoded inline.
+    #[tokio::test]
+    async fn test_flush_worker_starts_with_a_wal() {
+        let dir = tempdir().unwrap();
+        let (tx, rx) = mpsc::unbounded_channel::<PendingIndex>();
+        let _index = spawn_index_task(rx);
+        let wal = WalWriter::open_with_segment_limit(
+            dir.path(),
+            "metrics",
+            WalSyncMode::Always,
+            Duration::from_millis(0),
+            64 * 1024 * 1024,
+        )
+        .unwrap();
+        let _ = &wal;
+        let rotator =
+            BlockRotator::with_shards(tiny_metrics_config(dir.path()), tx, 2).with_wal(wal);
+        rotator.start_flush_worker(4);
+        assert!(
+            rotator.flush_tx.lock().unwrap().is_some(),
+            "the worker must start when a WAL is attached"
+        );
+        rotator.stop_flush_worker().await;
     }
 
     /// A minimal span, for the WAL tests.
