@@ -1,0 +1,22 @@
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: parqtel-red
+spec:
+  args:
+  - name: service
+  metrics:
+  - name: error-rate
+    initialDelay: 1m
+    interval: 30s
+    count: 10
+    failureLimit: 1
+    successCondition: "result[0] < 0.01"
+    failureCondition: "result[0] > 0.05"
+    provider:
+      prometheus:
+        address: http://parqtel.parqtel.svc.cluster.local:8080
+        query: |
+          sum(sum_over_time(traces_service_errors_total{service.name="{{args.service}}"}[5m]))
+          /
+          sum(sum_over_time(traces_service_requests_total{service.name="{{args.service}}"}[5m]))
