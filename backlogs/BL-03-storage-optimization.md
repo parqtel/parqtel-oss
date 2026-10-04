@@ -1102,6 +1102,92 @@ item first.
 
 ---
 
+## BL-03-16 (CRITICAL, open — data loss) — Block index is not durable before the WAL commits
+
+**Status: open. Reproduced on unmodified `main` (`c4c60d6`).** Found while
+implementing `BL-01-14`; it is not caused by that work.
+
+**Reproduction.** A metrics block large enough to flush, then `SIGKILL`
+immediately after the flush reports completion:
+
+```
+at kill      : ingested=64000  flushed=60000  blocks=3
+after restart: blocks=0  rows=0
+parquet files on disk: 3      index.json: absent
+```
+
+Sixty thousand acknowledged points are on disk as three Parquet files and
+invisible to every query, and nothing replays them.
+
+**Cause.** The ordering between the block write, the index sidecar and the WAL
+commit is wrong:
+
+| step | what happens |
+|---|---|
+| 1 | block written and renamed — the bytes are durable |
+| 2 | metadata published to the index task, which marks the sidecar dirty |
+| 3 | **WAL committed** — those rows are now considered recovered |
+| 4 | sidecar written, on a **2 s debounce** (`index_persist_interval_secs`) |
+
+A crash between 3 and 4 leaves the block on disk, absent from the sidecar, and
+already committed in the WAL — so replay skips it and no query can find it. The
+window is as wide as the index debounce, and #44 introduced the debounce while
+#58 introduced the commit. Neither was wrong alone; together they lose data.
+
+**Fix.** The index must be durable *before* the WAL is committed. That needs a
+handshake, because the flush path and the index task are different components:
+
+1. `run_flush_job` publishes the metadata, then waits for the index to confirm
+   the sidecar write completed, and only then commits the WAL. The index task
+   already owns persistence; it can acknowledge after a forced write rather
+   than waiting for the debounce.
+2. Preferably *also* make the sidecar self-healing: on startup, if the sidecar
+   is missing or older than the newest block file, rebuild it by reading the
+   block footers. That removes the ordering requirement entirely and also
+   recovers from any other way the index can be lost.
+
+While this is open, `parqtel_index_sidecar_bytes` and
+`parqtel_index_pending_writes` are the metrics to watch: a non-zero
+`pending_writes` that never returns to 0 means blocks exist that the sidecar
+does not yet know about.
+
+**Acceptance.** The reproduction above must show `blocks=3 rows=60000` after
+the `SIGKILL`, with the sidecar present. Until then, a crash can lose
+acknowledged data, which is the one guarantee a WAL exists to provide.
+
+**Effort** M · **Risk** Medium
+
+---
+
+## BL-03-17 (H, open) — Effective HTTP body limit is ~2 MiB, not `ingest.max_body_size`
+
+**Status: open. Reproduced on `main`.**
+
+`ingest.max_body_size` defaults to 10 MiB and is applied with
+`RequestBodyLimitLayer`, but axum's `DefaultBodyLimit` (2 MiB) wins, so larger
+batches are rejected:
+
+```
+payload 2033672 bytes ( 1.94 MiB) -> HTTP 200
+payload 2259632 bytes ( 2.15 MiB) -> HTTP 413
+```
+
+**Why it matters.** An operator who raises `max_body_size` to accept larger
+OTLP batches will see no change and a `413` from `RequestBodyLimitLayer`, with
+nothing pointing at the real limit. It also caps ingest throughput, since
+throughput is batch-size-limited.
+
+**Fix.** Remove `DefaultBodyLimit` (or set it above the configured value) on
+the ingest routes so `ingest.max_body_size` is authoritative, and state the
+effective limit in the 413 body.
+
+**Acceptance.** A payload of `max_body_size + 1` is rejected with a message
+naming `max_body_size`; a payload just under it is accepted.
+
+**Effort** S · **Risk** Low
+
+---
+
 ## BL-03-13 (L) — Schema and writer hygiene
 
 | # | Gap | Evidence | Resolution |
