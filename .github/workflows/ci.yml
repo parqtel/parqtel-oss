@@ -67,7 +67,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 8
     needs: changes
-    if: needs.changes.outputs.rust == 'true' || github.event_name == 'push'
+    # Always run on pull_request: these are required checks, and a skipped
+    # required check is never satisfied, so a docs-only PR would be
+    # unmergeable. The path filter only skips work on pushes to main.
+    if: needs.changes.outputs.rust == 'true' || github.event_name != 'pull_request'
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/setup-rust
@@ -94,7 +97,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     needs: changes
-    if: needs.changes.outputs.rust == 'true' || github.event_name == 'push'
+    # Always run on pull_request: these are required checks, and a skipped
+    # required check is never satisfied, so a docs-only PR would be
+    # unmergeable. The path filter only skips work on pushes to main.
+    if: needs.changes.outputs.rust == 'true' || github.event_name != 'pull_request'
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/setup-rust
@@ -109,7 +115,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 8
     needs: changes
-    if: needs.changes.outputs.rust == 'true' || github.event_name == 'push'
+    # Always run on pull_request: these are required checks, and a skipped
+    # required check is never satisfied, so a docs-only PR would be
+    # unmergeable. The path filter only skips work on pushes to main.
+    if: needs.changes.outputs.rust == 'true' || github.event_name != 'pull_request'
     strategy:
       fail-fast: false
       matrix:
@@ -129,7 +138,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 8
     needs: changes
-    if: needs.changes.outputs.rust == 'true' || github.event_name == 'push'
+    # Always run on pull_request: these are required checks, and a skipped
+    # required check is never satisfied, so a docs-only PR would be
+    # unmergeable. The path filter only skips work on pushes to main.
+    if: needs.changes.outputs.rust == 'true' || github.event_name != 'pull_request'
     permissions:
       contents: read
       actions: read
@@ -164,7 +176,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     needs: changes
-    if: needs.changes.outputs.helm == 'true' || github.event_name == 'push'
+    # Required check - see the note on the rust-gated jobs above.
+    if: needs.changes.outputs.helm == 'true' || github.event_name != 'pull_request'
     steps:
       - uses: actions/checkout@v4
       - uses: azure/setup-helm@v4
@@ -185,14 +198,15 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     needs: [changes, lint, test]
-    # Heavy job: skip entirely for docs/chart-only PRs. Runs after lint/test
-    # pass so we never spend 15 build minutes on a commit that already failed
-    # CI ('skipped' is accepted because docs-only PRs skip lint/test).
+    # Heavy job, and a required check. Runs after lint/test so we never spend
+    # build minutes on a commit that already failed CI. The path filter only
+    # skips it on pushes to main; on a pull_request it always runs, because a
+    # skipped required check is never satisfied.
     if: >-
       !cancelled()
       && (needs.lint.result == 'success' || needs.lint.result == 'skipped')
       && (needs.test.result == 'success' || needs.test.result == 'skipped')
-      && (needs.changes.outputs.docker == 'true' || github.event_name == 'push')
+      && (needs.changes.outputs.docker == 'true' || github.event_name != 'pull_request')
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
