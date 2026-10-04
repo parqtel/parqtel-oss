@@ -1,0 +1,126 @@
+name: Bug report
+about: Something behaves differently from what is documented
+title: "[BUG] "
+labels: bug
+assignees: ""
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report this.
+
+        **Do not report security vulnerabilities here** — see
+        https://github.com/parqtel/parqtel-oss/blob/main/SECURITY.md
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: What happens
+      description: What you observed, in one or two sentences.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected instead
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: |
+        Commands are best. An OTLP payload or a config snippet helps when the
+        problem only shows up on ingest.
+        <!-- 1. 2. 3. -->
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: workload
+    attributes:
+      label: Workload shape
+      description: Which part is affected, and at roughly what volume?
+      options:
+        - Metrics ingest
+        - Logs ingest
+        - Trace ingest
+        - Query / PromQL
+        - Log or trace search (ParqtelQL)
+        - Alerting
+        - Pipeline
+        - Console (UI)
+        - MCP
+        - Deployment or packaging
+        - Something else
+
+  - type: input
+    id: version
+    attributes:
+      label: Parqtel version
+      placeholder: v0.2.0, or `docker image ls | grep parqtel`
+    validations:
+      required: true
+
+  - type: input
+    id: deployment
+    attributes:
+      label: Deployment
+      placeholder: docker compose / Kubernetes Helm / binary / other
+    validations:
+      required: true
+
+  - type: dropdown
+    id: components
+    attributes:
+      label: Components in use
+      multiple: true
+      options:
+        - HTTP API
+        - OTLP gRPC
+        - Console
+        - Alerting
+        - MCP servers
+        - Alert preset packs
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: |
+        `docker compose logs --tail=200 parqtel-backend`, or
+        `kubectl logs -l app.kubernetes.io/name=parqtel --tail=200`.
+        Set `PARQTEL__LOG_LEVEL=debug` if the level matters.
+      render: shell
+
+  - type: textarea
+    id: metrics
+    attributes:
+      label: Relevant `/metrics` output
+      description: |
+        The counters that usually explain an ingest or query problem:
+        `parqtel_ingest_lock_wait_seconds`, `parqtel_flush_duration_seconds`,
+        `parqtel_flush_inflight`, `parqtel_index_pending_writes`,
+        `parqtel_storage_blocks`, `parqtel_query_duration_ms`.
+      render: shell
+
+  - type: textarea
+    id: config
+    attributes:
+      label: Configuration
+      description: Anything you changed from the defaults.
+      render: yaml
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I searched existing issues for this
+          required: true
+        - label: This is not a security vulnerability (those go to SECURITY.md)
+          required: true

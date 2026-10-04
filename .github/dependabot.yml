@@ -1,0 +1,43 @@
+# Keeps dependencies current. Security issues are handled through
+# SECURITY.md instead - please do not open a PR for a vulnerability.
+version: 2
+
+updates:
+  # Rust crates. Grouped so a security bump and a routine bump arrive together.
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      # Patch and minor bumps to serde/parquet/arrow/tokio and friends move together:
+      # these are released together and often need matching workspace bumps.
+      rust-patch-minor:
+        update-types:
+          - minor
+          - patch
+        exclude-types:
+          - major
+      rust-major:
+        update-types:
+          - major
+
+  # The OTLP protobuf codegen depends on protoc; the runtime does not.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "ci"
+    groups:
+      actions:
+        patterns: ["*"]
+
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: "chore(docker)"

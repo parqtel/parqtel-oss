@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Question or idea
+    url: https://github.com/parqtel/parqtel-oss/discussions
+    about: Ask a usage question, or propose an idea before opening a feature request.
+  - name: Security vulnerability
+    url: https://github.com/parqtel/parqtel-oss/blob/main/SECURITY.md
+    about: Report privately. Please do not open a public issue for a vulnerability.
+  - name: Contributing
+    url: https://github.com/parqtel/parqtel-oss/blob/main/CONTRIBUTING.md
+    about: Development setup, conventions and the PR process.
