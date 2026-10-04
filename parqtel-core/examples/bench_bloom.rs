@@ -144,11 +144,16 @@ async fn main() -> Result<()> {
         "configuration", "size", "write", "query"
     );
     let mut baseline: Option<(u64, Duration)> = None;
+    // Kept for the full-block scan below, which needs a real path.
+    let mut stats_only_path = dir.path().join("placeholder.parquet");
     for (label, stats, bloom) in configs {
         let path = dir
             .path()
             .join(format!("{}.parquet", label.replace([' ', '(', ')'], "_")));
         let write = write_block(&path, &metrics, stats, bloom)?;
+        if stats && !bloom {
+            stats_only_path = path.clone();
+        }
         let size = std::fs::metadata(&path)
             .map_err(parqtel_core::Error::Io)?
             .len();
@@ -264,6 +269,28 @@ async fn main() -> Result<()> {
     println!(
         "  speedup                   : {:.1}x",
         metric_only_best / svc_best
+    );
+
+    // Column projection: the metrics scan reads 7 of the block's 15 columns.
+    // `bench_bloom` is run twice with PARQTEL_NO_PROJECTION toggled, so the
+    // comparison is the real scan path either way.
+    let _ = &svc_metrics;
+
+    // Worst case for projection: a scan that must decode every row group, so
+    // the eight skipped columns are actually paid for. This is the shape where
+    // projection should matter most - a dashboard panel that groups many
+    // metrics, or an unindexed old block.
+    let meta_all = metadata(&stats_only_path, rows);
+    let mut wide_best = f64::MAX;
+    for _ in 0..4 {
+        let started = Instant::now();
+        let out = Scanner::scan(vec![meta_all.clone()], String::new(), 0, i64::MAX, None).await?;
+        wide_best = wide_best.min(started.elapsed().as_secs_f64());
+        assert_eq!(out.len(), rows, "a full scan returns every row");
+    }
+    println!(
+        "\nfull-block scan (no metric filter, all {rows} rows): {:.2} ms",
+        wide_best * 1e3
     );
 
     // A metric that is not in the block decodes nothing at all.
