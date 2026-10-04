@@ -992,3 +992,56 @@ encode happened inline.
 
 Pinned by `test_flush_worker_refuses_to_start_without_a_wal` and
 `test_flush_worker_starts_with_a_wal`.
+
+## Block index size: measured (`BL-03-06`)
+
+The block index sidecar carries per-block `metric_names`, `label_names` and
+`label_values`, and is re-serialised whole on every debounced pass.
+
+Measured on the load-generator stack after ~10 minutes:
+
+| | |
+|---|---|
+| blocks | 1 226 |
+| data (`storage_bytes`) | 35.6 MB — **29 064 B/block** |
+| `index.json` | 8.20 MB — **6 688 B/block** |
+| ratio | **the sidecar is 23 % of the data it describes** |
+
+Growth is linear in block count — ~32 blocks/min in that run, i.e. **~0.3 GB of
+`index.json` per day**, and unlike the data it is not bounded by retention.
+
+### Where the bytes go
+
+Per block, on a representative shape (600 series, 4 label fields):
+
+| field | bytes/block | share |
+|---|---|---|
+| `metric_names` | ~500 | **55 %** |
+| `label_values` | ~107 | 12 % |
+| `label_names` | ~57 | 6 % |
+| rest (path, sizes, timestamps) | ~243 | 27 % |
+
+`metric_names` dominates *because the same name is stored once per block* — on the
+load stack, where a block spans 50–100 distinct metric names, more so still.
+
+### Why this is recorded rather than built
+
+The fix — a per-block **bloom filter** over metric names, ~10 bits per name
+instead of a repeated string — is sound (a false positive costs one extra block
+read, never a missing result) and would cut ~55 % of a sidecar that is itself
+23 % of storage: **~13 % of total storage**.
+
+But it is a **sidecar format change** needing a read-old/write-new story, and
+the series-dictionary item is a standing reminder that this class of change can
+cost more than it returns. So the backlog now carries a measured, sized proposal
+instead of an unmeasured instruction.
+
+The low-risk half needs **no** format change: `label_values` is read only by
+`/api/v1/label/:name/values` and is rebuilt on compaction, so splitting it into
+a sibling file is straightforward.
+
+### Reproducing
+
+```bash
+curl -s localhost:9090/metrics | grep -E 'parqtel_index_sidecar_bytes|parqtel_storage_(blocks|bytes)'
+```

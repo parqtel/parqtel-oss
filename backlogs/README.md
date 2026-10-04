@@ -134,7 +134,10 @@ not size. Treat remaining size claims as unverified until measured.
 - BL-03-04 series-ID dictionary encoding for `labels` (kills per-row JSON)
 - BL-03-03 bloom filters + column/page index + data page limits
 - BL-03-07 sort row groups by `(metric_name, service_name, timestamp_ns)`; retune row-group sizes
-- BL-03-06 shrink the block index (series-dictionary sidecar instead of per-block `HashSet`s)
+- BL-03-06 index slimming — **measured**: the sidecar is 23 % of the data it
+  describes and grows ~0.3 GB/day, so the premise holds. The fix is a sidecar
+  format change worth ~13 % of storage, so it is recorded as a sized proposal
+  rather than an instruction.
 - BL-03-08 column projection at scan time
 - BL-03-09/10 real tiered compaction incl. traces
 
