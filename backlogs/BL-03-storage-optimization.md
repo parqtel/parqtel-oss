@@ -17,7 +17,46 @@ Severity: **C** Critical, **H** High, **M** Medium, **L** Low. Effort: S ≤ 2d,
 
 **Gap.** After **every** block flush the entire index — all blocks, all metric names, all label names, up to 10 000 values per label — is re-serialised to a JSON `String` in memory, written synchronously, and renamed, all while holding the `RwLock` that **every query handler** needs for `index.read()`. That is O(total_index_size) CPU + a blocking syscall pair per flush, on a tokio worker, under the write lock. As block count grows this is quadratic in the retention window, and every concurrent `/api/v1/query*` blocks for the duration.
 
-**Resolution.**
+**Resolution (core landed; ingest wiring is the next step).**
+
+`parqtel_core::wal` implements the log, with the crash-ordering contract as the
+central design decision. A flush and the WAL must agree or a crash either
+duplicates or loses data, so the sequence is:
+
+1. rows appended to the WAL, then the request acknowledged;
+2. a flush takes rows, snapshotting the WAL position it is about to cover;
+3. the block is written and renamed;
+4. the **commit file** is advanced to the snapshotted position;
+5. segments entirely below the commit are deleted.
+
+The commit file is the single source of truth and is advanced *after* the
+rename, so every crash point is safe:
+
+| crash after | result |
+|---|---|
+| (1) append | replayed, nothing on disk yet — correct |
+| (2) snapshot | replayed, no block written — correct |
+| (3) rename, before (4) | block exists but is not committed, so it is *not* in the index; the WAL still holds the rows and replay rewrites them. The orphan is invisible, so there is exactly one copy |
+| (4) commit, before (5) | rows are covered; replay skips everything at or below the commit, so the leftover segments are discarded rather than duplicated |
+
+Advancing the commit *before* the rename would instead be able to lose a
+block, which is the one failure a WAL exists to prevent.
+
+Framing is `[u32 len][u32 CRC32][JSON payload]`, with segments named
+`%020d.wal` so lexical order is sequence order. Positions are
+`(segment << 32) | (offset + 1)` — **1-based**, because a 0-based first record
+would collide with `START` and be silently skipped on replay. That was a real
+bug caught by the round-trip test.
+
+Twelve unit tests cover: ordered positions, round trip, commit-point skipping,
+covered-segment deletion, torn-tail recovery and truncation, bad-CRC handling,
+segment reuse across restart, commit persistence, writer poisoning, CRC
+sensitivity, and record preservation across segment rollover.
+
+Still to do: append on the ingest path, startup replay before serving,
+`/api/v1/stats` exposure, and the sync-mode/size configuration knobs.
+
+**Resolution (original plan).**
 - Mark the index dirty and persist on a **debounce** (1–2 s) or on shutdown, doing the `to_string` + write inside `spawn_blocking`.
 - Better: replace the JSON sidecar with an **append-only log** (one `serde_json` line per block add/remove), compacted periodically — O(1) per flush.
 - Never hold the index write lock across persistence: take the lock only to mutate the in-memory `Vec`, clone out what needs writing, release, then write.
@@ -39,7 +78,46 @@ Severity: **C** Critical, **H** High, **M** Medium, **L** Low. Effort: S ≤ 2d,
 
 **Gap.** Tokio's multi-threaded runtime has no preemption for synchronous work. A worker stuck in `ArrowWriter::close()` cannot poll any other task assigned to it, so **every** request multiplexed on that worker stalls — not just storage endpoints. On the default `compaction_interval_secs = 3600` (`config/storage.rs:39`) the cycle decodes and re-encodes up to 8 small blocks (or 12 in the tiered pass), potentially many seconds, while holding the write lock that every query needs.
 
-**Resolution.**
+**Resolution (core landed; ingest wiring is the next step).**
+
+`parqtel_core::wal` implements the log, with the crash-ordering contract as the
+central design decision. A flush and the WAL must agree or a crash either
+duplicates or loses data, so the sequence is:
+
+1. rows appended to the WAL, then the request acknowledged;
+2. a flush takes rows, snapshotting the WAL position it is about to cover;
+3. the block is written and renamed;
+4. the **commit file** is advanced to the snapshotted position;
+5. segments entirely below the commit are deleted.
+
+The commit file is the single source of truth and is advanced *after* the
+rename, so every crash point is safe:
+
+| crash after | result |
+|---|---|
+| (1) append | replayed, nothing on disk yet — correct |
+| (2) snapshot | replayed, no block written — correct |
+| (3) rename, before (4) | block exists but is not committed, so it is *not* in the index; the WAL still holds the rows and replay rewrites them. The orphan is invisible, so there is exactly one copy |
+| (4) commit, before (5) | rows are covered; replay skips everything at or below the commit, so the leftover segments are discarded rather than duplicated |
+
+Advancing the commit *before* the rename would instead be able to lose a
+block, which is the one failure a WAL exists to prevent.
+
+Framing is `[u32 len][u32 CRC32][JSON payload]`, with segments named
+`%020d.wal` so lexical order is sequence order. Positions are
+`(segment << 32) | (offset + 1)` — **1-based**, because a 0-based first record
+would collide with `START` and be silently skipped on replay. That was a real
+bug caught by the round-trip test.
+
+Twelve unit tests cover: ordered positions, round trip, commit-point skipping,
+covered-segment deletion, torn-tail recovery and truncation, bad-CRC handling,
+segment reuse across restart, commit persistence, writer poisoning, CRC
+sensitivity, and record preservation across segment rollover.
+
+Still to do: append on the ingest path, startup replay before serving,
+`/api/v1/stats` exposure, and the sync-mode/size configuration knobs.
+
+**Resolution (original plan).**
 - Wrap `read_source_blocks`, `write_merged` and the delete batches in `spawn_blocking` (mirroring `parqtel-ingest/src/service.rs:73`).
 - Snapshot the candidate metadata under the **read** lock, release it, do all I/O lock-free, then take the write lock only to swap the `Vec`.
 - Add a compaction concurrency limit and make the cycle resumable so an interrupted compaction does not leave orphans.
@@ -149,7 +227,46 @@ is the metric to watch if anyone wants to quantify it.
 Note also that `metric_kind` is plain `Utf8` for the same reason, and the same
 conclusion applies: Parquet already dictionary-encodes it.
 
-**Resolution.**
+**Resolution (core landed; ingest wiring is the next step).**
+
+`parqtel_core::wal` implements the log, with the crash-ordering contract as the
+central design decision. A flush and the WAL must agree or a crash either
+duplicates or loses data, so the sequence is:
+
+1. rows appended to the WAL, then the request acknowledged;
+2. a flush takes rows, snapshotting the WAL position it is about to cover;
+3. the block is written and renamed;
+4. the **commit file** is advanced to the snapshotted position;
+5. segments entirely below the commit are deleted.
+
+The commit file is the single source of truth and is advanced *after* the
+rename, so every crash point is safe:
+
+| crash after | result |
+|---|---|
+| (1) append | replayed, nothing on disk yet — correct |
+| (2) snapshot | replayed, no block written — correct |
+| (3) rename, before (4) | block exists but is not committed, so it is *not* in the index; the WAL still holds the rows and replay rewrites them. The orphan is invisible, so there is exactly one copy |
+| (4) commit, before (5) | rows are covered; replay skips everything at or below the commit, so the leftover segments are discarded rather than duplicated |
+
+Advancing the commit *before* the rename would instead be able to lose a
+block, which is the one failure a WAL exists to prevent.
+
+Framing is `[u32 len][u32 CRC32][JSON payload]`, with segments named
+`%020d.wal` so lexical order is sequence order. Positions are
+`(segment << 32) | (offset + 1)` — **1-based**, because a 0-based first record
+would collide with `START` and be silently skipped on replay. That was a real
+bug caught by the round-trip test.
+
+Twelve unit tests cover: ordered positions, round trip, commit-point skipping,
+covered-segment deletion, torn-tail recovery and truncation, bad-CRC handling,
+segment reuse across restart, commit persistence, writer poisoning, CRC
+sensitivity, and record preservation across segment rollover.
+
+Still to do: append on the ingest path, startup replay before serving,
+`/api/v1/stats` exposure, and the sync-mode/size configuration knobs.
+
+**Resolution (original plan).**
 - Introduce a **series dictionary**: intern each distinct label set to a `u32 series_id` (from the same interner as BL-01-02), store `series_id` as `DataType::UInt32` (or `Dictionary(Int32, UInt32)`), and keep a per-block side table mapping `series_id → labels JSON`.
 - Equivalently, make `labels` a `Dictionary(Int32, Utf8)` column so Parquet dictionary-encodes it — cheaper to implement, smaller win, no side table.
 - Prefer the full series-id design; fall back to dictionary-encoding if the side-table complexity is not worth it in one step.
@@ -174,7 +291,46 @@ Validation lives separately in `parqtel-core/src/config/mod.rs:50-62` against `[
 
 **Gap.** zstd at the library default is a size-first choice applied to the hot write path. Level 1 is typically 3–5× faster to encode with a modest size penalty — the right default for blocks written every 30–300 s (BL-01-04). Conversely, compacted cold data (24 h tier, `compactor.rs:120`) is written with the same setting even though it is read rarely and benefits from a higher level. The duplication also means a config typo validated in one place can behave differently in the other.
 
-**Resolution.**
+**Resolution (core landed; ingest wiring is the next step).**
+
+`parqtel_core::wal` implements the log, with the crash-ordering contract as the
+central design decision. A flush and the WAL must agree or a crash either
+duplicates or loses data, so the sequence is:
+
+1. rows appended to the WAL, then the request acknowledged;
+2. a flush takes rows, snapshotting the WAL position it is about to cover;
+3. the block is written and renamed;
+4. the **commit file** is advanced to the snapshotted position;
+5. segments entirely below the commit are deleted.
+
+The commit file is the single source of truth and is advanced *after* the
+rename, so every crash point is safe:
+
+| crash after | result |
+|---|---|
+| (1) append | replayed, nothing on disk yet — correct |
+| (2) snapshot | replayed, no block written — correct |
+| (3) rename, before (4) | block exists but is not committed, so it is *not* in the index; the WAL still holds the rows and replay rewrites them. The orphan is invisible, so there is exactly one copy |
+| (4) commit, before (5) | rows are covered; replay skips everything at or below the commit, so the leftover segments are discarded rather than duplicated |
+
+Advancing the commit *before* the rename would instead be able to lose a
+block, which is the one failure a WAL exists to prevent.
+
+Framing is `[u32 len][u32 CRC32][JSON payload]`, with segments named
+`%020d.wal` so lexical order is sequence order. Positions are
+`(segment << 32) | (offset + 1)` — **1-based**, because a 0-based first record
+would collide with `START` and be silently skipped on replay. That was a real
+bug caught by the round-trip test.
+
+Twelve unit tests cover: ordered positions, round trip, commit-point skipping,
+covered-segment deletion, torn-tail recovery and truncation, bad-CRC handling,
+segment reuse across restart, commit persistence, writer poisoning, CRC
+sensitivity, and record preservation across segment rollover.
+
+Still to do: append on the ingest path, startup replay before serving,
+`/api/v1/stats` exposure, and the sync-mode/size configuration knobs.
+
+**Resolution (original plan).**
 - Add `compression_level: Option<i32>` to `BlockConfig`/`LogBlockConfig`; single shared `fn compression_from_config(&str, Option<i32>) -> Compression` used by both the writer and the compactor.
 - Tier-aware policy: fast codec/level for fresh blocks, high level for compacted tiers (pairs with BL-03-09).
 - Make codec an enum rather than a string; keep string parsing at the config boundary only.
@@ -191,7 +347,46 @@ Validation lives separately in `parqtel-core/src/config/mod.rs:50-62` against `[
 
 **Gap.** A 30-day retention at, say, 300 blocks/signal with 50 label fields at 10 000 values each produces an index measured in hundreds of MB — serialised in full on **every flush** (BL-03-01). Per-block `HashSet<String>` of metric names also duplicates information that is trivially derivable from the block's Parquet dictionary page.
 
-**Resolution.**
+**Resolution (core landed; ingest wiring is the next step).**
+
+`parqtel_core::wal` implements the log, with the crash-ordering contract as the
+central design decision. A flush and the WAL must agree or a crash either
+duplicates or loses data, so the sequence is:
+
+1. rows appended to the WAL, then the request acknowledged;
+2. a flush takes rows, snapshotting the WAL position it is about to cover;
+3. the block is written and renamed;
+4. the **commit file** is advanced to the snapshotted position;
+5. segments entirely below the commit are deleted.
+
+The commit file is the single source of truth and is advanced *after* the
+rename, so every crash point is safe:
+
+| crash after | result |
+|---|---|
+| (1) append | replayed, nothing on disk yet — correct |
+| (2) snapshot | replayed, no block written — correct |
+| (3) rename, before (4) | block exists but is not committed, so it is *not* in the index; the WAL still holds the rows and replay rewrites them. The orphan is invisible, so there is exactly one copy |
+| (4) commit, before (5) | rows are covered; replay skips everything at or below the commit, so the leftover segments are discarded rather than duplicated |
+
+Advancing the commit *before* the rename would instead be able to lose a
+block, which is the one failure a WAL exists to prevent.
+
+Framing is `[u32 len][u32 CRC32][JSON payload]`, with segments named
+`%020d.wal` so lexical order is sequence order. Positions are
+`(segment << 32) | (offset + 1)` — **1-based**, because a 0-based first record
+would collide with `START` and be silently skipped on replay. That was a real
+bug caught by the round-trip test.
+
+Twelve unit tests cover: ordered positions, round trip, commit-point skipping,
+covered-segment deletion, torn-tail recovery and truncation, bad-CRC handling,
+segment reuse across restart, commit persistence, writer poisoning, CRC
+sensitivity, and record preservation across segment rollover.
+
+Still to do: append on the ingest path, startup replay before serving,
+`/api/v1/stats` exposure, and the sync-mode/size configuration knobs.
+
+**Resolution (original plan).**
 - Replace per-block `metric_names`/`label_names` with a compact **series-dictionary side table**: one global `series_id → {metric, labels}` map plus a per-block `Vec<u32>` of the series it contains (falls out of BL-03-04).
 - Keep `label_values` only in a **separate**, independently-loaded autocomplete structure with its own cap and eviction, not in the hot `index.json`.
 - Persist the autocomplete structure lazily (it is rebuilt from blocks if lost) — `/api/v1/label/:name/values` already merges with the memory buffer (`buffer.rs:196-207`).
@@ -213,7 +408,46 @@ Validation lives separately in `parqtel-core/src/config/mod.rs:50-62` against `[
 
 **Gap.** With a single global time ordering, a query for one metric in one service must decode a row group that also holds every other metric and every other service. At 100k rows per group, that is up to 100 000 rows decoded (and their label JSON parsed) to serve a handful of points. Metric names are already dictionary columns and service names are dictionary columns — sorting by them first costs nothing at write time and would make row-group pruning two-dimensional. The 100 000-row default is also coarse: it is 100 000 rows of decode work per group before pruning can help.
 
-**Resolution.**
+**Resolution (core landed; ingest wiring is the next step).**
+
+`parqtel_core::wal` implements the log, with the crash-ordering contract as the
+central design decision. A flush and the WAL must agree or a crash either
+duplicates or loses data, so the sequence is:
+
+1. rows appended to the WAL, then the request acknowledged;
+2. a flush takes rows, snapshotting the WAL position it is about to cover;
+3. the block is written and renamed;
+4. the **commit file** is advanced to the snapshotted position;
+5. segments entirely below the commit are deleted.
+
+The commit file is the single source of truth and is advanced *after* the
+rename, so every crash point is safe:
+
+| crash after | result |
+|---|---|
+| (1) append | replayed, nothing on disk yet — correct |
+| (2) snapshot | replayed, no block written — correct |
+| (3) rename, before (4) | block exists but is not committed, so it is *not* in the index; the WAL still holds the rows and replay rewrites them. The orphan is invisible, so there is exactly one copy |
+| (4) commit, before (5) | rows are covered; replay skips everything at or below the commit, so the leftover segments are discarded rather than duplicated |
+
+Advancing the commit *before* the rename would instead be able to lose a
+block, which is the one failure a WAL exists to prevent.
+
+Framing is `[u32 len][u32 CRC32][JSON payload]`, with segments named
+`%020d.wal` so lexical order is sequence order. Positions are
+`(segment << 32) | (offset + 1)` — **1-based**, because a 0-based first record
+would collide with `START` and be silently skipped on replay. That was a real
+bug caught by the round-trip test.
+
+Twelve unit tests cover: ordered positions, round trip, commit-point skipping,
+covered-segment deletion, torn-tail recovery and truncation, bad-CRC handling,
+segment reuse across restart, commit persistence, writer poisoning, CRC
+sensitivity, and record preservation across segment rollover.
+
+Still to do: append on the ingest path, startup replay before serving,
+`/api/v1/stats` exposure, and the sync-mode/size configuration knobs.
+
+**Resolution (original plan).**
 - Sort rows at flush by `(metric_name, service_name, timestamp_ns)` — for metrics; `(service_name, severity, timestamp_ns)` or just `(service_name, timestamp_ns)` for logs; traces already keyed by `start_time_ns`.
 - Extend `row_groups_in_range` into a `row_groups_matching(metadata, ts_column, start, end, name_column, name)` that intersects **both** the timestamp and the metric/service dictionary statistics.
 - Retune `row_group_size` defaults downward (25k–50k metrics, 5k–10k logs) once ordering is in place; document the trade-off (more row groups → more footer/metadata bytes).
@@ -235,7 +469,46 @@ let reader = reader_builder.build()?;
 
 **Gap.** For a `resource_attributes` selection over metrics, columns 4–10 (six dictionary columns) and `value_complex` are decoded for nothing. For trace search, `events`, `links`, `trace_state`, `status_message` are decoded per span and then JSON-parsed by `row_to_span` (`scanner.rs:490-503`) even when the caller only filters on service/operation.
 
-**Resolution.** Project explicitly per signal and per query shape: metrics scan → `[0,1,3,11,12,13,14]`; log count/volume path → `[0, severity, attributes, resource_attributes]`; trace filter-only path → defer `row_to_span` entirely and filter on the cheap columns, materialising full spans only for rows that pass (this also fixes the asymmetry noted in BL-02-12). Add a `Projection` parameter to the scanner entry points.
+**Resolution (core landed; ingest wiring is the next step).**
+
+`parqtel_core::wal` implements the log, with the crash-ordering contract as the
+central design decision. A flush and the WAL must agree or a crash either
+duplicates or loses data, so the sequence is:
+
+1. rows appended to the WAL, then the request acknowledged;
+2. a flush takes rows, snapshotting the WAL position it is about to cover;
+3. the block is written and renamed;
+4. the **commit file** is advanced to the snapshotted position;
+5. segments entirely below the commit are deleted.
+
+The commit file is the single source of truth and is advanced *after* the
+rename, so every crash point is safe:
+
+| crash after | result |
+|---|---|
+| (1) append | replayed, nothing on disk yet — correct |
+| (2) snapshot | replayed, no block written — correct |
+| (3) rename, before (4) | block exists but is not committed, so it is *not* in the index; the WAL still holds the rows and replay rewrites them. The orphan is invisible, so there is exactly one copy |
+| (4) commit, before (5) | rows are covered; replay skips everything at or below the commit, so the leftover segments are discarded rather than duplicated |
+
+Advancing the commit *before* the rename would instead be able to lose a
+block, which is the one failure a WAL exists to prevent.
+
+Framing is `[u32 len][u32 CRC32][JSON payload]`, with segments named
+`%020d.wal` so lexical order is sequence order. Positions are
+`(segment << 32) | (offset + 1)` — **1-based**, because a 0-based first record
+would collide with `START` and be silently skipped on replay. That was a real
+bug caught by the round-trip test.
+
+Twelve unit tests cover: ordered positions, round trip, commit-point skipping,
+covered-segment deletion, torn-tail recovery and truncation, bad-CRC handling,
+segment reuse across restart, commit persistence, writer poisoning, CRC
+sensitivity, and record preservation across segment rollover.
+
+Still to do: append on the ingest path, startup replay before serving,
+`/api/v1/stats` exposure, and the sync-mode/size configuration knobs.
+
+**Resolution (original plan).** Project explicitly per signal and per query shape: metrics scan → `[0,1,3,11,12,13,14]`; log count/volume path → `[0, severity, attributes, resource_attributes]`; trace filter-only path → defer `row_to_span` entirely and filter on the cheap columns, materialising full spans only for rows that pass (this also fixes the asymmetry noted in BL-02-12). Add a `Projection` parameter to the scanner entry points.
 
 **Acceptance.** Bytes decompressed per query reduced by ≥ 30 % on the seeded dataset for all three signals.
 
@@ -253,7 +526,46 @@ let reader = reader_builder.build()?;
 - Compaction is read-amplifying: it decodes **every column** (BL-03-08) and re-serialises labels per row (`storage/writer.rs:57`).
 - Losing `label_values` on compaction regresses label-value autocomplete for all compacted blocks — a correctness-adjacent regression hidden in a maintenance path.
 
-**Resolution.**
+**Resolution (core landed; ingest wiring is the next step).**
+
+`parqtel_core::wal` implements the log, with the crash-ordering contract as the
+central design decision. A flush and the WAL must agree or a crash either
+duplicates or loses data, so the sequence is:
+
+1. rows appended to the WAL, then the request acknowledged;
+2. a flush takes rows, snapshotting the WAL position it is about to cover;
+3. the block is written and renamed;
+4. the **commit file** is advanced to the snapshotted position;
+5. segments entirely below the commit are deleted.
+
+The commit file is the single source of truth and is advanced *after* the
+rename, so every crash point is safe:
+
+| crash after | result |
+|---|---|
+| (1) append | replayed, nothing on disk yet — correct |
+| (2) snapshot | replayed, no block written — correct |
+| (3) rename, before (4) | block exists but is not committed, so it is *not* in the index; the WAL still holds the rows and replay rewrites them. The orphan is invisible, so there is exactly one copy |
+| (4) commit, before (5) | rows are covered; replay skips everything at or below the commit, so the leftover segments are discarded rather than duplicated |
+
+Advancing the commit *before* the rename would instead be able to lose a
+block, which is the one failure a WAL exists to prevent.
+
+Framing is `[u32 len][u32 CRC32][JSON payload]`, with segments named
+`%020d.wal` so lexical order is sequence order. Positions are
+`(segment << 32) | (offset + 1)` — **1-based**, because a 0-based first record
+would collide with `START` and be silently skipped on replay. That was a real
+bug caught by the round-trip test.
+
+Twelve unit tests cover: ordered positions, round trip, commit-point skipping,
+covered-segment deletion, torn-tail recovery and truncation, bad-CRC handling,
+segment reuse across restart, commit persistence, writer poisoning, CRC
+sensitivity, and record preservation across segment rollover.
+
+Still to do: append on the ingest path, startup replay before serving,
+`/api/v1/stats` exposure, and the sync-mode/size configuration knobs.
+
+**Resolution (original plan).**
 - Drive merge limits from `max_rows_per_block` / `row_group_size` instead of literals; select **adjacent** blocks (sorted by `start_timestamp_ns`, which the index already maintains) so merged blocks stay time-contiguous and pruning stays effective.
 - Loop until no mergeable group remains, bounded by a per-cycle budget and a concurrency limit, instead of one merge per pass.
 - Carry `label_values` through the merge (union of source blocks) or rebuild from the new block's own flush-time collection.
@@ -300,7 +612,46 @@ projection work).
 
 **Gap.** Same lock-held-across-IO problem as BL-03-02, and it recurs hourly. Time-based-only retention means a high-cardinality or high-ingest deployment can fill the disk long before the retention horizon, with no back-pressure signal to the operator other than the deletion log line.
 
-**Resolution.**
+**Resolution (core landed; ingest wiring is the next step).**
+
+`parqtel_core::wal` implements the log, with the crash-ordering contract as the
+central design decision. A flush and the WAL must agree or a crash either
+duplicates or loses data, so the sequence is:
+
+1. rows appended to the WAL, then the request acknowledged;
+2. a flush takes rows, snapshotting the WAL position it is about to cover;
+3. the block is written and renamed;
+4. the **commit file** is advanced to the snapshotted position;
+5. segments entirely below the commit are deleted.
+
+The commit file is the single source of truth and is advanced *after* the
+rename, so every crash point is safe:
+
+| crash after | result |
+|---|---|
+| (1) append | replayed, nothing on disk yet — correct |
+| (2) snapshot | replayed, no block written — correct |
+| (3) rename, before (4) | block exists but is not committed, so it is *not* in the index; the WAL still holds the rows and replay rewrites them. The orphan is invisible, so there is exactly one copy |
+| (4) commit, before (5) | rows are covered; replay skips everything at or below the commit, so the leftover segments are discarded rather than duplicated |
+
+Advancing the commit *before* the rename would instead be able to lose a
+block, which is the one failure a WAL exists to prevent.
+
+Framing is `[u32 len][u32 CRC32][JSON payload]`, with segments named
+`%020d.wal` so lexical order is sequence order. Positions are
+`(segment << 32) | (offset + 1)` — **1-based**, because a 0-based first record
+would collide with `START` and be silently skipped on replay. That was a real
+bug caught by the round-trip test.
+
+Twelve unit tests cover: ordered positions, round trip, commit-point skipping,
+covered-segment deletion, torn-tail recovery and truncation, bad-CRC handling,
+segment reuse across restart, commit persistence, writer poisoning, CRC
+sensitivity, and record preservation across segment rollover.
+
+Still to do: append on the ingest path, startup replay before serving,
+`/api/v1/stats` exposure, and the sync-mode/size configuration knobs.
+
+**Resolution (original plan).**
 - Compute the deletion set under the read lock, release, delete files lock-free, then take the write lock once to remove the entries and persist.
 - Add `retention_max_bytes` (soft disk cap) alongside `retention_days`, deleting oldest-first when exceeded, with `parqtel_retention_deleted_blocks_total` and a disk-usage gauge exported.
 - Move the sweep interval into config rather than a literal (`retention.rs:14`).
@@ -312,13 +663,52 @@ projection work).
 
 ---
 
-## BL-03-12 (H) — No write-ahead log: crash loss is up to an entire block window
+## BL-03-12 (H, core landed — wiring next) — No write-ahead log: crash loss is up to an entire block window
 
 **Evidence** — `parqtel-core/src/config/ingest.rs:58` — `wal_enabled: false` by default (`log_wal_enabled: true` at `:59` is unused by this path). The buffer is drained only after a successful flush (`parqtel-ingest/src/service.rs:255-259`, `:276-280`), and blocks rotate on row count or the (effectively dead) time trigger — see BL-01-04.
 
 **Gap.** On crash or OOM-kill, everything in the memory buffer is lost. Combined with `block_duration_secs = 7200` that is potentially hours of telemetry. For an SRE tool this is the most damaging reliability gap in the backlog: the data you lose is exactly the data you wanted during the incident.
 
-**Resolution.**
+**Resolution (core landed; ingest wiring is the next step).**
+
+`parqtel_core::wal` implements the log, with the crash-ordering contract as the
+central design decision. A flush and the WAL must agree or a crash either
+duplicates or loses data, so the sequence is:
+
+1. rows appended to the WAL, then the request acknowledged;
+2. a flush takes rows, snapshotting the WAL position it is about to cover;
+3. the block is written and renamed;
+4. the **commit file** is advanced to the snapshotted position;
+5. segments entirely below the commit are deleted.
+
+The commit file is the single source of truth and is advanced *after* the
+rename, so every crash point is safe:
+
+| crash after | result |
+|---|---|
+| (1) append | replayed, nothing on disk yet — correct |
+| (2) snapshot | replayed, no block written — correct |
+| (3) rename, before (4) | block exists but is not committed, so it is *not* in the index; the WAL still holds the rows and replay rewrites them. The orphan is invisible, so there is exactly one copy |
+| (4) commit, before (5) | rows are covered; replay skips everything at or below the commit, so the leftover segments are discarded rather than duplicated |
+
+Advancing the commit *before* the rename would instead be able to lose a
+block, which is the one failure a WAL exists to prevent.
+
+Framing is `[u32 len][u32 CRC32][JSON payload]`, with segments named
+`%020d.wal` so lexical order is sequence order. Positions are
+`(segment << 32) | (offset + 1)` — **1-based**, because a 0-based first record
+would collide with `START` and be silently skipped on replay. That was a real
+bug caught by the round-trip test.
+
+Twelve unit tests cover: ordered positions, round trip, commit-point skipping,
+covered-segment deletion, torn-tail recovery and truncation, bad-CRC handling,
+segment reuse across restart, commit persistence, writer poisoning, CRC
+sensitivity, and record preservation across segment rollover.
+
+Still to do: append on the ingest path, startup replay before serving,
+`/api/v1/stats` exposure, and the sync-mode/size configuration knobs.
+
+**Resolution (original plan).**
 - Implement a WAL per signal: append decoded points/records to a length-prefixed, CRC-checked segment file on the blocking pool (batched, not per point); on startup replay and re-ingest; truncate after a successful block flush.
 - Enable by default for metrics and logs once it is implemented; expose `wal_sync_mode` (`none`/`interval`/`fsync`) so the durability/throughput trade-off is explicit.
 - Bound WAL size and segment count; expose replay duration and last-replay outcome on `/api/v1/stats`.
@@ -353,7 +743,46 @@ item first.
 
 **Evidence** — `compactor.rs:117-121`: warm tier > 6 h → 6 h blocks; cold tier > 24 h → 24 h blocks, both as literals. Tier window choice (`:149-156`) is per-pass and driven by whether *any* candidate is > 24 h old, so a single old block switches the whole pass to 24 h targets. Candidates are capped by `row_count < 500_000` (`:132`) with no size or cost budget.
 
-**Resolution.** Make tier boundaries and target sizes config-driven (`compaction.tier_warm_secs`, `tier_cold_secs`, `max_merge_blocks`, `max_merge_bytes`); select the tier per merge group rather than per pass; add a cost budget so a compaction cycle cannot monopolise disk I/O. Pair with BL-03-05 for tier-specific compression.
+**Resolution (core landed; ingest wiring is the next step).**
+
+`parqtel_core::wal` implements the log, with the crash-ordering contract as the
+central design decision. A flush and the WAL must agree or a crash either
+duplicates or loses data, so the sequence is:
+
+1. rows appended to the WAL, then the request acknowledged;
+2. a flush takes rows, snapshotting the WAL position it is about to cover;
+3. the block is written and renamed;
+4. the **commit file** is advanced to the snapshotted position;
+5. segments entirely below the commit are deleted.
+
+The commit file is the single source of truth and is advanced *after* the
+rename, so every crash point is safe:
+
+| crash after | result |
+|---|---|
+| (1) append | replayed, nothing on disk yet — correct |
+| (2) snapshot | replayed, no block written — correct |
+| (3) rename, before (4) | block exists but is not committed, so it is *not* in the index; the WAL still holds the rows and replay rewrites them. The orphan is invisible, so there is exactly one copy |
+| (4) commit, before (5) | rows are covered; replay skips everything at or below the commit, so the leftover segments are discarded rather than duplicated |
+
+Advancing the commit *before* the rename would instead be able to lose a
+block, which is the one failure a WAL exists to prevent.
+
+Framing is `[u32 len][u32 CRC32][JSON payload]`, with segments named
+`%020d.wal` so lexical order is sequence order. Positions are
+`(segment << 32) | (offset + 1)` — **1-based**, because a 0-based first record
+would collide with `START` and be silently skipped on replay. That was a real
+bug caught by the round-trip test.
+
+Twelve unit tests cover: ordered positions, round trip, commit-point skipping,
+covered-segment deletion, torn-tail recovery and truncation, bad-CRC handling,
+segment reuse across restart, commit persistence, writer poisoning, CRC
+sensitivity, and record preservation across segment rollover.
+
+Still to do: append on the ingest path, startup replay before serving,
+`/api/v1/stats` exposure, and the sync-mode/size configuration knobs.
+
+**Resolution (original plan).** Make tier boundaries and target sizes config-driven (`compaction.tier_warm_secs`, `tier_cold_secs`, `max_merge_blocks`, `max_merge_bytes`); select the tier per merge group rather than per pass; add a cost budget so a compaction cycle cannot monopolise disk I/O. Pair with BL-03-05 for tier-specific compression.
 
 **Effort** S · **Risk** Low
 
@@ -363,7 +792,46 @@ item first.
 
 **Gap.** There is no metric for index size, index save duration, compaction bytes read/written, compaction amplification ratio, or blocks-per-signal over time. `docs/benchmarks/PERFORMANCE.md` records throughput, but production operators have no visibility into compaction amplification or index growth — the two numbers that predict "disk full in 4 days".
 
-**Resolution.** Export: `parqtel_index_bytes`, `parqtel_index_save_duration_seconds`, `parqtel_blocks{signal}`, `parqtel_compaction_bytes_read`, `parqtel_compaction_bytes_written`, `parqtel_compaction_amplification_ratio`, `parqtel_retention_deleted_blocks_total`, `parqtel_block_write_duration_seconds` (split encode vs. rename). Follows from BL-03-01/02/09/11.
+**Resolution (core landed; ingest wiring is the next step).**
+
+`parqtel_core::wal` implements the log, with the crash-ordering contract as the
+central design decision. A flush and the WAL must agree or a crash either
+duplicates or loses data, so the sequence is:
+
+1. rows appended to the WAL, then the request acknowledged;
+2. a flush takes rows, snapshotting the WAL position it is about to cover;
+3. the block is written and renamed;
+4. the **commit file** is advanced to the snapshotted position;
+5. segments entirely below the commit are deleted.
+
+The commit file is the single source of truth and is advanced *after* the
+rename, so every crash point is safe:
+
+| crash after | result |
+|---|---|
+| (1) append | replayed, nothing on disk yet — correct |
+| (2) snapshot | replayed, no block written — correct |
+| (3) rename, before (4) | block exists but is not committed, so it is *not* in the index; the WAL still holds the rows and replay rewrites them. The orphan is invisible, so there is exactly one copy |
+| (4) commit, before (5) | rows are covered; replay skips everything at or below the commit, so the leftover segments are discarded rather than duplicated |
+
+Advancing the commit *before* the rename would instead be able to lose a
+block, which is the one failure a WAL exists to prevent.
+
+Framing is `[u32 len][u32 CRC32][JSON payload]`, with segments named
+`%020d.wal` so lexical order is sequence order. Positions are
+`(segment << 32) | (offset + 1)` — **1-based**, because a 0-based first record
+would collide with `START` and be silently skipped on replay. That was a real
+bug caught by the round-trip test.
+
+Twelve unit tests cover: ordered positions, round trip, commit-point skipping,
+covered-segment deletion, torn-tail recovery and truncation, bad-CRC handling,
+segment reuse across restart, commit persistence, writer poisoning, CRC
+sensitivity, and record preservation across segment rollover.
+
+Still to do: append on the ingest path, startup replay before serving,
+`/api/v1/stats` exposure, and the sync-mode/size configuration knobs.
+
+**Resolution (original plan).** Export: `parqtel_index_bytes`, `parqtel_index_save_duration_seconds`, `parqtel_blocks{signal}`, `parqtel_compaction_bytes_read`, `parqtel_compaction_bytes_written`, `parqtel_compaction_amplification_ratio`, `parqtel_retention_deleted_blocks_total`, `parqtel_block_write_duration_seconds` (split encode vs. rename). Follows from BL-03-01/02/09/11.
 
 **Effort** S · **Risk** Low
 
