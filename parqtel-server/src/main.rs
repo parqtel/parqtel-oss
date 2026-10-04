@@ -191,6 +191,34 @@ async fn main() -> anyhow::Result<()> {
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Opens a signal's WAL, or returns `None` when the signal has it disabled.
+///
+/// A WAL that cannot be opened is fatal: continuing would mean accepting data
+/// we cannot promise to recover, which is exactly the guarantee the WAL exists
+/// to provide.
+fn open_wal(
+    config: &Config,
+    signal: &str,
+    data_dir: &std::path::Path,
+    enabled: bool,
+) -> anyhow::Result<Option<parqtel_core::wal::WalWriter>> {
+    if !enabled {
+        tracing::warn!(
+            signal,
+            "WAL is disabled for this signal; a crash can lose up to a whole block window"
+        );
+        return Ok(None);
+    }
+    let wal = parqtel_core::wal::WalWriter::open_with_segment_limit(
+        data_dir,
+        signal,
+        config.ingest.wal_sync_mode,
+        std::time::Duration::from_millis(config.ingest.wal_sync_interval_ms.max(1)),
+        config.ingest.wal_max_segment_bytes,
+    )?;
+    Ok(Some(wal))
+}
+
 /// What a WAL replay did, for the startup log and `/api/v1/stats`.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct WalReplayOutcome {
@@ -200,81 +228,158 @@ pub struct WalReplayOutcome {
     pub elapsed: std::time::Duration,
 }
 
-/// Replays the metrics WAL into the live ingest path.
+/// Reads one signal's WAL records as raw JSON, handing each to `on_record`.
 ///
-/// Runs before the listener binds, so a restart does not serve queries over a
-/// partially-recovered store. Every record goes through `ingest_metrics`, so
-/// recovered telemetry is written into a fresh block exactly as if it had
-/// arrived live — which is also what advances the commit point and lets the
-/// WAL be trimmed.
-async fn replay_metrics_wal(
-    config: &Config,
-    service: &IngestionService,
-) -> Option<WalReplayOutcome> {
-    if !config.ingest.wal_enabled {
+/// The record type differs per signal, so each caller deserialises what it
+/// needs; the framing, the commit-point skip and the torn-tail handling are
+/// identical and live here. Returns the replay counters.
+fn read_wal_records(
+    data_dir: &std::path::Path,
+    signal: &str,
+    on_record: &mut dyn FnMut(serde_json::Value),
+) -> Option<(u64, u64, u64)> {
+    if !data_dir.join("wal").join(signal).exists() {
         return None;
     }
-    let started = std::time::Instant::now();
-    let commit = parqtel_core::wal::read_commit(&config.storage.data_dir, "metrics");
-    // One record per metric: the rotator appends while holding the shard lock,
-    // so WAL order and writer order are the same total order.
-    let batches = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let sink = batches.clone();
-
-    let stats = match parqtel_core::wal::replay::<parqtel_core::Metric, _>(
-        &config.storage.data_dir,
-        "metrics",
-        commit,
-        move |m| {
-            if let Ok(mut guard) = sink.lock() {
-                guard.push(m);
+    let commit = parqtel_core::wal::read_commit(data_dir, signal);
+    match parqtel_core::wal::replay::<serde_json::Value, _>(data_dir, signal, commit, |v| {
+        on_record(v)
+    }) {
+        Ok(stats) => {
+            if stats.truncated_bytes > 0 {
+                tracing::warn!(
+                    signal,
+                    bytes = stats.truncated_bytes,
+                    "WAL had a torn tail from a crash; the unusable bytes were dropped"
+                );
             }
-        },
-    ) {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::error!("WAL replay failed: {e}");
-            return None;
+            Some((stats.records, stats.skipped, stats.truncated_bytes))
         }
-    };
+        Err(e) => {
+            tracing::error!(signal, "WAL replay failed: {e}");
+            None
+        }
+    }
+}
 
-    if stats.truncated_bytes > 0 {
+/// Shared tail of a per-signal replay: log the outcome and stamp the elapsed
+/// time.
+fn finish_replay(
+    signal: &'static str,
+    started: std::time::Instant,
+    records: u64,
+    skipped: u64,
+    truncated_bytes: u64,
+) -> WalReplayOutcome {
+    if records > 0 {
         tracing::warn!(
-            bytes = stats.truncated_bytes,
-            "WAL had a torn tail from a crash; the unusable bytes were dropped"
+            signal,
+            records,
+            "recovered telemetry from the write-ahead log"
         );
     }
-    if stats.records == 0 {
-        return Some(WalReplayOutcome {
-            records: 0,
-            skipped: stats.skipped,
-            truncated_bytes: stats.truncated_bytes,
-            elapsed: started.elapsed(),
-        });
+    WalReplayOutcome {
+        records,
+        skipped,
+        truncated_bytes,
+        elapsed: started.elapsed(),
     }
+}
 
-    let metrics = batches.lock().map(|b| b.clone()).unwrap_or_default();
-    let mut recovered = 0u64;
-    for m in metrics {
-        match service.ingest_metrics(vec![m]).await {
-            Ok(n) => recovered += n,
-            Err(e) => {
-                // Keep going: one bad batch must not strand the rest of the WAL.
-                tracing::error!("WAL replay: batch ingest failed: {e}");
+/// Replays every enabled signal's WAL.
+///
+/// Runs before the listener binds, so a restart never serves queries over a
+/// partially-recovered store, and through exactly the entry points live
+/// exporters use — so recovered telemetry is written into a fresh block as if
+/// it had arrived live, which is also what advances the commit point and lets
+/// the WAL be trimmed.
+async fn replay_all_wals(
+    config: &Config,
+    metrics: &IngestionService,
+    logs: &LogIngestionService,
+    traces: &TraceIngestionService,
+) -> Vec<(&'static str, WalReplayOutcome)> {
+    let mut out = Vec::new();
+
+    if config.ingest.wal_enabled {
+        let started = std::time::Instant::now();
+        let mut pending = Vec::new();
+        let counts = read_wal_records(&config.storage.data_dir, "metrics", &mut |v| {
+            pending.push(v);
+        });
+        if let Some((records, skipped, truncated)) = counts {
+            for v in pending.drain(..) {
+                match serde_json::from_value::<parqtel_core::Metric>(v) {
+                    Ok(m) => {
+                        // One bad record must not strand the rest of the WAL.
+                        if let Err(e) = metrics.ingest_metrics(vec![m]).await {
+                            tracing::error!(
+                                signal = "metrics",
+                                "WAL replay: re-ingest failed: {e}"
+                            );
+                        }
+                    }
+                    Err(e) => tracing::error!(signal = "metrics", "WAL replay: bad record: {e}"),
+                }
             }
+            out.push((
+                "metrics",
+                finish_replay("metrics", started, records, skipped, truncated),
+            ));
         }
     }
-    tracing::warn!(
-        records = stats.records,
-        points = recovered,
-        "recovered telemetry from the write-ahead log"
-    );
-    Some(WalReplayOutcome {
-        records: stats.records,
-        skipped: stats.skipped,
-        truncated_bytes: stats.truncated_bytes,
-        elapsed: started.elapsed(),
-    })
+
+    if config.ingest.log_wal_enabled {
+        let started = std::time::Instant::now();
+        let mut pending = Vec::new();
+        let counts = read_wal_records(&config.logs.data_dir, "logs", &mut |v| {
+            pending.push(v);
+        });
+        if let Some((records, skipped, truncated)) = counts {
+            for v in pending.drain(..) {
+                match serde_json::from_value::<parqtel_core::LogRecord>(v) {
+                    Ok(l) => {
+                        if let Err(e) = logs.ingest_logs(vec![l]).await {
+                            tracing::error!(signal = "logs", "WAL replay: re-ingest failed: {e}");
+                        }
+                    }
+                    Err(e) => tracing::error!(signal = "logs", "WAL replay: bad record: {e}"),
+                }
+            }
+            out.push((
+                "logs",
+                finish_replay("logs", started, records, skipped, truncated),
+            ));
+        }
+    }
+
+    if config.ingest.wal_enabled {
+        let started = std::time::Instant::now();
+        let mut pending = Vec::new();
+        // Trace blocks share the metrics data dir (TraceWriter is built from
+        // config.storage), so the trace WAL lives there too.
+        let counts = read_wal_records(&config.storage.data_dir, "traces", &mut |v| {
+            pending.push(v);
+        });
+        if let Some((records, skipped, truncated)) = counts {
+            for v in pending.drain(..) {
+                match serde_json::from_value::<parqtel_core::Span>(v) {
+                    Ok(s) => {
+                        if let Err(e) = traces.ingest_spans(vec![s]).await {
+                            tracing::error!(signal = "traces", "WAL replay: re-ingest failed: {e}");
+                        }
+                    }
+                    Err(e) => tracing::error!(signal = "traces", "WAL replay: bad record: {e}"),
+                }
+            }
+            out.push((
+                "traces",
+                finish_replay("traces", started, records, skipped, truncated),
+            ));
+        }
+    }
+
+    out
 }
 
 async fn run_server(
@@ -375,20 +480,36 @@ async fn run_server(
         shards = ingestion_service.rotator_shards(),
         "metrics ingest rotator shard count"
     );
-    let log_ingestion_service = LogIngestionService::new(config.logs.clone(), log_tx)
-        .with_memory_buffer(memory_buffer.clone())
-        .with_contention(contention.clone());
+    let logs_wal = open_wal(
+        &config,
+        "logs",
+        &config.logs.data_dir,
+        config.ingest.log_wal_enabled,
+    )?;
+    let log_ingestion_service =
+        LogIngestionService::with_wal(config.logs.clone(), log_tx, logs_wal)
+            .with_memory_buffer(memory_buffer.clone())
+            .with_contention(contention.clone());
     let (trace_tx, mut trace_rx) = mpsc::unbounded_channel();
     // Span-metrics RED bridge: trace ingestion derives
     // traces_service_{requests,errors,duration_ms} metrics and feeds them
     // back through the normal metrics path.
     let (span_metrics_tx, mut span_metrics_rx) =
         mpsc::unbounded_channel::<Vec<parqtel_core::Metric>>();
-    let trace_ingestion_service = TraceIngestionService::new(config.storage.clone(), trace_tx)
-        .with_memory_buffer(memory_buffer.clone())
-        .with_span_metrics(span_metrics_tx)
-        .with_tail_sampling(config.ingest.tail_sampling.clone())
-        .with_contention(contention.clone());
+    // Trace blocks live in the metrics data dir (TraceWriter is built from
+    // config.storage), so the trace WAL goes there too.
+    let traces_wal = open_wal(
+        &config,
+        "traces",
+        &config.storage.data_dir,
+        config.ingest.wal_enabled,
+    )?;
+    let trace_ingestion_service =
+        TraceIngestionService::with_wal(config.storage.clone(), trace_tx, traces_wal)
+            .with_memory_buffer(memory_buffer.clone())
+            .with_span_metrics(span_metrics_tx)
+            .with_tail_sampling(config.ingest.tail_sampling.clone())
+            .with_contention(contention.clone());
 
     // Trace index - uses same data_dir as metrics but separate index file
     let trace_data_dir = config.storage.data_dir.join("traces");
@@ -455,10 +576,15 @@ async fn run_server(
     ));
 
     // Replay before the listener binds, so nothing is served until recovered
-    // telemetry is back in the write path. Rows are fed through
-    // `ingest_metrics`, i.e. exactly the path live exporters take, so replayed
-    // data is indistinguishable from data that was never lost.
-    let wal_replay = replay_metrics_wal(&config, &ingestion_service).await;
+    // telemetry is back in the write path, and through exactly the entry points
+    // live exporters use.
+    let wal_replay = replay_all_wals(
+        &config,
+        &ingestion_service,
+        &log_ingestion_service,
+        &trace_ingestion_service,
+    )
+    .await;
 
     let state = AppState::new(
         ingestion_service,
@@ -757,13 +883,14 @@ async fn run_server(
     let router = build_router(state.clone());
     let addr = config.server.bind_address.clone();
     let listener = tokio::net::TcpListener::bind(&addr).await?;
-    if let Some(r) = wal_replay {
+    for (signal, r) in &wal_replay {
         tracing::info!(
+            signal,
             records = r.records,
             skipped = r.skipped,
             truncated_bytes = r.truncated_bytes,
             elapsed_ms = r.elapsed.as_millis(),
-            "metrics WAL replay complete"
+            "WAL replay complete"
         );
     }
     tracing::info!("parqtel server listening on {}", addr);

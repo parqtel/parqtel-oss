@@ -403,6 +403,12 @@ pub struct LogRotator {
     last_flush: Instant,
     max_duration: Duration,
     metadata_tx: mpsc::UnboundedSender<BlockMetadata>,
+    /// WAL for logs, when enabled. Appended under the rotator lock, which the
+    /// caller already holds, so WAL order and writer order are the same total
+    /// order — the property that makes the committed position correct.
+    wal: Option<WalWriter>,
+    /// Highest WAL position among the rows currently in `writer`.
+    covered: WalPosition,
 }
 
 impl LogRotator {
@@ -410,6 +416,8 @@ impl LogRotator {
         let max_duration = Duration::from_secs(config.block_duration_secs);
         Self {
             writer: LogWriter::new(config.clone()),
+            wal: None,
+            covered: WalPosition::START,
             config,
             last_flush: Instant::now(),
             max_duration,
@@ -426,11 +434,28 @@ impl LogRotator {
         let _ = self.metadata_tx.send(meta);
     }
 
+    /// Attaches a WAL. After this, every accepted record is logged before it
+    /// reaches the writer.
+    pub fn with_wal(mut self, wal: WalWriter) -> Self {
+        self.wal = Some(wal);
+        self
+    }
+
+    /// Bytes the log WAL currently occupies.
+    pub fn wal_bytes(&self) -> u64 {
+        self.wal.as_ref().map_or(0, |w| w.size_bytes())
+    }
+
     pub async fn push(
         &mut self,
         log: LogRecord,
         contention: Option<&ContentionMetrics>,
     ) -> Result<bool> {
+        // Logged first, and failures propagate: acknowledging a record we
+        // could not log would make the WAL a lie.
+        if let Some(wal) = self.wal.as_mut() {
+            self.covered = wal.append(&log)?;
+        }
         if let Some(meta) = self.writer.push(log)? {
             self.publish(meta, contention);
             return Ok(true);
@@ -456,6 +481,10 @@ impl LogRotator {
         }
         let row_count = self.writer.len();
         let started = std::time::Instant::now();
+        // Snapshot before the writer is taken: the block will contain exactly
+        // the rows whose WAL positions are at or below this.
+        let covered = self.covered;
+        self.covered = WalPosition::START;
         let mut writer = std::mem::replace(&mut self.writer, LogWriter::new(self.config.clone()));
         let flush_guard = contention.map(|c| c.flush_started(SignalType::Logs));
         let encoded = tokio::task::spawn_blocking(move || writer.flush()).await;
@@ -471,6 +500,11 @@ impl LogRotator {
         let metadata = metadata?;
         self.last_flush = Instant::now();
         let _ = self.metadata_tx.send(metadata);
+        // Committed only now the block is renamed; see wal.rs for why the
+        // order matters.
+        if let Some(wal) = self.wal.as_mut() {
+            wal.commit(covered)?;
+        }
         tracing::debug!(
             signal = "logs",
             rows = row_count,
@@ -726,9 +760,27 @@ pub struct LogIngestionService {
 }
 
 impl LogIngestionService {
+    /// Bytes the log WAL currently occupies.
+    pub async fn wal_bytes(&self) -> u64 {
+        self.rotator.lock().await.wal_bytes()
+    }
+
     pub fn new(config: LogBlockConfig, metadata_tx: mpsc::UnboundedSender<BlockMetadata>) -> Self {
+        Self::with_wal(config, metadata_tx, None)
+    }
+
+    /// Creates the service with an optional write-ahead log.
+    pub fn with_wal(
+        config: LogBlockConfig,
+        metadata_tx: mpsc::UnboundedSender<BlockMetadata>,
+        wal: Option<WalWriter>,
+    ) -> Self {
+        let mut rotator = LogRotator::new(config, metadata_tx);
+        if let Some(w) = wal {
+            rotator = rotator.with_wal(w);
+        }
         Self {
-            rotator: Arc::new(Mutex::new(LogRotator::new(config, metadata_tx))),
+            rotator: Arc::new(Mutex::new(rotator)),
             stats: Arc::new(IngestionStats::default()),
             memory_buffer: None,
             contention: None,
@@ -758,7 +810,7 @@ impl LogIngestionService {
         .inspect_err(|_| {
             self.stats.failed_batches.fetch_add(1, Ordering::Relaxed);
         })?;
-        self.process_logs(logs).await
+        self.ingest_logs(logs).await
     }
 
     pub async fn ingest_json(&self, body: Bytes) -> Result<u64> {
@@ -772,10 +824,14 @@ impl LogIngestionService {
         .inspect_err(|_| {
             self.stats.failed_batches.fetch_add(1, Ordering::Relaxed);
         })?;
-        self.process_logs(logs).await
+        self.ingest_logs(logs).await
     }
 
-    async fn process_logs(&self, logs: Vec<LogRecord>) -> Result<u64> {
+    /// Ingests already-decoded log records.
+    ///
+    /// Public because WAL replay feeds recovered records back through exactly
+    /// this path, so recovered telemetry is treated identically to live data.
+    pub async fn ingest_logs(&self, logs: Vec<LogRecord>) -> Result<u64> {
         let count = logs.len() as u64;
         let mut flushed = false;
         // Write to in-memory buffer first
@@ -855,6 +911,10 @@ pub struct TraceRotator {
     last_flush: Instant,
     max_duration: Duration,
     metadata_tx: mpsc::UnboundedSender<BlockMetadata>,
+    /// WAL for traces, when enabled. Same contract as [`LogRotator::wal`].
+    wal: Option<WalWriter>,
+    /// Highest WAL position among the rows currently in `writer`.
+    covered: WalPosition,
 }
 
 impl TraceRotator {
@@ -862,6 +922,8 @@ impl TraceRotator {
         let max_duration = Duration::from_secs(config.block_duration_secs);
         Self {
             writer: TraceWriter::new(config.clone()),
+            wal: None,
+            covered: WalPosition::START,
             config,
             last_flush: Instant::now(),
             max_duration,
@@ -878,11 +940,26 @@ impl TraceRotator {
         let _ = self.metadata_tx.send(meta);
     }
 
+    /// Attaches a WAL. After this, every accepted span is logged before it
+    /// reaches the writer.
+    pub fn with_wal(mut self, wal: WalWriter) -> Self {
+        self.wal = Some(wal);
+        self
+    }
+
+    /// Bytes the trace WAL currently occupies.
+    pub fn wal_bytes(&self) -> u64 {
+        self.wal.as_ref().map_or(0, |w| w.size_bytes())
+    }
+
     pub async fn push(
         &mut self,
         span: Span,
         contention: Option<&ContentionMetrics>,
     ) -> Result<bool> {
+        if let Some(wal) = self.wal.as_mut() {
+            self.covered = wal.append(&span)?;
+        }
         if let Some(meta) = self.writer.push(span)? {
             self.publish(meta, contention);
             return Ok(true);
@@ -908,6 +985,9 @@ impl TraceRotator {
         }
         let row_count = self.writer.len();
         let started = std::time::Instant::now();
+        // Snapshot before the writer is taken; see LogRotator::flush.
+        let covered = self.covered;
+        self.covered = WalPosition::START;
         let mut writer = std::mem::replace(&mut self.writer, TraceWriter::new(self.config.clone()));
         let flush_guard = contention.map(|c| c.flush_started(SignalType::Traces));
         let encoded = tokio::task::spawn_blocking(move || writer.flush()).await;
@@ -923,6 +1003,10 @@ impl TraceRotator {
         let metadata = metadata?;
         self.last_flush = Instant::now();
         let _ = self.metadata_tx.send(metadata);
+        // Committed only now the block is renamed; see wal.rs.
+        if let Some(wal) = self.wal.as_mut() {
+            wal.commit(covered)?;
+        }
         tracing::debug!(
             signal = "traces",
             rows = row_count,
@@ -948,8 +1032,21 @@ pub struct TraceIngestionService {
 
 impl TraceIngestionService {
     pub fn new(config: BlockConfig, metadata_tx: mpsc::UnboundedSender<BlockMetadata>) -> Self {
+        Self::with_wal(config, metadata_tx, None)
+    }
+
+    /// Creates the service with an optional write-ahead log.
+    pub fn with_wal(
+        config: BlockConfig,
+        metadata_tx: mpsc::UnboundedSender<BlockMetadata>,
+        wal: Option<WalWriter>,
+    ) -> Self {
+        let mut rotator = TraceRotator::new(config, metadata_tx);
+        if let Some(w) = wal {
+            rotator = rotator.with_wal(w);
+        }
         Self {
-            rotator: Arc::new(Mutex::new(TraceRotator::new(config, metadata_tx))),
+            rotator: Arc::new(Mutex::new(rotator)),
             stats: Arc::new(IngestionStats::default()),
             memory_buffer: None,
             span_metrics_tx: None,
@@ -995,7 +1092,7 @@ impl TraceIngestionService {
         .inspect_err(|_| {
             self.stats.failed_batches.fetch_add(1, Ordering::Relaxed);
         })?;
-        self.process_traces(spans).await
+        self.ingest_spans(spans).await
     }
 
     pub async fn ingest_json(&self, body: Bytes) -> Result<u64> {
@@ -1009,10 +1106,14 @@ impl TraceIngestionService {
         .inspect_err(|_| {
             self.stats.failed_batches.fetch_add(1, Ordering::Relaxed);
         })?;
-        self.process_traces(spans).await
+        self.ingest_spans(spans).await
     }
 
-    async fn process_traces(&self, spans: Vec<Span>) -> Result<u64> {
+    /// Ingests already-decoded spans.
+    ///
+    /// Public because WAL replay feeds recovered records back through exactly
+    /// this path, so recovered telemetry is treated identically to live data.
+    pub async fn ingest_spans(&self, spans: Vec<Span>) -> Result<u64> {
         let count = spans.len() as u64;
         let mut flushed = false;
         // Span-metrics RED bridge: derive metrics from the FULL span set
@@ -1114,6 +1215,28 @@ mod tests {
             max_rows_per_block: 10,
             block_duration_secs: 1,
             ..Default::default()
+        }
+    }
+
+    /// A minimal span, for the WAL tests.
+    fn test_span(start: i64) -> Span {
+        Span {
+            trace_id: [7u8; 16],
+            span_id: [start as u8; 8],
+            trace_state: String::new(),
+            name: "op".into(),
+            kind: 2,
+            start_time_ns: start,
+            end_time_ns: start + 50,
+            attributes: parqtel_core::LabelSet::default(),
+            events: Vec::new(),
+            links: Vec::new(),
+            status: parqtel_core::models::traces::SpanStatus {
+                code: 1,
+                message: String::new(),
+            },
+            parent_span_id: [0u8; 8],
+            flags: 1,
         }
     }
 
@@ -2111,6 +2234,154 @@ mod tests {
         assert_eq!(seen, 0, "flushed rows must not be replayed");
         assert!(stats.records == 0);
         assert!(stats.skipped > 0, "they must be counted as skipped");
+    }
+
+    /// Logs and traces get the same crash-recovery contract as metrics: a
+    /// process death must lose nothing acknowledged, and a graceful flush must
+    /// commit the WAL so a restart does not re-ingest it.
+    #[tokio::test]
+    async fn test_log_and_trace_wal_recover_and_commit() {
+        for signal in ["logs", "traces"] {
+            let dir = tempdir().unwrap();
+            // Logs live in their own data dir; trace blocks share the metrics
+            // one, because TraceWriter is built from config.storage.
+            let data_dir = if signal == "logs" {
+                dir.path().join("logs")
+            } else {
+                dir.path().to_path_buf()
+            };
+            std::fs::create_dir_all(&data_dir).unwrap();
+            let open = || {
+                WalWriter::open_with_segment_limit(
+                    &data_dir,
+                    signal,
+                    WalSyncMode::Always,
+                    Duration::from_millis(0),
+                    64 * 1024 * 1024,
+                )
+                .unwrap()
+            };
+            let log_config = LogBlockConfig {
+                data_dir: data_dir.clone(),
+                max_rows_per_block: 10_000,
+                block_duration_secs: 3600,
+                ..Default::default()
+            };
+            let block_config = BlockConfig {
+                data_dir: data_dir.clone(),
+                max_rows_per_block: 10_000,
+                block_duration_secs: 3600,
+                ..Default::default()
+            };
+
+            // Crash: accept, acknowledge, drop without flushing.
+            {
+                let (ltx, _lrx) = mpsc::unbounded_channel();
+                let (ttx, _trx) = mpsc::unbounded_channel();
+                let logs_svc = LogIngestionService::with_wal(log_config.clone(), ltx, Some(open()));
+                let traces_svc =
+                    TraceIngestionService::with_wal(block_config.clone(), ttx, Some(open()));
+
+                for i in 0..3i64 {
+                    let l = parqtel_core::LogRecord::new(
+                        i + 1,
+                        i + 1,
+                        9,
+                        "INFO".into(),
+                        format!("log-{i}"),
+                        parqtel_core::LabelSet::default(),
+                        parqtel_core::LabelSet::default(),
+                        [0u8; 16],
+                        [0u8; 8],
+                        0,
+                        "".into(),
+                        "".into(),
+                    );
+                    assert_eq!(logs_svc.ingest_logs(vec![l]).await.unwrap(), 1);
+
+                    let mut sp = test_span(i + 1);
+                    sp.start_time_ns = i + 1;
+                    sp.end_time_ns = i + 100;
+                    assert_eq!(traces_svc.ingest_spans(vec![sp]).await.unwrap(), 1);
+                }
+            }
+
+            let commit = parqtel_core::wal::read_commit(&data_dir, signal);
+            let mut lrec = Vec::new();
+            let lstats = parqtel_core::wal::replay::<parqtel_core::LogRecord, _>(
+                &data_dir,
+                signal,
+                commit,
+                |r| lrec.push(r),
+            )
+            .unwrap();
+            let mut srec = Vec::new();
+            let sstats = parqtel_core::wal::replay::<parqtel_core::Span, _>(
+                &data_dir,
+                signal,
+                commit,
+                |r| srec.push(r),
+            )
+            .unwrap();
+
+            assert_eq!(
+                lstats.records, 3,
+                "{signal}: every acknowledged log must replay"
+            );
+            assert_eq!(
+                sstats.records, 3,
+                "{signal}: every acknowledged span must replay"
+            );
+            assert_eq!(
+                lrec.iter().map(|l| l.body.clone()).collect::<Vec<_>>(),
+                vec!["log-0", "log-1", "log-2"]
+            );
+            assert_eq!(srec.len(), 3);
+
+            // Graceful flush commits, so a second replay finds nothing.
+            let (ltx, mut lrx) = mpsc::unbounded_channel();
+            let (ttx, mut trx) = mpsc::unbounded_channel();
+            let logs_svc = LogIngestionService::with_wal(log_config.clone(), ltx, Some(open()));
+            let traces_svc =
+                TraceIngestionService::with_wal(block_config.clone(), ttx, Some(open()));
+            // Ingest again so the writers are non-empty and `shutdown` really
+            // flushes — an empty writer short-circuits before the commit, which
+            // would leave the earlier records uncommitted and make this phase
+            // assert the wrong thing.
+            let l = parqtel_core::LogRecord::new(
+                99,
+                99,
+                9,
+                "INFO".into(),
+                "log-flushed".into(),
+                parqtel_core::LabelSet::default(),
+                parqtel_core::LabelSet::default(),
+                [0u8; 16],
+                [0u8; 8],
+                0,
+                "".into(),
+                "".into(),
+            );
+            logs_svc.ingest_logs(vec![l]).await.unwrap();
+            traces_svc.ingest_spans(vec![test_span(99)]).await.unwrap();
+            logs_svc.shutdown().await.unwrap();
+            traces_svc.shutdown().await.unwrap();
+            assert!(lrx.try_recv().is_ok(), "{signal}: a block must be written");
+            assert!(trx.try_recv().is_ok(), "{signal}: a block must be written");
+
+            let commit = parqtel_core::wal::read_commit(&data_dir, signal);
+            let after = parqtel_core::wal::replay::<serde_json::Value, _>(
+                &data_dir,
+                signal,
+                commit,
+                |_| {},
+            )
+            .unwrap();
+            assert_eq!(
+                after.records, 0,
+                "{signal}: flushed rows must not be replayed again"
+            );
+        }
     }
 
     #[tokio::test]

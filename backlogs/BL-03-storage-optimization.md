@@ -17,10 +17,8 @@ Severity: **C** Critical, **H** High, **M** Medium, **L** Low. Effort: S ≤ 2d,
 
 **Gap.** After **every** block flush the entire index — all blocks, all metric names, all label names, up to 10 000 values per label — is re-serialised to a JSON `String` in memory, written synchronously, and renamed, all while holding the `RwLock` that **every query handler** needs for `index.read()`. That is O(total_index_size) CPU + a blocking syscall pair per flush, on a tokio worker, under the write lock. As block count grows this is quadratic in the retention window, and every concurrent `/api/v1/query*` blocks for the duration.
 
-**Status: landed for metrics.** Verified end-to-end by SIGKILLing a container
-and restarting it. Logs and traces are **not** yet WAL'd (`log_wal_enabled`
-exists but is unused); the mechanism is per-signal, so they follow the same
-shape.
+**Status: landed for all three signals.** Verified end-to-end by SIGKILLing a
+container and restarting it.
 
 **Resolution.**
 
@@ -118,10 +116,8 @@ steady-state lock-wait impact negligible. Both met.
 
 **Gap.** Tokio's multi-threaded runtime has no preemption for synchronous work. A worker stuck in `ArrowWriter::close()` cannot poll any other task assigned to it, so **every** request multiplexed on that worker stalls — not just storage endpoints. On the default `compaction_interval_secs = 3600` (`config/storage.rs:39`) the cycle decodes and re-encodes up to 8 small blocks (or 12 in the tiered pass), potentially many seconds, while holding the write lock that every query needs.
 
-**Status: landed for metrics.** Verified end-to-end by SIGKILLing a container
-and restarting it. Logs and traces are **not** yet WAL'd (`log_wal_enabled`
-exists but is unused); the mechanism is per-signal, so they follow the same
-shape.
+**Status: landed for all three signals.** Verified end-to-end by SIGKILLing a
+container and restarting it.
 
 **Resolution.**
 
@@ -307,10 +303,8 @@ is the metric to watch if anyone wants to quantify it.
 Note also that `metric_kind` is plain `Utf8` for the same reason, and the same
 conclusion applies: Parquet already dictionary-encodes it.
 
-**Status: landed for metrics.** Verified end-to-end by SIGKILLing a container
-and restarting it. Logs and traces are **not** yet WAL'd (`log_wal_enabled`
-exists but is unused); the mechanism is per-signal, so they follow the same
-shape.
+**Status: landed for all three signals.** Verified end-to-end by SIGKILLing a
+container and restarting it.
 
 **Resolution.**
 
@@ -411,10 +405,8 @@ Validation lives separately in `parqtel-core/src/config/mod.rs:50-62` against `[
 
 **Gap.** zstd at the library default is a size-first choice applied to the hot write path. Level 1 is typically 3–5× faster to encode with a modest size penalty — the right default for blocks written every 30–300 s (BL-01-04). Conversely, compacted cold data (24 h tier, `compactor.rs:120`) is written with the same setting even though it is read rarely and benefits from a higher level. The duplication also means a config typo validated in one place can behave differently in the other.
 
-**Status: landed for metrics.** Verified end-to-end by SIGKILLing a container
-and restarting it. Logs and traces are **not** yet WAL'd (`log_wal_enabled`
-exists but is unused); the mechanism is per-signal, so they follow the same
-shape.
+**Status: landed for all three signals.** Verified end-to-end by SIGKILLing a
+container and restarting it.
 
 **Resolution.**
 
@@ -507,10 +499,8 @@ steady-state lock-wait impact negligible. Both met.
 
 **Gap.** A 30-day retention at, say, 300 blocks/signal with 50 label fields at 10 000 values each produces an index measured in hundreds of MB — serialised in full on **every flush** (BL-03-01). Per-block `HashSet<String>` of metric names also duplicates information that is trivially derivable from the block's Parquet dictionary page.
 
-**Status: landed for metrics.** Verified end-to-end by SIGKILLing a container
-and restarting it. Logs and traces are **not** yet WAL'd (`log_wal_enabled`
-exists but is unused); the mechanism is per-signal, so they follow the same
-shape.
+**Status: landed for all three signals.** Verified end-to-end by SIGKILLing a
+container and restarting it.
 
 **Resolution.**
 
@@ -608,10 +598,8 @@ steady-state lock-wait impact negligible. Both met.
 
 **Gap.** With a single global time ordering, a query for one metric in one service must decode a row group that also holds every other metric and every other service. At 100k rows per group, that is up to 100 000 rows decoded (and their label JSON parsed) to serve a handful of points. Metric names are already dictionary columns and service names are dictionary columns — sorting by them first costs nothing at write time and would make row-group pruning two-dimensional. The 100 000-row default is also coarse: it is 100 000 rows of decode work per group before pruning can help.
 
-**Status: landed for metrics.** Verified end-to-end by SIGKILLing a container
-and restarting it. Logs and traces are **not** yet WAL'd (`log_wal_enabled`
-exists but is unused); the mechanism is per-signal, so they follow the same
-shape.
+**Status: landed for all three signals.** Verified end-to-end by SIGKILLing a
+container and restarting it.
 
 **Resolution.**
 
@@ -709,10 +697,8 @@ let reader = reader_builder.build()?;
 
 **Gap.** For a `resource_attributes` selection over metrics, columns 4–10 (six dictionary columns) and `value_complex` are decoded for nothing. For trace search, `events`, `links`, `trace_state`, `status_message` are decoded per span and then JSON-parsed by `row_to_span` (`scanner.rs:490-503`) even when the caller only filters on service/operation.
 
-**Status: landed for metrics.** Verified end-to-end by SIGKILLing a container
-and restarting it. Logs and traces are **not** yet WAL'd (`log_wal_enabled`
-exists but is unused); the mechanism is per-signal, so they follow the same
-shape.
+**Status: landed for all three signals.** Verified end-to-end by SIGKILLing a
+container and restarting it.
 
 **Resolution.**
 
@@ -806,10 +792,8 @@ steady-state lock-wait impact negligible. Both met.
 - Compaction is read-amplifying: it decodes **every column** (BL-03-08) and re-serialises labels per row (`storage/writer.rs:57`).
 - Losing `label_values` on compaction regresses label-value autocomplete for all compacted blocks — a correctness-adjacent regression hidden in a maintenance path.
 
-**Status: landed for metrics.** Verified end-to-end by SIGKILLing a container
-and restarting it. Logs and traces are **not** yet WAL'd (`log_wal_enabled`
-exists but is unused); the mechanism is per-signal, so they follow the same
-shape.
+**Status: landed for all three signals.** Verified end-to-end by SIGKILLing a
+container and restarting it.
 
 **Resolution.**
 
@@ -932,10 +916,8 @@ projection work).
 
 **Gap.** Same lock-held-across-IO problem as BL-03-02, and it recurs hourly. Time-based-only retention means a high-cardinality or high-ingest deployment can fill the disk long before the retention horizon, with no back-pressure signal to the operator other than the deletion log line.
 
-**Status: landed for metrics.** Verified end-to-end by SIGKILLing a container
-and restarting it. Logs and traces are **not** yet WAL'd (`log_wal_enabled`
-exists but is unused); the mechanism is per-signal, so they follow the same
-shape.
+**Status: landed for all three signals.** Verified end-to-end by SIGKILLing a
+container and restarting it.
 
 **Resolution.**
 
@@ -1029,10 +1011,8 @@ steady-state lock-wait impact negligible. Both met.
 
 **Gap.** On crash or OOM-kill, everything in the memory buffer is lost. Combined with `block_duration_secs = 7200` that is potentially hours of telemetry. For an SRE tool this is the most damaging reliability gap in the backlog: the data you lose is exactly the data you wanted during the incident.
 
-**Status: landed for metrics.** Verified end-to-end by SIGKILLing a container
-and restarting it. Logs and traces are **not** yet WAL'd (`log_wal_enabled`
-exists but is unused); the mechanism is per-signal, so they follow the same
-shape.
+**Status: landed for all three signals.** Verified end-to-end by SIGKILLing a
+container and restarting it.
 
 **Resolution.**
 
@@ -1141,10 +1121,8 @@ item first.
 
 **Evidence** — `compactor.rs:117-121`: warm tier > 6 h → 6 h blocks; cold tier > 24 h → 24 h blocks, both as literals. Tier window choice (`:149-156`) is per-pass and driven by whether *any* candidate is > 24 h old, so a single old block switches the whole pass to 24 h targets. Candidates are capped by `row_count < 500_000` (`:132`) with no size or cost budget.
 
-**Status: landed for metrics.** Verified end-to-end by SIGKILLing a container
-and restarting it. Logs and traces are **not** yet WAL'd (`log_wal_enabled`
-exists but is unused); the mechanism is per-signal, so they follow the same
-shape.
+**Status: landed for all three signals.** Verified end-to-end by SIGKILLing a
+container and restarting it.
 
 **Resolution.**
 
@@ -1230,10 +1208,8 @@ steady-state lock-wait impact negligible. Both met.
 
 **Gap.** There is no metric for index size, index save duration, compaction bytes read/written, compaction amplification ratio, or blocks-per-signal over time. `docs/benchmarks/PERFORMANCE.md` records throughput, but production operators have no visibility into compaction amplification or index growth — the two numbers that predict "disk full in 4 days".
 
-**Status: landed for metrics.** Verified end-to-end by SIGKILLing a container
-and restarting it. Logs and traces are **not** yet WAL'd (`log_wal_enabled`
-exists but is unused); the mechanism is per-signal, so they follow the same
-shape.
+**Status: landed for all three signals.** Verified end-to-end by SIGKILLing a
+container and restarting it.
 
 **Resolution.**
 
