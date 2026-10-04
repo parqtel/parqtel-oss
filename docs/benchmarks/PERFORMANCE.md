@@ -837,3 +837,49 @@ Lock-wait cost on all three signals under the load generator:
 `wal_sync_interval_ms` (1000), `wal_max_segment_bytes` (64 MB). A WAL that
 cannot be opened **fails startup** rather than silently accepting unrecoverable
 data.
+
+## Index durability before the WAL commit (`BL-03-16`)
+
+A crash in the window between a block being written and the index sidecar
+catching up lost acknowledged data: the block was on disk, absent from the
+sidecar, and already marked recovered in the WAL, so nothing replayed it and no
+query could find it. Reproduced on `main`:
+
+```
+at kill      : ingested=64000  flushed=60000  blocks=3
+after restart: blocks=0  rows=0      index.json: absent
+```
+
+The fix is a durability handshake. `PendingIndex` carries an optional oneshot
+alongside the metadata; the flush waits on it and commits the WAL only once the
+index task has **forced** the sidecar write, rather than waiting out the 2 s
+debounce that created the window.
+
+The wait is bounded (30 s) and fails safe — on timeout the WAL is deliberately
+*not* committed, so the rows stay in it and a replay restores them. An unbounded
+wait would have turned a wedged index task into a full ingest outage, which is a
+worse failure than an orphaned block.
+
+Same reproduction, after:
+
+```
+after restart: blocks=3  rows=60000     index.json: present
+```
+
+## Effective HTTP body limit (`BL-03-17`)
+
+axum's `DefaultBodyLimit` (2 MB) was the real ingest limit; `ingest.max_body_size`
+(10 MiB) was applied via `RequestBodyLimitLayer` and silently lost. Raising the
+setting changed nothing and the `413` pointed nowhere useful.
+
+`DefaultBodyLimit::max(ingest.max_body_size)` is now layered as well. With
+`max_body_size` at its 10 MiB default:
+
+| payload | before | after |
+|---|---|---|
+| 2.15 MiB | 413 | **200** |
+| 4.02 MiB | 413 | **200** |
+| 10.69 MiB | 413 | 413 |
+
+This also raises the ingest throughput ceiling, since throughput is
+batch-size-limited.

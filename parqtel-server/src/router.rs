@@ -160,6 +160,15 @@ pub fn build_router(state: AppState) -> Router {
         .layer(TimeoutLayer::new(Duration::from_secs(
             query_config.timeout_secs,
         )))
+        // axum's own `DefaultBodyLimit` is 2 MB and applies to every route that
+        // does not override it. It was silently the *effective* ingest limit:
+        // a 2.15 MB OTLP batch was rejected with 413 even though
+        // `ingest.max_body_size` defaults to 10 MB, so raising the setting
+        // appeared to do nothing. Both layers are applied so the configured
+        // value is authoritative.
+        .layer(axum::extract::DefaultBodyLimit::max(
+            ingest_config.max_body_size,
+        ))
         .layer(RequestBodyLimitLayer::new(ingest_config.max_body_size))
         // Outermost layer: records the golden signals (count + latency
         // histogram) for the whole request, including any inner middleware.

@@ -5,7 +5,7 @@ pub mod retention;
 pub mod scanner;
 
 pub use compactor::Compactor;
-pub use index::{BlockIndex, BlockIndexStore};
+pub use index::{BlockIndex, BlockIndexStore, PendingIndex};
 pub use persist::{persist_blocking, persist_once, run_index_persist_loop};
 pub use retention::RetentionPolicy;
 pub use scanner::{LogRowFilter, LogScanStats, Scanner};

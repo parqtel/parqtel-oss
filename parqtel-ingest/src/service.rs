@@ -4,6 +4,7 @@ use crate::otel::collector::metrics::v1::ExportMetricsServiceRequest;
 use crate::otel::collector::trace::v1::ExportTraceServiceRequest;
 use crate::writer::{BlockMetadata, BlockWriter, LogWriter, TraceWriter};
 use bytes::Bytes;
+use parqtel_core::storage::PendingIndex;
 use parqtel_core::wal::{WalPosition, WalWriter};
 use parqtel_core::MemoryBuffer;
 use parqtel_core::{
@@ -124,11 +125,11 @@ pub struct BlockRotator {
     /// `flush_lock`, so exactly one writer updates this at a time.
     last_flush_unix_ms: AtomicU64,
     max_duration_ms: u64,
-    metadata_tx: mpsc::UnboundedSender<BlockMetadata>,
+    metadata_tx: mpsc::UnboundedSender<PendingIndex>,
 }
 
 impl BlockRotator {
-    pub fn new(config: BlockConfig, metadata_tx: mpsc::UnboundedSender<BlockMetadata>) -> Self {
+    pub fn new(config: BlockConfig, metadata_tx: mpsc::UnboundedSender<PendingIndex>) -> Self {
         Self::with_shards(config, metadata_tx, 1)
     }
 
@@ -138,7 +139,7 @@ impl BlockRotator {
     /// previous single-writer behaviour rather than an unusable rotator.
     pub fn with_shards(
         config: BlockConfig,
-        metadata_tx: mpsc::UnboundedSender<BlockMetadata>,
+        metadata_tx: mpsc::UnboundedSender<PendingIndex>,
         shards: usize,
     ) -> Self {
         let shards = shards.clamp(1, 256);
@@ -181,7 +182,9 @@ impl BlockRotator {
 
     fn publish(&self, meta: BlockMetadata, contention: Option<&ContentionMetrics>) {
         record_block_written(&meta, contention, SignalType::Metrics);
-        let _ = self.metadata_tx.send(meta);
+        // No WAL ordering requirement: these blocks were already committed by
+        // the flush that is publishing them, so they must not wait again.
+        let _ = self.metadata_tx.send(PendingIndex::untracked(meta));
     }
 
     /// Total rows currently buffered, from the atomic counter.
@@ -373,12 +376,44 @@ impl BlockRotator {
         // enough to publish the new flush time.
         self.last_flush_unix_ms
             .store(unix_millis(), Ordering::Relaxed);
-        let _ = self.metadata_tx.send(metadata);
-        // Committed only now that the block is renamed. A crash before this
-        // leaves the block unindexed and its WAL rows intact, so replay
-        // rewrites them with no duplicate — see the ordering table in wal.rs.
-        if let Some(wal) = &self.wal {
-            wal.lock().await.commit(covered)?;
+        // Publish, wait for the sidecar to be durable, and only then commit
+        // the WAL. Committing first leaves a crash window in which the block is
+        // on disk, absent from the sidecar, and already marked recovered — so
+        // nothing replays it and no query can find it (BL-03-16).
+        let (pending, durable) = match &self.wal {
+            Some(_) => {
+                let (p, r) = PendingIndex::tracked(metadata);
+                (p, Some(r))
+            }
+            // No WAL: nothing is committed, so there is nothing to order.
+            None => (PendingIndex::untracked(metadata), None),
+        };
+        let _ = self.metadata_tx.send(pending);
+        if let Some(durable) = durable {
+            // Bounded: a wedged or absent index task must not stall ingest
+            // indefinitely, and committing while the index is behind is
+            // exactly the data-loss window this handshake exists to close.
+            // So on timeout we do NOT commit - the WAL keeps the rows and a
+            // later replay restores them into a fresh block. The stale block is
+            // left unindexed, which costs disk but loses no data.
+            match tokio::time::timeout(INDEX_DURABILITY_TIMEOUT, durable).await {
+                Ok(Ok(())) => {
+                    if let Some(wal) = &self.wal {
+                        wal.lock().await.commit(covered)?;
+                    }
+                }
+                Ok(Err(_)) => {
+                    tracing::warn!(
+                        "index task dropped before the sidecar was persisted;                          leaving the WAL uncommitted so the rows are replayed"
+                    );
+                }
+                Err(_) => {
+                    tracing::error!(
+                        timeout_secs = INDEX_DURABILITY_TIMEOUT.as_secs(),
+                        "timed out waiting for the block index to become durable;                          leaving the WAL uncommitted so the rows are replayed"
+                    );
+                }
+            }
         }
         tracing::debug!(
             signal = "metrics",
@@ -402,7 +437,7 @@ pub struct LogRotator {
     config: LogBlockConfig,
     last_flush: Instant,
     max_duration: Duration,
-    metadata_tx: mpsc::UnboundedSender<BlockMetadata>,
+    metadata_tx: mpsc::UnboundedSender<PendingIndex>,
     /// WAL for logs, when enabled. Appended under the rotator lock, which the
     /// caller already holds, so WAL order and writer order are the same total
     /// order — the property that makes the committed position correct.
@@ -412,7 +447,7 @@ pub struct LogRotator {
 }
 
 impl LogRotator {
-    pub fn new(config: LogBlockConfig, metadata_tx: mpsc::UnboundedSender<BlockMetadata>) -> Self {
+    pub fn new(config: LogBlockConfig, metadata_tx: mpsc::UnboundedSender<PendingIndex>) -> Self {
         let max_duration = Duration::from_secs(config.block_duration_secs);
         Self {
             writer: LogWriter::new(config.clone()),
@@ -431,7 +466,7 @@ impl LogRotator {
     /// buffer.
     fn publish(&self, meta: BlockMetadata, contention: Option<&ContentionMetrics>) {
         record_block_written(&meta, contention, SignalType::Logs);
-        let _ = self.metadata_tx.send(meta);
+        let _ = self.metadata_tx.send(PendingIndex::untracked(meta));
     }
 
     /// Attaches a WAL. After this, every accepted record is logged before it
@@ -499,11 +534,33 @@ impl LogRotator {
         }
         let metadata = metadata?;
         self.last_flush = Instant::now();
-        let _ = self.metadata_tx.send(metadata);
-        // Committed only now the block is renamed; see wal.rs for why the
-        // order matters.
-        if let Some(wal) = self.wal.as_mut() {
-            wal.commit(covered)?;
+        // See the metrics flush for why the sidecar must be durable first.
+        let (pending, durable) = match self.wal.is_some() {
+            true => {
+                let (p, r) = PendingIndex::tracked(metadata);
+                (p, Some(r))
+            }
+            false => (PendingIndex::untracked(metadata), None),
+        };
+        let _ = self.metadata_tx.send(pending);
+        if let Some(durable) = durable {
+            // See the metrics flush: bounded, and on timeout leave the WAL
+            // uncommitted so replay recovers the rows.
+            match tokio::time::timeout(INDEX_DURABILITY_TIMEOUT, durable).await {
+                Ok(Ok(())) => {
+                    if let Some(wal) = self.wal.as_mut() {
+                        wal.commit(covered)?;
+                    }
+                }
+                Ok(Err(_)) => tracing::warn!(
+                    "log index task dropped before the sidecar was persisted; \
+                     leaving the WAL uncommitted"
+                ),
+                Err(_) => tracing::error!(
+                    "timed out waiting for the log index to become durable; \
+                     leaving the WAL uncommitted"
+                ),
+            }
         }
         tracing::debug!(
             signal = "logs",
@@ -514,6 +571,15 @@ impl LogRotator {
         Ok(())
     }
 }
+
+/// How long a flush waits for the block index to become durable before giving
+/// up and leaving the WAL uncommitted.
+///
+/// A wait with no bound would turn a wedged index task into a total ingest
+/// outage, so the failure mode is deliberately "do not commit": the rows stay
+/// in the WAL and a later replay restores them into a fresh block. The stale
+/// block is left unindexed, which costs disk but loses no data.
+const INDEX_DURABILITY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Stats for an ingestion service.
 #[derive(Default)]
@@ -574,7 +640,7 @@ pub struct IngestionService {
 }
 
 impl IngestionService {
-    pub fn new(config: BlockConfig, metadata_tx: mpsc::UnboundedSender<BlockMetadata>) -> Self {
+    pub fn new(config: BlockConfig, metadata_tx: mpsc::UnboundedSender<PendingIndex>) -> Self {
         Self::with_shards(config, metadata_tx, 1, None)
     }
 
@@ -585,7 +651,7 @@ impl IngestionService {
     /// rather than each producing their own.
     pub fn with_shards(
         config: BlockConfig,
-        metadata_tx: mpsc::UnboundedSender<BlockMetadata>,
+        metadata_tx: mpsc::UnboundedSender<PendingIndex>,
         shards: usize,
         wal: Option<WalWriter>,
     ) -> Self {
@@ -765,14 +831,14 @@ impl LogIngestionService {
         self.rotator.lock().await.wal_bytes()
     }
 
-    pub fn new(config: LogBlockConfig, metadata_tx: mpsc::UnboundedSender<BlockMetadata>) -> Self {
+    pub fn new(config: LogBlockConfig, metadata_tx: mpsc::UnboundedSender<PendingIndex>) -> Self {
         Self::with_wal(config, metadata_tx, None)
     }
 
     /// Creates the service with an optional write-ahead log.
     pub fn with_wal(
         config: LogBlockConfig,
-        metadata_tx: mpsc::UnboundedSender<BlockMetadata>,
+        metadata_tx: mpsc::UnboundedSender<PendingIndex>,
         wal: Option<WalWriter>,
     ) -> Self {
         let mut rotator = LogRotator::new(config, metadata_tx);
@@ -910,7 +976,7 @@ pub struct TraceRotator {
     config: BlockConfig,
     last_flush: Instant,
     max_duration: Duration,
-    metadata_tx: mpsc::UnboundedSender<BlockMetadata>,
+    metadata_tx: mpsc::UnboundedSender<PendingIndex>,
     /// WAL for traces, when enabled. Same contract as [`LogRotator::wal`].
     wal: Option<WalWriter>,
     /// Highest WAL position among the rows currently in `writer`.
@@ -918,7 +984,7 @@ pub struct TraceRotator {
 }
 
 impl TraceRotator {
-    pub fn new(config: BlockConfig, metadata_tx: mpsc::UnboundedSender<BlockMetadata>) -> Self {
+    pub fn new(config: BlockConfig, metadata_tx: mpsc::UnboundedSender<PendingIndex>) -> Self {
         let max_duration = Duration::from_secs(config.block_duration_secs);
         Self {
             writer: TraceWriter::new(config.clone()),
@@ -937,7 +1003,7 @@ impl TraceRotator {
     /// buffer.
     fn publish(&self, meta: BlockMetadata, contention: Option<&ContentionMetrics>) {
         record_block_written(&meta, contention, SignalType::Traces);
-        let _ = self.metadata_tx.send(meta);
+        let _ = self.metadata_tx.send(PendingIndex::untracked(meta));
     }
 
     /// Attaches a WAL. After this, every accepted span is logged before it
@@ -1002,10 +1068,33 @@ impl TraceRotator {
         }
         let metadata = metadata?;
         self.last_flush = Instant::now();
-        let _ = self.metadata_tx.send(metadata);
-        // Committed only now the block is renamed; see wal.rs.
-        if let Some(wal) = self.wal.as_mut() {
-            wal.commit(covered)?;
+        // See the metrics flush for why the sidecar must be durable first.
+        let (pending, durable) = match self.wal.is_some() {
+            true => {
+                let (p, r) = PendingIndex::tracked(metadata);
+                (p, Some(r))
+            }
+            false => (PendingIndex::untracked(metadata), None),
+        };
+        let _ = self.metadata_tx.send(pending);
+        if let Some(durable) = durable {
+            // See the metrics flush: bounded, and on timeout leave the WAL
+            // uncommitted so replay recovers the rows.
+            match tokio::time::timeout(INDEX_DURABILITY_TIMEOUT, durable).await {
+                Ok(Ok(())) => {
+                    if let Some(wal) = self.wal.as_mut() {
+                        wal.commit(covered)?;
+                    }
+                }
+                Ok(Err(_)) => tracing::warn!(
+                    "log index task dropped before the sidecar was persisted; \
+                     leaving the WAL uncommitted"
+                ),
+                Err(_) => tracing::error!(
+                    "timed out waiting for the log index to become durable; \
+                     leaving the WAL uncommitted"
+                ),
+            }
         }
         tracing::debug!(
             signal = "traces",
@@ -1031,14 +1120,14 @@ pub struct TraceIngestionService {
 }
 
 impl TraceIngestionService {
-    pub fn new(config: BlockConfig, metadata_tx: mpsc::UnboundedSender<BlockMetadata>) -> Self {
+    pub fn new(config: BlockConfig, metadata_tx: mpsc::UnboundedSender<PendingIndex>) -> Self {
         Self::with_wal(config, metadata_tx, None)
     }
 
     /// Creates the service with an optional write-ahead log.
     pub fn with_wal(
         config: BlockConfig,
-        metadata_tx: mpsc::UnboundedSender<BlockMetadata>,
+        metadata_tx: mpsc::UnboundedSender<PendingIndex>,
         wal: Option<WalWriter>,
     ) -> Self {
         let mut rotator = TraceRotator::new(config, metadata_tx);
@@ -1218,6 +1307,113 @@ mod tests {
         }
     }
 
+    /// Number of WAL-written Parquet blocks in a data dir.
+    fn wal_files(data_dir: &std::path::Path) -> usize {
+        std::fs::read_dir(data_dir)
+            .map(|d| {
+                d.flatten()
+                    .filter(|e| e.path().extension().is_some_and(|x| x == "parquet"))
+                    .count()
+            })
+            .unwrap_or(0)
+    }
+
+    /// The WAL must not be committed until the sidecar holding the block is
+    /// durable.
+    ///
+    /// This is the ordering bug behind `BL-03-16`: the flush used to commit the
+    /// WAL immediately after publishing the metadata, while the sidecar was
+    /// written up to two seconds later by a debounce. A crash in that window
+    /// left a block on disk, absent from the sidecar and already marked
+    /// recovered — so nothing replayed it and no query could find it.
+    ///
+    /// A deliberately slow index task stands in for a slow sidecar write: the
+    /// commit must not have happened while it was still blocked.
+    #[tokio::test]
+    async fn test_wal_commit_waits_for_the_sidecar_to_be_durable() {
+        let dir = tempdir().unwrap();
+        let data_dir = dir.path().to_path_buf();
+        let config = BlockConfig {
+            data_dir: data_dir.clone(),
+            max_rows_per_block: 10_000,
+            block_duration_secs: 3600,
+            ..Default::default()
+        };
+        let (tx, mut rx) = mpsc::unbounded_channel::<PendingIndex>();
+
+        // Read the commit point at the moment the index task is released, before
+        // the flush can possibly commit: it must still be START.
+        let commit_when_released = Arc::new(std::sync::atomic::AtomicU64::new(u64::MAX));
+        let index_task = tokio::spawn({
+            let commit_when_released = commit_when_released.clone();
+            let data_dir = data_dir.clone();
+            async move {
+                while let Some(pending) = rx.recv().await {
+                    // Stand in for a slow sidecar write.
+                    tokio::time::sleep(Duration::from_millis(300)).await;
+                    commit_when_released.store(
+                        parqtel_core::wal::read_commit(&data_dir, "metrics").0,
+                        std::sync::atomic::Ordering::SeqCst,
+                    );
+                    if let Some(ack) = pending.durable {
+                        let _ = ack.send(());
+                    }
+                }
+            }
+        });
+
+        let svc = IngestionService::with_shards(
+            config,
+            tx,
+            1,
+            Some(
+                WalWriter::open_with_segment_limit(
+                    &data_dir,
+                    "metrics",
+                    WalSyncMode::Always,
+                    Duration::from_millis(0),
+                    64 * 1024 * 1024,
+                )
+                .unwrap(),
+            ),
+        );
+        svc.ingest_metrics(vec![metric_named("ord", 1)])
+            .await
+            .unwrap();
+        svc.shutdown().await.unwrap();
+        index_task.abort();
+
+        assert_eq!(
+            commit_when_released.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "the WAL was committed before the sidecar was durable"
+        );
+        assert_ne!(
+            parqtel_core::wal::read_commit(&data_dir, "metrics").0,
+            0,
+            "once the index releases the flush, the WAL must be committed"
+        );
+    }
+
+    /// Runs an index task the way `main.rs` does: add the block, then release
+    /// the flush waiting on durability.
+    ///
+    /// A flush now blocks until the sidecar holding its block is written, so a
+    /// test that produces blocks without one would stall until the handshake
+    /// times out. Reproducing the real task keeps the tests honest about the
+    /// ordering as well.
+    fn spawn_index_task(
+        mut rx: mpsc::UnboundedReceiver<PendingIndex>,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            while let Some(pending) = rx.recv().await {
+                if let Some(ack) = pending.durable {
+                    let _ = ack.send(());
+                }
+            }
+        })
+    }
+
     /// A minimal span, for the WAL tests.
     fn test_span(start: i64) -> Span {
         Span {
@@ -1282,7 +1478,7 @@ mod tests {
             .unwrap();
 
         rotator.flush(None).await.unwrap();
-        let meta = rx.recv().await.unwrap();
+        let meta = rx.recv().await.unwrap().meta;
         assert_eq!(meta.row_count, 1);
         assert!(meta.path.exists());
     }
@@ -1318,7 +1514,7 @@ mod tests {
             .unwrap();
         rotator.flush(Some(&contention)).await.unwrap();
 
-        let meta = rx.recv().await.unwrap();
+        let meta = rx.recv().await.unwrap().meta;
         assert_eq!(contention.flush_duration_count(SignalType::Metrics), 1);
         assert_eq!(contention.flush_rows(SignalType::Metrics), 1);
         assert_eq!(contention.flush_inflight(SignalType::Metrics), 0);
@@ -1361,7 +1557,7 @@ mod tests {
             .unwrap();
         assert!(flushed, "push must report the flush so the buffer drains");
 
-        let meta = rx.recv().await.unwrap();
+        let meta = rx.recv().await.unwrap().meta;
         assert_eq!(meta.row_count, 10);
         assert_eq!(contention.flush_duration_count(SignalType::Metrics), 1);
         assert_eq!(contention.flush_rows(SignalType::Metrics), 10);
@@ -1446,7 +1642,7 @@ mod tests {
         rotator.flush(Some(&contention)).await.unwrap();
 
         let mut metas = Vec::new();
-        while let Ok(meta) = rx.try_recv() {
+        while let Ok(meta) = rx.try_recv().map(|p| p.meta) {
             metas.push(meta);
         }
         assert_eq!(
@@ -1502,7 +1698,7 @@ mod tests {
             .unwrap();
         rotator.flush(None).await.unwrap();
         let mut metas = Vec::new();
-        while let Ok(meta) = rx.try_recv() {
+        while let Ok(meta) = rx.try_recv().map(|p| p.meta) {
             metas.push(meta);
         }
         assert_eq!(metas.len(), 1, "the four shards must merge into one block");
@@ -1585,7 +1781,7 @@ mod tests {
         );
     }
 
-    fn tx2() -> mpsc::UnboundedSender<BlockMetadata> {
+    fn tx2() -> mpsc::UnboundedSender<PendingIndex> {
         mpsc::unbounded_channel().0
     }
 
@@ -1670,8 +1866,8 @@ mod tests {
             const TOTAL: usize = 40 * 60 * 20;
             const REQUEST: usize = 60 * 20;
             let mut blocks = Vec::new();
-            while let Ok(m) = rx.try_recv() {
-                blocks.push(m.row_count);
+            while let Ok(p) = rx.try_recv() {
+                blocks.push(p.meta.row_count);
             }
             let written: usize = blocks.iter().sum();
             assert_eq!(written, TOTAL, "shards={shards}: no rows may be lost");
@@ -1731,7 +1927,7 @@ mod tests {
         rotator.flush(Some(&contention)).await.unwrap();
 
         let total: usize = std::iter::from_fn(|| rx.try_recv().ok())
-            .map(|m: BlockMetadata| m.row_count)
+            .map(|p: PendingIndex| p.meta.row_count)
             .sum();
         assert_eq!(
             total,
@@ -1778,7 +1974,7 @@ mod tests {
         rotator.flush(Some(&contention)).await.unwrap();
 
         let mut metas = Vec::new();
-        while let Ok(meta) = rx.try_recv() {
+        while let Ok(meta) = rx.try_recv().map(|p| p.meta) {
             metas.push(meta);
         }
         let total: usize = metas.iter().map(|m| m.row_count).sum();
@@ -1835,7 +2031,7 @@ mod tests {
         // The two closed blocks must already be in the channel before any
         // explicit flush; the tail is still buffered.
         let mut published = 0usize;
-        while let Ok(meta) = rx.try_recv() {
+        while let Ok(meta) = rx.try_recv().map(|p| p.meta) {
             assert!(meta.path.exists(), "published block must exist on disk");
             published += meta.row_count;
         }
@@ -1891,7 +2087,7 @@ mod tests {
         // Fourth record crosses the cap: must roll over, not error.
         assert!(rotator.push(make(103), Some(&contention)).await.unwrap());
 
-        let meta = rx.recv().await.unwrap();
+        let meta = rx.recv().await.unwrap().meta;
         assert_eq!(meta.row_count, 3, "the full block is written");
         assert_eq!(
             contention.flush_rows(SignalType::Logs),
@@ -1982,7 +2178,7 @@ mod tests {
 
         service.shutdown().await.unwrap();
         let total: usize = std::iter::from_fn(|| rx.try_recv().ok())
-            .map(|m: parqtel_core::BlockMetadata| m.row_count)
+            .map(|p: PendingIndex| p.meta.row_count)
             .sum();
         assert_eq!(total, points * 2, "both batches must be written in full");
     }
@@ -2135,7 +2331,8 @@ mod tests {
 
         // First "process": accept points, acknowledge, then crash.
         {
-            let (tx, _rx) = mpsc::unbounded_channel();
+            let (tx, rx) = mpsc::unbounded_channel();
+            let _index = spawn_index_task(rx);
             let svc = IngestionService::with_shards(
                 config.clone(),
                 tx,
@@ -2199,7 +2396,8 @@ mod tests {
             block_duration_secs: 3600,
             ..Default::default()
         };
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::unbounded_channel();
+        let _index = spawn_index_task(rx);
         let svc = IngestionService::with_shards(
             config.clone(),
             tx,
@@ -2222,9 +2420,12 @@ mod tests {
                 .unwrap();
         }
         svc.shutdown().await.unwrap();
-        let meta = rx.try_recv().expect("a block must have been written");
-        assert_eq!(meta.row_count, 4);
-        assert!(meta.path.exists(), "the block must be renamed into place");
+        // The index task consumed the metadata, so the durable proof is that
+        // the WAL is committed: the block is on disk and covered.
+        assert!(
+            wal_files(&data_dir) >= 1,
+            "the flush must have written a block"
+        );
 
         let commit = parqtel_core::wal::read_commit(&data_dir, "metrics");
         let mut seen = 0u64;
@@ -2276,8 +2477,10 @@ mod tests {
 
             // Crash: accept, acknowledge, drop without flushing.
             {
-                let (ltx, _lrx) = mpsc::unbounded_channel();
-                let (ttx, _trx) = mpsc::unbounded_channel();
+                let (ltx, lrx) = mpsc::unbounded_channel();
+                let (ttx, trx) = mpsc::unbounded_channel();
+                let _index_a = spawn_index_task(lrx);
+                let _index_b = spawn_index_task(trx);
                 let logs_svc = LogIngestionService::with_wal(log_config.clone(), ltx, Some(open()));
                 let traces_svc =
                     TraceIngestionService::with_wal(block_config.clone(), ttx, Some(open()));
@@ -2339,8 +2542,10 @@ mod tests {
             assert_eq!(srec.len(), 3);
 
             // Graceful flush commits, so a second replay finds nothing.
-            let (ltx, mut lrx) = mpsc::unbounded_channel();
-            let (ttx, mut trx) = mpsc::unbounded_channel();
+            let (ltx, lrx) = mpsc::unbounded_channel();
+            let (ttx, trx) = mpsc::unbounded_channel();
+            let _gc_index_a = spawn_index_task(lrx);
+            let _gc_index_b = spawn_index_task(trx);
             let logs_svc = LogIngestionService::with_wal(log_config.clone(), ltx, Some(open()));
             let traces_svc =
                 TraceIngestionService::with_wal(block_config.clone(), ttx, Some(open()));
@@ -2366,8 +2571,8 @@ mod tests {
             traces_svc.ingest_spans(vec![test_span(99)]).await.unwrap();
             logs_svc.shutdown().await.unwrap();
             traces_svc.shutdown().await.unwrap();
-            assert!(lrx.try_recv().is_ok(), "{signal}: a block must be written");
-            assert!(trx.try_recv().is_ok(), "{signal}: a block must be written");
+            // The index tasks consumed the metadata; the WAL commit is what the
+            // second replay checks.
 
             let commit = parqtel_core::wal::read_commit(&data_dir, signal);
             let after = parqtel_core::wal::replay::<serde_json::Value, _>(
@@ -2409,7 +2614,7 @@ mod tests {
         service.shutdown().await.unwrap();
 
         let mut metas = Vec::new();
-        while let Ok(meta) = rx.try_recv() {
+        while let Ok(meta) = rx.try_recv().map(|p| p.meta) {
             metas.push(meta);
         }
         assert!(!metas.is_empty(), "flushes must still publish blocks");
@@ -2702,7 +2907,7 @@ mod tests {
         rotator.push(log, None).await.unwrap();
 
         rotator.flush(None).await.unwrap();
-        let meta = rx.recv().await.unwrap();
+        let meta = rx.recv().await.unwrap().meta;
         assert_eq!(meta.row_count, 1);
     }
 

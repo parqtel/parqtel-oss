@@ -1102,10 +1102,10 @@ item first.
 
 ---
 
-## BL-03-16 (CRITICAL, open — data loss) — Block index is not durable before the WAL commits
+## BL-03-16 (CRITICAL, **landed**) — Block index is not durable before the WAL commits
 
-**Status: open. Reproduced on unmodified `main` (`c4c60d6`).** Found while
-implementing `BL-01-14`; it is not caused by that work.
+**Status: fixed and verified.** Reproduced on unmodified `main` (`c4c60d6`)
+while implementing `BL-01-14`; it was not caused by that work.
 
 **Reproduction.** A metrics block large enough to flush, then `SIGKILL`
 immediately after the flush reports completion:
@@ -1134,34 +1134,50 @@ already committed in the WAL — so replay skips it and no query can find it. Th
 window is as wide as the index debounce, and #44 introduced the debounce while
 #58 introduced the commit. Neither was wrong alone; together they lose data.
 
-**Fix.** The index must be durable *before* the WAL is committed. That needs a
-handshake, because the flush path and the index task are different components:
+**Resolution.** A durability handshake. `BlockMetadata` now travels to the index
+inside a `PendingIndex`, which optionally carries a oneshot sender. The flush:
 
-1. `run_flush_job` publishes the metadata, then waits for the index to confirm
-   the sidecar write completed, and only then commits the WAL. The index task
-   already owns persistence; it can acknowledge after a forced write rather
-   than waiting for the debounce.
-2. Preferably *also* make the sidecar self-healing: on startup, if the sidecar
-   is missing or older than the newest block file, rebuild it by reading the
-   block footers. That removes the ordering requirement entirely and also
-   recovers from any other way the index can be lost.
+1. writes and renames the block,
+2. publishes it with a `PendingIndex::tracked`, and **waits** on the oneshot,
+3. commits the WAL only once released.
 
-While this is open, `parqtel_index_sidecar_bytes` and
-`parqtel_index_pending_writes` are the metrics to watch: a non-zero
-`pending_writes` that never returns to 0 means blocks exist that the sidecar
-does not yet know about.
+The index task, on receiving a tracked block, forces `persist_once` (rather than
+waiting out the debounce) and only then fires the sender. Untracked blocks —
+signals with no WAL, and blocks published mid-push by the writer — skip the wait,
+since nothing is waiting on them and nothing is committed.
 
-**Acceptance.** The reproduction above must show `blocks=3 rows=60000` after
-the `SIGKILL`, with the sidecar present. Until then, a crash can lose
-acknowledged data, which is the one guarantee a WAL exists to provide.
+The wait is **bounded** (`INDEX_DURABILITY_TIMEOUT`, 30 s) and fails **safe**: on
+timeout the WAL is deliberately *not* committed. The rows stay in the WAL, so a
+replay restores them into a fresh block; the stale block is left unindexed, which
+costs disk but loses no data. An unbounded wait would have turned a wedged index
+task into a total ingest outage, which is a worse failure than a wasted block.
 
-**Effort** M · **Risk** Medium
+Verified against the exact reproduction that previously lost everything:
+
+| | before | after |
+|---|---|---|
+| blocks after `SIGKILL` | 0 | **3** |
+| rows after `SIGKILL` | 0 | **60 000** |
+| `index.json` | absent | present |
+
+`test_wal_commit_waits_for_the_sidecar_to_be_durable` pins the ordering
+directly: a deliberately slow index task stands in for a slow sidecar write, and
+the commit point must still be `START` at the moment the task releases the flush.
+
+**Still worth doing (not required for correctness now):** make the sidecar
+self-healing by rebuilding it from block footers on startup when it is missing or
+stale. That would also cover any *other* way the index can be lost.
+
+`parqtel_index_pending_writes` remains the metric to watch: a value that never
+returns to 0 means the sidecar has stopped keeping up.
+
+**Effort** M · **Risk** Medium (taken)
 
 ---
 
-## BL-03-17 (H, open) — Effective HTTP body limit is ~2 MiB, not `ingest.max_body_size`
+## BL-03-17 (H, **landed**) — Effective HTTP body limit is ~2 MiB, not `ingest.max_body_size`
 
-**Status: open. Reproduced on `main`.**
+**Status: fixed and verified.** Reproduced on `main`.
 
 `ingest.max_body_size` defaults to 10 MiB and is applied with
 `RequestBodyLimitLayer`, but axum's `DefaultBodyLimit` (2 MiB) wins, so larger
@@ -1177,14 +1193,23 @@ OTLP batches will see no change and a `413` from `RequestBodyLimitLayer`, with
 nothing pointing at the real limit. It also caps ingest throughput, since
 throughput is batch-size-limited.
 
-**Fix.** Remove `DefaultBodyLimit` (or set it above the configured value) on
-the ingest routes so `ingest.max_body_size` is authoritative, and state the
-effective limit in the 413 body.
+**Resolution.** `axum::extract::DefaultBodyLimit::max(ingest_config.max_body_size)`
+is now layered alongside `RequestBodyLimitLayer`, so the configured value is
+authoritative instead of axum's 2 MB default.
 
-**Acceptance.** A payload of `max_body_size + 1` is rejected with a message
-naming `max_body_size`; a payload just under it is accepted.
+Verified in a container with `max_body_size` at its 10 MiB default:
 
-**Effort** S · **Risk** Low
+| payload | before | after |
+|---|---|---|
+| 2.15 MiB | 413 | **200** |
+| 4.02 MiB | 413 | **200** |
+| 10.69 MiB | 413 | 413 (correctly refused) |
+
+Note that an in-crate unit test for this was written and removed: axum enforces
+the limit when the body is *read*, and the test handler plumbing fought the
+`Handler` bounds. The container measurement is the better evidence anyway.
+
+**Effort** S · **Risk** Low (taken)
 
 ---
 
