@@ -680,3 +680,56 @@ waiting. The merge behaviour is therefore pinned by unit tests that run the
 real `compact_once` against real Parquet blocks. Live container checks confirmed
 no regression: spans ingest, flush (`parqtel_flush_rows_total{signal="traces"}`),
 and trace search returns correct results.
+
+## Series dictionary for the `labels` column: measured, not worth doing
+
+`BL-03-04` proposed replacing the per-row JSON `labels` column with a
+series-ID dictionary, on the reasoning that *"zstd must re-compress the same
+text per row"*. That was the largest storage item in the backlog, an XL item
+with an on-disk format change behind it.
+
+**It was measured instead of built, and the premise is false.**
+
+100 000 rows, 200 series, 5 000 rows/row-group:
+
+| configuration | `Utf8` (current) | `Dictionary(Int32, Utf8)` | change |
+|---|---|---|---|
+| zstd (production) | 810 614 B | 810 678 B | **0.0 %** |
+| uncompressed | 1 784 431 B | 1 784 495 B | **0.0 %** |
+| write time | 0.034 s | 0.035 s | wash |
+
+Reading the encodings back out of a block written with the **plain `Utf8`
+column**:
+
+```
+"labels"  ["PLAIN", "RLE", "RLE_DICTIONARY"]
+```
+
+**Parquet dictionary-encodes string columns by default.** The Arrow-level field
+type only decides whether *Arrow* does the encoding; Parquet applies the same
+`RLE_DICTIONARY` either way. A series dictionary would therefore add an encoding
+that is already present, and zstd compresses what is left — 9 MB of raw labels
+JSON becomes 810 KB.
+
+So: no schema version bump, no migration, no v1-read/v2-write reader. The
+expensive, risky work is avoided rather than done for nothing.
+
+The same conclusion applies to `metric_kind`, the other plain-`Utf8` per-row
+column.
+
+### What does survive
+
+The per-row `labels.to_json()` on the write path and the per-series
+`from_json()` on the read path are real **CPU** costs. The read side is already
+covered by the per-chunk label cache from `perf(storage)`. The write side was
+not measured here; `parqtel_flush_duration_seconds` is the metric to watch if
+anyone wants to quantify it.
+
+### Evidence kept
+
+`probe_labels_size` is retained rather than deleted, both as the record of why
+this was closed and as a guard for anyone who revisits the assumption.
+
+```bash
+cargo run --release -p parqtel-core --example probe_labels_size
+```

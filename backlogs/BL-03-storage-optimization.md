@@ -109,7 +109,45 @@ bloom filters confirmed present on both key columns. Met.
 - By contrast `metric_name`, `service_name`, `service_version`, the k8s columns and `resource_attributes` (metrics) **are** dictionary-encoded (`schema.rs:44`, `:50`, `:84`).
 - Every row serialises its labels independently: `parqtel-core/src/models/storage/writer.rs:57` — `labels.append_value(&dp.labels.to_json()?)`; scanner caches by JSON text because "label JSON repeats once per series across thousands of rows" (`scanner.rs:132`, `:198-219`).
 
-**Gap.** The single largest column in the metrics/logs/traces blocks is a repeated, near-identical JSON blob — the archetypal Parquet anti-pattern. It costs: file size (zstd must re-compress the same text per row), write CPU (one `serde_json::to_string` per row), read CPU (one JSON parse per distinct series per chunk, cached but still per chunk), and scan bandwidth. This is the main reason blocks are large, which in turn is why scans are slow.
+**Gap (as originally stated).** The largest repeated column is a near-identical JSON blob per row — the archetypal Parquet anti-pattern — supposedly costing file size because "zstd must re-compress the same text per row", plus write CPU and scan bandwidth.
+
+**MEASURED: the premise is wrong. Do not do this.**
+
+`cargo run --release -p parqtel-core --example probe_labels_size`, 100 000 rows,
+200 series, 5 000 rows/row-group:
+
+| configuration | `Utf8` (current) | `Dictionary(Int32, Utf8)` | change |
+|---|---|---|---|
+| zstd (production) | 810 614 B | 810 678 B | **0.0 %** |
+| uncompressed | 1 784 431 B | 1 784 495 B | **0.0 %** |
+| write time (zstd) | 0.034 s | 0.035 s | **wash** |
+
+Reading the encodings back out of a block written with the **plain `Utf8`
+column** gives:
+
+```
+"labels"  ["PLAIN", "RLE", "RLE_DICTIONARY"]
+```
+
+**Parquet dictionary-encodes string columns by default.** The Arrow-level type
+only decides whether *Arrow* does the encoding; Parquet applies the same
+`RLE_DICTIONARY` either way. So a series dictionary would add an encoding that
+is already present, and zstd then compresses what remains — 9 MB of raw labels
+JSON becomes 810 KB.
+
+An on-disk format migration is expensive, risky, and version-sensitive. This
+says it buys nothing, so it should not be done. The probe is kept as the
+evidence and as a guard if anyone revisits the assumption.
+
+**What survives from the original analysis:** the per-row
+`labels.to_json()` on the *write* path and the per-series `from_json()` on the
+*read* path are real CPU costs. The read side is already addressed by the
+per-chunk label cache in `perf(storage)`. The write side is one serialisation
+per row and was not measured separately here — `parqtel_flush_duration_seconds`
+is the metric to watch if anyone wants to quantify it.
+
+Note also that `metric_kind` is plain `Utf8` for the same reason, and the same
+conclusion applies: Parquet already dictionary-encodes it.
 
 **Resolution.**
 - Introduce a **series dictionary**: intern each distinct label set to a `u32 series_id` (from the same interner as BL-01-02), store `series_id` as `DataType::UInt32` (or `Dictionary(Int32, UInt32)`), and keep a per-block side table mapping `series_id → labels JSON`.
@@ -117,11 +155,9 @@ bloom filters confirmed present on both key columns. Met.
 - Prefer the full series-id design; fall back to dictionary-encoding if the side-table complexity is not worth it in one step.
 - Same treatment for logs `attributes`/`resource_attributes` and traces `attributes`.
 
-**Acceptance.** Blocks ≥ 2× smaller (target ≤ 60 % of current bytes on the seeded benchmark dataset); flush CPU ≥ 25 % lower; narrow-query scan cost independent of `row_group_size` once bloom filters land.
+**Acceptance.** NOT MET — and the target itself was wrong. Closed as measured-not-worth-doing. No schema version bump, no migration, no `schema_version` field: none is needed when the format does not change.
 
-**Schema compatibility.** Version the schema in `BlockMetadata` (add `schema_version`), support reading v1 and writing v2, and document that pre-v2 data dirs must be wiped or migrated — consistent with the existing arrow2→arrow migration precedent recorded in `AGENTS.md`.
-
-**Effort** XL · **Risk** High (on-disk format change)
+**Effort** XL (avoided) · **Risk** High (avoided)
 
 ---
 
