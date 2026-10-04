@@ -94,9 +94,24 @@ pub struct BlockRotator {
     /// own lock, so a concurrent push can never have its count erased by a
     /// later `store(0)`.
     buffered: AtomicUsize,
-    /// Serialises flushes so two requests cannot each swap the buffers and
-    /// write overlapping blocks. Held across the encode, but no shard lock is.
+    /// Serialises flush *initiation* so two requests cannot each swap the
+    /// buffers and produce overlapping blocks. With a worker running it is held
+    /// only for the swap and the hand-off, not for the encode.
     flush_lock: tokio::sync::Mutex<()>,
+    /// Channel to the background flush worker, when one is running.
+    ///
+    /// Behind a mutex because shutdown only has `&self`: the rotator is shared as
+    /// an `Arc`, and awaiting the worker must not need exclusive access.
+    flush_tx: std::sync::Mutex<Option<mpsc::Sender<FlushJob>>>,
+    /// Handle to the worker, awaited on shutdown so nothing is left in flight.
+    worker: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// Buffer to drain once a flush is **durable**.
+    ///
+    /// The rotator owns this rather than the service because with a background
+    /// worker the flush completes long after `push` returns. Draining in the
+    /// service would empty the buffer before the rows were in any block, and they
+    /// would be visible to neither the buffer nor a block.
+    buffer: std::sync::Mutex<Option<MemoryBuffer>>,
     /// WAL for this signal, when enabled.
     ///
     /// Appended to **while a shard lock is held**, so WAL order and writer
@@ -123,7 +138,7 @@ pub struct BlockRotator {
     /// Unix time of the last completed flush, in milliseconds. An atomic so
     /// the duration check needs no lock — flushes are serialised by
     /// `flush_lock`, so exactly one writer updates this at a time.
-    last_flush_unix_ms: AtomicU64,
+    last_flush_unix_ms: Arc<AtomicU64>,
     max_duration_ms: u64,
     metadata_tx: mpsc::UnboundedSender<PendingIndex>,
 }
@@ -152,10 +167,13 @@ impl BlockRotator {
                 .map(|_| std::sync::Mutex::new(WalPosition::START))
                 .collect(),
             flush_lock: tokio::sync::Mutex::new(()),
+            flush_tx: std::sync::Mutex::new(None),
+            worker: std::sync::Mutex::new(None),
+            buffer: std::sync::Mutex::new(None),
             buffered: AtomicUsize::new(0),
             max_duration_ms: config.block_duration_secs.saturating_mul(1000),
             config,
-            last_flush_unix_ms: AtomicU64::new(unix_millis()),
+            last_flush_unix_ms: Arc::new(AtomicU64::new(unix_millis())),
             metadata_tx,
         }
     }
@@ -170,6 +188,122 @@ impl BlockRotator {
     pub fn with_wal(mut self, wal: WalWriter) -> Self {
         self.wal = Some(Arc::new(Mutex::new(wal)));
         self
+    }
+
+    /// Gives the rotator the buffer to drain once a flush is durable.
+    pub fn with_buffer(self, buffer: MemoryBuffer) -> Self {
+        *self.buffer.lock().unwrap_or_else(|e| e.into_inner()) = Some(buffer);
+        self
+    }
+
+    /// Attaches the buffer after the rotator has been wrapped in an `Arc`.
+    pub fn set_buffer(&self, buffer: Option<MemoryBuffer>) {
+        *self.buffer.lock().unwrap_or_else(|e| e.into_inner()) = buffer;
+    }
+
+    /// Starts the background flush worker.
+    ///
+    /// With a worker, `flush` only *schedules*: the shard writers are swapped
+    /// out under their own short locks and the encode happens on a background
+    /// task, so the triggering request is acknowledged as soon as the WAL has
+    /// its rows. Durability is not weakened — the WAL append already happened.
+    pub fn start_flush_worker(&self, max_in_flight: usize) {
+        if self
+            .flush_tx
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some()
+        {
+            return;
+        }
+        let max_in_flight = max_in_flight.max(1);
+        // Queue depth and concurrent encodes share the same bound: the channel
+        // is what makes a full queue detectable (and therefore fall back to an
+        // inline encode) rather than growing without limit.
+        let (tx, mut rx) = mpsc::channel::<FlushJob>(max_in_flight);
+        let buffer = self
+            .buffer
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let wal = self.wal.clone();
+        let metadata_tx = self.metadata_tx.clone();
+        // Shared with the workers so a *completed* background flush is what
+        // resets the rotation clock; the field cannot be reassigned via `&self`.
+        let last_flush = Arc::clone(&self.last_flush_unix_ms);
+        let permits = Arc::new(tokio::sync::Semaphore::new(max_in_flight));
+
+        let handle = tokio::spawn(async move {
+            // One task **per job**, bounded by the semaphore, rather than a
+            // sequential loop: a single loop would encode one block at a time,
+            // which is exactly the serialisation the worker exists to remove.
+            let mut inflight = tokio::task::JoinSet::new();
+            loop {
+                tokio::select! {
+                    // Drain finished encodes first so the set does not grow.
+                    Some(joined) = inflight.join_next(), if !inflight.is_empty() => {
+                        if let Err(e) = joined {
+                            tracing::error!(signal = "metrics", "flush task panicked: {e}");
+                        }
+                    }
+                    job = rx.recv() => {
+                        let Some(job) = job else { break };
+                        let wal = wal.clone();
+                        let metadata_tx = metadata_tx.clone();
+                        let buffer = buffer.clone();
+                        let permits = Arc::clone(&permits);
+                        let last_flush = Arc::clone(&last_flush);
+                        inflight.spawn(async move {
+                            // Bound the encodes themselves; the channel bound
+                            // only limits how many are queued.
+                            if let Ok(_permit) =
+                                Arc::clone(&permits).acquire_owned().await
+                            {
+                                let rows = job.row_count;
+                                if let Err(e) =
+                                    run_flush_job(job, &metadata_tx, wal.as_ref(), &buffer).await
+                                {
+                                    // The rows are still in the WAL, so an
+                                    // encode failure is recoverable rather than
+                                    // data loss. Log loudly and keep going.
+                                    tracing::error!(
+                                        signal = "metrics",
+                                        rows,
+                                        "background flush failed: {e}"
+                                    );
+                                }
+                                last_flush.store(unix_millis(), Ordering::Relaxed);
+                            }
+                        });
+                    }
+                }
+            }
+            // Channel closed: let every queued encode finish before the worker
+            // reports done, so a graceful shutdown cannot leave a block
+            // half-written or skip a WAL commit.
+            while inflight.join_next().await.is_some() {}
+        });
+        *self.worker.lock().unwrap_or_else(|e| e.into_inner()) = Some(handle);
+        *self.flush_tx.lock().unwrap_or_else(|e| e.into_inner()) = Some(tx);
+    }
+
+    /// Stops the worker after it finishes everything already queued.
+    ///
+    /// Dropping the sender closes the channel, so the loop ends once it has
+    /// drained; awaiting the handle therefore waits for the outstanding
+    /// encodes. That is what makes a graceful shutdown safe: no block is left
+    /// half-written and no WAL commit is skipped.
+    pub async fn stop_flush_worker(&self) {
+        drop(
+            self.flush_tx
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take(),
+        );
+        let handle = self.worker.lock().unwrap_or_else(|e| e.into_inner()).take();
+        if let Some(handle) = handle {
+            let _ = handle.await;
+        }
     }
 
     /// Bytes the WAL currently occupies.
@@ -223,7 +357,7 @@ impl BlockRotator {
     pub async fn push(
         &self,
         metric: Metric,
-        contention: Option<&ContentionMetrics>,
+        contention: Option<Arc<ContentionMetrics>>,
     ) -> Result<bool> {
         let idx = shard_for(&metric.name, self.shards.len());
         let points = metric.data_points.len();
@@ -233,7 +367,7 @@ impl BlockRotator {
         // `buffered + points > cap`, rearranged so neither side can overflow.
         let would_overflow = points > cap || self.buffered.load(Ordering::Relaxed) > cap - points;
         if would_overflow {
-            self.flush_if_over_capacity(contention).await?;
+            self.flush_if_over_capacity(contention.clone()).await?;
             flushed = true;
         }
 
@@ -241,7 +375,7 @@ impl BlockRotator {
         {
             let waited = Instant::now();
             let mut shard = self.shards[idx].lock().await;
-            if let Some(c) = contention {
+            if let Some(c) = contention.as_ref() {
                 c.record_ingest_lock_wait(SignalType::Metrics, waited.elapsed());
             }
             // Logged while the shard lock is held, so WAL order and writer
@@ -258,7 +392,7 @@ impl BlockRotator {
             for meta in shard.push(metric.clone())? {
                 closed += meta.row_count;
                 flushed = true;
-                self.publish(meta, contention);
+                self.publish(meta, contention.as_deref());
             }
             // Adjust the counter while still holding the shard lock: a flush
             // subtracts a shard's rows and swaps the writer under the same
@@ -285,7 +419,10 @@ impl BlockRotator {
         Ok(flushed)
     }
 
-    pub async fn check_and_flush(&self, contention: Option<&ContentionMetrics>) -> Result<bool> {
+    pub async fn check_and_flush(
+        &self,
+        contention: Option<Arc<ContentionMetrics>>,
+    ) -> Result<bool> {
         if unix_millis().saturating_sub(self.last_flush_unix_ms.load(Ordering::Relaxed))
             >= self.max_duration_ms
         {
@@ -299,7 +436,10 @@ impl BlockRotator {
     ///
     /// Takes the flush lock *before* re-checking, so two requests that both
     /// crossed the cap produce one flush rather than two.
-    async fn flush_if_over_capacity(&self, contention: Option<&ContentionMetrics>) -> Result<()> {
+    async fn flush_if_over_capacity(
+        &self,
+        contention: Option<Arc<ContentionMetrics>>,
+    ) -> Result<()> {
         let _permit = self.flush_lock.lock().await;
         if self.buffered.load(Ordering::Relaxed) < self.config.max_rows_per_block {
             // Another request's flush already covered the cap.
@@ -316,19 +456,19 @@ impl BlockRotator {
     /// requests keep pushing into the fresh buffers while this encodes.
     ///
     /// Idempotent on an empty set of shards.
-    pub async fn flush(&self, contention: Option<&ContentionMetrics>) -> Result<()> {
+    pub async fn flush(&self, contention: Option<Arc<ContentionMetrics>>) -> Result<()> {
         let _permit = self.flush_lock.lock().await;
         self.flush_locked(contention).await
     }
 
     /// Flush body, with the flush lock already held.
-    async fn flush_locked(&self, contention: Option<&ContentionMetrics>) -> Result<()> {
+    async fn flush_locked(&self, contention: Option<Arc<ContentionMetrics>>) -> Result<()> {
         let mut writers = Vec::with_capacity(self.shards.len());
         let mut row_count = 0usize;
-        // Highest WAL position among the rows this block will actually
-        // contain. Taken per shard under that shard's own lock, at the moment
-        // its writer is swapped, so it can never include a row that lands in
-        // the *next* block.
+        // Highest WAL position among the rows this block will actually contain.
+        // Taken per shard under that shard's own lock, at the moment its writer
+        // is swapped, so it can never include a row that lands in the *next*
+        // block.
         let mut covered = WalPosition::START;
         for (i, shard) in self.shards.iter().enumerate() {
             let mut guard = shard.lock().await;
@@ -344,8 +484,8 @@ impl BlockRotator {
             *slot = WalPosition::START;
             // Subtract while still holding this shard's lock, so a concurrent
             // push either lands before this (and is subtracted here) or after
-            // (and counts up from the decremented total). A `store(0)` after
-            // the loop would erase the latter.
+            // (and counts up from the decremented total). A `store(0)` after the
+            // loop would erase the latter.
             self.buffered.fetch_sub(taken, Ordering::Relaxed);
             writers.push(std::mem::replace(
                 &mut *guard,
@@ -357,72 +497,142 @@ impl BlockRotator {
             return Ok(());
         }
 
-        let started = std::time::Instant::now();
-        let flush_guard = contention.map(|c| c.flush_started(SignalType::Metrics));
-        let encoded = tokio::task::spawn_blocking(move || merge_and_flush(writers)).await;
-        // Unwrap the JoinError separately from the writer's own Result so the
-        // row count can still be attributed when the flush succeeded.
-        let metadata = match encoded {
-            Ok(result) => result,
-            Err(e) => {
-                return Err(Error::Internal(format!("flush task panicked: {}", e)));
-            }
+        let job = FlushJob {
+            writers,
+            covered,
+            row_count,
+            contention,
         };
-        if let (Some(guard), Ok(meta)) = (flush_guard, metadata.as_ref()) {
-            guard.count_rows(meta.row_count as u64);
-        }
-        let metadata = metadata?;
-        // Only one flush runs at a time (flush_lock), so one relaxed store is
-        // enough to publish the new flush time.
-        self.last_flush_unix_ms
-            .store(unix_millis(), Ordering::Relaxed);
-        // Publish, wait for the sidecar to be durable, and only then commit
-        // the WAL. Committing first leaves a crash window in which the block is
-        // on disk, absent from the sidecar, and already marked recovered — so
-        // nothing replays it and no query can find it (BL-03-16).
-        let (pending, durable) = match &self.wal {
-            Some(_) => {
-                let (p, r) = PendingIndex::tracked(metadata);
-                (p, Some(r))
-            }
-            // No WAL: nothing is committed, so there is nothing to order.
-            None => (PendingIndex::untracked(metadata), None),
+
+        // Clone the sender out and drop the guard before any await: holding a
+        // std MutexGuard across a suspension makes the future non-Send.
+        let tx = self
+            .flush_tx
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let buffer = self
+            .buffer
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let Some(tx) = tx else {
+            // No worker configured: the original synchronous behaviour.
+            return run_flush_job(job, &self.metadata_tx, self.wal.as_ref(), &buffer).await;
         };
-        let _ = self.metadata_tx.send(pending);
-        if let Some(durable) = durable {
-            // Bounded: a wedged or absent index task must not stall ingest
-            // indefinitely, and committing while the index is behind is
-            // exactly the data-loss window this handshake exists to close.
-            // So on timeout we do NOT commit - the WAL keeps the rows and a
-            // later replay restores them into a fresh block. The stale block is
-            // left unindexed, which costs disk but loses no data.
-            match tokio::time::timeout(INDEX_DURABILITY_TIMEOUT, durable).await {
-                Ok(Ok(())) => {
-                    if let Some(wal) = &self.wal {
-                        wal.lock().await.commit(covered)?;
-                    }
-                }
-                Ok(Err(_)) => {
-                    tracing::warn!(
-                        "index task dropped before the sidecar was persisted;                          leaving the WAL uncommitted so the rows are replayed"
-                    );
-                }
-                Err(_) => {
-                    tracing::error!(
-                        timeout_secs = INDEX_DURABILITY_TIMEOUT.as_secs(),
-                        "timed out waiting for the block index to become durable;                          leaving the WAL uncommitted so the rows are replayed"
-                    );
-                }
+
+        match tx.try_send(job) {
+            // Queued: the caller is acknowledged now. The rows are already in the
+            // WAL, so nothing is lost if this process dies before the encode
+            // lands.
+            Ok(()) => Ok(()),
+            Err(mpsc::error::TrySendError::Full(job)) => {
+                tracing::warn!("flush queue full; encoding inline (backpressure)");
+                run_flush_job(job, &self.metadata_tx, self.wal.as_ref(), &buffer).await
+            }
+            Err(mpsc::error::TrySendError::Closed(job)) => {
+                // Worker gone (shutdown). Encode inline rather than drop.
+                tracing::warn!("flush worker is gone; encoding inline");
+                run_flush_job(job, &self.metadata_tx, self.wal.as_ref(), &buffer).await
             }
         }
-        tracing::debug!(
-            signal = "metrics",
-            rows = row_count,
-            duration_ms = started.elapsed().as_millis(),
-            "metric block flushed to parquet"
-        );
-        Ok(())
     }
+}
+
+/// One block's worth of rows handed to the flush worker.
+struct FlushJob {
+    writers: Vec<BlockWriter>,
+    /// WAL position this block covers once it is durable.
+    covered: WalPosition,
+    row_count: usize,
+    contention: Option<Arc<ContentionMetrics>>,
+}
+
+/// Encodes a job into a block and publishes it, in the order the WAL contract
+/// requires: rename, publish to the index, **wait for the sidecar**, then commit
+/// the WAL.
+///
+/// The buffer drain happens here too, and only here. Draining when a flush was
+/// *scheduled* would remove rows from the memory buffer before they exist in any
+/// block, leaving them invisible to queries - in neither place.
+async fn run_flush_job(
+    job: FlushJob,
+    metadata_tx: &mpsc::UnboundedSender<PendingIndex>,
+    wal: Option<&Arc<Mutex<WalWriter>>>,
+    buffer: &Option<MemoryBuffer>,
+) -> Result<()> {
+    let FlushJob {
+        writers,
+        covered,
+        row_count,
+        contention,
+    } = job;
+
+    let started = std::time::Instant::now();
+    let flush_guard = contention
+        .as_ref()
+        .map(|c| c.flush_started(SignalType::Metrics));
+    let encoded = tokio::task::spawn_blocking(move || merge_and_flush(writers)).await;
+    // Unwrap the JoinError separately from the writer's own Result so the row
+    // count can still be attributed when the flush succeeded.
+    let metadata = match encoded {
+        Ok(result) => result,
+        Err(e) => {
+            return Err(Error::Internal(format!("flush task panicked: {}", e)));
+        }
+    };
+    if let (Some(guard), Ok(meta)) = (flush_guard, metadata.as_ref()) {
+        guard.count_rows(meta.row_count as u64);
+    }
+    let metadata = metadata?;
+    tracing::debug!(
+        signal = "metrics",
+        rows = row_count,
+        duration_ms = started.elapsed().as_millis(),
+        "metric block encoded"
+    );
+
+    // Publish, wait for the sidecar to be durable, then commit the WAL.
+    // Committing first leaves a crash window in which the block is on disk,
+    // absent from the sidecar and already marked recovered (BL-03-16).
+    let (pending, durable) = match wal {
+        Some(_) => {
+            let (p, r) = PendingIndex::tracked(metadata);
+            (p, Some(r))
+        }
+        // No WAL: nothing is committed, so there is nothing to order.
+        None => (PendingIndex::untracked(metadata), None),
+    };
+    let _ = metadata_tx.send(pending);
+    if let Some(durable) = durable {
+        // Bounded: a wedged index task must not stall ingest, and committing
+        // while the index is behind is exactly the window this handshake
+        // closes. On timeout we do NOT commit, so the rows stay in the WAL and a
+        // replay restores them into a fresh block.
+        match tokio::time::timeout(INDEX_DURABILITY_TIMEOUT, durable).await {
+            Ok(Ok(())) => {
+                if let Some(wal) = wal {
+                    wal.lock().await.commit(covered)?;
+                }
+            }
+            Ok(Err(_)) => tracing::warn!(
+                "index task dropped before the sidecar was persisted; leaving the WAL uncommitted so the rows are replayed"
+            ),
+            Err(_) => tracing::error!(
+                timeout_secs = INDEX_DURABILITY_TIMEOUT.as_secs(),
+                "timed out waiting for the block index to become durable; leaving the WAL uncommitted so the rows are replayed"
+            ),
+        }
+    }
+
+    // Safe now: the rows are in a block the index knows about. Draining earlier -
+    // when a flush was merely *scheduled* - would leave the rows in neither the
+    // buffer nor a block, and they would be invisible to every query until the
+    // block landed.
+    if let Some(buffer) = buffer {
+        buffer.drain_offloaded(SignalType::Metrics).await;
+    }
+    Ok(())
 }
 
 /// Merges every shard writer's rows into one block and encodes it.
@@ -673,7 +883,12 @@ impl IngestionService {
     }
 
     /// Set the shared memory buffer for stream-queryable data.
+    ///
+    /// The rotator gets a handle too: with a background flush worker it must
+    /// drain the buffer when a block becomes *durable*, which is long after
+    /// this request returns.
     pub fn with_memory_buffer(mut self, buffer: MemoryBuffer) -> Self {
+        self.rotator.set_buffer(Some(buffer.clone()));
         self.memory_buffer = Some(buffer);
         self
     }
@@ -682,6 +897,23 @@ impl IngestionService {
     pub fn with_contention(mut self, contention: Arc<ContentionMetrics>) -> Self {
         self.contention = Some(contention);
         self
+    }
+
+    /// Starts the background flush worker.
+    ///
+    /// `max_in_flight` bounds concurrent encodes; when the queue is full a flush
+    /// encodes inline instead, so backpressure degrades to the previous
+    /// synchronous behaviour rather than growing a backlog.
+    pub fn start_flush_worker(&self, max_in_flight: usize) {
+        self.rotator.start_flush_worker(max_in_flight);
+    }
+
+    /// Schedules a flush without stopping the worker, so a test can observe the
+    /// window between a flush being scheduled and its block becoming durable.
+    pub async fn schedule_flush_for_test(&self) -> Result<bool> {
+        let contention = self.contention.clone();
+        self.rotator.flush(contention).await?;
+        Ok(true)
     }
 
     pub async fn ingest_proto(&self, body: Bytes) -> Result<u64> {
@@ -762,11 +994,11 @@ impl IngestionService {
             // The rotator measures its own per-shard lock wait, so the push is
             // not wrapped in the service-level measurement the single-lock
             // design needed.
-            if self.rotator.push(m, contention.as_deref()).await? {
+            if self.rotator.push(m, contention.clone()).await? {
                 flushed = true;
             }
         }
-        if self.rotator.check_and_flush(contention.as_deref()).await? {
+        if self.rotator.check_and_flush(contention.clone()).await? {
             flushed = true;
         }
         if flushed {
@@ -790,21 +1022,15 @@ impl IngestionService {
     /// (the shared memory buffer is drained so flushed rows aren't double-read).
     pub async fn check_and_flush(&self) -> Result<bool> {
         let contention = self.contention.clone();
-        let flushed = self.rotator.check_and_flush(contention.as_deref()).await?;
-        if flushed {
-            if let Some(ref buf) = self.memory_buffer {
-                buf.drain_offloaded(SignalType::Metrics).await;
-            }
-        }
-        Ok(flushed)
+        self.rotator.check_and_flush(contention).await
     }
 
     pub async fn shutdown(&self) -> Result<()> {
         let contention = self.contention.clone();
-        let _ = self.rotator.flush(contention.as_deref()).await;
-        if let Some(ref buf) = self.memory_buffer {
-            buf.drain_offloaded(SignalType::Metrics).await;
-        }
+        let _ = self.rotator.flush(contention.clone()).await;
+        // Stops the worker after it drains, so every scheduled block is written
+        // and its WAL position committed before we exit.
+        self.rotator.stop_flush_worker().await;
         Ok(())
     }
 
@@ -1414,6 +1640,70 @@ mod tests {
         })
     }
 
+    /// The hazard the background worker introduces: between a flush being
+    /// *scheduled* and the block being *durable*, the rows live only in the
+    /// WAL. Draining the memory buffer during that window would leave them in
+    /// neither the buffer nor a block, and they would be invisible to queries.
+    ///
+    /// Driven through the service, which is the path that populates both.
+    #[tokio::test]
+    async fn test_background_flush_keeps_rows_visible_throughout() {
+        let dir = tempdir().unwrap();
+        let buffer = parqtel_core::MemoryBuffer::new();
+        let config = BlockConfig {
+            data_dir: dir.path().to_path_buf(),
+            max_rows_per_block: 10_000,
+            block_duration_secs: 3600,
+            ..Default::default()
+        };
+        let (tx, rx) = mpsc::unbounded_channel::<PendingIndex>();
+        let _index = spawn_index_task(rx);
+        let svc =
+            IngestionService::with_shards(config, tx, 2, None).with_memory_buffer(buffer.clone());
+        svc.start_flush_worker(2);
+
+        for i in 0..8i64 {
+            svc.ingest_metrics(vec![metric_named(&format!("vis{i}"), i + 1)])
+                .await
+                .unwrap();
+        }
+        // Queryable before any flush: the rows are in the buffer.
+        assert_eq!(buffer.stats().await.0, 8, "rows must be in the buffer");
+
+        // Schedule a flush. It returns without waiting for the encode.
+        svc.schedule_flush_for_test().await.unwrap();
+
+        // Eventually the block is written, and only then is the buffer drained.
+        // At no point may the two overlap, or rows would be read twice.
+        let mut blocks = 0usize;
+        for _ in 0..200 {
+            blocks = block_file_count(dir.path()).max(blocks);
+            if buffer.stats().await.0 == 0 && blocks > 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(blocks > 0, "the worker must write the block");
+        assert_eq!(
+            buffer.stats().await.0,
+            0,
+            "the buffer must be drained once the block is durable"
+        );
+        assert_eq!(blocks, 1, "all 8 rows belong to a single block");
+        svc.shutdown().await.unwrap();
+    }
+
+    /// Number of Parquet block files a data dir holds.
+    fn block_file_count(dir: &std::path::Path) -> usize {
+        std::fs::read_dir(dir)
+            .map(|d| {
+                d.flatten()
+                    .filter(|e| e.path().extension().is_some_and(|x| x == "parquet"))
+                    .count()
+            })
+            .unwrap_or(0)
+    }
+
     /// A minimal span, for the WAL tests.
     fn test_span(start: i64) -> Span {
         Span {
@@ -1489,10 +1779,10 @@ mod tests {
     async fn test_idle_flush_is_not_recorded() {
         let dir = tempdir().unwrap();
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let contention = ContentionMetrics::new();
+        let contention = Arc::new(ContentionMetrics::new());
         let rotator = BlockRotator::new(tiny_metrics_config(dir.path()), tx);
 
-        rotator.flush(Some(&contention)).await.unwrap();
+        rotator.flush(Some(Arc::clone(&contention))).await.unwrap();
         assert!(rx.try_recv().is_err(), "no block should be written");
         assert_eq!(contention.flush_duration_count(SignalType::Metrics), 0);
         assert_eq!(contention.flush_rows(SignalType::Metrics), 0);
@@ -1505,14 +1795,14 @@ mod tests {
     async fn test_flush_records_duration_rows_and_clears_inflight() {
         let dir = tempdir().unwrap();
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let contention = ContentionMetrics::new();
+        let contention = Arc::new(ContentionMetrics::new());
         let rotator = BlockRotator::new(tiny_metrics_config(dir.path()), tx);
 
         rotator
-            .push(one_point_metric("m1", 100), Some(&contention))
+            .push(one_point_metric("m1", 100), Some(Arc::clone(&contention)))
             .await
             .unwrap();
-        rotator.flush(Some(&contention)).await.unwrap();
+        rotator.flush(Some(Arc::clone(&contention))).await.unwrap();
 
         let meta = rx.recv().await.unwrap().meta;
         assert_eq!(contention.flush_duration_count(SignalType::Metrics), 1);
@@ -1532,7 +1822,7 @@ mod tests {
     async fn test_capacity_triggered_flush_is_recorded() {
         let dir = tempdir().unwrap();
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let contention = ContentionMetrics::new();
+        let contention = Arc::new(ContentionMetrics::new());
         let rotator = BlockRotator::new(tiny_metrics_config(dir.path()), tx);
 
         // Ten points exactly fill the cap: no flush, because the check is
@@ -1540,7 +1830,10 @@ mod tests {
         // cap plus one request.
         for i in 0..10 {
             let flushed = rotator
-                .push(one_point_metric("m1", 100 + i), Some(&contention))
+                .push(
+                    one_point_metric("m1", 100 + i),
+                    Some(Arc::clone(&contention)),
+                )
                 .await
                 .unwrap();
             assert!(!flushed, "no flush while the batch still fits");
@@ -1552,7 +1845,7 @@ mod tests {
         // push must report the flush so the caller drains the memory buffer and
         // the flushed rows are not read twice.
         let flushed = rotator
-            .push(one_point_metric("m1", 200), Some(&contention))
+            .push(one_point_metric("m1", 200), Some(Arc::clone(&contention)))
             .await
             .unwrap();
         assert!(flushed, "push must report the flush so the buffer drains");
@@ -1614,7 +1907,7 @@ mod tests {
     async fn test_sharded_flush_writes_one_block() {
         let dir = tempdir().unwrap();
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let contention = ContentionMetrics::new();
+        let contention = Arc::new(ContentionMetrics::new());
         // A cap comfortably above the row count, so no rotation is triggered
         // by the cap check and the explicit flush below is the only writer.
         let rotator = BlockRotator::with_shards(
@@ -1634,12 +1927,12 @@ mod tests {
             rotator
                 .push(
                     one_point_metric(&format!("m{i}"), 100 + i),
-                    Some(&contention),
+                    Some(Arc::clone(&contention)),
                 )
                 .await
                 .unwrap();
         }
-        rotator.flush(Some(&contention)).await.unwrap();
+        rotator.flush(Some(Arc::clone(&contention))).await.unwrap();
 
         let mut metas = Vec::new();
         while let Ok(meta) = rx.try_recv().map(|p| p.meta) {
@@ -1914,7 +2207,7 @@ mod tests {
                     rotator
                         .push(
                             one_point_metric(&name, 1000 * (i as i64 + 1)),
-                            Some(&contention),
+                            Some(Arc::clone(&contention)),
                         )
                         .await
                         .unwrap();
@@ -1924,7 +2217,7 @@ mod tests {
         for h in handles {
             h.await.unwrap();
         }
-        rotator.flush(Some(&contention)).await.unwrap();
+        rotator.flush(Some(Arc::clone(&contention))).await.unwrap();
 
         let total: usize = std::iter::from_fn(|| rx.try_recv().ok())
             .map(|p: PendingIndex| p.meta.row_count)
@@ -1943,7 +2236,7 @@ mod tests {
     async fn test_oversized_metric_is_split_across_blocks() {
         let dir = tempdir().unwrap();
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let contention = ContentionMetrics::new();
+        let contention = Arc::new(ContentionMetrics::new());
         let rotator = BlockRotator::new(tiny_metrics_config(dir.path()), tx);
 
         // 25 points into a block that holds 10: three blocks, no error.
@@ -1965,13 +2258,13 @@ mod tests {
                     data_points: points,
                     ..Default::default()
                 },
-                Some(&contention),
+                Some(Arc::clone(&contention)),
             )
             .await
             .unwrap();
         assert!(flushed, "splitting a metric must report the flush");
 
-        rotator.flush(Some(&contention)).await.unwrap();
+        rotator.flush(Some(Arc::clone(&contention))).await.unwrap();
 
         let mut metas = Vec::new();
         while let Ok(meta) = rx.try_recv().map(|p| p.meta) {
@@ -2047,7 +2340,7 @@ mod tests {
     async fn test_full_log_buffer_rolls_over_instead_of_failing() {
         let dir = tempdir().unwrap();
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let contention = ContentionMetrics::new();
+        let contention = Arc::new(ContentionMetrics::new());
         let mut rotator = LogRotator::new(
             LogBlockConfig {
                 data_dir: dir.path().to_path_buf(),

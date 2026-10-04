@@ -309,10 +309,49 @@ unchanged for the same ingested row count.
 
 ---
 
-## BL-01-14 (M, deferred) — Async flush worker: acknowledge before durable
+## BL-01-14 (M, **landed**) — Async flush worker: acknowledge before durable
 
-**Status:** deliberately deferred, not scheduled. Recorded so the option is not
-lost, and so nobody re-derives it from BL-01-01 later.
+**Status: landed**, once `BL-03-12` (WAL) and `BL-03-16` (index durable before
+WAL commit) made it safe. It was deferred twice before that, correctly: an
+unacknowledged flush is only recoverable once the rows are in the WAL, and the
+commit is only ordered once the index is durable first.
+
+**Measured, with the body limit fixed to its configured 10 MiB** (`BL-03-17`),
+130 000-point batches, block cap 130 000 so every request triggers one
+~125 ms encode:
+
+| | before | after |
+|---|---|---|
+| single flush-triggering request | ~330 ms | **~280 ms** |
+| 4 concurrent flush-triggering requests | 1.291 s | **0.932 s** |
+
+Modest, and the reason is that OTLP **decode** dominates: a 7 MiB batch costs
+~175 ms to decode against ~125 ms to encode, so removing the encode from the
+request path can only ever remove about 40 % of it.
+
+**What it took to get the concurrency win.** The first version used a single
+worker loop that processed jobs one at a time — which serialised the encodes
+exactly as the flush lock had, and made 4 concurrent requests *slower* (1.461 s).
+The worker now spawns one task per job bounded by a semaphore, so encodes
+genuinely overlap; that is what produced 0.932 s.
+
+**The correctness point.** The memory-buffer drain moved from the service to
+`run_flush_job`, and now happens only after the block is **durable**. Draining
+when a flush was merely *scheduled* would leave rows in neither the buffer nor any
+block, and they would be invisible to every query until the encode landed. This
+is the one thing that would have been easy to get wrong and impossible to notice
+in a passing smoke test, so
+`test_background_flush_keeps_rows_visible_throughout` drives the real service and
+asserts rows stay in the buffer until the block exists, then disappear from it.
+
+**Bounds.** `ingest.max_inflight_flushes` (default 4) caps concurrent encodes and
+bounds the queue. When the queue is full a flush encodes inline rather than
+queueing further, so backpressure degrades to the previous synchronous behaviour
+instead of growing an unbounded backlog.
+
+Shutdown drops the sender, then awaits every in-flight encode, so a graceful
+stop cannot leave a block half-written or skip a WAL commit — verified by
+restarting and confirming `storage_rows` is preserved and the data queryable.
 
 **What it would do.** `flush()` takes the writer (`mem::take`), sends it to a
 dedicated flush task over a bounded channel, and returns. The rotator then
@@ -331,20 +370,22 @@ flush". With `storage.wal_enabled = false` (`config/ingest.rs:58`) and a
 duration-based block window, that can be hours. That is a durability
 regression, and taking it silently would be the wrong call for an SRE tool.
 
-**Prerequisite.** BL-03-12 (WAL). With a WAL, an unacknowledged flush is
-recoverable — the data is already in the log — so acknowledgement can be
-decoupled from durability. Until then, BL-01-01a gets most of the contention
-win without weakening the guarantee that PR #44 was careful to preserve.
+**Prerequisite (satisfied).** BL-03-12 (WAL) and BL-03-16 (index durable before
+the WAL commits it).
 
 **Expected additional gain over BL-01-01a.** Sharding removes cross-metric
 contention but a flushing shard is still blocked for its flush duration, so
 ingest p99 is bounded below by flush duration / shards. Removing the block
 entirely is the only way past that.
 
-**Acceptance when taken.** Ingest p99 during a flush unchanged (< 250 ms);
-`parqtel_flush_inflight` bounded by the configured limit; a SIGKILL mid-flush
-loses < 5 s with the WAL enabled (BL-03-12's criterion), and the loss window
-is documented in `docs/BEST_PRACTICES.md` for the WAL-disabled case.
+**Acceptance.** Met: flush-triggering requests ~15 % faster, four concurrent
+~28 % faster, `parqtel_flush_inflight` bounded by `max_inflight_flushes`, rows
+never invisible to queries across the schedule→durability window, and a graceful
+shutdown drains queued encodes.
+
+**Still open:** the loss window when the WAL is *disabled*. With
+`ingest.wal_enabled = false` an unacknowledged flush is unrecoverable again, so
+either document it or refuse to start the worker without a WAL.
 
 **Effort** L · **Risk** Medium
 

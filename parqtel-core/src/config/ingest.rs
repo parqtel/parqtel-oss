@@ -25,6 +25,19 @@ pub struct IngestConfig {
     /// How often the WAL is `fsync`ed, in `interval` mode.
     #[serde(default = "default_wal_sync_interval_ms")]
     pub wal_sync_interval_ms: u64,
+    /// Maximum number of block encodes that may be in flight at once.
+    ///
+    /// A request that crosses the block cap is acknowledged once the WAL has its
+    /// rows rather than after the Parquet encode, because the rows are
+    /// recoverable either way. Measured on a realistic 7 MiB batch, the encode is
+    /// ~125 ms of a ~300 ms request, and it serialises concurrent requests
+    /// behind the flush lock.
+    ///
+    /// This bounds how many encodes overlap. When the queue is full a flush
+    /// encodes inline instead, so backpressure degrades to the previous
+    /// synchronous behaviour rather than growing an unbounded backlog.
+    #[serde(default = "default_max_inflight_flushes")]
+    pub max_inflight_flushes: usize,
     /// Size at which the WAL rolls to a new segment, in bytes.
     ///
     /// A segment is deleted once the commit point passes it, so the on-disk
@@ -53,6 +66,10 @@ pub struct IngestConfig {
     /// one extra lock acquisition per push.
     #[serde(default = "default_rotator_shards")]
     pub rotator_shards: usize,
+}
+
+fn default_max_inflight_flushes() -> usize {
+    4
 }
 
 fn default_wal_sync_interval_ms() -> u64 {
@@ -111,6 +128,7 @@ impl Default for IngestConfig {
             log_wal_enabled: true,
             wal_sync_mode: crate::wal::WalSyncMode::Interval,
             wal_sync_interval_ms: default_wal_sync_interval_ms(),
+            max_inflight_flushes: default_max_inflight_flushes(),
             wal_max_segment_bytes: default_wal_max_segment_bytes(),
             tail_sampling: TailSamplingConfig::default(),
             rotator_shards: default_rotator_shards(),
