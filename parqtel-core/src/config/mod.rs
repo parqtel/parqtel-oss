@@ -313,8 +313,34 @@ mod tests {
     fn test_ingest_config_defaults() {
         let config = IngestConfig::default();
         assert_eq!(config.max_body_size, 10 * 1024 * 1024);
-        assert!(!config.wal_enabled);
+        // The WAL is on by default now that it is implemented: it bounds crash
+        // loss to the sync interval rather than to the whole block window.
+        assert!(config.wal_enabled);
         assert!(config.log_wal_enabled);
+        assert_eq!(config.wal_sync_mode, crate::wal::WalSyncMode::Interval);
+        assert_eq!(config.wal_sync_interval_ms, 1000);
+        assert_eq!(
+            config.wal_max_segment_bytes,
+            crate::wal::DEFAULT_MAX_SEGMENT_BYTES
+        );
+    }
+
+    /// A config file written before the WAL knobs existed must still load,
+    /// and must pick up the new defaults rather than failing.
+    #[test]
+    fn test_ingest_config_deserialises_without_wal_knobs() {
+        let json = r#"{
+            "max_body_size": 10485760,
+            "wal_enabled": true,
+            "log_wal_enabled": true
+        }"#;
+        let c: IngestConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(c.wal_sync_mode, crate::wal::WalSyncMode::Interval);
+        assert_eq!(c.wal_sync_interval_ms, 1000);
+        assert_eq!(
+            c.wal_max_segment_bytes,
+            crate::wal::DEFAULT_MAX_SEGMENT_BYTES
+        );
     }
 
     #[test]

@@ -7,9 +7,31 @@ pub struct IngestConfig {
     /// Maximum size of an incoming OTLP batch in bytes.
     pub max_body_size: usize,
     /// Whether to enable the Write-Ahead Log (WAL) for metrics.
+    ///
+    /// The WAL bounds crash loss to the sync interval instead of the whole
+    /// block window — with the 2 h default that is the difference between
+    /// losing two hours of the data you wanted during an incident and losing
+    /// seconds.
     pub wal_enabled: bool,
     /// Whether to enable the Write-Ahead Log (WAL) for logs.
     pub log_wal_enabled: bool,
+    /// How durably a WAL append is persisted. See [`crate::wal::WalSyncMode`].
+    ///
+    /// `interval` is the intended default: `write` plus a periodic `fsync`, so
+    /// crash loss is bounded by `wal_sync_interval_ms` rather than costing an
+    /// fsync per batch.
+    #[serde(default)]
+    pub wal_sync_mode: crate::wal::WalSyncMode,
+    /// How often the WAL is `fsync`ed, in `interval` mode.
+    #[serde(default = "default_wal_sync_interval_ms")]
+    pub wal_sync_interval_ms: u64,
+    /// Size at which the WAL rolls to a new segment, in bytes.
+    ///
+    /// A segment is deleted once the commit point passes it, so the on-disk
+    /// working set is bounded by roughly this size plus whatever has not been
+    /// flushed yet.
+    #[serde(default = "default_wal_max_segment_bytes")]
+    pub wal_max_segment_bytes: u64,
     /// Tail-sampling policy for traces (keep-all by default).
     #[serde(default)]
     pub tail_sampling: TailSamplingConfig,
@@ -31,6 +53,14 @@ pub struct IngestConfig {
     /// one extra lock acquisition per push.
     #[serde(default = "default_rotator_shards")]
     pub rotator_shards: usize,
+}
+
+fn default_wal_sync_interval_ms() -> u64 {
+    1000
+}
+
+fn default_wal_max_segment_bytes() -> u64 {
+    crate::wal::DEFAULT_MAX_SEGMENT_BYTES
 }
 
 fn default_rotator_shards() -> usize {
@@ -77,8 +107,11 @@ impl Default for IngestConfig {
     fn default() -> Self {
         Self {
             max_body_size: 10 * 1024 * 1024,
-            wal_enabled: false,
+            wal_enabled: true,
             log_wal_enabled: true,
+            wal_sync_mode: crate::wal::WalSyncMode::Interval,
+            wal_sync_interval_ms: default_wal_sync_interval_ms(),
+            wal_max_segment_bytes: default_wal_max_segment_bytes(),
             tail_sampling: TailSamplingConfig::default(),
             rotator_shards: default_rotator_shards(),
         }

@@ -733,3 +733,83 @@ this was closed and as a guard for anyone who revisits the assumption.
 ```bash
 cargo run --release -p parqtel-core --example probe_labels_size
 ```
+
+## Write-ahead log wired for metrics (`BL-03-12`)
+
+Bounded crash loss, verified by killing a real container.
+
+### The ordering contract
+
+A flush and the WAL must agree, or a crash duplicates or loses data:
+
+1. rows appended to the WAL, request acknowledged
+2. a flush takes rows, **snapshotting the WAL position it will cover**
+3. the block is written and renamed
+4. the **commit file** is advanced to that snapshot
+5. segments below the commit are deleted
+
+The commit file is the single source of truth and advances **after** the rename:
+
+| crash after | result |
+|---|---|
+| (1)/(2) | replayed, nothing on disk — correct |
+| (3) rename, before (4) | block exists but is not committed, so it is not indexed; the WAL still holds the rows and replay rewrites them. The orphan is invisible → one copy |
+| (4) commit, before (5) | rows covered; replay skips at or below the commit → discarded, not duplicated |
+
+Advancing the commit *before* the rename could lose a block — the one failure a
+WAL exists to prevent.
+
+The WAL is appended **while the shard lock is held**, so WAL order and writer
+order are the same total order. Each shard records the highest WAL position
+among the rows in its writer, taken and reset under that shard's own lock as
+its writer is swapped — so a block can only ever commit positions for rows it
+actually contains.
+
+### A bug the crash test caught and the unit tests did not
+
+The first version buffered appends in a 64 KB `BufWriter` and flushed only on
+the fsync interval. A `SIGKILL` lost everything still in **userspace** — 4 of 5
+points on the first crash run.
+
+The module docs had claimed *"the page cache survives a process crash"*, which
+is true of `write` and **false of an unflushed userspace buffer**. Every append
+is now flushed to the OS; `fsync` remains governed by `WalSyncMode`.
+
+The same run also showed the record type had to be a single `Metric`, not the
+batch `Vec<Metric>` the rotator receives. The unit test and the replay helper
+were wrong in the same way and would have recovered nothing.
+
+### Verified against a real container
+
+| scenario | outcome |
+|---|---|
+| ingest 5 points, nothing flushed, `SIGKILL`, restart | replay `records=5`; **all 5 queryable again** |
+| ingest 3 points, graceful stop (flushes + commits), restart | replay `records=0 skipped=3`; 1 block / 3 rows; all 3 queryable, **not duplicated** |
+
+### Cost
+
+The flagged trade-off — a file write under the ingest lock — measured as
+**54 ns average lock wait over 9 695 acquisitions** (0.52 ms total) under the
+load generator:
+
+```
+parqtel_ingest_lock_wait_seconds{signal="metrics"}_sum   0.000522
+parqtel_ingest_lock_wait_seconds{signal="metrics"}_count 9695
+```
+
+So it is not material, which is worth having measured rather than assumed.
+
+`WalSyncMode::default()` is `Interval`, not the fastest option: a default that
+quietly means "do not sync" is a footgun in a durability feature.
+
+### Not yet
+
+Logs and traces have no WAL (`log_wal_enabled` exists but is unused). The
+mechanism is per-signal, so they follow the same shape.
+
+### Configuration
+
+`wal_enabled` (default **true**), `wal_sync_mode` (`interval`),
+`wal_sync_interval_ms` (1000), `wal_max_segment_bytes` (64 MB). A WAL that
+cannot be opened **fails startup** rather than silently accepting unrecoverable
+data.
