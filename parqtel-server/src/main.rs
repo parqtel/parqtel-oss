@@ -407,35 +407,57 @@ async fn run_server(
     // scrapes. The index writer measures how long it waits for the write lock
     // because every query handler contends for it.
     let contention = Arc::new(parqtel_core::ContentionMetrics::new());
-    let (tx, mut rx) = mpsc::unbounded_channel();
+    let (tx, mut rx) = mpsc::unbounded_channel::<parqtel_core::storage::PendingIndex>();
     let idx_clone = index.clone();
     let idx_contention = contention.clone();
     let idx_store = index_store.clone();
     let index_task = tokio::spawn(async move {
-        while let Some(meta) = rx.recv().await {
+        while let Some(pending) = rx.recv().await {
             let started = std::time::Instant::now();
-            let mut idx = idx_clone.write().await;
-            idx_contention.record_index_lock_wait(started.elapsed());
-            // In-memory only: the write lock must never be held across a
-            // serialise + write + rename of the whole index.
-            idx.add(meta);
-            // Cheap flag set; the persist task does the I/O.
+            {
+                let mut idx = idx_clone.write().await;
+                idx_contention.record_index_lock_wait(started.elapsed());
+                // In-memory only: the write lock must never be held across a
+                // serialise + write + rename of the whole index.
+                idx.add(pending.meta);
+            }
             idx_store.mark_dirty();
+            // A block whose WAL has not been committed yet must be durable in
+            // the sidecar *before* the flush proceeds, or a crash in between
+            // leaves the block on disk, absent from the index, and already
+            // marked recovered (BL-03-16). So force the write now rather than
+            // waiting for the debounce.
+            if pending.durable.is_some() {
+                let _ = parqtel_core::storage::persist_once(&idx_clone, &idx_store).await;
+            }
+            if let Some(ack) = pending.durable {
+                let _ = ack.send(());
+            }
         }
     });
 
     // Logs pipeline
-    let (log_tx, mut log_rx) = mpsc::unbounded_channel();
+    let (log_tx, mut log_rx) = mpsc::unbounded_channel::<parqtel_core::storage::PendingIndex>();
     let log_idx_clone = log_index.clone();
     let log_idx_contention = contention.clone();
     let log_idx_store = log_index_store.clone();
     let log_index_task = tokio::spawn(async move {
-        while let Some(meta) = log_rx.recv().await {
+        while let Some(pending) = log_rx.recv().await {
             let started = std::time::Instant::now();
-            let mut idx = log_idx_clone.write().await;
-            log_idx_contention.record_index_lock_wait(started.elapsed());
-            idx.add(meta);
+            {
+                let mut idx = log_idx_clone.write().await;
+                log_idx_contention.record_index_lock_wait(started.elapsed());
+                idx.add(pending.meta);
+            }
             log_idx_store.mark_dirty();
+            // See the metrics task: the sidecar must be durable before the
+            // flush commits the WAL (BL-03-16).
+            if pending.durable.is_some() {
+                let _ = parqtel_core::storage::persist_once(&log_idx_clone, &log_idx_store).await;
+            }
+            if let Some(ack) = pending.durable {
+                let _ = ack.send(());
+            }
         }
     });
 
@@ -490,7 +512,7 @@ async fn run_server(
         LogIngestionService::with_wal(config.logs.clone(), log_tx, logs_wal)
             .with_memory_buffer(memory_buffer.clone())
             .with_contention(contention.clone());
-    let (trace_tx, mut trace_rx) = mpsc::unbounded_channel();
+    let (trace_tx, mut trace_rx) = mpsc::unbounded_channel::<parqtel_core::storage::PendingIndex>();
     // Span-metrics RED bridge: trace ingestion derives
     // traces_service_{requests,errors,duration_ms} metrics and feeds them
     // back through the normal metrics path.
@@ -525,12 +547,25 @@ async fn run_server(
 
     let trace_idx_clone = trace_index.clone();
     let trace_idx_contention = contention.clone();
+    let trace_idx_store = trace_index_store.clone();
     let trace_index_task = tokio::spawn(async move {
-        while let Some(meta) = trace_rx.recv().await {
+        while let Some(pending) = trace_rx.recv().await {
             let started = std::time::Instant::now();
-            let mut idx = trace_idx_clone.write().await;
-            trace_idx_contention.record_index_lock_wait(started.elapsed());
-            idx.add(meta);
+            {
+                let mut idx = trace_idx_clone.write().await;
+                trace_idx_contention.record_index_lock_wait(started.elapsed());
+                idx.add(pending.meta);
+            }
+            trace_idx_store.mark_dirty();
+            // See the metrics task: the sidecar must be durable before the
+            // flush commits the WAL (BL-03-16).
+            if pending.durable.is_some() {
+                let _ =
+                    parqtel_core::storage::persist_once(&trace_idx_clone, &trace_idx_store).await;
+            }
+            if let Some(ack) = pending.durable {
+                let _ = ack.send(());
+            }
         }
     });
 

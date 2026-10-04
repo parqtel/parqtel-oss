@@ -100,9 +100,12 @@ impl AppState {
         use tokio::sync::mpsc;
         let dir = tempfile::tempdir().unwrap();
         let config = Config::default();
-        let (tx, mut metadata_rx) = mpsc::unbounded_channel();
-        let (ltx, _) = mpsc::unbounded_channel();
-        let (ttx, _) = mpsc::unbounded_channel();
+        // Blocks now carry a durability handshake, so the index task can
+        // confirm the sidecar write before the flush commits its WAL.
+        let (tx, mut metadata_rx) =
+            mpsc::unbounded_channel::<parqtel_core::storage::PendingIndex>();
+        let (ltx, _) = mpsc::unbounded_channel::<parqtel_core::storage::PendingIndex>();
+        let (ttx, _) = mpsc::unbounded_channel::<parqtel_core::storage::PendingIndex>();
         let index = Arc::new(RwLock::new(BlockIndex::new(dir.path())));
         let log_index = Arc::new(RwLock::new(BlockIndex::new(&dir.path().join("logs"))));
         let trace_dir = config.storage.data_dir.join("traces");
@@ -125,9 +128,12 @@ impl AppState {
             let idx = index.clone();
             let store = index_stores[0].clone();
             tokio::spawn(async move {
-                while let Some(meta) = metadata_rx.recv().await {
-                    idx.write().await.add(meta);
+                while let Some(pending) = metadata_rx.recv().await {
+                    idx.write().await.add(pending.meta);
                     store.mark_dirty();
+                    if let Some(ack) = pending.durable {
+                        let _ = ack.send(());
+                    }
                 }
             });
         }

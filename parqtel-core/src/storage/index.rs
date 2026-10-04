@@ -145,6 +145,53 @@ impl BlockIndex {
     }
 }
 
+/// A block being handed to the index, plus an optional signal to fire once
+/// the sidecar containing it is **durable**.
+///
+/// The WAL contract requires the index to be persisted before the WAL is
+/// committed for those rows. Without that ordering, a crash in the window
+/// between the two leaves a block on disk that is absent from the sidecar and
+/// already committed in the WAL - so nothing replays it and no query can find
+/// it. See `BL-03-16`.
+///
+/// `durable` is `None` when no WAL is attached: there is no ordering
+/// requirement, so the sender does not wait.
+#[derive(Debug)]
+pub struct PendingIndex {
+    pub meta: BlockMetadata,
+    /// Fired by the index task once the sidecar write has completed.
+    pub durable: Option<tokio::sync::oneshot::Sender<()>>,
+}
+
+impl PendingIndex {
+    /// A block with no durability handshake: the caller is not waiting, so
+    /// there is nothing to order against.
+    pub fn untracked(meta: BlockMetadata) -> Self {
+        Self {
+            meta,
+            durable: None,
+        }
+    }
+
+    /// A block whose sender must wait for the sidecar to become durable.
+    pub fn tracked(meta: BlockMetadata) -> (Self, tokio::sync::oneshot::Receiver<()>) {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        (
+            Self {
+                meta,
+                durable: Some(tx),
+            },
+            rx,
+        )
+    }
+}
+
+impl From<BlockMetadata> for PendingIndex {
+    fn from(meta: BlockMetadata) -> Self {
+        Self::untracked(meta)
+    }
+}
+
 /// Owns persistence of a [`BlockIndex`] sidecar.
 ///
 /// Mutations mark the store dirty; a background pass serialises under a
