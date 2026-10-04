@@ -62,7 +62,7 @@ Parqtel is a single-binary observability backend written in Rust that ingests Op
 | **Querying** | [**PQL Guide**](docs/PQL_GUIDE.md) — ParQL metrics, ParqtelQL log/trace search, cross-signal pipelines |
 | **Deep Dive** | [Architecture](docs/ARCHITECTURE.md) • [Configuration](docs/CONFIGURATION.md) • [Developer Guide](docs/DEVELOPER_GUIDE.md) • [MCP Integrations](docs/MCP.md) • [Query Functions](docs/QUERY_FUNCTIONS.md) • [Performance](docs/benchmarks/PERFORMANCE.md) • [CI/CD](docs/CI_CD.md) |
 | **Operations** | [Deployment](docs/DEPLOYMENT.md) • [Troubleshooting](docs/TROUBLESHOOTING.md) • [Best Practices](docs/BEST_PRACTICES.md) • [Testing & Validation](docs/TESTING.md) |
-| **Community** | [Contributing](CONTRIBUTING.md) • [Code of Conduct](CODE_OF_CONDUCT.md) • [Security](SECURITY.md) |
+| **Community** | [Contributing](CONTRIBUTING.md) • [Support](SUPPORT.md) • [Code of Conduct](CODE_OF_CONDUCT.md) • [Security](SECURITY.md) • [Changelog](CHANGELOG.md) |
 
 ## Features
 
@@ -414,9 +414,22 @@ Apache License 2.0 — see [LICENSE](LICENSE).
 
 ## Contributing
 
-Contributions are welcome! Please read [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) before submitting.
+Contributions are welcome. Please read [CONTRIBUTING.md](CONTRIBUTING.md) and
+[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) first.
 
 1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/my-feature`)
-3. Run tests (`make test && make lint`)
-4. Submit a pull request
+2. Create a branch (`git checkout -b feat/my-change`)
+3. Run `make lint && make test`
+4. Open a pull request using the [PR template](.github/PULL_REQUEST_TEMPLATE.md)
+
+Performance changes need a measurement — the number, the command that produced
+it, and the dataset. See [CONTRIBUTING.md](CONTRIBUTING.md#performance-changes)
+and [docs/benchmarks/PERFORMANCE.md](docs/benchmarks/PERFORMANCE.md).
+
+## Status
+
+`0.2.0` is the initial **public beta**. It has **no authentication or
+authorization** — do not expose the HTTP (`8080`) or OTLP gRPC (`4317`) ports
+publicly without a reverse proxy that provides it. Known limitations are listed
+in [docs/PERFORMANCE_SIZING.md](docs/PERFORMANCE_SIZING.md) and
+[docs/PQL_GUIDE.md](docs/PQL_GUIDE.md).

@@ -2,9 +2,16 @@
 
 ## Supported Versions
 
-| Version | Supported          |
-| ------- | ------------------ |
-| 0.1.x   | :white_check_mark: |
+Security fixes land on the latest minor release only.
+
+| Version | Supported |
+|---|---|
+| 0.2.x | :white_check_mark: |
+| < 0.2   | :x: |
+
+> `0.2.0` is the initial **public beta**. It has no authentication or
+> authorization: do not expose the HTTP (`8080`) or OTLP gRPC (`4317`) ports
+> publicly without a reverse proxy that provides it.
 
 ## Reporting a Vulnerability
 
