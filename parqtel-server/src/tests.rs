@@ -66,6 +66,39 @@ async fn setup_test_app() -> axum::Router {
     build_router(state)
 }
 
+/// Liveness and readiness answer different questions and must not be the same
+/// handler: a static 200 on the readiness probe routes traffic to an instance
+/// whose storage is broken.
+#[tokio::test]
+async fn test_health_is_liveness_and_ready_checks_storage() {
+    let app = setup_test_app().await;
+
+    // Liveness is static and always ok.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Readiness returns 200 on a healthy state.
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/ready")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
 #[tokio::test]
 async fn test_ui_redirect() {
     let app = setup_test_app().await;
