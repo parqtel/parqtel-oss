@@ -1,22 +1,45 @@
 # Code owners
 
-Changes to these areas are reviewed by the maintainers listed here in
-addition to whoever else the PR assigns.
+# Changes to these areas are reviewed by the maintainers listed here in
+# addition to whoever else the PR assigns.
 
-Default owner for everything not matched below:
-
+# Default owner for everything not matched below:
 * @parqtel/maintainers
 
-| Path | Owner | Notes |
-|---|---|---|
-| `/parqtel-core/src/config/**` | @parqtel/maintainers | Configuration schema and defaults are a public contract; changing one is breaking |
-| `/parqtel-core/src/storage/**` | @parqtel/maintainers | On-disk format, WAL ordering contract, index durability |
-| `/parqtel-core/src/wal.rs` | @parqtel/maintainers | The crash-ordering contract must be preserved — see `docs/ARCHITECTURE.md` |
-| `/parqtel-ingest/**` | @parqtel/maintainers | Durability of the acknowledged path |
-| `/parqtel-server/src/router.rs` | @parqtel/maintainers | Routes, middleware and body limits |
-| `/parqtel-server/src/ui.html` | @parqtel/maintainers | Single embedded file, no external requests |
-| `/charts/**`, `/deploy/**`, `/Dockerfile`, `/docker-compose.yml` | @parqtel/maintainers | Packaging and image build |
-| `/.github/workflows/**` | @parqtel/maintainers | Release gate changes affect every artifact |
-| `/docs/**` | @parqtel/maintainers | Documentation accuracy |
-| `/LICENSE`, `/SECURITY.md`, `/CODE_OF_CONDUCT.md` | @parqtel/maintainers | Legal and policy |
-| `/rules/presets/**` | @parqtel/maintainers | Embedded into the binary at compile time |
+# Configuration schema and defaults are a public contract; changing one is breaking
+/parqtel-core/src/config/ @parqtel/maintainers
+
+# On-disk format, WAL ordering contract, index durability
+/parqtel-core/src/storage/ @parqtel/maintainers
+
+# The crash-ordering contract must be preserved — see docs/ARCHITECTURE.md
+/parqtel-core/src/wal.rs @parqtel/maintainers
+
+# Durability of the acknowledged path
+/parqtel-ingest/ @parqtel/maintainers
+
+# Routes, middleware and body limits
+/parqtel-server/src/router.rs @parqtel/maintainers
+
+# Single embedded file, no external requests
+/parqtel-server/src/ui.html @parqtel/maintainers
+
+# Packaging and image build
+/charts/ @parqtel/maintainers
+/deploy/ @parqtel/maintainers
+/Dockerfile @parqtel/maintainers
+/docker-compose.yml @parqtel/maintainers
+
+# Release gate changes affect every artifact
+/.github/workflows/ @parqtel/maintainers
+
+# Documentation accuracy
+/docs/ @parqtel/maintainers
+
+# Legal and policy
+/LICENSE @parqtel/maintainers
+/SECURITY.md @parqtel/maintainers
+/CODE_OF_CONDUCT.md @parqtel/maintainers
+
+# Embedded into the binary at compile time
+/rules/presets/ @parqtel/maintainers
