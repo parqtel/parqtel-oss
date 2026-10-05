@@ -7,7 +7,10 @@ replicaCount: 1
 
 image:
   # -- Container image repository.
-  repository: ghcr.io/parqtel/parqtel
+  # Must match the image the release workflow pushes (`IMAGE_NAME` in
+  # .github/workflows/release.yml, which is `ghcr.io/<owner>/<repo>`).
+  # Asserted by `chart_default_image_matches_release_workflow`.
+  repository: ghcr.io/parqtel/parqtel-oss
   # -- Image tag. Defaults to chart appVersion.
   tag: ""
   # -- Image pull policy.
