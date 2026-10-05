@@ -1,0 +1,111 @@
+# Values for the k3d `ai-sre-lab` install, tuned by measurement against a 4 GiB
+# limit and an OTLP exporter pushing ~640 points/s per signal.
+#
+# Apply with:
+#   helm upgrade parqtel oci://ghcr.io/parqtel/charts/parqtel --version 0.3.0 \
+#     --kube-context k3d-ai-sre-lab -n parqtel -f deploy/k3d-values-4gb.yaml
+#
+# Two separate problems are addressed below. They are unrelated, and both are
+# required: fixing only one still leaves the pod OOMKilled.
+#
+# Why the default profile OOMKills
+# ---------------------------------
+# It is not unbounded accumulation. At steady state ingested_points_total
+# equals flush_rows_total; the buffer drains. It is a per-flush spike plus
+# allocator retention:
+#
+#   * a whole block is held as DataPointContexts *and* re-encoded as Arrow
+#     arrays, so peak memory is a multiple of the block, not the block itself;
+#   * glibc does not return freed pages to the OS, so RSS ratchets upward
+#     across block cycles until some later flush crosses the limit.
+#
+# Measured here at ~4 KiB RSS per buffered metric point. The stock defaults
+# (7200s blocks, 1M rows) allowed 576k points to accumulate = ~2.3 GiB before
+# the first flush ever ran.
+#
+# Block sizing
+# ------------
+#   blockDurationSecs 7200 -> 300     bounds buffered points by time
+#   maxRowsPerBlock  1e6 -> 50000     bounds them regardless of ingest rate;
+#                                     this is the hard ceiling, ~0.19 GiB
+#   rowGroupSize   100000 -> 25000    halves the encode working set
+#   compactionIntervalSecs -> 420     keeps pace with 5-minute blocks
+#
+# Result: RSS plateaus near 650 MiB of the 4 GiB limit, buffer at 0, no
+# restarts.
+#
+# Allocator settings
+# ------------------
+# These matter as much as the block sizes. The flush spike is transient, but
+# glibc keeps the arena afterwards, so without trimming RSS only ever ratchets
+# up. Capping arenas and trimming on free return the pages.
+
+extraEnv:
+  - name: MALLOC_ARENA_MAX
+    value: "2"
+  - name: MALLOC_TRIM_THRESHOLD_
+    value: "131072"
+  - name: MALLOC_MMAP_THRESHOLD_
+    value: "131072"
+
+# External access
+# ---------------
+# LOCAL LAB ONLY. NodePort is not part of the standard chart configuration --
+# the chart ships ClusterIP, and this file exists to make one specific dev
+# cluster reachable from outside it. Do not copy this block into a production
+# values file; put an Ingress or LoadBalancer in front instead.
+#
+# Only the HTTP port can be pinned through the chart. The gRPC port draws a
+# random node port here, so read it back with:
+#   kubectl -n parqtel get svc parqtel -o jsonpath='{..nodePort}'
+#
+# image.pullSecrets is what keeps a re-created pod able to start. The GHCR
+# package is private, and a pod that cannot pull it fails with 401 and the
+# release never comes up. Note this is `image.pullSecrets`, a list of objects:
+# the root schema sets additionalProperties: false, so a top-level
+# `imagePullSecrets` key is rejected outright.
+
+image:
+  repository: ghcr.io/parqtel/parqtel-oss
+  pullSecrets:
+    - name: ghcr
+
+service:
+  type: NodePort
+  nodePort: 30090
+
+# Write-ahead log
+# ---------------
+# The WAL is on by default from 0.3.1: with it off, a crash loses up to a
+# whole block window and the metrics path degrades to synchronous flushing.
+# Pinned explicitly here so the profile is self-contained and a future change
+# to the chart default cannot silently disable crash recovery.
+#
+# The segment size and fsync interval were not settable through the chart
+# before 0.3.1 — the ConfigMap template never rendered them, so the binary
+# default applied regardless of what you set in values.
+
+parqtel:
+  storage:
+    blockDurationSecs: 300
+    maxRowsPerBlock: 50000
+    rowGroupSize: 25000
+    compactionIntervalSecs: 420
+  logs:
+    blockDurationSecs: 300
+    maxRowsPerBlock: 50000
+    rowGroupSize: 20000
+    compactionIntervalSecs: 420
+  ingest:
+    walEnabled: true
+    logWalEnabled: true
+    walMaxSegmentBytes: 16777216
+    walSyncIntervalMs: 1000
+
+resources:
+  requests:
+    cpu: 500m
+    memory: 2Gi
+  limits:
+    cpu: "2"
+    memory: 4Gi

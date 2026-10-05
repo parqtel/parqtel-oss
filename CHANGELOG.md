@@ -13,6 +13,47 @@ build cannot reach a registry or the release page.
 
 Nothing yet.
 
+## [0.3.1]
+
+Chart and release-pipeline release. No binary behaviour changes.
+
+### Fixed
+
+- **Releases no longer fail on the Trivy step.** Every tag since `v0.1.0` produced
+  a red release run. The failure was in Trivy's own installer, not the scan:
+  `trivy-action` was unpinned, resolved v0.65.0, and its install step aborted
+  before examining a single image layer. Because `github-release` needs
+  `trivy-scan`, Docker Publish, Helm Publish and Sign Image all succeeded and
+  published — and the GitHub Release and homebrew tap were skipped anyway.
+  Trivy is now pinned to `v0.58.1`, the version the CI filesystem scan already
+  runs green on every push. The SARIF upload is guarded, because
+  `upload-sarif` hard-fails on an empty file and would turn "no vulnerabilities
+  found" into a failed release. Scan semantics are unchanged: still report-only,
+  since image findings are distroless base CVEs with no source-level remediation.
+  The CI filesystem scan remains the hard gate.
+- **Chart values that were silently ignored.** `wal_max_segment_bytes` and
+  `wal_sync_interval_ms` were never rendered by the ConfigMap template, so
+  there was no way to tune WAL segment size or fsync interval without
+  hand-patching a ConfigMap that the next `helm upgrade` discards. Both are now
+  rendered and settable.
+
+### Changed
+
+- **Probes are configurable.** `livenessProbe`, `readinessProbe` and
+  `startupProbe` were hardcoded in the deployment template. On start, parqtel
+  replays whatever the WAL did not flush, and that replay is proportional to
+  unflushed WAL — so it is slow exactly when the pod is least healthy. The
+  hardcoded startup budget was 150s; an install restarting with a large WAL
+  replay exceeds it, is killed by the liveness probe mid-replay, and restarts
+  with an even larger WAL. Defaults reproduce the previous values exactly, so
+  upgrading changes nothing until edited, and each probe can be set to `{}` to
+  disable.
+- **The metrics write-ahead log is now on by default**, matching logs. It
+  defaulted to off, which is the wrong default for a product that acknowledges
+  writes over HTTP: without it, a crash loses up to a whole block window and the
+  ingest path degrades to synchronous flushing, so an acknowledged write is not
+  recoverable. Still overridable via `parqtel.ingest.walEnabled`.
+
 ## [0.3.0]
 
 Second public beta.

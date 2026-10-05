@@ -1984,7 +1984,7 @@ dependencies = [
 
 [[package]]
 name = "parqtel-alert"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "ahash",
  "chrono",
@@ -2004,7 +2004,7 @@ dependencies = [
 
 [[package]]
 name = "parqtel-core"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "ahash",
  "anyhow",
@@ -2027,7 +2027,7 @@ dependencies = [
 
 [[package]]
 name = "parqtel-ingest"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "arrow",
@@ -2053,7 +2053,7 @@ dependencies = [
 
 [[package]]
 name = "parqtel-mcp-core"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "async-trait",
  "axum 0.7.9",
@@ -2073,7 +2073,7 @@ dependencies = [
 
 [[package]]
 name = "parqtel-mcp-discord"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "axum 0.7.9",
  "chrono",
@@ -2092,7 +2092,7 @@ dependencies = [
 
 [[package]]
 name = "parqtel-mcp-gdocs"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "axum 0.7.9",
  "chrono",
@@ -2111,7 +2111,7 @@ dependencies = [
 
 [[package]]
 name = "parqtel-mcp-jira"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "axum 0.7.9",
  "chrono",
@@ -2130,7 +2130,7 @@ dependencies = [
 
 [[package]]
 name = "parqtel-mcp-notion"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "axum 0.7.9",
  "chrono",
@@ -2149,7 +2149,7 @@ dependencies = [
 
 [[package]]
 name = "parqtel-mcp-pagerduty"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "axum 0.7.9",
  "chrono",
@@ -2168,7 +2168,7 @@ dependencies = [
 
 [[package]]
 name = "parqtel-mcp-parqtel"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "axum 0.7.9",
  "chrono",
@@ -2185,7 +2185,7 @@ dependencies = [
 
 [[package]]
 name = "parqtel-mcp-slack"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "axum 0.7.9",
  "chrono",
@@ -2203,7 +2203,7 @@ dependencies = [
 
 [[package]]
 name = "parqtel-pipeline"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "ahash",
  "async-trait",
@@ -2223,7 +2223,7 @@ dependencies = [
 
 [[package]]
 name = "parqtel-query"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2240,7 +2240,7 @@ dependencies = [
 
 [[package]]
 name = "parqtel-server"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "axum 0.7.9",

@@ -36,8 +36,14 @@ data:
 
     [ingest]
     max_body_size = {{ .Values.parqtel.ingest.maxBodySize | int }}
-    wal_enabled = {{ .Values.parqtel.ingest.walEnabled }}
-    log_wal_enabled = {{ .Values.parqtel.ingest.logWalEnabled }}
+      wal_enabled = {{ .Values.parqtel.ingest.walEnabled }}
+      log_wal_enabled = {{ .Values.parqtel.ingest.logWalEnabled }}
+      {{- if .Values.parqtel.ingest.walMaxSegmentBytes }}
+      wal_max_segment_bytes = {{ .Values.parqtel.ingest.walMaxSegmentBytes | int }}
+      {{- end }}
+      {{- if .Values.parqtel.ingest.walSyncIntervalMs }}
+      wal_sync_interval_ms = {{ .Values.parqtel.ingest.walSyncIntervalMs | int }}
+      {{- end }}
     [ingest.tail_sampling]
     keep_errors = {{ .Values.ingestion.tailSampling.keepErrors }}
     {{- if .Values.ingestion.tailSampling.slowTraceMs }}
