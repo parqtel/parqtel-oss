@@ -235,8 +235,20 @@ jobs:
           fetch-depth: 0
 
       - uses: actions/download-artifact@v4
+        # Pattern-scoped, not "download everything". Docker Publish leaves
+        # two build-cache artifacts behind (parqtel~parqtel-oss~*.dockerbuild,
+        # from cache-to: type=gha). They are never consumed by this job --
+        # files: artifacts/**/*.tar.gz* matches only the binary tarballs --
+        # and on this run one of them failed to download after five retries
+        # with a bare "Artifact download failed" and no HTTP code, which
+        # killed the release. Filtering to the four platform artifacts
+        # removes a dependency on something we do not ship and that can
+        # flake out underneath us. The glob parqtel-* matches the four
+        # parqtel-{linux,darwin}-{amd64,arm64} artifacts and excludes the
+        # parqtel~...dockerbuild cache artifacts.
         with:
           path: artifacts
+          pattern: parqtel-*
 
       - name: Create release
         uses: softprops/action-gh-release@v2
@@ -272,8 +284,8 @@ jobs:
 
             # Binary checksum
             sha256sum -c parqtel-linux-amd64.tar.gz.sha256
-            ```
-
+              ```
+  
   # ── Homebrew Tap ─────────────────────────────────────────────────────────
   # Zero-touch coordination with parqtel/homebrew-tap (see that repo's
   # docs/RELEASE_COORDINATION.md): on every release we fire a
