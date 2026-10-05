@@ -156,6 +156,57 @@ async fn test_ui_caching() {
     assert_eq!(response2.status(), StatusCode::NOT_MODIFIED);
 }
 
+/// Traces run retention only, which meant they also had no index persist
+/// loop: `start_maintenance` owns the loop and is called for metrics and logs
+/// only. The trace sidecar was written on exactly one line of the shutdown
+/// sequence, so anything slow before it (a large WAL replay, a slow flush) meant
+/// the grace period expired first and the sidecar was never written — leaving
+/// orphaned trace blocks that reconcile cannot adopt.
+#[tokio::test]
+async fn trace_index_is_persisted_like_every_other_signal() {
+    let dir = tempfile::tempdir().unwrap();
+    let data_dir = dir.path().to_path_buf();
+    let index = Arc::new(tokio::sync::RwLock::new(BlockIndex::new(&data_dir)));
+    let store = Arc::new(parqtel_core::BlockIndexStore::at_path(
+        data_dir.join("index.json"),
+    ));
+
+    index.write().await.add(parqtel_core::BlockMetadata {
+        path: data_dir.join("traces_1_2_abc.parquet"),
+        start_timestamp_ns: 1,
+        end_timestamp_ns: 2,
+        row_count: 1,
+        size_bytes: 10,
+        metric_names: Default::default(),
+        label_names: Default::default(),
+        label_values: Default::default(),
+        signal_type: parqtel_core::SignalType::Traces,
+    });
+
+    // persist_blocking does filesystem I/O, so it belongs off the runtime thread.
+    let for_persist = index.clone();
+    let store_for_persist = store.clone();
+    tokio::task::spawn_blocking(move || {
+        parqtel_core::storage::persist_blocking(&for_persist.blocking_read(), &store_for_persist)
+    })
+    .await
+    .unwrap()
+    .unwrap();
+
+    assert!(
+        data_dir.join("index.json").exists(),
+        "the trace index sidecar must exist once a block is added"
+    );
+
+    let mut reloaded = BlockIndex::new(&data_dir);
+    reloaded.load().unwrap();
+    assert_eq!(
+        reloaded.total_blocks(),
+        1,
+        "a persisted trace block must survive a reload"
+    );
+}
+
 #[tokio::test]
 async fn test_metrics_endpoint() {
     let app = setup_test_app().await;

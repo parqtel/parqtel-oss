@@ -587,6 +587,10 @@ async fn run_server(
     std::fs::create_dir_all(&trace_data_dir).unwrap_or_default();
     let mut trace_index = BlockIndex::new(&trace_data_dir);
     trace_index.load().unwrap_or_default();
+    // One store, shared by the reconcile below, the index task, and the
+    // persist loop. It previously existed twice — the reconcile step built one
+    // and the index task captured a different one — so a dirty flag set by the
+    // task was invisible to the store the reconcile step persisted through.
     let trace_index_store = Arc::new(BlockIndexStore::new(&trace_index));
     reconcile_and_persist(
         &mut trace_index,
@@ -598,7 +602,6 @@ async fn run_server(
         blocks = trace_index.blocks.len(),
         "trace block index loaded"
     );
-    let trace_index_store = Arc::new(BlockIndexStore::new(&trace_index));
     let trace_index = Arc::new(tokio::sync::RwLock::new(trace_index));
 
     let trace_idx_clone = trace_index.clone();
@@ -657,6 +660,26 @@ async fn run_server(
     // maintenance would attempt trace merges and fail on schema mismatch.
     // Without retention the trace index grows without bound (observed:
     // 62 blocks/700K rows in ~8h on the OOM-affected deployment).
+    // Traces run retention only (compaction for traces is a separate decision),
+    // which meant they also had **no index persist loop** - `start_maintenance`
+    // owns the loop, and it is called for metrics and logs only. The trace
+    // sidecar was therefore written on exactly one line of the shutdown
+    // sequence, after every flush and every maintenance task. Anything slow
+    // earlier in shutdown (a large WAL replay, a slow flush) meant the grace
+    // period expired first and the sidecar was never written at all - leaving
+    // orphaned trace blocks that reconcile cannot adopt, because reconcile
+    // scans the index's own directory while trace blocks are written to its
+    // parent.
+    //
+    // Persist the trace index continuously, like every other signal.
+    let (trace_persist_shutdown_tx, trace_persist_shutdown_rx) = tokio::sync::watch::channel(false);
+    let trace_persist_task = tokio::spawn(parqtel_core::storage::run_index_persist_loop(
+        trace_index.clone(),
+        trace_index_store.clone(),
+        std::time::Duration::from_secs(config.server.index_persist_interval_secs.max(1)),
+        trace_persist_shutdown_rx,
+    ));
+
     let (trace_shutdown_tx, trace_shutdown_rx) = tokio::sync::watch::channel(false);
     let trace_retention = tokio::spawn(RetentionPolicy::run_loop(
         trace_index.clone(),
@@ -1052,11 +1075,10 @@ async fn run_server(
     logs_maintenance.shutdown(stop_timeout).await;
     let _ = trace_shutdown_tx.send(true);
     let _ = tokio::time::timeout(stop_timeout, trace_retention).await;
-
-    // The trace index has no persist loop (retention only), so it is written
-    // explicitly here — synchronously, after all other writers are stopped.
-    let trace_snapshot = trace_index.read().await.serialize()?;
-    tokio::task::spawn_blocking(move || trace_index_store.write_payload(&trace_snapshot)).await??;
+    // The persist loop's final pass runs inside the await, so this explicit
+    // write is now a backstop rather than the only chance.
+    let _ = trace_persist_shutdown_tx.send(true);
+    let _ = tokio::time::timeout(stop_timeout, trace_persist_task).await;
 
     // Flush any buffered OTLP spans/metrics before the process exits so the
     // final self-telemetry batch is not silently dropped.
