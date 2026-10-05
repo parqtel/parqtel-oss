@@ -50,10 +50,14 @@ extraEnv:
 
 # External access
 # ---------------
-# The chart's default service type is ClusterIP, which leaves nothing reachable
-# from outside the cluster. Both node ports are pinned: with only
-# service.nodePort set, the gRPC port draws a random node port, so the OTLP
-# endpoint moves on every upgrade and the load generator has to be reconfigured.
+# LOCAL LAB ONLY. NodePort is not part of the standard chart configuration --
+# the chart ships ClusterIP, and this file exists to make one specific dev
+# cluster reachable from outside it. Do not copy this block into a production
+# values file; put an Ingress or LoadBalancer in front instead.
+#
+# Only the HTTP port can be pinned through the chart. The gRPC port draws a
+# random node port here, so read it back with:
+#   kubectl -n parqtel get svc parqtel -o jsonpath='{..nodePort}'
 #
 # image.pullSecrets is what keeps a re-created pod able to start. The GHCR
 # package is private, and a pod that cannot pull it fails with 401 and the
@@ -69,10 +73,6 @@ image:
 service:
   type: NodePort
   nodePort: 30090
-
-ingestion:
-  grpc:
-    nodePort: 32539
 
 # Write-ahead log
 # ---------------

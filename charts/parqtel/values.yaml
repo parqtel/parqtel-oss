@@ -61,6 +61,49 @@ resources:
     cpu: "1"
     memory: 256Mi
 
+# ── Probes ─────────────────────────────────────────────────────────────────
+# Defaults reproduce the previously hardcoded probes exactly, so upgrading
+# changes nothing until you edit them. They are exposed because the one
+# situation that reliably needs tuning is startup, and it is the situation
+# most likely to take the pod down.
+#
+# On start, parqtel replays whatever the WAL did not flush. That replay is
+# proportional to unflushed WAL, so it is slow exactly when the pod is least
+# healthy. The startupProbe below allows 30 * 5s = 150s. An install that
+# comes back with a large WAL replay will exceed that and be killed by the
+# liveness probe mid-replay, restarting in a loop and making the replay
+# longer each time.
+#
+# If that happens, raise startupProbe.failureThreshold (or periodSeconds)
+# rather than removing the startupProbe. Deleting it hands the same work to
+# the liveness probe, which has a much smaller budget.
+livenessProbe:
+  httpGet:
+    path: /health
+    port: http
+  initialDelaySeconds: 10
+  periodSeconds: 30
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+readinessProbe:
+  httpGet:
+    path: /ready
+    port: http
+  initialDelaySeconds: 5
+  periodSeconds: 10
+  timeoutSeconds: 3
+  failureThreshold: 3
+
+# A successful start disables the liveness probe, so this only governs the
+# startup window.
+startupProbe:
+  httpGet:
+    path: /health
+    port: http
+  periodSeconds: 5
+  failureThreshold: 30
+
 # ── Service ──────────────────────────────────────────────────────────────────
 service:
   # -- Service type: ClusterIP, NodePort, or LoadBalancer.
@@ -79,11 +122,6 @@ ingestion:
     enabled: true
     # -- Container/service port for OTLP gRPC (4317 is the OTel default).
     port: 4317
-    # -- Node port for OTLP gRPC. Only used when service.type is NodePort.
-    # Set this alongside service.nodePort; without it the gRPC port is
-    # assigned a random node port, so the OTLP endpoint moves on every
-    # upgrade and load-generator config has to be rewritten each time.
-    nodePort: null
     # -- Set empty to read from config file / defaults (0.0.0.0:4317).
     # Set "" via --set to disable gRPC ingestion.
     bindAddress: ""
