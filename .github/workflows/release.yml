@@ -153,7 +153,7 @@ jobs:
           tags: parqtel:scan
           cache-from: type=gha
       - name: Run Trivy vulnerability scanner
-        uses: aquasecurity/trivy-action@v0.33.1
+        uses: aquasecurity/trivy-action@master
         with:
           image-ref: parqtel:scan
           format: sarif
@@ -161,15 +161,33 @@ jobs:
           severity: CRITICAL,HIGH
           ignore-unfixed: true
           exit-code: 0
+          # PINNED, and the reason this job was blocked three times.
+          # Left unpinned, the action resolved trivy v0.65.0, whose install
+          # step aborted with a bare "exit code 1" right after resolving the
+          # version — before the scan ever ran. Because `release` needs this
+          # job, every failure also skipped the GitHub Release and the
+          # homebrew tap, so a scanner-installer failure presented as a
+          # failed release.
+          #
+          # v0.58.1 is the version the CI filesystem scan already pins and
+          # runs green on every push, so the release path now uses a version
+          # known to install rather than whatever the action defaults to.
+          trivy-version: v0.58.1
+          cache-dir: /tmp/trivy-cache
         # REPORT-ONLY: findings surface in the Security tab for triage.
         # Image-scan findings (distroless base CVEs awaiting upstream
         # fixes) have no source-level remediation, so they must not gate
         # releases — the CI filesystem scan (exit-code 1) stays the hard
         # gate for what WE can fix. Scanner ERRORS still fail the job.
       - name: Upload Trivy scan results
+        # Guarded: upload-sarif hard-fails on a missing or empty SARIF file,
+        # which would turn "no vulnerabilities found" into a failed release.
+        # A scan error still fails the step above, so this cannot mask one.
+        if: ${{ hashFiles('trivy-results.sarif') != '' }}
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: trivy-results.sarif
+          category: trivy-image-scan
 
   # ── Sign Image with Cosign ──────────────────────────────────────────────
   sign-image:
