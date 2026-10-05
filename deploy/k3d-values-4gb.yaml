@@ -1,0 +1,92 @@
+# Values for the k3d `ai-sre-lab` install, tuned by measurement against a 4 GiB
+# limit and an OTLP exporter pushing ~640 points/s per signal.
+#
+# Apply with:
+#   helm upgrade parqtel oci://ghcr.io/parqtel/charts/parqtel --version 0.3.0 \
+#     --kube-context k3d-ai-sre-lab -n parqtel -f deploy/k3d-values-4gb.yaml
+#
+# Two separate problems are addressed below. They are unrelated, and both are
+# required: fixing only one still leaves the pod OOMKilled.
+#
+# Why the default profile OOMKills
+# ---------------------------------
+# It is not unbounded accumulation. At steady state ingested_points_total
+# equals flush_rows_total; the buffer drains. It is a per-flush spike plus
+# allocator retention:
+#
+#   * a whole block is held as DataPointContexts *and* re-encoded as Arrow
+#     arrays, so peak memory is a multiple of the block, not the block itself;
+#   * glibc does not return freed pages to the OS, so RSS ratchets upward
+#     across block cycles until some later flush crosses the limit.
+#
+# Measured here at ~4 KiB RSS per buffered metric point. The stock defaults
+# (7200s blocks, 1M rows) allowed 576k points to accumulate = ~2.3 GiB before
+# the first flush ever ran.
+#
+# Block sizing
+# ------------
+#   blockDurationSecs 7200 -> 300     bounds buffered points by time
+#   maxRowsPerBlock  1e6 -> 50000     bounds them regardless of ingest rate;
+#                                     this is the hard ceiling, ~0.19 GiB
+#   rowGroupSize   100000 -> 25000    halves the encode working set
+#   compactionIntervalSecs -> 420     keeps pace with 5-minute blocks
+#
+# Result: RSS plateaus near 650 MiB of the 4 GiB limit, buffer at 0, no
+# restarts.
+#
+# Allocator settings
+# ------------------
+# These matter as much as the block sizes. The flush spike is transient, but
+# glibc keeps the arena afterwards, so without trimming RSS only ever ratchets
+# up. Capping arenas and trimming on free return the pages.
+
+extraEnv:
+  - name: MALLOC_ARENA_MAX
+    value: "2"
+  - name: MALLOC_TRIM_THRESHOLD_
+    value: "131072"
+  - name: MALLOC_MMAP_THRESHOLD_
+    value: "131072"
+
+# External access
+# ---------------
+# The chart's default service type is ClusterIP, which leaves nothing reachable
+# from outside the cluster. NodePort is required here. Note that the 0.3.0
+# service template only honours nodePort for the HTTP port; the gRPC nodePort
+# is not templated and has to be patched in after every upgrade.
+
+service:
+  type: NodePort
+  nodePort: 30090
+
+# Write-ahead log
+# ---------------
+# Both signals keep the WAL on. With it off, a crash loses up to a whole block
+# window, and the metrics path degrades to synchronous flushing.
+#
+# Note: wal_max_segment_bytes and wal_sync_interval_ms are deliberately absent.
+# The 0.3.0 ConfigMap template does not render them, so there is no values path
+# to set them and the binary's built-in default applies.
+
+parqtel:
+  storage:
+    blockDurationSecs: 300
+    maxRowsPerBlock: 50000
+    rowGroupSize: 25000
+    compactionIntervalSecs: 420
+  logs:
+    blockDurationSecs: 300
+    maxRowsPerBlock: 50000
+    rowGroupSize: 20000
+    compactionIntervalSecs: 420
+  ingest:
+    walEnabled: true
+    logWalEnabled: true
+
+resources:
+  requests:
+    cpu: 500m
+    memory: 2Gi
+  limits:
+    cpu: "2"
+    memory: 4Gi
