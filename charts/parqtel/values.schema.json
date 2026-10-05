@@ -421,6 +421,16 @@
             },
             "logWalEnabled": {
               "type": "boolean"
+            },
+            "walMaxSegmentBytes": {
+              "type": "integer",
+              "description": "Roll the WAL segment once it exceeds this many bytes",
+              "minimum": 1048576
+            },
+            "walSyncIntervalMs": {
+              "type": "integer",
+              "description": "WAL fsync interval in milliseconds",
+              "minimum": 0
             }
           }
         },
@@ -1053,6 +1063,14 @@
             "bindAddress": {
               "type": "string",
               "description": "Bind address; empty string uses defaults"
+            },
+            "nodePort": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 30000,
+              "maximum": 32767
             }
           },
           "required": [

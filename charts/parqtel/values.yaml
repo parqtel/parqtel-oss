@@ -79,6 +79,11 @@ ingestion:
     enabled: true
     # -- Container/service port for OTLP gRPC (4317 is the OTel default).
     port: 4317
+    # -- Node port for OTLP gRPC. Only used when service.type is NodePort.
+    # Set this alongside service.nodePort; without it the gRPC port is
+    # assigned a random node port, so the OTLP endpoint moves on every
+    # upgrade and load-generator config has to be rewritten each time.
+    nodePort: null
     # -- Set empty to read from config file / defaults (0.0.0.0:4317).
     # Set "" via --set to disable gRPC ingestion.
     bindAddress: ""
@@ -169,9 +174,22 @@ parqtel:
     # -- Max request body size in bytes (10MB).
     maxBodySize: 10485760
     # -- Enable write-ahead log for metrics.
-    walEnabled: false
+    # On by default: with it off, a crash loses up to a whole block window
+    # and the metrics path degrades to synchronous flushing, so an
+    # acknowledged write is not recoverable. Logs default on for the same
+    # reason. Turn this off only if you have measured the WAL's write
+    # amplification and do not need crash recovery for metrics.
+    walEnabled: true
     # -- Enable write-ahead log for logs.
     logWalEnabled: true
+    # -- Roll the WAL segment once it exceeds this size in bytes (16 MiB).
+    # Bounds the largest single segment's replay cost and caps the file the
+    # writer must fsync, at the cost of more frequent segment churn.
+    walMaxSegmentBytes: 16777216
+    # -- How often to fsync the WAL in milliseconds (1000).
+    # Lower trades write throughput for a smaller loss window on power
+    # failure; 0 or null leaves the binary default in place.
+    walSyncIntervalMs: 1000
   query:
     # -- Max series returned per query.
     maxSeries: 1000

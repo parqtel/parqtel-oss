@@ -51,22 +51,39 @@ extraEnv:
 # External access
 # ---------------
 # The chart's default service type is ClusterIP, which leaves nothing reachable
-# from outside the cluster. NodePort is required here. Note that the 0.3.0
-# service template only honours nodePort for the HTTP port; the gRPC nodePort
-# is not templated and has to be patched in after every upgrade.
+# from outside the cluster. Both node ports are pinned: with only
+# service.nodePort set, the gRPC port draws a random node port, so the OTLP
+# endpoint moves on every upgrade and the load generator has to be reconfigured.
+#
+# image.pullSecrets is what keeps a re-created pod able to start. The GHCR
+# package is private, and a pod that cannot pull it fails with 401 and the
+# release never comes up. Note this is `image.pullSecrets`, a list of objects:
+# the root schema sets additionalProperties: false, so a top-level
+# `imagePullSecrets` key is rejected outright.
+
+image:
+  repository: ghcr.io/parqtel/parqtel-oss
+  pullSecrets:
+    - name: ghcr
 
 service:
   type: NodePort
   nodePort: 30090
 
+ingestion:
+  grpc:
+    nodePort: 32539
+
 # Write-ahead log
 # ---------------
-# Both signals keep the WAL on. With it off, a crash loses up to a whole block
-# window, and the metrics path degrades to synchronous flushing.
+# The WAL is on by default from 0.3.1: with it off, a crash loses up to a
+# whole block window and the metrics path degrades to synchronous flushing.
+# Pinned explicitly here so the profile is self-contained and a future change
+# to the chart default cannot silently disable crash recovery.
 #
-# Note: wal_max_segment_bytes and wal_sync_interval_ms are deliberately absent.
-# The 0.3.0 ConfigMap template does not render them, so there is no values path
-# to set them and the binary's built-in default applies.
+# The segment size and fsync interval were not settable through the chart
+# before 0.3.1 — the ConfigMap template never rendered them, so the binary
+# default applied regardless of what you set in values.
 
 parqtel:
   storage:
@@ -82,6 +99,8 @@ parqtel:
   ingest:
     walEnabled: true
     logWalEnabled: true
+    walMaxSegmentBytes: 16777216
+    walSyncIntervalMs: 1000
 
 resources:
   requests:
