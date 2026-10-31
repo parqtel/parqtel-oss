@@ -765,9 +765,9 @@ async fn run_server(
     // Auto mode: retry packs whose canary metrics have not arrived yet every
     // 5 minutes until the pending set drains. Activations never revert, so
     // the task exits for good once every selected pack has resolved.
-    if !preset_pending.is_empty() {
+    let preset_task = if !preset_pending.is_empty() {
         let preset_state = state.clone();
-        tokio::spawn(async move {
+        Some(tokio::spawn(async move {
             let mut pending = preset_pending;
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
             interval.tick().await; // startup pass already ran; wait a full interval
@@ -782,8 +782,10 @@ async fn run_server(
                 .await;
             }
             tracing::debug!("all selected built-in alert packs resolved");
-        });
-    }
+        }))
+    } else {
+        None
+    };
 
     // Load alert rules from the configured directory (evaluator + router
     // both key off the registry; without this, rules only exist via the API).
@@ -1055,6 +1057,11 @@ async fn run_server(
     grpc_task.abort();
     span_metrics_task.abort();
     alert_router_task.abort();
+    // Every task holding a clone of the app state keeps the ingestion services
+    // (and so the index channels below) alive, so none may outlive this point.
+    if let Some(task) = preset_task {
+        task.abort();
+    }
 
     state.inner.ingestion_service.shutdown().await?;
     state.inner.log_ingestion_service.shutdown().await?;
@@ -1063,14 +1070,16 @@ async fn run_server(
     // Let the index tasks drain the block metadata the flushes above just
     // published, so the final persist pass sees every block.
     drop(state);
-    let _ = index_task.await;
-    let _ = log_index_task.await;
-    let _ = trace_index_task.await;
+    let stop_timeout = std::time::Duration::from_secs(config.server.shutdown_timeout_secs.max(1));
+    // Bounded: an index task only ends when every sender is gone, and a stray
+    // holder must cost a timeout, not an unkillable process.
+    let _ = tokio::time::timeout(stop_timeout, index_task).await;
+    let _ = tokio::time::timeout(stop_timeout, log_index_task).await;
+    let _ = tokio::time::timeout(stop_timeout, trace_index_task).await;
 
     // Maintenance tasks stop and each perform a final persist pass before
     // returning, so the sidecars are complete without anyone writing the
     // index from under a lock here.
-    let stop_timeout = std::time::Duration::from_secs(config.server.shutdown_timeout_secs.max(1));
     metrics_maintenance.shutdown(stop_timeout).await;
     logs_maintenance.shutdown(stop_timeout).await;
     let _ = trace_shutdown_tx.send(true);
