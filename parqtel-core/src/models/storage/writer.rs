@@ -15,6 +15,54 @@ use arrow_array::{
 };
 use std::sync::Arc;
 
+/// Resolved correlation columns and resource JSON for one resource set.
+struct ResolvedResource {
+    json: String,
+    correlation: super::correlation::CorrelationLabels,
+}
+
+const RESOURCE_CACHE_MAX: usize = 4096;
+
+/// Memoises [`extract_correlation_labels`] per distinct resource set.
+///
+/// A block's rows come from a handful of resources, and each resource's
+/// attributes are shared (one `LabelSet` handle) across all of its rows, so the
+/// split into correlation columns and the resource JSON are computed once per
+/// resource instead of once per row.
+#[derive(Default)]
+struct ResourceCache {
+    by_addr: std::collections::HashMap<usize, usize>,
+    resolved: Vec<(LabelSet, ResolvedResource)>,
+}
+
+impl ResourceCache {
+    fn resolve(&mut self, labels: &LabelSet) -> &ResolvedResource {
+        let idx = match self.by_addr.get(&labels.addr()) {
+            Some(i) => *i,
+            None => {
+                // Bounded: rows that each carry a distinct set (unique ids in
+                // their attributes) would otherwise keep a copy of every one.
+                if self.resolved.len() >= RESOURCE_CACHE_MAX {
+                    self.resolved.clear();
+                    self.by_addr.clear();
+                }
+                let (rest, correlation) = extract_correlation_labels(labels);
+                self.resolved.push((
+                    // Keeps the handle alive so its address cannot be reused.
+                    labels.clone(),
+                    ResolvedResource {
+                        json: rest.json_str().to_string(),
+                        correlation,
+                    },
+                ));
+                self.by_addr.insert(labels.addr(), self.resolved.len() - 1);
+                self.resolved.len() - 1
+            }
+        };
+        &self.resolved[idx].1
+    }
+}
+
 /// Rows that share one metric identity: name, kind and resource attributes.
 ///
 /// Everything that is constant per run - the metric name, the kind, the
@@ -168,30 +216,22 @@ pub fn logs_to_chunk(logs: &[LogRecord]) -> Result<RecordBatch> {
     let mut attributes = StringBuilder::new();
     let mut resource_attributes = StringBuilder::new();
 
+    let mut resources = ResourceCache::default();
     for log in logs {
-        let (res_labels, correlation) = extract_correlation_labels(&log.resource_attributes);
+        let res = resources.resolve(&log.resource_attributes);
+        let correlation = &res.correlation;
         timestamp_ns.append_value(log.timestamp_ns);
         observed_timestamp_ns.append_value(log.observed_timestamp_ns);
         severity_number.append_value(log.severity_number);
         severity_text.append_value(&log.severity_text);
         body.append_value(&log.body);
-        service_name.append_option(correlation.service_name.as_deref().map(|s| s.to_string()));
-        service_version.append_option(
-            correlation
-                .service_version
-                .as_deref()
-                .map(|s| s.to_string()),
-        );
-        k8s_namespace.append_option(correlation.k8s_namespace.as_deref().map(|s| s.to_string()));
-        k8s_pod_name.append_option(correlation.k8s_pod_name.as_deref().map(|s| s.to_string()));
-        k8s_pod_uid.append_option(correlation.k8s_pod_uid.as_deref().map(|s| s.to_string()));
-        k8s_container_name.append_option(
-            correlation
-                .k8s_container_name
-                .as_deref()
-                .map(|s| s.to_string()),
-        );
-        k8s_node_name.append_option(correlation.k8s_node_name.as_deref().map(|s| s.to_string()));
+        service_name.append_option(correlation.service_name.as_deref());
+        service_version.append_option(correlation.service_version.as_deref());
+        k8s_namespace.append_option(correlation.k8s_namespace.as_deref());
+        k8s_pod_name.append_option(correlation.k8s_pod_name.as_deref());
+        k8s_pod_uid.append_option(correlation.k8s_pod_uid.as_deref());
+        k8s_container_name.append_option(correlation.k8s_container_name.as_deref());
+        k8s_node_name.append_option(correlation.k8s_node_name.as_deref());
 
         // FixedSizeBinary: trace_id is 16 bytes, span_id is 8 bytes
         let _ = trace_id.append_value(log.trace_id);
@@ -200,8 +240,8 @@ pub fn logs_to_chunk(logs: &[LogRecord]) -> Result<RecordBatch> {
         flags.append_value(log.flags);
         scope_name.append_value(&log.scope_name);
         scope_version.append_value(&log.scope_version);
-        attributes.append_value(&log.attributes.to_json()?);
-        resource_attributes.append_value(&res_labels.to_json()?);
+        attributes.append_value(log.attributes.json_str());
+        resource_attributes.append_value(&res.json);
     }
 
     let schema = logs_schema();
@@ -269,8 +309,10 @@ pub fn traces_to_chunk(spans: &[Span]) -> Result<RecordBatch> {
     let mut events = StringBuilder::new();
     let mut links = StringBuilder::new();
 
+    let mut resources = ResourceCache::default();
     for span in spans {
-        let (resource_labels, correlation) = extract_correlation_labels(&span.attributes);
+        let res = resources.resolve(&span.attributes);
+        let correlation = &res.correlation;
         let kind_str = match span.kind {
             1 => "SPAN_KIND_INTERNAL",
             2 => "SPAN_KIND_SERVER",
@@ -294,29 +336,19 @@ pub fn traces_to_chunk(spans: &[Span]) -> Result<RecordBatch> {
         duration_ns.append_value(span.duration_ns());
         status_code.append_value(status_str);
         status_message.append_value(&span.status.message);
-        service_name.append_option(correlation.service_name.as_deref().map(|s| s.to_string()));
-        service_version.append_option(
-            correlation
-                .service_version
-                .as_deref()
-                .map(|s| s.to_string()),
-        );
-        k8s_namespace.append_option(correlation.k8s_namespace.as_deref().map(|s| s.to_string()));
-        k8s_pod_name.append_option(correlation.k8s_pod_name.as_deref().map(|s| s.to_string()));
-        k8s_pod_uid.append_option(correlation.k8s_pod_uid.as_deref().map(|s| s.to_string()));
-        k8s_container_name.append_option(
-            correlation
-                .k8s_container_name
-                .as_deref()
-                .map(|s| s.to_string()),
-        );
-        k8s_node_name.append_option(correlation.k8s_node_name.as_deref().map(|s| s.to_string()));
+        service_name.append_option(correlation.service_name.as_deref());
+        service_version.append_option(correlation.service_version.as_deref());
+        k8s_namespace.append_option(correlation.k8s_namespace.as_deref());
+        k8s_pod_name.append_option(correlation.k8s_pod_name.as_deref());
+        k8s_pod_uid.append_option(correlation.k8s_pod_uid.as_deref());
+        k8s_container_name.append_option(correlation.k8s_container_name.as_deref());
+        k8s_node_name.append_option(correlation.k8s_node_name.as_deref());
         let _ = trace_id.append_value(span.trace_id);
         let _ = parent_span_id.append_value(span.parent_span_id);
         flags.append_value(span.flags);
         trace_state.append_value(&span.trace_state);
-        attributes.append_value(&span.attributes.to_json()?);
-        resource_attributes.append_value(&resource_labels.to_json()?);
+        attributes.append_value(span.attributes.json_str());
+        resource_attributes.append_value(&res.json);
         events.append_value(&serde_json::to_string(&span.events).map_err(Error::Serde)?);
         links.append_value(&serde_json::to_string(&span.links).map_err(Error::Serde)?);
     }
@@ -354,4 +386,89 @@ pub fn traces_to_chunk(spans: &[Span]) -> Result<RecordBatch> {
     .map_err(|e| Error::Arrow(e.to_string()))?;
 
     Ok(record_batch)
+}
+
+#[cfg(test)]
+mod conversion_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+    use super::*;
+    use arrow_array::{Array, DictionaryArray, StringArray};
+
+    fn dict_value(batch: &RecordBatch, col: &str, row: usize) -> Option<String> {
+        let c = batch.column(batch.schema().index_of(col).unwrap());
+        let d = c
+            .as_any()
+            .downcast_ref::<DictionaryArray<Int32Type>>()
+            .unwrap();
+        if d.is_null(row) {
+            return None;
+        }
+        let v = d.values().as_any().downcast_ref::<StringArray>().unwrap();
+        Some(v.value(d.keys().value(row) as usize).to_string())
+    }
+
+    fn str_value(batch: &RecordBatch, col: &str, row: usize) -> String {
+        let c = batch.column(batch.schema().index_of(col).unwrap());
+        c.as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap()
+            .value(row)
+            .to_string()
+    }
+
+    /// Rows from different resources (and one with none) must each get their own
+    /// correlation columns and resource JSON, however the rows interleave.
+    #[test]
+    fn logs_conversion_resolves_each_resource_per_row() {
+        let a = LabelSet::try_from_iter(vec![
+            ("service.name", "api"),
+            ("k8s.pod.name", "api-0"),
+            ("region", "eu"),
+        ])
+        .unwrap();
+        let b = LabelSet::try_from_iter(vec![("service.name", "db"), ("zone", "z1")]).unwrap();
+        let none = LabelSet::default();
+        let mk = |ts: i64, res: &LabelSet| {
+            LogRecord::new(
+                ts,
+                ts,
+                9,
+                "INFO".into(),
+                format!("m{ts}"),
+                LabelSet::try_from_iter(vec![("k", format!("v{ts}"))]).unwrap(),
+                res.clone(),
+                [0; 16],
+                [0; 8],
+                0,
+                "".into(),
+                "".into(),
+            )
+        };
+        let logs = vec![mk(1, &a), mk(2, &b), mk(3, &a), mk(4, &none), mk(5, &b)];
+        let batch = logs_to_chunk(&logs).unwrap();
+        let want_svc = [Some("api"), Some("db"), Some("api"), None, Some("db")];
+        let want_pod = [Some("api-0"), None, Some("api-0"), None, None];
+        let want_res = [
+            r#"{"region":"eu"}"#,
+            r#"{"zone":"z1"}"#,
+            r#"{"region":"eu"}"#,
+            "{}",
+            r#"{"zone":"z1"}"#,
+        ];
+        for i in 0..5 {
+            assert_eq!(
+                dict_value(&batch, "service_name", i).as_deref(),
+                want_svc[i]
+            );
+            assert_eq!(
+                dict_value(&batch, "k8s_pod_name", i).as_deref(),
+                want_pod[i]
+            );
+            assert_eq!(str_value(&batch, "resource_attributes", i), want_res[i]);
+            assert_eq!(
+                str_value(&batch, "attributes", i),
+                format!(r#"{{"k":"v{}"}}"#, i + 1)
+            );
+        }
+    }
 }
