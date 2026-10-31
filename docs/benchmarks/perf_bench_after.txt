@@ -1,0 +1,49 @@
+Seeding 12 blocks × 50000 points…
+
+=== concurrent service ingest (8 workers x 40 batches x 2500 pts, 1 flush each) ===
+svc-ingest     576.76 ms/op        0.72 µs/point         1387067 points/s
+             accepted 800000/800000 points (drops = old overflow behavior)
+
+=== ingest (JSON decode + buffer push, 40×2500 pts) ===
+ingest       112.08 ms/op        1.12 µs/point          892224 points/s
+
+=== flush (50000 pts → Parquet) ===
+flush         18.63 ms/op        0.37 µs/point         2684065 points/s
+
+=== scan (all 12 blocks, full range) ===
+scan           5.91 ms/op        0.01 µs/point       101443456 points/s
+
+=== scan narrow (1/12 blocks, middle half of its data) ===
+scan-narrow       1.23 ms/op        0.05 µs/point        20396358 points/s
+
+=== query execute (full range, avg downsample @60s) ===
+query         26.63 ms/op        0.04 µs/point        22528583 points/s
+
+=== query execute (narrow range, avg downsample @60s) ===
+query-narrow       2.41 ms/op        0.01 µs/point       124433981 points/s
+
+--- summary (points/s, higher is better) ---
+ingest : 892224
+flush  : 2684065
+scan   : 101443456
+query  : 22528583
+q-narr : 124433981
+
+=== logs: ingest / flush / scan (4 blocks x 100000 rows, row_group_size=10000) ===
+log-ingest     202.49 ms/op        2.02 µs/point          493842 points/s
+log-flush     108.71 ms/op        1.09 µs/point          919876 points/s
+log-flush-1rg     109.32 ms/op        1.09 µs/point          914778 points/s
+  (10 row groups costs 0.99x the write time of one row group)
+  4 blocks seeded, 1 block(s) overlap the narrow window
+log-scan      65.36 ms/op        0.16 µs/point         6120084 points/s
+log-scan-narrow       4.00 ms/op        0.40 µs/point         2497970 points/s
+log-scan-worst       4.02 ms/op        0.40 µs/point         2487691 points/s
+  narrow window = 2.5% of rows, 6% of full-scan latency, 2.5x per-row cost
+
+=== traces: ingest / flush / scan (4 blocks x 100000 spans, row_group_size=10000) ===
+span-ingest     241.45 ms/op        2.41 µs/point          414159 points/s
+span-flush     135.54 ms/op        1.36 µs/point          737768 points/s
+span-scan      94.96 ms/op        0.24 µs/point         4212261 points/s
+span-scan-narrow       6.80 ms/op        0.68 µs/point         1469949 points/s
+span-scan-worst       6.74 ms/op        0.67 µs/point         1483313 points/s
+  narrow window = 2.5% of rows, 7% of full-scan latency, 2.8x per-row cost

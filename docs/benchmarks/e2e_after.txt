@@ -1,0 +1,48 @@
+### run 1
+ingest-metrics(points) reqs=1200    err=0    items/s=2033813     p50=    6.73ms p95=    9.58ms p99=   15.30ms max=   22.53ms
+ingest-logs(records)   reqs=300     err=0    items/s=1857442     p50=    3.30ms p95=    6.83ms p99=    9.13ms max=   10.23ms
+ingest-traces(spans)   reqs=300     err=0    items/s=1954428     p50=    1.66ms p95=    2.63ms p99=    5.27ms max=    5.55ms
+selector-one-series    reqs=293     err=0    items/s=73          p50=   13.66ms p95=   14.07ms p99=   15.95ms max=   17.82ms
+sum-by-env             reqs=146     err=0    items/s=36          p50=   27.42ms p95=   27.73ms p99=   27.99ms max=   28.35ms
+rate-sum-by-region     reqs=138     err=0    items/s=34          p50=   29.03ms p95=   29.31ms p99=   29.54ms max=   33.00ms
+avg-all-1h             reqs=148     err=0    items/s=37          p50=   27.12ms p95=   27.30ms p99=   27.41ms max=   27.42ms
+topk-rate              reqs=145     err=0    items/s=36          p50=   27.57ms p95=   27.85ms p99=   28.47ms max=   28.70ms
+instant-sum            reqs=261     err=0    items/s=65          p50=   15.32ms p95=   15.45ms p99=   15.49ms max=   15.54ms
+logs-search            reqs=41      err=0    items/s=10          p50=   99.55ms p95=  101.37ms p99=  101.71ms max=  101.71ms
+traces-search          reqs=222     err=0    items/s=55          p50=   18.06ms p95=   18.27ms p99=   18.52ms max=   19.13ms
+label-values           reqs=1246    err=0    items/s=311         p50=    3.17ms p95=    3.51ms p99=    4.15ms max=    5.32ms
+server cpu (user+sys):   0:53.63
+peak RSS (KB): 797120
+data dir: 225380 KB  files:        3
+### run 2
+ingest-metrics(points) reqs=1200    err=0    items/s=1994820     p50=    6.79ms p95=    9.55ms p99=   17.39ms max=   21.27ms
+ingest-logs(records)   reqs=300     err=0    items/s=1930920     p50=    3.09ms p95=    7.23ms p99=    9.39ms max=   11.37ms
+ingest-traces(spans)   reqs=300     err=0    items/s=1970435     p50=    1.63ms p95=    2.86ms p99=    5.73ms max=    5.81ms
+selector-one-series    reqs=297     err=0    items/s=74          p50=   13.48ms p95=   13.99ms p99=   15.35ms max=   18.97ms
+sum-by-env             reqs=148     err=0    items/s=37          p50=   27.02ms p95=   27.65ms p99=   29.59ms max=   30.99ms
+rate-sum-by-region     reqs=141     err=0    items/s=35          p50=   28.43ms p95=   28.60ms p99=   28.82ms max=   28.86ms
+avg-all-1h             reqs=151     err=0    items/s=38          p50=   26.56ms p95=   26.79ms p99=   26.83ms max=   26.84ms
+topk-rate              reqs=148     err=0    items/s=37          p50=   27.10ms p95=   27.41ms p99=   28.41ms max=   28.97ms
+instant-sum            reqs=264     err=0    items/s=66          p50=   15.17ms p95=   15.29ms p99=   15.41ms max=   15.58ms
+logs-search            reqs=40      err=0    items/s=10          p50=   99.98ms p95=  101.77ms p99=  101.89ms max=  101.89ms
+traces-search          reqs=208     err=0    items/s=52          p50=   19.26ms p95=   19.48ms p99=   19.66ms max=   19.84ms
+label-values           reqs=1266    err=0    items/s=316         p50=    3.14ms p95=    3.35ms p99=    3.58ms max=    4.78ms
+server cpu (user+sys):   0:54.02
+peak RSS (KB): 630080
+data dir: 225388 KB  files:        3
+### run 3
+ingest-metrics(points) reqs=1200    err=0    items/s=2020418     p50=    6.77ms p95=    9.28ms p99=   16.64ms max=   20.75ms
+ingest-logs(records)   reqs=300     err=0    items/s=1926430     p50=    3.20ms p95=    7.65ms p99=   10.06ms max=   10.22ms
+ingest-traces(spans)   reqs=300     err=0    items/s=2040152     p50=    1.54ms p95=    2.55ms p99=    5.23ms max=    5.47ms
+selector-one-series    reqs=274     err=0    items/s=68          p50=   14.62ms p95=   14.94ms p99=   18.26ms max=   20.79ms
+sum-by-env             reqs=143     err=0    items/s=36          p50=   28.01ms p95=   28.69ms p99=   28.77ms max=   29.09ms
+rate-sum-by-region     reqs=135     err=0    items/s=34          p50=   29.77ms p95=   29.98ms p99=   30.11ms max=   30.94ms
+avg-all-1h             reqs=144     err=0    items/s=36          p50=   27.84ms p95=   27.99ms p99=   28.11ms max=   28.21ms
+topk-rate              reqs=141     err=0    items/s=35          p50=   28.41ms p95=   28.57ms p99=   29.04ms max=   30.84ms
+instant-sum            reqs=244     err=0    items/s=61          p50=   16.45ms p95=   16.61ms p99=   16.79ms max=   16.79ms
+logs-search            reqs=40      err=0    items/s=10          p50=  100.56ms p95=  102.30ms p99=  104.53ms max=  104.53ms
+traces-search          reqs=190     err=0    items/s=47          p50=   21.13ms p95=   21.48ms p99=   21.58ms max=   21.73ms
+label-values           reqs=1402    err=0    items/s=350         p50=    2.82ms p95=    3.05ms p99=    3.41ms max=    4.68ms
+server cpu (user+sys):   0:53.56
+peak RSS (KB): 781056
+data dir: 225440 KB  files:        3

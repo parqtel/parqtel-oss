@@ -11,7 +11,44 @@ build cannot reach a registry or the release page.
 
 ## [Unreleased]
 
-Nothing yet.
+Ingest and query performance, and a set of durability and visibility fixes found
+while measuring. Measurements and method are in
+[docs/benchmarks/PERFORMANCE.md](docs/benchmarks/PERFORMANCE.md).
+
+### Performance
+
+- **Ingest**: metrics 0.62 → 2.0 M points/s, logs 0.10 → 1.9 M records/s, p99
+  ingest latency 55 → 17 ms (metrics) and 538 → 9 ms (logs), on 8 cores.
+- **Queries**: single-series selector 156 → 14 ms, aggregations 180 → 27 ms,
+  instant queries 107 → 15 ms, log search 284 → 100 ms (p50, 2.4 M-point
+  dataset).
+- Peak RSS under the same load fell from 2.3 GB to 0.8 GB.
+
+### Added
+
+- **gzip-compressed OTLP**, which the OpenTelemetry Collector's exporters send by
+  default: request bodies on HTTP (limits apply to the decompressed size) and
+  gRPC.
+
+### Fixed
+
+- **OTLP/HTTP protobuf traces** were rejected with 400 on `/v1/traces`; only gRPC
+  could ingest protobuf traces. The endpoint now negotiates on `Content-Type`
+  like metrics and logs.
+- **Crash recovery lost data.** Replay numbered WAL records by where they started
+  while commit points are where they end, so the record after the committed one
+  was skipped; and a sharded flush could commit a position past a record that
+  belonged to the next block. After `kill -9` under load, every acknowledged
+  metric, log and span is now recovered.
+- **Concurrent flushes committed out of order**, which could move the WAL commit
+  point past a block that was not yet on disk. Commits are released in flush
+  order.
+- **Fresh data vanished from queries after each flush.** The memory buffer was
+  emptied completely when a block became durable, including rows that arrived
+  while it was being written. Only the rows the block holds are removed now.
+- **SIGTERM could leave the process running** after "Shutting down gracefully":
+  a background task kept the ingestion services alive. Shutdown also bounds its
+  waits on the index tasks.
 
 ## [0.3.1]
 

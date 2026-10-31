@@ -99,7 +99,8 @@ parqtel-mcp-{slack,pagerduty,jira,notion,discord,gdocs,parqtel}
 4. **Rotate** → `IngestionService` accumulates data points in memory via `BlockRotator`
 4a. **Span-metrics RED bridge** → trace ingestion derives `traces_service_{requests,errors,duration_ms}_total` metrics from `SPAN_KIND_SERVER` spans (grouped by service/operation) and feeds them back through the metrics path — services get out-of-the-box RED metrics without hand-written rules. Trace decode merges resource attributes (service.name, k8s.*) into span attributes, span attrs winning on conflict.
 4b. **Tail sampling** → after RED derivation (which sees the full span set, keeping metric rates accurate), traces are evaluated per trace against the `ingest.tail_sampling` policy: `keep_errors` (ERROR-status spans), `slow_trace_ms` (server spans above threshold), then a deterministic trace_id-hash probabilistic `sampling_ratio` (trace-coherent — whole traces live or die together). Per-service overrides replace the global policy. Dropped spans count in `dropped_spans` stats; default policy keeps everything at zero cost.
-5. **Flush** → When block duration expires or row limit is reached, `BlockWriter` serializes to Parquet with configured compression. Blocking work (encode/compress/IO) runs on `spawn_blocking`; the rotator swaps out its writer so ingest continues during flushes
+5. **Flush** → When block duration expires or row limit is reached, `BlockWriter` serializes to Parquet with configured compression. Blocking work (encode/compress/IO) runs on `spawn_blocking`; the rotator swaps out its writer so ingest continues during flushes. Metrics flush across writer shards (all shards are held for the swap so the WAL position the block commits is exact); logs and traces share one `SerialRotator` that frames a request's WAL records before taking its lock, writes them with one `write`, and encodes each block on a detached task with one flush in flight.
+5a. **Buffer lifetime** → rows stay in the `MemoryBuffer` until the block holding them is durable, then exactly those rows are removed: metrics by writer epoch, logs and spans by count. Rows that arrived during the encode stay queryable.
 6. **Index** → `BlockMetadata` is sent via `mpsc::unbounded_channel` to the index task, which updates the in-memory `BlockIndex`
 7. **Background** → A periodic flush task (5s interval) calls `check_and_flush()` on all three services
 
@@ -119,6 +120,8 @@ A query resolves in three stages, each with its own pruning mechanism:
    (`timestamp_ns`, `metric_name`, `service_name`, `labels`, and the three value
    columns). The eight skipped are `metric_kind`, the six k8s dictionaries and
    `resource_attributes`, all per-row data a range query never touches.
+
+Label matchers are pushed into the block scan: a predicate over the series' label set runs once per distinct series per block (the `labels` column is read as a dictionary, so each distinct JSON is parsed once), and rows of series that cannot match are never turned into points. Parsed Parquet footers are cached per immutable block file. Log search rejects rows from the timestamp, severity and body columns alone (a Parquet row filter) before decoding the other columns; the prefilter is derived only from the query's AND conjuncts and the full predicate still judges every row that passes.
 
 Evaluation is then handed to the blocking pool. Series labels are shared behind
 an `Arc` (`ast::SharedLabels`), so a series' labels are cloned once per block
