@@ -216,25 +216,34 @@ impl WalWriter {
         if let Some(err) = &self.poisoned {
             return Err(Error::Internal(format!("WAL writer is poisoned: {err}")));
         }
-        let payload = match serde_json::to_vec(value) {
-            Ok(p) => p,
+        let record = match encode_record(value) {
+            Ok(r) => r,
             Err(e) => {
                 // Serialisation failure must not be retried on every request.
                 self.poisoned = Some(e.to_string());
-                return Err(Error::Serde(e));
+                return Err(e);
             }
         };
-        let mut record = Vec::with_capacity(RECORD_HEADER_LEN as usize + payload.len());
-        record.extend_from_slice(&(payload.len() as u32).to_le_bytes());
-        record.extend_from_slice(&crc32(&payload).to_le_bytes());
-        record.extend_from_slice(&payload);
+        self.append_encoded(&record)
+    }
 
-        if let Err(e) = self.file.write_all(&record) {
+    /// Appends records that [`encode_record`] already framed, with one write.
+    ///
+    /// Encoding is the CPU-heavy half of an append; doing it before the caller
+    /// takes the lock that orders WAL and writer leaves only a copy and a
+    /// `write` inside it. `records` may hold several back-to-back records, in
+    /// which case the returned position covers the last of them and a request of
+    /// N items costs one syscall rather than N.
+    pub fn append_encoded(&mut self, records: &[u8]) -> Result<WalPosition> {
+        if let Some(err) = &self.poisoned {
+            return Err(Error::Internal(format!("WAL writer is poisoned: {err}")));
+        }
+        if let Err(e) = self.file.write_all(records) {
             let msg = e.to_string();
             self.poisoned = Some(msg.clone());
             return Err(Error::Io(std::io::Error::other(msg)));
         }
-        self.offset += record.len() as u64;
+        self.offset += records.len() as u64;
         // Flush to the OS on **every** append. The `BufWriter` holds records in
         // userspace, so without this a process kill loses everything still
         // buffered - which is exactly the case the WAL exists for. `write` is
@@ -558,6 +567,31 @@ fn write_commit(dir: &Path, position: WalPosition) -> Result<()> {
 fn read_commit_inner(dir: &Path) -> Option<WalPosition> {
     let s = fs::read_to_string(commit_path(dir)).ok()?;
     Some(WalPosition(s.trim().parse().ok()?))
+}
+
+// --- Record framing --------------------------------------------------------
+
+/// Frames `value` as one WAL record: `u32` length, `u32` CRC-32, JSON payload.
+///
+/// Pure CPU, no I/O and no state, so callers run it outside any lock and then
+/// hand the bytes to [`WalWriter::append_encoded`]. Several encoded records may
+/// be concatenated and appended together.
+pub fn encode_record<T: Serialize>(value: &T) -> Result<Vec<u8>> {
+    let mut record = Vec::with_capacity(256);
+    encode_record_into(value, &mut record)?;
+    Ok(record)
+}
+
+/// As [`encode_record`], appending to `out` so a batch shares one buffer.
+pub fn encode_record_into<T: Serialize>(value: &T, out: &mut Vec<u8>) -> Result<()> {
+    let start = out.len();
+    out.extend_from_slice(&[0u8; RECORD_HEADER_LEN as usize]);
+    serde_json::to_writer(&mut *out, value).map_err(Error::Serde)?;
+    let payload_len = out.len() - start - RECORD_HEADER_LEN as usize;
+    let crc = crc32(&out[start + RECORD_HEADER_LEN as usize..]);
+    out[start..start + 4].copy_from_slice(&(payload_len as u32).to_le_bytes());
+    out[start + 4..start + 8].copy_from_slice(&crc.to_le_bytes());
+    Ok(())
 }
 
 // --- CRC32 -----------------------------------------------------------------

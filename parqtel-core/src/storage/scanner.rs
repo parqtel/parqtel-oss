@@ -5,7 +5,8 @@ use crate::models::storage::{BlockMetadata, StorageModel};
 use crate::models::traces::Span;
 use arrow_array::{Array, TimestampNanosecondArray};
 use parquet::arrow::arrow_reader::{
-    ArrowReaderMetadata, ArrowReaderOptions, ParquetRecordBatchReaderBuilder,
+    ArrowPredicateFn, ArrowReaderMetadata, ArrowReaderOptions, ParquetRecordBatchReaderBuilder,
+    RowFilter,
 };
 use parquet::arrow::ProjectionMask;
 use parquet::file::metadata::PageIndexPolicy;
@@ -22,6 +23,40 @@ const MAX_BLOCKS: usize = 128;
 
 /// Row predicate pushed down into blocking scan tasks.
 pub type LogRowFilter = Arc<dyn Fn(&LogRecord) -> bool + Send + Sync>;
+
+/// Conditions on log columns that every matching row must satisfy, so a block
+/// scan can reject rows from three columns before decoding the other sixteen.
+///
+/// This is a *necessary* condition only: the row predicate still decides every
+/// row that passes. Whoever builds one must derive it from conjuncts of that
+/// predicate, never from an `OR` or a negation.
+#[derive(Debug, Clone, Default)]
+pub struct LogColumnPrefilter {
+    /// `severity_number >= n`.
+    pub min_severity: Option<i32>,
+    /// Lowercase needles; the body must contain every one, ASCII-case-insensitively.
+    pub body_contains_lower: Vec<String>,
+}
+
+impl LogColumnPrefilter {
+    /// Whether this rules nothing out.
+    pub fn is_empty(&self) -> bool {
+        self.min_severity.is_none() && self.body_contains_lower.is_empty()
+    }
+}
+
+/// Case-insensitive (ASCII) substring test; `needle_lower` must be lowercase.
+fn body_contains_ci(haystack: &str, needle_lower: &str) -> bool {
+    let (h, n) = (haystack.as_bytes(), needle_lower.as_bytes());
+    if n.is_empty() {
+        return true;
+    }
+    if n.len() > h.len() {
+        return false;
+    }
+    h.windows(n.len())
+        .any(|w| w.iter().zip(n).all(|(a, b)| a.to_ascii_lowercase() == *b))
+}
 
 /// Aggregate statistics for a counted log scan: the true match count
 /// (never capped by `keep`) and 60 ingestion-volume buckets spread over
@@ -81,6 +116,48 @@ pub fn metric_scan_indices(schema: &std::sync::Arc<arrow_schema::Schema>) -> Res
             .map_err(|_| Error::Arrow(format!("metrics scan is missing the {name} column")))?;
     }
     Ok(idx)
+}
+
+/// Row mask for a [`LogColumnPrefilter`] over a batch holding exactly
+/// `timestamp_ns`, `severity_number` and `body` (in file order).
+fn log_prefilter_mask(
+    batch: &arrow_array::RecordBatch,
+    pre: &LogColumnPrefilter,
+    start_ns: i64,
+    end_ns: i64,
+) -> std::result::Result<arrow_array::BooleanArray, arrow_schema::ArrowError> {
+    let bad = |what: &str| arrow_schema::ArrowError::SchemaError(format!("log prefilter: {what}"));
+    let schema = batch.schema();
+    let col = |name: &str| {
+        schema
+            .index_of(name)
+            .map(|i| batch.column(i))
+            .map_err(|_| bad(name))
+    };
+    let ts = col("timestamp_ns")?
+        .as_any()
+        .downcast_ref::<TimestampNanosecondArray>()
+        .ok_or_else(|| bad("timestamp_ns type"))?;
+    let sev = col("severity_number")?
+        .as_any()
+        .downcast_ref::<arrow_array::Int32Array>()
+        .ok_or_else(|| bad("severity_number type"))?;
+    let body = col("body")?
+        .as_any()
+        .downcast_ref::<arrow_array::StringArray>()
+        .ok_or_else(|| bad("body type"))?;
+    Ok((0..batch.num_rows())
+        .map(|i| {
+            let t = ts.value(i);
+            t >= start_ns
+                && t <= end_ns
+                && pre.min_severity.is_none_or(|m| sev.value(i) >= m)
+                && pre
+                    .body_contains_lower
+                    .iter()
+                    .all(|n| body_contains_ci(body.value(i), n))
+        })
+        .collect())
 }
 
 /// Predicate over a series' label set (after the `service.name` label has been
@@ -616,6 +693,31 @@ impl Scanner {
         keep_newest: bool,
         filter: Option<LogRowFilter>,
     ) -> Result<(Vec<LogRecord>, LogScanStats)> {
+        Self::scan_logs_counted_prefiltered(
+            blocks,
+            start_ns,
+            end_ns,
+            keep,
+            keep_newest,
+            filter,
+            None,
+        )
+        .await
+    }
+
+    /// As [`Self::scan_logs_counted_filtered`], also rejecting rows on
+    /// `prefilter` from the time, severity and body columns alone, so only rows
+    /// that can match are fully decoded. `filter` still has the last word.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn scan_logs_counted_prefiltered(
+        blocks: Vec<BlockMetadata>,
+        start_ns: i64,
+        end_ns: i64,
+        keep: usize,
+        keep_newest: bool,
+        filter: Option<LogRowFilter>,
+        prefilter: Option<LogColumnPrefilter>,
+    ) -> Result<(Vec<LogRecord>, LogScanStats)> {
         let sem = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT));
         let window_ns = (end_ns - start_ns) / 60;
         let mut tasks = Vec::new();
@@ -626,6 +728,7 @@ impl Scanner {
                 .await
                 .map_err(|e| Error::Internal(e.to_string()))?;
             let filter = filter.clone();
+            let prefilter = prefilter.clone();
             tasks.push(tokio::task::spawn_blocking(move || {
                 let _permit = permit;
                 Self::scan_log_block_filtered(
@@ -635,6 +738,7 @@ impl Scanner {
                     keep,
                     keep_newest,
                     filter,
+                    prefilter,
                     window_ns,
                 )
             }));
@@ -668,6 +772,7 @@ impl Scanner {
         Ok((all_logs, stats))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn scan_log_block_filtered(
         meta: BlockMetadata,
         start_ns: i64,
@@ -675,6 +780,7 @@ impl Scanner {
         keep: usize,
         keep_newest: bool,
         filter: Option<LogRowFilter>,
+        prefilter: Option<LogColumnPrefilter>,
         window_ns: i64,
     ) -> Result<(Vec<LogRecord>, usize, Vec<u64>)> {
         let file = match File::open(&meta.path) {
@@ -703,7 +809,28 @@ impl Scanner {
             None => reader_builder,
         };
 
+        // Late materialisation: decide from timestamp, severity and body alone,
+        // and let the reader decode the other columns only for the rows (and
+        // pages) that pass.
+        let reader_builder = match prefilter.filter(|p| !p.is_empty()) {
+            Some(pre) => {
+                let schema = reader_builder.parquet_schema();
+                let cols = project_present(schema, &["timestamp_ns", "severity_number", "body"]);
+                if cols.len() == 3 {
+                    let mask = ProjectionMask::leaves(schema, cols);
+                    let predicate = ArrowPredicateFn::new(mask, move |batch| {
+                        log_prefilter_mask(&batch, &pre, start_ns, end_ns)
+                    });
+                    reader_builder.with_row_filter(RowFilter::new(vec![Box::new(predicate)]))
+                } else {
+                    reader_builder
+                }
+            }
+            None => reader_builder,
+        };
+
         let reader = reader_builder
+            .with_batch_size(SCAN_BATCH_ROWS)
             .build()
             .map_err(|e| Error::Parquet(e.to_string()))?;
 

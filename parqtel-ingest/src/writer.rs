@@ -56,6 +56,10 @@ pub struct BlockWriter {
     batches: Vec<PushedBatch>,
     rows: usize,
     capacity: usize,
+    /// Which generation of this shard's writer this is. Starts at 1 and moves on
+    /// every time the writer's rows are written out, so the memory buffer can tell
+    /// the points a block holds from the ones that arrived afterwards.
+    epoch: u64,
 }
 
 struct PushedBatch {
@@ -67,6 +71,11 @@ struct PushedBatch {
 
 impl BlockWriter {
     pub fn new(config: BlockConfig) -> Self {
+        Self::with_epoch(config, 1)
+    }
+
+    /// A writer for generation `epoch` of its shard.
+    pub fn with_epoch(config: BlockConfig, epoch: u64) -> Self {
         let capacity = config.max_rows_per_block;
         // Grows on demand: pre-allocating `max_rows_per_block` slots would park
         // hundreds of MB per writer, and every flush swaps in a fresh writer.
@@ -75,7 +84,13 @@ impl BlockWriter {
             batches: Vec::new(),
             rows: 0,
             capacity,
+            epoch,
         }
+    }
+
+    /// This writer's generation; see the field docs.
+    pub fn epoch(&self) -> u64 {
+        self.epoch
     }
 
     /// Appends a metric, splitting it across blocks when it does not fit.
@@ -149,6 +164,7 @@ impl BlockWriter {
             batches,
             rows,
             capacity,
+            epoch: 1,
         })
     }
 
@@ -251,6 +267,7 @@ impl BlockWriter {
         let size_bytes = fs::metadata(&final_path)?.len();
         self.batches.clear();
         self.rows = 0;
+        self.epoch += 1;
 
         Ok(BlockMetadata {
             path: final_path,

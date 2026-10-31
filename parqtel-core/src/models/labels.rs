@@ -4,7 +4,7 @@ use serde::de::{MapAccess, Visitor};
 use serde::ser::SerializeMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::cmp::Ordering;
-use std::hash::{Hash, Hasher};
+use std::hash::{BuildHasher, Hash, Hasher};
 use std::sync::{Arc, OnceLock};
 
 /// Shared storage behind a [`LabelSet`].
@@ -108,6 +108,13 @@ impl LabelSet {
     /// Returns an iterator over the label keys in sorted order.
     pub fn keys(&self) -> impl Iterator<Item = &String> {
         self.inner.entries.iter().map(|(k, _)| k)
+    }
+
+    /// Identity of the shared storage: equal for clones, different for sets built
+    /// separately. A cheap key for "have I seen this exact handle", never a
+    /// substitute for equality.
+    pub fn addr(&self) -> usize {
+        Arc::as_ptr(&self.inner) as usize
     }
 
     /// Whether both handles point at the same shared storage.
@@ -236,6 +243,117 @@ impl LabelSet {
     pub fn from_json(json: &str) -> Result<Self> {
         serde_json::from_str(json).map_err(Error::Serde)
     }
+}
+
+/// Process-wide table of recently seen label sets.
+///
+/// A series is scraped over and over, and every request used to rebuild its
+/// label set from scratch. Resolving a request's attributes to a set that is
+/// already shared makes the repeat free (no allocation) and keeps the cached
+/// fingerprint and JSON warm for the life of the series, instead of recomputing
+/// them for each copy.
+///
+/// It is a cache and nothing more: a miss builds the set the ordinary way, an
+/// entry may be evicted at any time, and equality is always decided by contents,
+/// so no result can depend on whether a set was interned.
+pub struct LabelInterner {
+    shards: Vec<std::sync::Mutex<InternShard>>,
+    hasher: ahash::RandomState,
+}
+
+#[derive(Default)]
+struct InternShard {
+    buckets: std::collections::HashMap<u64, Vec<LabelSet>>,
+    entries: usize,
+}
+
+/// Shards, and the number of distinct sets each may hold before it is emptied.
+/// 16 x 16K bounds the table at ~262K series (tens of MB).
+const INTERN_SHARDS: usize = 16;
+const INTERN_SHARD_CAP: usize = 16 * 1024;
+/// Attribute lists longer than this are not interned.
+const INTERN_MAX_PAIRS: usize = 32;
+
+impl LabelInterner {
+    /// The shared instance.
+    pub fn global() -> &'static LabelInterner {
+        static GLOBAL: OnceLock<LabelInterner> = OnceLock::new();
+        GLOBAL.get_or_init(|| LabelInterner {
+            shards: (0..INTERN_SHARDS)
+                .map(|_| std::sync::Mutex::new(InternShard::default()))
+                .collect(),
+            hasher: ahash::RandomState::with_seeds(
+                0x243f_6a88_85a3_08d3,
+                0x1319_8a2e_0370_7344,
+                0xa409_3822_299f_31d0,
+                0x082e_fa98_ec4e_6c89,
+            ),
+        })
+    }
+
+    /// Order-independent hash of the pairs.
+    fn hash_pairs<K: AsRef<str>, V: AsRef<str>>(&self, pairs: &[(K, V)]) -> u64 {
+        let mut acc = pairs.len() as u64;
+        for (k, v) in pairs {
+            let mut h = self.hasher.build_hasher();
+            k.as_ref().hash(&mut h);
+            v.as_ref().hash(&mut h);
+            acc = acc.wrapping_add(h.finish());
+        }
+        acc
+    }
+
+    /// Resolves `pairs` (in any order) to a [`LabelSet`], reusing an equal one
+    /// when it is known. Fails on a repeated key, as [`LabelSet::try_from_iter`]
+    /// does.
+    pub fn intern<K: AsRef<str>, V: AsRef<str>>(&self, pairs: &[(K, V)]) -> Result<LabelSet> {
+        if pairs.is_empty() {
+            return Ok(LabelSet::default());
+        }
+        let build = || LabelSet::try_from_iter(pairs.iter().map(|(k, v)| (k.as_ref(), v.as_ref())));
+        if pairs.len() > INTERN_MAX_PAIRS || has_repeated_key(pairs) {
+            return build();
+        }
+        let hash = self.hash_pairs(pairs);
+        let shard = &self.shards[(hash as usize) % INTERN_SHARDS];
+        {
+            let guard = shard.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(bucket) = guard.buckets.get(&hash) {
+                for cand in bucket {
+                    // Keys are unique on both sides, so equal length plus every
+                    // pair found in the candidate is equality.
+                    if cand.len() == pairs.len()
+                        && pairs
+                            .iter()
+                            .all(|(k, v)| cand.get(k.as_ref()) == Some(v.as_ref()))
+                    {
+                        return Ok(cand.clone());
+                    }
+                }
+            }
+        }
+        let built = build()?;
+        let mut guard = shard.lock().unwrap_or_else(|e| e.into_inner());
+        if guard.entries >= INTERN_SHARD_CAP {
+            guard.buckets.clear();
+            guard.entries = 0;
+        }
+        guard.buckets.entry(hash).or_default().push(built.clone());
+        guard.entries += 1;
+        Ok(built)
+    }
+}
+
+fn has_repeated_key<K: AsRef<str>, V>(pairs: &[(K, V)]) -> bool {
+    for (i, (k, _)) in pairs.iter().enumerate() {
+        if pairs[..i]
+            .iter()
+            .any(|(other, _)| other.as_ref() == k.as_ref())
+        {
+            return true;
+        }
+    }
+    false
 }
 
 /// Appends `s` as a JSON string literal, escaping exactly as `serde_json` does.
@@ -466,5 +584,43 @@ mod tests {
         let b = a.clone();
         assert!(a.ptr_eq(&b));
         assert!(std::ptr::eq(a.json_str(), b.json_str()));
+    }
+
+    #[test]
+    fn interner_shares_equal_sets_in_any_order() {
+        let i = LabelInterner::global();
+        let a = i.intern(&[("zz_it", "1"), ("aa_it", "2")]).unwrap();
+        let b = i.intern(&[("aa_it", "2"), ("zz_it", "1")]).unwrap();
+        assert!(
+            a.ptr_eq(&b),
+            "equal contents must resolve to one shared set"
+        );
+        assert_eq!(
+            a,
+            LabelSet::try_from_iter(vec![("aa_it", "2"), ("zz_it", "1")]).unwrap()
+        );
+        let c = i.intern(&[("aa_it", "2"), ("zz_it", "other")]).unwrap();
+        assert!(!a.ptr_eq(&c));
+        assert_ne!(a, c);
+    }
+
+    #[test]
+    fn interner_rejects_repeated_keys_and_handles_empty() {
+        let i = LabelInterner::global();
+        assert!(i.intern(&[("k_it", "1"), ("k_it", "1")]).is_err());
+        assert!(i
+            .intern(&[("k_it", "1"), ("j_it", "x"), ("k_it", "2")])
+            .is_err());
+        assert!(i.intern::<&str, &str>(&[]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn interner_does_not_confuse_subsets_with_equal_length_sets() {
+        let i = LabelInterner::global();
+        let ab = i.intern(&[("sa_it", "1"), ("sb_it", "2")]).unwrap();
+        let ac = i.intern(&[("sa_it", "1"), ("sc_it", "2")]).unwrap();
+        assert!(!ab.ptr_eq(&ac));
+        assert_eq!(ab.get("sc_it"), None);
+        assert_eq!(ac.get("sb_it"), None);
     }
 }

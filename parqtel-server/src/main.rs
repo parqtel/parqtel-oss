@@ -1190,7 +1190,7 @@ fn v_to_f64(v: &parqtel_core::MetricValue) -> f64 {
     match v {
         parqtel_core::MetricValue::Double(f) => *f,
         parqtel_core::MetricValue::Int(i) => *i as f64,
-        parqtel_core::MetricValue::Histogram { sum, .. } => *sum,
-        parqtel_core::MetricValue::Summary { sum, .. } => *sum,
+        parqtel_core::MetricValue::Histogram(h) => h.sum,
+        parqtel_core::MetricValue::Summary(s) => s.sum,
     }
 }

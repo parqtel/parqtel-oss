@@ -790,10 +790,72 @@ impl PreparedPredicate {
         Self(PreparedPredicateKind::new(pred))
     }
 
+    /// Conditions on the severity and body columns that every matching row meets,
+    /// for rejecting rows before they are decoded.
+    ///
+    /// Only conjuncts count: a row matching an `AND` meets all its parts, so each
+    /// part's requirement is necessary for the whole. An `OR` or a negation
+    /// contributes nothing, because a matching row need not meet any one branch.
+    pub fn column_prefilter(&self) -> ColumnPrefilter {
+        let mut pre = ColumnPrefilter::default();
+        self.0.collect_prefilter(&mut pre);
+        pre
+    }
+
     /// Evaluates against one log record.
     pub fn matches(&self, log: &parqtel_core::LogRecord, extra: &HashMap<String, String>) -> bool {
         let row = LogRow { log, extra };
         self.0.matches(&row)
+    }
+}
+
+/// See [`PreparedPredicate::column_prefilter`].
+pub type ColumnPrefilter = parqtel_core::storage::LogColumnPrefilter;
+
+trait PrefilterBuilder {
+    fn add_clause(&mut self, clause: &PreparedClause);
+    fn add_term(&mut self, term: &PreparedTerm);
+}
+
+impl PrefilterBuilder for ColumnPrefilter {
+    fn add_clause(&mut self, clause: &PreparedClause) {
+        match clause {
+            PreparedClause::SeverityMin(min) => {
+                self.min_severity = Some(self.min_severity.map_or(*min, |m| m.max(*min)));
+            }
+            PreparedClause::BodyContains {
+                needle_lower,
+                negate: false,
+            } => self.body_contains_lower.push(needle_lower.clone()),
+            _ => {}
+        }
+    }
+
+    fn add_term(&mut self, term: &PreparedTerm) {
+        if let PreparedTerm::Contains {
+            needle_lower,
+            negate: false,
+        } = term
+        {
+            self.body_contains_lower.push(needle_lower.clone());
+        }
+    }
+}
+
+impl PreparedPredicateKind {
+    fn collect_prefilter(&self, pre: &mut ColumnPrefilter) {
+        match self {
+            PreparedPredicateKind::And(parts) => {
+                for part in parts {
+                    part.0.collect_prefilter(pre);
+                }
+            }
+            PreparedPredicateKind::Clause(c) => pre.add_clause(c),
+            PreparedPredicateKind::Term(t) => pre.add_term(t),
+            // An OR need not satisfy any one branch, and a NOT inverts its
+            // requirement: neither yields a necessary condition.
+            PreparedPredicateKind::Or(_) | PreparedPredicateKind::Not(_) => {}
+        }
     }
 }
 
@@ -872,6 +934,19 @@ impl PreparedLogQuery {
         }
         self.clauses.iter().map(clause_patterns).sum::<usize>()
             + self.terms.iter().map(term_patterns).sum::<usize>()
+    }
+
+    /// Conditions on the severity and body columns that every matching row meets,
+    /// for rejecting rows before they are decoded. See [`ColumnPrefilter`].
+    pub fn column_prefilter(&self) -> ColumnPrefilter {
+        let mut pre = ColumnPrefilter::default();
+        for clause in &self.clauses {
+            pre.add_clause(clause);
+        }
+        for term in &self.terms {
+            pre.add_term(term);
+        }
+        pre
     }
 
     /// Evaluates against one log record.
@@ -1874,6 +1949,45 @@ mod tests {
                 "contains_ci({hay:?}, {needle:?}) disagrees with the lowercase form"
             );
         }
+    }
+
+    fn prefilter_of(q: &str) -> ColumnPrefilter {
+        PreparedPredicate::new(&parse_predicate(q).unwrap()).column_prefilter()
+    }
+
+    /// The prefilter may only demand what *every* matching row satisfies: the
+    /// conjuncts of the predicate. Anything under an OR or a NOT is optional or
+    /// inverted, and demanding it would drop rows the predicate accepts.
+    #[test]
+    fn column_prefilter_takes_only_conjuncts() {
+        let pre = prefilter_of("Timeout severity>=WARN");
+        assert_eq!(pre.body_contains_lower, vec!["timeout".to_string()]);
+        assert_eq!(pre.min_severity, Some(13));
+
+        // Both branches of an OR are optional.
+        let pre = prefilter_of("alpha OR beta");
+        assert!(pre.is_empty(), "OR contributes nothing: {pre:?}");
+
+        // A conjunct next to an OR still counts; the OR does not.
+        let pre = prefilter_of("must (alpha OR beta)");
+        assert_eq!(pre.body_contains_lower, vec!["must".to_string()]);
+
+        // Negation inverts the requirement.
+        assert!(prefilter_of("-nope").is_empty());
+        assert!(prefilter_of("NOT alpha").is_empty());
+
+        // Field clauses on other columns do not enter the prefilter.
+        assert!(prefilter_of("service=api").is_empty());
+    }
+
+    #[test]
+    fn column_prefilter_for_flat_search_queries() {
+        let q = parse_search("error -debug body:Slow severity>=ERROR");
+        let pre = PreparedLogQuery::new(&q).column_prefilter();
+        let mut needles = pre.body_contains_lower.clone();
+        needles.sort();
+        assert_eq!(needles, vec!["error".to_string(), "slow".to_string()]);
+        assert_eq!(pre.min_severity, Some(17));
     }
 
     #[test]

@@ -1,4 +1,4 @@
-use super::common::{any_value_to_string, json_attrs_to_labels, parse_json_timestamp};
+use super::common::{json_attrs_to_labels, kv_labels, parse_json_timestamp};
 use crate::otel::collector::metrics::v1::ExportMetricsServiceRequest;
 use crate::otel::metrics::v1::{
     metric::Data, number_data_point, HistogramDataPoint as ProtoHistogramDataPoint,
@@ -10,15 +10,9 @@ use parqtel_core::{DataPoint, Error, LabelSet, Metric, MetricKind, MetricValue, 
 pub(crate) fn decode_metrics(request: ExportMetricsServiceRequest) -> Result<Vec<Metric>> {
     let mut metrics = Vec::new();
     for resource_metrics in request.resource_metrics {
-        let resource_attributes = if let Some(resource) = resource_metrics.resource {
-            LabelSet::try_from_iter(resource.attributes.into_iter().map(|attr| {
-                (
-                    attr.key,
-                    attr.value.map(any_value_to_string).unwrap_or_default(),
-                )
-            }))?
-        } else {
-            LabelSet::default()
+        let resource_attributes = match resource_metrics.resource.as_ref() {
+            Some(resource) => kv_labels(&resource.attributes)?,
+            None => LabelSet::default(),
         };
         for scope_metrics in resource_metrics.scope_metrics {
             for proto_metric in scope_metrics.metrics {
@@ -157,12 +151,7 @@ fn convert_number_data_points(protos: Vec<ProtoNumberDataPoint>) -> Result<Vec<D
                 Some(number_data_point::Value::AsInt(i)) => MetricValue::Int(i),
                 None => MetricValue::Double(0.0),
             };
-            let labels = LabelSet::try_from_iter(proto.attributes.into_iter().map(|attr| {
-                (
-                    attr.key,
-                    attr.value.map(any_value_to_string).unwrap_or_default(),
-                )
-            }))?;
+            let labels = kv_labels(&proto.attributes)?;
             DataPoint::new(proto.time_unix_nano as i64, value, labels)
         })
         .collect()
@@ -172,20 +161,15 @@ fn convert_histogram_data_points(protos: Vec<ProtoHistogramDataPoint>) -> Result
     protos
         .into_iter()
         .map(|proto| {
-            let value = MetricValue::Histogram {
-                count: proto.count,
-                sum: proto.sum.unwrap_or(0.0),
-                min: proto.min,
-                max: proto.max,
-                boundaries: proto.explicit_bounds,
-                counts: proto.bucket_counts,
-            };
-            let labels = LabelSet::try_from_iter(proto.attributes.into_iter().map(|attr| {
-                (
-                    attr.key,
-                    attr.value.map(any_value_to_string).unwrap_or_default(),
-                )
-            }))?;
+            let value = MetricValue::histogram(
+                proto.count,
+                proto.sum.unwrap_or(0.0),
+                proto.min,
+                proto.max,
+                proto.explicit_bounds,
+                proto.bucket_counts,
+            );
+            let labels = kv_labels(&proto.attributes)?;
             DataPoint::new(proto.time_unix_nano as i64, value, labels)
         })
         .collect()
@@ -200,17 +184,8 @@ fn convert_summary_data_points(protos: Vec<ProtoSummaryDataPoint>) -> Result<Vec
                 .into_iter()
                 .map(|q| (q.quantile, q.value))
                 .collect();
-            let value = MetricValue::Summary {
-                count: proto.count,
-                sum: proto.sum,
-                quantiles,
-            };
-            let labels = LabelSet::try_from_iter(proto.attributes.into_iter().map(|attr| {
-                (
-                    attr.key,
-                    attr.value.map(any_value_to_string).unwrap_or_default(),
-                )
-            }))?;
+            let value = MetricValue::summary(proto.count, proto.sum, quantiles);
+            let labels = kv_labels(&proto.attributes)?;
             DataPoint::new(proto.time_unix_nano as i64, value, labels)
         })
         .collect()
@@ -277,18 +252,17 @@ fn json_hist_value(dp: &serde_json::Value) -> MetricValue {
         .and_then(|v| v.as_array())
         .map(|a| a.iter().filter_map(num_f64).collect())
         .unwrap_or_default();
-    MetricValue::Histogram {
-        count: dp
-            .get("count")
+    MetricValue::histogram(
+        dp.get("count")
             .and_then(|c| {
                 c.as_u64()
                     .or_else(|| c.as_str().and_then(|s| s.parse().ok()))
             })
             .unwrap_or_else(|| counts.iter().sum::<u64>()),
-        sum: dp.get("sum").and_then(num_f64).unwrap_or(0.0),
-        min: dp.get("min").and_then(num_f64),
-        max: dp.get("max").and_then(num_f64),
+        dp.get("sum").and_then(num_f64).unwrap_or(0.0),
+        dp.get("min").and_then(num_f64),
+        dp.get("max").and_then(num_f64),
         boundaries,
         counts,
-    }
+    )
 }

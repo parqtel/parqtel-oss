@@ -353,19 +353,16 @@ impl QueryExecutor {
                     let mut num_pts: Vec<(i64, f64)> = Vec::with_capacity(pts.len());
                     for (t, v) in pts {
                         match v {
-                            MetricValue::Histogram {
-                                count,
-                                sum,
-                                boundaries,
-                                counts,
-                                ..
-                            } => hist_pts.push(crate::ast::HistSample {
-                                timestamp_ns: t,
-                                count,
-                                sum,
-                                boundaries,
-                                counts,
-                            }),
+                            MetricValue::Histogram(h) => {
+                                let h = *h;
+                                hist_pts.push(crate::ast::HistSample {
+                                    timestamp_ns: t,
+                                    count: h.count,
+                                    sum: h.sum,
+                                    boundaries: h.boundaries,
+                                    counts: h.counts,
+                                })
+                            }
                             other => num_pts.push((t, v_to_f64(&other))),
                         }
                     }
@@ -710,6 +707,17 @@ impl QueryExecutor {
                 })
             };
 
+        // Severity and body search are decidable from two columns, so the scan
+        // rejects on them before decoding a row. Folding the needle to ASCII
+        // lowercase makes the scan's test the same comparison as `contains_ci`.
+        let prefilter = parqtel_core::storage::LogColumnPrefilter {
+            min_severity: severity_min,
+            body_contains_lower: search
+                .as_ref()
+                .map(|s| vec![s.to_ascii_lowercase()])
+                .unwrap_or_default(),
+        };
+
         let window_ns = (end_ns - start_ns) / 60;
         let mut total_logs_count = 0usize;
         let mut volume_summary = vec![0u64; 60];
@@ -745,13 +753,14 @@ impl QueryExecutor {
             // keep_newest follows the ordering contract: `desc` (the UI's
             // logs view) returns the newest `limit` matches — Loki-style
             // "last N logs" — while `asc` keeps the oldest.
-            let (disk_logs, stats) = Scanner::scan_logs_counted_filtered(
+            let (disk_logs, stats) = Scanner::scan_logs_counted_prefiltered(
                 blocks,
                 start_ns,
                 end_ns,
                 limit,
                 order_desc,
                 Some(filter),
+                Some(prefilter),
             )
             .await?;
             total_logs_count += stats.total_matched;
@@ -843,13 +852,14 @@ impl QueryExecutor {
         let mut filtered = if blocks.is_empty() {
             buffered_matching
         } else {
-            let (disk, stats) = Scanner::scan_logs_counted_filtered(
+            let (disk, stats) = Scanner::scan_logs_counted_prefiltered(
                 blocks,
                 start_ns,
                 end_ns,
                 limit,
                 order_desc,
                 Some(pred_filter),
+                Some(prepared_pred.column_prefilter()),
             )
             .await?;
             total_logs_count += stats.total_matched;
@@ -935,13 +945,14 @@ impl QueryExecutor {
         let mut filtered = if blocks.is_empty() {
             buffered_matching
         } else {
-            let (disk, stats) = Scanner::scan_logs_counted_filtered(
+            let (disk, stats) = Scanner::scan_logs_counted_prefiltered(
                 blocks,
                 start_ns,
                 end_ns,
                 limit,
                 order_desc,
                 Some(search_filter),
+                Some(prepared_search.column_prefilter()),
             )
             .await?;
             total_logs_count += stats.total_matched;
@@ -1214,8 +1225,8 @@ impl QueryExecutor {
                 let value = match &p.value {
                     parqtel_core::MetricValue::Double(v) => *v,
                     parqtel_core::MetricValue::Int(v) => *v as f64,
-                    parqtel_core::MetricValue::Histogram { .. }
-                    | parqtel_core::MetricValue::Summary { .. } => f64::NAN,
+                    parqtel_core::MetricValue::Histogram(_)
+                    | parqtel_core::MetricValue::Summary(_) => f64::NAN,
                 };
                 fields.insert("value".to_string(), json!(value));
                 for (k, v) in p.labels.iter() {
@@ -1797,8 +1808,8 @@ fn v_to_f64(v: &MetricValue) -> f64 {
     match v {
         MetricValue::Double(f) => *f,
         MetricValue::Int(i) => *i as f64,
-        MetricValue::Histogram { sum, .. } => *sum,
-        MetricValue::Summary { sum, .. } => *sum,
+        MetricValue::Histogram(h) => h.sum,
+        MetricValue::Summary(s) => s.sum,
     }
 }
 
@@ -2829,22 +2840,18 @@ mod tests {
         assert_eq!(v_to_f64(&parqtel_core::MetricValue::Double(3.15)), 3.15);
         assert_eq!(v_to_f64(&parqtel_core::MetricValue::Int(42)), 42.0);
         assert_eq!(
-            v_to_f64(&parqtel_core::MetricValue::Histogram {
-                count: 1,
-                sum: 99.0,
-                min: None,
-                max: None,
-                boundaries: vec![],
-                counts: vec![],
-            }),
+            v_to_f64(&parqtel_core::MetricValue::histogram(
+                1,
+                99.0,
+                None,
+                None,
+                vec![],
+                vec![]
+            )),
             99.0
         );
         assert_eq!(
-            v_to_f64(&parqtel_core::MetricValue::Summary {
-                count: 1,
-                sum: 55.0,
-                quantiles: vec![],
-            }),
+            v_to_f64(&parqtel_core::MetricValue::summary(1, 55.0, vec![])),
             55.0
         );
     }

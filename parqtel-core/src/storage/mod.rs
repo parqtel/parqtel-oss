@@ -8,7 +8,7 @@ pub use compactor::Compactor;
 pub use index::{reconcile, BlockIndex, BlockIndexStore, PendingIndex};
 pub use persist::{persist_blocking, persist_once, run_index_persist_loop};
 pub use retention::RetentionPolicy;
-pub use scanner::{LogRowFilter, LogScanStats, Scanner};
+pub use scanner::{LogColumnPrefilter, LogRowFilter, LogScanStats, Scanner};
 
 use crate::config::BlockConfig;
 use std::sync::Arc;
@@ -1417,6 +1417,98 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(points.len(), 2);
+    }
+
+    /// Rejecting rows on the time, severity and body columns before decoding must
+    /// not change what a log scan returns, counts or volume buckets - only how
+    /// much gets decoded. The row filter still decides every row that passes.
+    #[tokio::test]
+    async fn test_log_prefilter_does_not_change_scan_results() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("prefilter_logs.parquet");
+        let logs: Vec<LogRecord> = (0..20_000i64)
+            .map(|i| {
+                LogRecord::new(
+                    i + 1,
+                    i + 1,
+                    [5, 9, 9, 13, 17][(i % 5) as usize],
+                    "X".into(),
+                    format!(
+                        "Request {i} {} path=/a",
+                        if i % 7 == 0 { "TIMEOUT upstream" } else { "ok" }
+                    ),
+                    LabelSet::try_from_iter(vec![("pod", format!("p{}", i % 11))]).unwrap(),
+                    LabelSet::try_from_iter(vec![("service.name", "api")]).unwrap(),
+                    [0u8; 16],
+                    [0u8; 8],
+                    0,
+                    "".into(),
+                    "".into(),
+                )
+            })
+            .collect();
+        write_logs_parquet(&path, &logs);
+        let meta = BlockMetadata {
+            path,
+            start_timestamp_ns: 1,
+            end_timestamp_ns: 20_000,
+            row_count: logs.len(),
+            size_bytes: 0,
+            metric_names: HashSet::new(),
+            label_names: HashSet::new(),
+            label_values: Default::default(),
+            signal_type: SignalType::Logs,
+        };
+
+        // The row filter is the full predicate: severity, body, and a label test
+        // the prefilter knows nothing about.
+        let filter: LogRowFilter = Arc::new(|l: &LogRecord| {
+            l.severity_number >= 13
+                && l.body.to_ascii_lowercase().contains("timeout")
+                && l.attributes.get("pod") != Some("p3")
+        });
+        let pre = scanner::LogColumnPrefilter {
+            min_severity: Some(13),
+            body_contains_lower: vec!["timeout".into()],
+        };
+
+        for (start, end, keep, newest) in [
+            (0, i64::MAX, usize::MAX, false),
+            (5_000, 15_000, 50, true),
+            (5_000, 15_000, 50, false),
+            (19_990, 40_000, 10, true),
+        ] {
+            let (plain, plain_stats) = Scanner::scan_logs_counted_filtered(
+                vec![meta.clone()],
+                start,
+                end,
+                keep,
+                newest,
+                Some(filter.clone()),
+            )
+            .await
+            .unwrap();
+            let (fast, fast_stats) = Scanner::scan_logs_counted_prefiltered(
+                vec![meta.clone()],
+                start,
+                end,
+                keep,
+                newest,
+                Some(filter.clone()),
+                Some(pre.clone()),
+            )
+            .await
+            .unwrap();
+            let stamps = |v: &[LogRecord]| v.iter().map(|l| l.timestamp_ns).collect::<Vec<_>>();
+            assert_eq!(
+                stamps(&fast),
+                stamps(&plain),
+                "rows for window {start}..{end}"
+            );
+            assert_eq!(fast_stats.total_matched, plain_stats.total_matched);
+            assert_eq!(fast_stats.volume_buckets, plain_stats.volume_buckets);
+            assert!(plain_stats.total_matched > 0 || start == 19_990);
+        }
     }
 
     #[tokio::test]

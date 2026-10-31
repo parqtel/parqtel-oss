@@ -202,17 +202,11 @@ mod tests {
         assert_eq!(metrics[0].kind, parqtel_core::MetricKind::Histogram);
         assert_eq!(metrics[0].data_points.len(), 1);
         match &metrics[0].data_points[0].value {
-            parqtel_core::MetricValue::Histogram {
-                count,
-                sum,
-                boundaries,
-                counts,
-                ..
-            } => {
-                assert_eq!(*count, 10, "histogram count");
-                assert!((sum - 4.2).abs() < 1e-9, "histogram sum");
-                assert_eq!(boundaries, &vec![0.5, 2.5], "explicit bounds");
-                assert_eq!(counts, &vec![4, 5, 1], "bucket counts");
+            parqtel_core::MetricValue::Histogram(h) => {
+                assert_eq!(h.count, 10, "histogram count");
+                assert!((h.sum - 4.2).abs() < 1e-9, "histogram sum");
+                assert_eq!(h.boundaries, vec![0.5, 2.5], "explicit bounds");
+                assert_eq!(h.counts, vec![4, 5, 1], "bucket counts");
             }
             other => panic!("expected Histogram value, got {other:?}"),
         }
@@ -234,15 +228,10 @@ mod tests {
         });
         let metrics = OtlpDecoder::decode_metrics_json(json_snake).unwrap();
         match &metrics[0].data_points[0].value {
-            parqtel_core::MetricValue::Histogram {
-                count,
-                boundaries,
-                counts,
-                ..
-            } => {
-                assert_eq!(*count, 3);
-                assert_eq!(boundaries, &vec![1.0]);
-                assert_eq!(counts, &vec![1, 2]);
+            parqtel_core::MetricValue::Histogram(h) => {
+                assert_eq!(h.count, 3);
+                assert_eq!(h.boundaries, vec![1.0]);
+                assert_eq!(h.counts, vec![1, 2]);
             }
             other => panic!("expected Histogram value, got {other:?}"),
         }
