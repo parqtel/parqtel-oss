@@ -24,16 +24,12 @@ mod selectors;
 
 /// Evaluates an expression tree against pre-loaded series data.
 pub struct Evaluator<'a> {
-    pub(super) data: &'a SeriesData,
+    data: &'a SeriesData,
     /// Native-histogram samples per metric/series (explicit buckets),
     /// for the histogram_* function family.
-    pub(super) hist_data: Option<&'a crate::ast::HistData>,
-    /// Metric names referenced anywhere in the tree (for empty-selector
-    /// checks and absent()).
-    #[allow(dead_code)]
-    pub(super) all_names: Vec<String>,
+    hist_data: Option<&'a crate::ast::HistData>,
     /// Instant-selector lookback (Prometheus lookback-delta; 5m default).
-    pub(super) lookback_ns: i64,
+    lookback_ns: i64,
     /// Group label sets for aggregations, keyed by the grouping fingerprint.
     ///
     /// The *values* of an aggregation group change every step but its *labels*
@@ -52,7 +48,6 @@ impl<'a> Evaluator<'a> {
         Self {
             data,
             hist_data: None,
-            all_names: data.keys().cloned().collect(),
             group_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
             lookback_ns: 5 * 60 * 1_000_000_000,
         }
@@ -63,7 +58,6 @@ impl<'a> Evaluator<'a> {
         Self {
             data,
             hist_data: None,
-            all_names: data.keys().cloned().collect(),
             group_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
             lookback_ns: lookback_ns.max(1),
         }

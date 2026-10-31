@@ -176,7 +176,7 @@ impl ParqtelClient {
     ///
     /// `severity_min` is a *string* severity name here; it is translated to
     /// the numeric OTLP threshold the server expects (see
-    /// [`severity_threshold`]).
+    /// `severity_threshold`).
     pub async fn logs(
         &self,
         query: &str,

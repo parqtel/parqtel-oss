@@ -6,7 +6,7 @@ use super::prepared::contains_ci;
 
 /// A span search query with its per-query work already done.
 ///
-/// Same reasoning as [`PreparedLogQuery`]: the previous span path compiled a
+/// Same reasoning as `PreparedLogQuery`: the previous span path compiled a
 /// regex, and lowercased the operation name and *every attribute value*, once
 /// per term per span.
 #[derive(Debug, Clone)]

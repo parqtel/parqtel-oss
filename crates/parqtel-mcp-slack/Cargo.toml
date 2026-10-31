@@ -4,6 +4,8 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 description = "MCP server for Slack integration"
+rust-version.workspace = true
+license.workspace = true
 
 [[bin]]
 name = "parqtel-mcp-slack"
@@ -22,3 +24,6 @@ chrono = { workspace = true }
 reqwest = { version = "0.12", features = ["json"] }
 tokio-rustls = { version = "0.26", features = ["ring"] }
 rustls = { version = "0.23", features = ["ring"] }
+
+[lints]
+workspace = true

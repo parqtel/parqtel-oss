@@ -1,12 +1,12 @@
 //! Query API handlers.
 //!
-//! - [`metrics`] serves the Prometheus-compatible instant and range queries.
-//! - [`labels`] lists metric names, label names and label values.
-//! - [`logs`] serves log search, counts and field discovery.
-//! - [`traces`] serves trace search and cross-signal correlation.
-//! - [`searches`] stores saved searches.
-//! - [`pipeline_search`] runs pipeline queries across signals.
-//! - [`common`] holds the response envelope and the shared parsing helpers.
+//! - `metrics` serves the Prometheus-compatible instant and range queries.
+//! - `labels` lists metric names, label names and label values.
+//! - `logs` serves log search, counts and field discovery.
+//! - `traces` serves trace search and cross-signal correlation.
+//! - `searches` stores saved searches.
+//! - `pipeline_search` runs pipeline queries across signals.
+//! - `common` holds the response envelope and the shared parsing helpers.
 
 mod common;
 mod labels;

@@ -65,7 +65,7 @@ make docker        # Build Docker image
 - **Scans** (`Scanner::scan_filtered`, `scan_logs_counted_prefiltered`) take pushed-down predicates: a series filter evaluated once per distinct series per block, and a log column prefilter (severity/body) derived only from AND conjuncts. Callers that add a pushdown must keep the full row predicate as the final judge.
 - **Compressed OTLP**: HTTP request bodies are gunzipped outside the size limits; gRPC accepts gzip.
 - **Tail sampling**: `ingest.tail_sampling` policy (keep_errors, slow_trace_ms, sampling_ratio, per-service overrides) runs AFTER RED derivation — RED metrics see all spans; storage/buffer sees only sampled traces. Decisions are trace-coherent (deterministic trace_id hash); default keeps everything.
-- **Span-metrics RED bridge**: server-kind spans automatically derive `traces_service_{requests,errors,duration_ms}_total` metrics (labels: `service`, `operation`, `service.name`) through the normal metrics path — wired in `main.rs` via `with_span_metrics` channel.
+- **Span-metrics RED bridge**: server-kind spans automatically derive `traces_service_{requests,errors,duration_ms}_total` metrics (labels: `service`, `operation`, `service.name`) through the normal metrics path — wired in `server.rs` via the `with_span_metrics` channel.
 
 ## Code Conventions
 
@@ -79,15 +79,16 @@ make docker        # Build Docker image
 
 ## Key Source Paths
 
-- `crates/parqtel-server/src/main.rs` — CLI entry point and server bootstrap
-- `crates/parqtel-server/src/router.rs` — Axum routes; `handlers/` — HTTP handlers; `ui.html` — embedded console
-- `crates/parqtel-core/src/storage/` — scanner, block writer, block/series/log indexes, compaction, retention
+- `crates/parqtel-server/src/main.rs` — configuration and subcommand dispatch; `cli.rs`, `commands.rs`, `server.rs` (serve wiring), `tasks.rs` (background tasks), `recovery.rs` (startup reconcile and WAL replay)
+- `crates/parqtel-server/src/router.rs` — Axum routes; `handlers/` — HTTP handlers (`handlers/query/` is the query API); `ui.html` — embedded console
+- `crates/parqtel-core/src/storage/` — `scanner/` (block scans), block writer, block/series/log indexes, compaction, retention
 - `crates/parqtel-core/src/models/storage/schema.rs` — canonical Parquet schemas (metrics/logs/traces)
 - `crates/parqtel-core/src/wal.rs` — write-ahead log
-- `crates/parqtel-ingest/src/` — OTLP decoding, block rotation, Parquet writing; `proto/` — OTLP definitions (compiled by `build.rs`)
-- `crates/parqtel-query/src/` — PromQL / LogQL parsing and execution
+- `crates/parqtel-ingest/src/` — `decode/` (OTLP decoding), `service/` (block rotation, flush ordering, per-signal services), `writer.rs` (Parquet writing); `proto/` — OTLP definitions (compiled by `build.rs`)
+- `crates/parqtel-query/src/` — `parser.rs` and `eval/` (PromQL), `logql/` (ParqtelQL), `executor/` (execution per signal), `pipeline*.rs`
 - `crates/parqtel-alert/src/` — alert rules, evaluation, state machine
 - `rules/` — example rules; `rules/presets/` holds ready-made alert packs, embedded into the binary and inert until copied into the rules dir — validated by `make test-presets-static` and `make test-alert-presets`
+- Large modules are directories whose `mod.rs` documents the split; larger unit-test suites sit in a sibling `tests.rs` or `tests/` (see `docs/development/developer-guide.md`)
 
 ## Configuration
 

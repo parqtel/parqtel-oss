@@ -138,7 +138,7 @@ impl PreparedTerm {
 ///
 /// Mirrors [`Predicate`] exactly; `matches` walks it with the same precedence
 /// the parser applied, so results are identical to
-/// [`log_matches_predicate`] — which is now a thin wrapper over this.
+/// `log_matches_predicate` — which is now a thin wrapper over this.
 #[derive(Debug, Clone)]
 pub struct PreparedPredicate(PreparedPredicateKind);
 

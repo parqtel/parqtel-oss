@@ -4,6 +4,8 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 description = "Core library for parqtel MCP servers"
+rust-version.workspace = true
+license.workspace = true
 
 [dependencies]
 tokio = { workspace = true }
@@ -24,3 +26,6 @@ async-trait = { workspace = true }
 # oneshot() lets the health-route regression test drive the real router
 # instead of calling the handler directly.
 tower = { workspace = true, features = ["util"] }
+
+[lints]
+workspace = true

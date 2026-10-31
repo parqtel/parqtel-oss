@@ -89,6 +89,27 @@ parqtel-mcp-{slack,pagerduty,jira,notion,discord,gdocs,parqtel}
 └── parqtel-mcp-core
 ```
 
+## Module Map
+
+Large modules are directories with a `mod.rs` that documents the split and re-exports the public API, so callers import from the parent module.
+
+| Crate | Module | Contents |
+|-------|--------|----------|
+| `parqtel-core` | `storage/scanner/` | Block scans: block reading, predicate and series pruning, metrics, logs and traces scans |
+| | `storage/index.rs`, `series_index.rs`, `log_index.rs` | Block index, per-block series table, log skip index |
+| | `storage/` | Block file writer, compactor, retention, index persistence |
+| | `wal.rs` | Write-ahead log |
+| `parqtel-ingest` | `service/` | Block rotation and flush ordering (`rotator`, `flush`, `serial`) and the per-signal ingestion services |
+| | `decode/` | OTLP protobuf and JSON decoding |
+| `parqtel-query` | `parser.rs`, `ast.rs` | PromQL-compatible parser and AST |
+| | `eval/` | AST evaluation: selectors, calls, range functions, aggregation, binary operators |
+| | `logql/` | ParqtelQL: tokenizer, parser, prepared predicates, log and span matching |
+| | `executor/` | `QueryExecutor` split by signal (metrics, logs, traces, pipeline, correlate, series) |
+| | `pipeline.rs`, `pipeline_exec.rs` | Pipeline query language and its executor |
+| `parqtel-server` | `main.rs`, `cli.rs`, `commands.rs` | Configuration, startup and subcommands |
+| | `server.rs`, `tasks.rs`, `recovery.rs` | Server wiring, background tasks, startup recovery and WAL replay |
+| | `router.rs`, `handlers/` | Routes and HTTP handlers (`handlers/query/` holds the query API) |
+
 ## Data Flow
 
 ### Ingestion Path

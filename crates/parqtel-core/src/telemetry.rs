@@ -68,7 +68,7 @@ impl Histogram {
         }
     }
 
-    /// A histogram with the shared [`SECONDS_BUCKETS`] layout.
+    /// A histogram with the shared `SECONDS_BUCKETS` layout.
     pub fn seconds() -> Self {
         Self::new(SECONDS_BUCKETS.to_vec())
     }

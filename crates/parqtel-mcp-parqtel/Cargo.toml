@@ -4,6 +4,8 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 description = "MCP server for parqtel self-access"
+rust-version.workspace = true
+license.workspace = true
 
 [[bin]]
 name = "parqtel-mcp-parqtel"
@@ -24,3 +26,6 @@ schemars = { workspace = true }
 # feature flags live in the workspace dependency so the image build resolves
 # the same way as a local build.
 reqwest = { workspace = true }
+
+[lints]
+workspace = true

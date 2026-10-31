@@ -90,13 +90,15 @@ Parqtel's AI-native capabilities come from its MCP servers. To add a new tool (e
 
 ## 6. Coding Standards
 
+- **Lints**: Every crate opts into `[workspace.lints]` (`[lints] workspace = true`): `unsafe_code` is forbidden, and `unwrap`/`expect`/`panic` are denied outside tests. New crates inherit `version`, `edition`, `rust-version`, `license` and `authors` from `[workspace.package]`.
 - **Error Handling**: Always use `Result` and the `thiserror` crate for library errors. Avoid `unwrap()` at all costs.
 - **Concurrency**: Use `tokio` primitives. Prefer `mpsc` channels for communication between services. Run blocking I/O (Parquet encode, file scans) on `spawn_blocking` with a pre-acquired semaphore.
 - **Documentation**: All public functions must have doc comments (`///`).
+- **Module layout**: Split a file once it covers several concerns (roughly 600+ lines of production code). Make it a directory module, keep the public API re-exported from `mod.rs`, mark items shared between sibling files `pub(super)`, and describe the split in the `mod.rs` doc comment.
 
 ## 7. Testing Strategy
 
-- **Unit Tests**: Found in `src/` of each crate.
+- **Unit Tests**: Small test modules sit inline at the bottom of the file they cover. Larger suites live next to the module as `<module>/tests.rs` (for a file module `foo.rs`, create `foo/tests.rs` and declare `#[cfg(test)] mod tests;`), or as a `tests/` directory when they split by topic. Test code may use `unwrap`/`expect`; production code may not.
 - **Integration Tests**: Found in the `tests/` directory of each crate.
 - **E2E Tests**: The Kubernetes suite in the root `tests/e2e/` directory requires a running cluster and is built with the `e2e` build tag (`cd e2e && go test -tags e2e ./...`; Go + client-go). The PromQL functional suite needs no cluster — `make e2e-promql` runs it against the local compose stack.
 

@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::time::Instant;
 
 impl QueryExecutor {
-    /// Executes a log query and returns matching [LogRecord]s.
+    /// Executes a log query and returns matching [`parqtel_core::LogRecord`]s.
     #[allow(clippy::too_many_arguments)]
     pub async fn query_logs(
         &self,

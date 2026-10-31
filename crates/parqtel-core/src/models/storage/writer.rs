@@ -342,7 +342,7 @@ pub fn logs_to_chunk(logs: &[LogRecord]) -> Result<RecordBatch> {
     Ok(record_batch)
 }
 
-/// As [`logs_to_chunk`], and also builds the block's skip index for the rows in
+/// As `logs_to_chunk`, and also builds the block's skip index for the rows in
 /// the order they are written.
 pub fn logs_to_block(logs: &[LogRecord]) -> Result<(RecordBatch, LogIndexTable)> {
     let batch = logs_to_chunk(logs)?;

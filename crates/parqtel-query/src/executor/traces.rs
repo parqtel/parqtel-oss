@@ -89,7 +89,7 @@ impl QueryExecutor {
             .spans)
     }
 
-    /// [query_traces_filtered] with volume stats: the true span total for
+    /// `query_traces_filtered` with volume stats: the true span total for
     /// the range (exact, from block metadata — no Parquet decode), the
     /// bounded-scan match count, and whether the result was truncated.
     pub async fn query_traces_filtered_counted(

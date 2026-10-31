@@ -485,7 +485,12 @@ async fn tools_call_handler(
         .and_then(|v| v.as_str())
         .unwrap_or("anonymous");
     {
-        let mut limiter = server.rate_limiter.lock().unwrap();
+        // A poisoned lock only means another request panicked mid-check; the
+        // limiter state is still usable.
+        let mut limiter = server
+            .rate_limiter
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if !limiter.allow(client_id) {
             return (
                 StatusCode::TOO_MANY_REQUESTS,

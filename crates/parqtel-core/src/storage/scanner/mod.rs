@@ -1,9 +1,9 @@
 //! Block scanning: reads metric, log and trace blocks and applies the pushed-down
 //! predicates of a query.
 //!
-//! - [`block`] opens a block and caches its footer and indexes.
-//! - [`pruning`] decides which row groups and rows a scan has to read.
-//! - [`metrics`], [`logs`] and [`traces`] hold the scans themselves, as methods
+//! - `block` opens a block and caches its footer and indexes.
+//! - `pruning` decides which row groups and rows a scan has to read.
+//! - `metrics`, `logs` and `traces` hold the scans themselves, as methods
 //!   of [`Scanner`].
 
 mod block;

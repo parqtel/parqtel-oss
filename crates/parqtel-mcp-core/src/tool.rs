@@ -43,9 +43,9 @@ fn sanitize_value(value: &Value) -> Value {
 /// Sanitize input parameters for audit logging
 /// Removes sensitive fields like tokens, passwords, keys
 pub fn sanitize_params(params: &Value) -> Value {
-    if !params.is_object() {
+    let Some(obj) = params.as_object() else {
         return params.clone();
-    }
+    };
 
     // Matched as a substring of the lowercased key, so `api_key`, `X-Api-Key`
     // and `db_password` are all covered.
@@ -65,7 +65,6 @@ pub fn sanitize_params(params: &Value) -> Value {
         "private",
     ];
 
-    let obj = params.as_object().expect("guarded above by is_object()");
     let mut sanitized = serde_json::Map::new();
 
     for (key, value) in obj {

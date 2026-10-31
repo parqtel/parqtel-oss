@@ -49,7 +49,7 @@ pub enum Error {
     Serde(#[from] serde_json::Error),
 }
 
-/// Result type alias using the parqtel [Error].
+/// Result type alias using the parqtel [`enum@Error`].
 pub type Result<T> = std::result::Result<T, Error>;
 
 #[cfg(test)]
