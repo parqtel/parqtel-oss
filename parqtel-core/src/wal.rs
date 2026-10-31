@@ -562,18 +562,12 @@ fn read_commit_inner(dir: &Path) -> Option<WalPosition> {
 
 // --- CRC32 -----------------------------------------------------------------
 
-/// CRC-32 (IEEE). Small table-driven implementation; the WAL needs integrity
-/// detection, not speed, and this keeps the dependency surface unchanged.
+/// CRC-32 (IEEE 802.3), the same checksum every WAL record has always carried.
+///
+/// Computed with hardware CRC instructions where the CPU has them; the value
+/// is identical to the bitwise reference, so existing segments stay readable.
 fn crc32(data: &[u8]) -> u32 {
-    let mut crc = 0xffff_ffffu32;
-    for &byte in data {
-        crc ^= byte as u32;
-        for _ in 0..8 {
-            let mask = (crc & 1).wrapping_neg();
-            crc = (crc >> 1) ^ (0xedb8_8320 & mask);
-        }
-    }
-    !crc
+    crc32fast::hash(data)
 }
 
 #[cfg(test)]
@@ -815,6 +809,14 @@ mod tests {
                 v: 1
             })
             .is_err());
+    }
+
+    #[test]
+    fn crc_matches_the_ieee_check_value() {
+        // The standard CRC-32 check value; also what the original bitwise
+        // implementation produced, so records written by older builds verify.
+        assert_eq!(crc32(b"123456789"), 0xCBF4_3926);
+        assert_eq!(crc32(b""), 0);
     }
 
     #[test]

@@ -1,7 +1,8 @@
 use super::correlation::extract_correlation_labels;
 use crate::error::{Error, Result};
+use crate::models::labels::LabelSet;
 use crate::models::logs::LogRecord;
-use crate::models::metrics::{Metric, MetricValue};
+use crate::models::metrics::{DataPoint, Metric, MetricKind, MetricValue};
 use crate::models::storage::{logs_schema, metrics_schema, traces_schema};
 use crate::models::traces::Span;
 use arrow::record_batch::RecordBatch;
@@ -14,13 +15,49 @@ use arrow_array::{
 };
 use std::sync::Arc;
 
+/// Rows that share one metric identity: name, kind and resource attributes.
+///
+/// Everything that is constant per run - the metric name, the kind, the
+/// correlation columns and the resource JSON - is resolved once per run and
+/// appended as a block, rather than re-derived for every row.
+pub struct MetricRun<'a> {
+    pub name: &'a str,
+    pub kind: MetricKind,
+    pub resource: &'a LabelSet,
+    pub points: Vec<&'a DataPoint>,
+}
+
+fn kind_name(kind: MetricKind) -> &'static str {
+    match kind {
+        MetricKind::Gauge => "Gauge",
+        MetricKind::Sum => "Sum",
+        MetricKind::Histogram => "Histogram",
+        MetricKind::Summary => "Summary",
+    }
+}
+
 /// Converts a list of [Metric]s into a single Arrow [RecordBatch].
 pub fn metrics_to_chunk(metrics: &[Metric]) -> Result<RecordBatch> {
-    let mut timestamp_ns = TimestampNanosecondBuilder::new();
+    let runs: Vec<MetricRun<'_>> = metrics
+        .iter()
+        .map(|m| MetricRun {
+            name: &m.name,
+            kind: m.kind,
+            resource: &m.resource_attributes,
+            points: m.data_points.iter().collect(),
+        })
+        .collect();
+    metric_runs_to_chunk(&runs)
+}
+
+/// Converts runs of rows into a single Arrow [RecordBatch], in run order.
+pub fn metric_runs_to_chunk(runs: &[MetricRun<'_>]) -> Result<RecordBatch> {
+    let total: usize = runs.iter().map(|r| r.points.len()).sum();
+    let mut timestamp_ns = TimestampNanosecondBuilder::with_capacity(total);
 
     // Dictionary columns - use DictionaryBuilder
     let mut metric_name = StringDictionaryBuilder::<Int32Type>::new();
-    let mut metric_kind = StringBuilder::new();
+    let mut metric_kind = StringBuilder::with_capacity(total, total * 5);
     let mut service_name = StringDictionaryBuilder::<Int32Type>::new();
     let mut service_version = StringDictionaryBuilder::<Int32Type>::new();
     let mut k8s_namespace = StringDictionaryBuilder::<Int32Type>::new();
@@ -31,30 +68,32 @@ pub fn metrics_to_chunk(metrics: &[Metric]) -> Result<RecordBatch> {
     let mut resource_attributes = StringDictionaryBuilder::<Int32Type>::new();
 
     // Non-dictionary columns
-    let mut labels = StringBuilder::new();
-    let mut value_float = Float64Builder::new();
-    let mut value_int = Int64Builder::new();
+    let mut labels = StringBuilder::with_capacity(total, total * 48);
+    let mut value_float = Float64Builder::with_capacity(total);
+    let mut value_int = Int64Builder::with_capacity(total);
     let mut value_complex = StringBuilder::new();
 
-    for metric in metrics {
-        let (resource_labels, correlation) =
-            extract_correlation_labels(&metric.resource_attributes);
-        let resource_attr_json = resource_labels.to_json()?;
-        let kind_str = format!("{:?}", metric.kind);
+    for run in runs {
+        let n = run.points.len();
+        if n == 0 {
+            continue;
+        }
+        let (resource_labels, correlation) = extract_correlation_labels(run.resource);
 
-        for dp in &metric.data_points {
+        metric_name.append_values(run.name, n);
+        metric_kind.append_value_n(kind_name(run.kind), n);
+        service_name.append_options(correlation.service_name.as_deref(), n);
+        service_version.append_options(correlation.service_version.as_deref(), n);
+        k8s_namespace.append_options(correlation.k8s_namespace.as_deref(), n);
+        k8s_pod_name.append_options(correlation.k8s_pod_name.as_deref(), n);
+        k8s_pod_uid.append_options(correlation.k8s_pod_uid.as_deref(), n);
+        k8s_container_name.append_options(correlation.k8s_container_name.as_deref(), n);
+        k8s_node_name.append_options(correlation.k8s_node_name.as_deref(), n);
+        resource_attributes.append_values(resource_labels.json_str(), n);
+
+        for dp in &run.points {
             timestamp_ns.append_value(dp.timestamp_ns);
-            metric_name.append_value(&metric.name);
-            metric_kind.append_value(&kind_str);
-            service_name.append_option(correlation.service_name.as_deref());
-            service_version.append_option(correlation.service_version.as_deref());
-            k8s_namespace.append_option(correlation.k8s_namespace.as_deref());
-            k8s_pod_name.append_option(correlation.k8s_pod_name.as_deref());
-            k8s_pod_uid.append_option(correlation.k8s_pod_uid.as_deref());
-            k8s_container_name.append_option(correlation.k8s_container_name.as_deref());
-            k8s_node_name.append_option(correlation.k8s_node_name.as_deref());
-            resource_attributes.append_value(&resource_attr_json);
-            labels.append_value(&dp.labels.to_json()?);
+            labels.append_value(dp.labels.json_str());
 
             match &dp.value {
                 MetricValue::Double(v) => {

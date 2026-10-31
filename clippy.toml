@@ -1,0 +1,4 @@
+# LabelSet caches its fingerprint and JSON text in `OnceLock`s. Both are derived
+# purely from the (immutable) entries, and neither `Eq`, `Ord` nor `Hash` reads
+# them, so it is safe as a map or set key.
+ignore-interior-mutability = ["parqtel_core::models::labels::LabelSet"]
