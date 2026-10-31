@@ -55,16 +55,19 @@ impl OtlpGrpcService {
             // service rather than the transport builder.
             .add_service(
                 MetricsServiceServer::new(svc.clone())
+                    .accept_compressed(tonic::codec::CompressionEncoding::Gzip)
                     .max_decoding_message_size(limits.max_message_bytes)
                     .max_encoding_message_size(limits.max_message_bytes),
             )
             .add_service(
                 LogsServiceServer::new(svc.clone())
+                    .accept_compressed(tonic::codec::CompressionEncoding::Gzip)
                     .max_decoding_message_size(limits.max_message_bytes)
                     .max_encoding_message_size(limits.max_message_bytes),
             )
             .add_service(
                 TraceServiceServer::new(svc)
+                    .accept_compressed(tonic::codec::CompressionEncoding::Gzip)
                     .max_decoding_message_size(limits.max_message_bytes)
                     .max_encoding_message_size(limits.max_message_bytes),
             )
@@ -100,13 +103,14 @@ impl MetricsService for OtlpGrpcService {
         &self,
         request: Request<ExportMetricsServiceRequest>,
     ) -> Result<Response<ExportMetricsServiceResponse>, Status> {
-        let body = prost::Message::encode_to_vec(&request.into_inner());
-        let wire_bytes = body.len() as u64;
+        let request = request.into_inner();
+        // Size on the wire, without encoding the message again.
+        let wire_bytes = prost::Message::encoded_len(&request) as u64;
         match self
             .state
             .inner
             .ingestion_service
-            .ingest_proto(bytes::Bytes::from(body))
+            .ingest_request(request)
             .await
         {
             Ok(count) => {
@@ -150,13 +154,14 @@ impl LogsService for OtlpGrpcService {
         &self,
         request: Request<ExportLogsServiceRequest>,
     ) -> Result<Response<ExportLogsServiceResponse>, Status> {
-        let body = prost::Message::encode_to_vec(&request.into_inner());
-        let wire_bytes = body.len() as u64;
+        let request = request.into_inner();
+        // Size on the wire, without encoding the message again.
+        let wire_bytes = prost::Message::encoded_len(&request) as u64;
         match self
             .state
             .inner
             .log_ingestion_service
-            .ingest_proto(bytes::Bytes::from(body))
+            .ingest_request(request)
             .await
         {
             Ok(count) => {
@@ -200,13 +205,14 @@ impl TraceService for OtlpGrpcService {
         &self,
         request: Request<ExportTraceServiceRequest>,
     ) -> Result<Response<ExportTraceServiceResponse>, Status> {
-        let body = prost::Message::encode_to_vec(&request.into_inner());
-        let wire_bytes = body.len() as u64;
+        let request = request.into_inner();
+        // Size on the wire, without encoding the message again.
+        let wire_bytes = prost::Message::encoded_len(&request) as u64;
         match self
             .state
             .inner
             .trace_ingestion_service
-            .ingest_proto(bytes::Bytes::from(body))
+            .ingest_request(request)
             .await
         {
             Ok(count) => {

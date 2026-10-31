@@ -22,6 +22,10 @@ use tower::util::ServiceExt;
 
 #[cfg(test)]
 async fn setup_test_app() -> axum::Router {
+    build_router(setup_test_state().await)
+}
+
+async fn setup_test_state() -> AppState {
     let dir = tempfile::tempdir().unwrap();
     let config = Config::default();
     let (tx, _) = mpsc::unbounded_channel();
@@ -63,7 +67,7 @@ async fn setup_test_app() -> axum::Router {
     )
     .await;
 
-    build_router(state)
+    state
 }
 
 /// Liveness and readiness answer different questions and must not be the same
@@ -522,6 +526,205 @@ async fn test_ingest_metrics_proto() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::OK);
+}
+
+/// The Collector's OTLP/gRPC exporter compresses with gzip by default. A client
+/// that does must be served, and the points must land.
+#[tokio::test]
+async fn test_otlp_grpc_accepts_gzip_compressed_exports() {
+    use parqtel_ingest::otel::collector::metrics::v1::metrics_service_client::MetricsServiceClient;
+    use parqtel_ingest::otel::metrics::v1::metric::Data;
+    use parqtel_ingest::otel::metrics::v1::number_data_point::Value;
+    use parqtel_ingest::otel::metrics::v1::{
+        Gauge, Metric as ProtoMetric, NumberDataPoint, ResourceMetrics, ScopeMetrics,
+    };
+
+    let state = setup_test_state().await;
+    // Reserve a free port, then hand it to the server.
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let addr: std::net::SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+    let server_state = state.clone();
+    let server = tokio::spawn(async move {
+        let _ = crate::grpc::OtlpGrpcService::serve(server_state, addr).await;
+    });
+
+    let mut client = None;
+    for _ in 0..100 {
+        if let Ok(c) = MetricsServiceClient::connect(format!("http://{addr}")).await {
+            client = Some(c);
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    let mut client = client
+        .expect("gRPC server should accept connections")
+        .send_compressed(tonic::codec::CompressionEncoding::Gzip);
+
+    let request = ExportMetricsServiceRequest {
+        resource_metrics: vec![ResourceMetrics {
+            scope_metrics: vec![ScopeMetrics {
+                metrics: vec![ProtoMetric {
+                    name: "grpc_gz".into(),
+                    data: Some(Data::Gauge(Gauge {
+                        data_points: (1..=50)
+                            .map(|i| NumberDataPoint {
+                                time_unix_nano: i,
+                                value: Some(Value::AsDouble(i as f64)),
+                                ..Default::default()
+                            })
+                            .collect(),
+                    })),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+    };
+    client
+        .export(request)
+        .await
+        .expect("a gzip-compressed export must be accepted");
+
+    assert_eq!(state.inner.ingestion_service.stats().2, 50);
+    server.abort();
+}
+
+fn gzip(bytes: &[u8]) -> Vec<u8> {
+    let mut enc = GzEncoder::new(Vec::new(), Compression::default());
+    enc.write_all(bytes).unwrap();
+    enc.finish().unwrap()
+}
+
+async fn post(
+    app: axum::Router,
+    uri: &str,
+    content_type: &str,
+    encoding: Option<&str>,
+    body: Vec<u8>,
+) -> StatusCode {
+    let mut req = Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header(header::CONTENT_TYPE, content_type);
+    if let Some(e) = encoding {
+        req = req.header(header::CONTENT_ENCODING, e);
+    }
+    app.oneshot(req.body(Body::from(body)).unwrap())
+        .await
+        .unwrap()
+        .status()
+}
+
+/// The OpenTelemetry Collector's `otlphttp` exporter gzips by default, so a
+/// gzip-encoded body must be inflated and handled exactly like a plain one.
+#[tokio::test]
+async fn test_otlp_http_accepts_gzip_request_bodies() {
+    let json = br#"{"resourceMetrics":[{"scopeMetrics":[{"metrics":[{"name":"gz","gauge":{"dataPoints":[{"timeUnixNano":"1000","asDouble":1.5}]}}]}]}]}"#;
+    let app = setup_test_app().await;
+    assert_eq!(
+        post(
+            app.clone(),
+            "/v1/metrics",
+            "application/json",
+            None,
+            json.to_vec()
+        )
+        .await,
+        StatusCode::OK
+    );
+    assert_eq!(
+        post(
+            app.clone(),
+            "/v1/metrics",
+            "application/json",
+            Some("gzip"),
+            gzip(json)
+        )
+        .await,
+        StatusCode::OK,
+        "gzip JSON"
+    );
+
+    use parqtel_ingest::otel::metrics::v1::metric::Data;
+    use parqtel_ingest::otel::metrics::v1::number_data_point::Value;
+    use parqtel_ingest::otel::metrics::v1::{
+        Gauge, Metric as ProtoMetric, NumberDataPoint, ResourceMetrics, ScopeMetrics,
+    };
+    let proto = ExportMetricsServiceRequest {
+        resource_metrics: vec![ResourceMetrics {
+            scope_metrics: vec![ScopeMetrics {
+                metrics: vec![ProtoMetric {
+                    name: "gz_proto".into(),
+                    data: Some(Data::Gauge(Gauge {
+                        data_points: vec![NumberDataPoint {
+                            time_unix_nano: 1000,
+                            value: Some(Value::AsDouble(2.0)),
+                            ..Default::default()
+                        }],
+                    })),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+    }
+    .encode_to_vec();
+    assert_eq!(
+        post(
+            app.clone(),
+            "/v1/metrics",
+            "application/x-protobuf",
+            Some("gzip"),
+            gzip(&proto)
+        )
+        .await,
+        StatusCode::OK,
+        "gzip protobuf"
+    );
+}
+
+#[tokio::test]
+async fn test_otlp_http_rejects_bad_or_oversized_compressed_bodies() {
+    let app = setup_test_app().await;
+    // Not gzip at all.
+    let bad = post(
+        app.clone(),
+        "/v1/metrics",
+        "application/json",
+        Some("gzip"),
+        b"definitely not gzip".to_vec(),
+    )
+    .await;
+    assert!(
+        bad.is_client_error(),
+        "malformed gzip must be a client error, got {bad}"
+    );
+    // An encoding we do not implement.
+    assert_eq!(
+        post(
+            app.clone(),
+            "/v1/metrics",
+            "application/json",
+            Some("br"),
+            b"{}".to_vec()
+        )
+        .await,
+        StatusCode::UNSUPPORTED_MEDIA_TYPE
+    );
+    // A tiny gzip body that inflates past `ingest.max_body_size` (10 MB default).
+    let bomb = gzip(&vec![b' '; 32 * 1024 * 1024]);
+    assert!(bomb.len() < 1024 * 1024, "the bomb is small on the wire");
+    assert_eq!(
+        post(app, "/v1/metrics", "application/json", Some("gzip"), bomb).await,
+        StatusCode::PAYLOAD_TOO_LARGE,
+        "limits must apply to the decompressed size"
+    );
 }
 
 /// OTLP/HTTP lets a client send traces as protobuf; `/v1/traces` must accept

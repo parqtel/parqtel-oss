@@ -173,6 +173,11 @@ pub fn build_router(state: AppState) -> Router {
             ingest_config.max_body_size,
         ))
         .layer(RequestBodyLimitLayer::new(ingest_config.max_body_size))
+        // OTLP/HTTP exporters gzip their bodies (the Collector's `otlphttp`
+        // exporter does by default). Placed outside the limits above so they
+        // bound the *decompressed* size: a small gzip bomb is refused with 413
+        // rather than inflated into memory. Other encodings get 415.
+        .layer(tower_http::decompression::RequestDecompressionLayer::new().gzip(true))
         // Outermost layer: records the golden signals (count + latency
         // histogram) for the whole request, including any inner middleware.
         .layer(axum::middleware::from_fn(

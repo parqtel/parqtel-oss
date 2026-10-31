@@ -1410,6 +1410,18 @@ impl IngestionService {
         self.process_metrics(metrics).await
     }
 
+    /// Ingests a request a transport has already decoded (gRPC), skipping the
+    /// encode and decode a byte-oriented entry point would need.
+    pub async fn ingest_request(&self, request: ExportMetricsServiceRequest) -> Result<u64> {
+        self.stats.total_batches.fetch_add(1, Ordering::Relaxed);
+        let metrics = decode_offloading(move || OtlpDecoder::decode_metrics(request))
+            .await
+            .inspect_err(|_| {
+                self.stats.failed_batches.fetch_add(1, Ordering::Relaxed);
+            })?;
+        self.process_metrics(metrics).await
+    }
+
     /// Ingest already-decoded metrics directly (used by the span-metrics
     /// RED bridge, which derives metrics from trace spans).
     pub async fn ingest_metrics(&self, metrics: Vec<Metric>) -> Result<u64> {
@@ -1554,6 +1566,17 @@ impl LogIngestionService {
         .inspect_err(|_| {
             self.stats.failed_batches.fetch_add(1, Ordering::Relaxed);
         })?;
+        self.ingest_logs(logs).await
+    }
+
+    /// Ingests a request a transport has already decoded (gRPC).
+    pub async fn ingest_request(&self, request: ExportLogsServiceRequest) -> Result<u64> {
+        self.stats.total_batches.fetch_add(1, Ordering::Relaxed);
+        let logs = decode_offloading(move || OtlpDecoder::decode_logs(request))
+            .await
+            .inspect_err(|_| {
+                self.stats.failed_batches.fetch_add(1, Ordering::Relaxed);
+            })?;
         self.ingest_logs(logs).await
     }
 
@@ -1723,6 +1746,17 @@ impl TraceIngestionService {
         .inspect_err(|_| {
             self.stats.failed_batches.fetch_add(1, Ordering::Relaxed);
         })?;
+        self.ingest_spans(spans).await
+    }
+
+    /// Ingests a request a transport has already decoded (gRPC).
+    pub async fn ingest_request(&self, request: ExportTraceServiceRequest) -> Result<u64> {
+        self.stats.total_batches.fetch_add(1, Ordering::Relaxed);
+        let spans = decode_offloading(move || OtlpDecoder::decode_traces(request))
+            .await
+            .inspect_err(|_| {
+                self.stats.failed_batches.fetch_add(1, Ordering::Relaxed);
+            })?;
         self.ingest_spans(spans).await
     }
 
