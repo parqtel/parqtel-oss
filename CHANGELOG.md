@@ -23,15 +23,39 @@ while measuring. Measurements and method are in
   instant queries 107 → 17 ms, log search 284 → 102 ms (p50, 2.4 M-point
   dataset).
 - Peak RSS under the same load fell from 2.3 GB to 0.8 GB.
+- **Series table in every metric block** (see Added): a selective query now reads
+  only the rows of the series it selects. Single-series selector 15 → 0.9 ms,
+  aggregations 28 → 7 ms, instant queries 15 → 3 ms (p50, one client, same
+  dataset and build mode); with 8 concurrent clients 41 → 1.8 ms, 77 → 20 ms and
+  32 → 9.7 ms.
 
 ### Added
 
+- **Series table in each metric block.** Metric blocks are now laid out series by
+  series (each in time order) and carry, in the Parquet footer
+  (`parqtel.series_index`), a table of their series: labels, the rows each one
+  occupies and its time bounds. At load the table becomes an inverted index
+  (label name → value → series) that narrows a selector to its candidate series
+  without touching a row; the candidates' row ranges become a Parquet row
+  selection over the timestamp and value columns only. Labels come from the
+  table, so the label, metric-name and service columns are not read. The
+  matcher still judges every candidate, so a block read through its table
+  returns exactly what a scan of the same block without one returns. Flushed,
+  compacted and engine-written blocks all carry it; a block without a valid
+  table (or one that disagrees with its row count) is scanned as before.
+  `points_scanned` now counts the rows actually read.
+- Footer cache is bounded by bytes (192 MiB) rather than entry count, and holds
+  each block's parsed series table.
 - **gzip-compressed OTLP**, which the OpenTelemetry Collector's exporters send by
   default: request bodies on HTTP (limits apply to the decompressed size) and
   gRPC.
 
 ### Fixed
 
+- **A capped query could return different series after every restart.** The
+  label-set fingerprint used a randomly seeded hasher although it is documented
+  as stable, and series are ordered by fingerprint before the series limit is
+  applied. It is now a fixed function of the labels (value pinned in a test).
 - **OTLP/HTTP protobuf traces** were rejected with 400 on `/v1/traces`; only gRPC
   could ingest protobuf traces. The endpoint now negotiates on `Content-Type`
   like metrics and logs.
