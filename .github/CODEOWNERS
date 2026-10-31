@@ -7,25 +7,24 @@
 * @parqtel/maintainers
 
 # Configuration schema and defaults are a public contract; changing one is breaking
-/parqtel-core/src/config/ @parqtel/maintainers
+/crates/parqtel-core/src/config/ @parqtel/maintainers
 
 # On-disk format, WAL ordering contract, index durability
-/parqtel-core/src/storage/ @parqtel/maintainers
+/crates/parqtel-core/src/storage/ @parqtel/maintainers
 
-# The crash-ordering contract must be preserved — see docs/ARCHITECTURE.md
-/parqtel-core/src/wal.rs @parqtel/maintainers
+# The crash-ordering contract must be preserved — see docs/development/architecture.md
+/crates/parqtel-core/src/wal.rs @parqtel/maintainers
 
 # Durability of the acknowledged path
-/parqtel-ingest/ @parqtel/maintainers
+/crates/parqtel-ingest/ @parqtel/maintainers
 
 # Routes, middleware and body limits
-/parqtel-server/src/router.rs @parqtel/maintainers
+/crates/parqtel-server/src/router.rs @parqtel/maintainers
 
 # Single embedded file, no external requests
-/parqtel-server/src/ui.html @parqtel/maintainers
+/crates/parqtel-server/src/ui.html @parqtel/maintainers
 
 # Packaging and image build
-/charts/ @parqtel/maintainers
 /deploy/ @parqtel/maintainers
 /Dockerfile @parqtel/maintainers
 /docker-compose.yml @parqtel/maintainers

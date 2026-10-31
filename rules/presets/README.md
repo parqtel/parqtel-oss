@@ -104,7 +104,7 @@ cargo test -p parqtel-alert --test preset_rules
 
 # End-to-end: boots Parqtel, loads the presets, proves rules fire on
 # threshold crossings and recover when they clear.
-scripts/test_alert_presets.sh
+scripts/checks/test_alert_presets.sh
 ```
 
 The end-to-end script exercises one rule per distinct query shape — plain

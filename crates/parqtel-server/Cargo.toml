@@ -1,0 +1,56 @@
+[package]
+name = "parqtel-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "parqtel"
+path = "src/main.rs"
+
+[dependencies]
+parqtel-core = { workspace = true }
+parqtel-ingest = { workspace = true }
+parqtel-query = { workspace = true }
+parqtel-alert = { workspace = true }
+parqtel-pipeline = { workspace = true }
+axum = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tower = { version = "0.4", features = ["util"] }
+tower-http = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+prost = { workspace = true }
+tonic = { workspace = true }
+bytes = { workspace = true }
+anyhow = { workspace = true }
+flate2 = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+chrono = { workspace = true }
+ulid = { workspace = true }
+clap = { workspace = true }
+figment = { workspace = true }
+regex = { workspace = true }
+futures = { workspace = true }
+# Self-instrumentation: OTLP traces/SLI metrics + on-demand CPU profiling.
+opentelemetry = { workspace = true }
+opentelemetry_sdk = { workspace = true }
+opentelemetry-otlp = { workspace = true }
+tracing-opentelemetry = { workspace = true }
+pprof = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
+urlencoding = "2"
+http-body-util = "0.1"
+hyper = { workspace = true }
+http = "1"
+reqwest = { workspace = true }
+
+[lints]
+workspace = true

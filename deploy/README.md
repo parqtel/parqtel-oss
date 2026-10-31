@@ -48,5 +48,5 @@ make local-k3d-down  # Destroy cluster
 -   `k8s/`: Environment-specific overlays and installation scripts.
 -   `systemd/`: Service units for bare-metal deployments.
 
-> The Helm chart lives at `charts/parqtel/` (project root).
-> The Docker Compose setup lives at `compose/` (project root) with `docker-compose.yml` at root.
+> The Helm chart lives at `deploy/helm/parqtel/` (project root).
+> The Docker Compose setup lives in `deploy/compose/` (`deploy/compose/docker-compose.yml`).

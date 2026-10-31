@@ -13,7 +13,7 @@ build cannot reach a registry or the release page.
 
 Ingest and query performance, and a set of durability and visibility fixes found
 while measuring. Measurements and method are in
-[docs/benchmarks/PERFORMANCE.md](docs/benchmarks/PERFORMANCE.md).
+[docs/performance/README.md](docs/performance/README.md).
 
 ### Performance
 
@@ -206,7 +206,7 @@ New options: `storage.compression_level` and `logs.compression_level` (zstd
 (OTLP export and profiling). Config validation now rejects a `row_group_size`
 of 0 or above `max_rows_per_block` — a combination that silently disabled
 row-group pruning. See
-[docs/CONFIGURATION.md](docs/CONFIGURATION.md).
+[docs/operations/configuration.md](docs/operations/configuration.md).
 
 ### Security
 
@@ -215,9 +215,9 @@ row-group pruning. See
 
 ### Documentation
 
-- [Argo Rollouts integration guide](docs/ARGO_ROLLOUTS.md) with runnable
+- [Argo Rollouts integration guide](docs/guides/argo-rollouts.md) with runnable
   AnalysisTemplate and canary Rollout examples.
-- [PQL guide](docs/PQL_GUIDE.md).
+- [PQL guide](docs/guides/pql-guide.md).
 - Internal working documents pruned; user documentation refreshed against the
   current build.
 
@@ -234,7 +234,7 @@ Initial public beta.
 
 Query and storage work landed over 30-odd pull requests, each measured against
 a running build. Full method and caveats in
-[docs/benchmarks/PERFORMANCE.md](docs/benchmarks/PERFORMANCE.md).
+[docs/performance/README.md](docs/performance/README.md).
 
 - **Query evaluation.** Label sets are shared behind an `Arc` throughout the
   evaluator instead of being cloned per series per *step* — ~20 M string
@@ -315,7 +315,7 @@ New options: `ingest.rotator_shards`, `ingest.max_inflight_flushes`,
 `server.alert_interval_secs`, `server.retention_interval_secs`,
 `server.index_persist_interval_secs`, `server.grpc_concurrency_limit`. All
 default to the previous hardcoded behaviour. See
-[docs/CONFIGURATION.md](docs/CONFIGURATION.md).
+[docs/operations/configuration.md](docs/operations/configuration.md).
 
 ### Observability
 
@@ -327,13 +327,13 @@ no longer reads `/proc`.
 
 ### Known limitations
 
-Collected in [docs/KNOWN_ISSUES.md](docs/KNOWN_ISSUES.md), with a workaround for
+Collected in [docs/operations/known-issues.md](docs/operations/known-issues.md), with a workaround for
 each. They are recorded deliberately rather than left to be discovered.
 
 - The in-memory buffer is unbounded — there is no max size, no byte accounting
   and no eviction. Resident memory is a function of ingest rate ×
   `storage.block_duration_secs` with no ceiling. Size the container from the
-  formula in `docs/PERFORMANCE_SIZING.md` until this is bounded.
+  formula in `docs/operations/performance-sizing.md` until this is bounded.
 - A range query evaluates steps from `start` while `ts < end`, so samples newer
   than one `step` before `end` are not visible to `/api/v1/query_range` (an
   instant query at the same `end` still sees them through the 5-minute

@@ -41,21 +41,21 @@ jobs:
         with:
           filters: |
             helm:
-              - 'charts/**'
-              - 'compose/**'
+              - 'deploy/helm/**'
+              - 'deploy/compose/**'
             docker:
               - 'Dockerfile'
-              - 'parqtel-*/src/**'
-              - 'parqtel-*/proto/**'
-              - 'parqtel-*/build.rs'
+              - 'crates/parqtel-*/src/**'
+              - 'crates/parqtel-*/proto/**'
+              - 'crates/parqtel-*/build.rs'
               - 'Cargo.{toml,lock}'
               - '.github/workflows/ci.yml'
               - 'Makefile'
               - '**/*.rs'
             rust:
-              - 'parqtel-*/src/**'
-              - 'parqtel-*/proto/**'
-              - 'parqtel-*/build.rs'
+              - 'crates/parqtel-*/src/**'
+              - 'crates/parqtel-*/proto/**'
+              - 'crates/parqtel-*/build.rs'
               - 'Cargo.{toml,lock}'
               - '.github/workflows/ci.yml'
               - 'Makefile'
@@ -86,7 +86,7 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Check unsafe code
         run: |
-          if grep -rn "unsafe" --include="*.rs" parqtel-*/src/ \
+          if grep -rn "unsafe" --include="*.rs" crates/parqtel-*/src/ \
              | grep -v "forbid(unsafe_code)" | grep -v "^\s*//" | grep -v "unsafe_"; then
             echo "::error::Unsafe code detected"
             exit 1
@@ -189,13 +189,13 @@ jobs:
         with:
           version: v3.16.0
       - name: Lint chart (default)
-        run: helm lint charts/parqtel
+        run: helm lint deploy/helm/parqtel
       - name: Lint chart (minimal)
-        run: helm lint charts/parqtel -f charts/parqtel/ci/minimal-values.yaml
+        run: helm lint deploy/helm/parqtel -f deploy/helm/parqtel/ci/minimal-values.yaml
       - name: Lint chart (full)
-        run: helm lint charts/parqtel -f charts/parqtel/ci/full-values.yaml
+        run: helm lint deploy/helm/parqtel -f deploy/helm/parqtel/ci/full-values.yaml
       - name: Template validation
-        run: helm template test charts/parqtel --debug > /dev/null
+        run: helm template test deploy/helm/parqtel --debug > /dev/null
 
   # ── Docker Build + Smoke Test (only when image inputs change) ─────────────
   docker:

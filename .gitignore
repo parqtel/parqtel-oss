@@ -31,13 +31,11 @@ __pycache__/
 
 # Local data and logs
 *.log
-scripts/bench_stubs/
-scripts/bench_results/
-parqtel-server/data/
+scripts/bench/bench_stubs/
+scripts/bench/bench_results/
 .local-parqtel-data/
 
 # Local working notes (not part of the published docs)
-BACKLOG.local.md
 *.local.md
 
 # Agent-local artifacts
@@ -51,3 +49,6 @@ server.pid
 # repo-local cargo home (Makefile CARGO_HOME fallback) and pinned tools
 .cargo-home/
 .tools/
+
+# Local planning notes
+/backlog/
