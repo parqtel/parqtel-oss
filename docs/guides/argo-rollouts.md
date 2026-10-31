@@ -114,8 +114,4 @@ metrics:
 ## Notes & limitations
 - **Instant-query lookback:** `/api/v1/query` looks back 5 minutes (`query.lookback_delta_ns`). Use `initialDelay` so the first measurement has data, or use `provider.prometheus.rangeQuery` for an explicit window.
 - **Empty results:** if a query returns no series (no traffic yet), `result[0]` is undefined and the measurement errors. Use `initialDelay` + a realistic `interval`.
-- **Metrics only (Phase 0):** this integration uses the Prometheus provider, so it gates on **metrics**. Parqtel's **log** and **trace** search and **cross-signal** pipelines are not reachable through the stock Prometheus provider — that's the dedicated provider (Phase 2) / go-plugin (Phase 1) work in the integration roadmap.
-
-## What's next
-- **Phase 1 — go-plugin** (`rollouts-plugin-metric-parqtel`): out-of-tree plugin exposing Parqtel's log, trace, and PQL-pipeline queries as first-class analysis metrics. No Argo Rollouts core changes.
-- **Phase 2 — native `parqtel` provider**: a first-class `provider: parqtel: {...}` in the Argo Rollouts CRD (like `skywalking`), with schema validation and dedicated docs.
+- **Metrics only:** this integration uses the stock Prometheus provider, so it gates on **metrics**. Parqtel's **log** and **trace** search and **cross-signal** pipelines are not reachable through that provider.

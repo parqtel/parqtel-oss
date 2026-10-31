@@ -13,7 +13,7 @@ Parqtel's memory usage is primarily driven by:
 
 ### CPU & I/O
 - **Compaction**: This is a CPU and Disk I/O intensive process. If your queries are slow, check if the compactor is lagging.
-- **Zstd Level**: Parqtel uses Zstd for compression. If CPU usage is too high, you can lower the compression level (on the roadmap) or switch to `lz4`.
+- **Zstd Level**: Parqtel uses Zstd for compression. If CPU usage is too high, you can switch to `lz4`.
 
 ## 2. Storage Strategy
 

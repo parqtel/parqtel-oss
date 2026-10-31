@@ -241,8 +241,7 @@ Per-service overrides; each entry fully replaces the global policy for that serv
 
 ### `[alerts.presets]`
 
-Built-in alert packs embedded in the binary (`rules/presets/*.yaml`; see
-`docs/BUILTIN_ALERT_PRESETS_PLAN.md`). Packs activate automatically when
+Built-in alert packs embedded in the binary (`rules/presets/*.yaml`). Packs activate automatically when
 their canary metrics appear in the metric index/buffer, or explicitly via the
 selection lists below. Once activated, a pack never deactivates, and rules in
 `rules_dir` (or created via the API) with the same id always override the

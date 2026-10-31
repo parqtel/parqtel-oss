@@ -17,7 +17,7 @@ Rust provides the memory safety and performance required for high-throughput ing
 Since Parquet blocks are immutable once written, you can simply use `rsync` or cloud snapshots to back up the `data/` directory. Each signal directory also holds its `index.json` sidecar (block index) — include it for faster startups after restoration.
 
 #### Can I store data in S3/GCS?
-Currently, Parqtel stores data on the local filesystem. Support for S3-compatible object storage as a "cold tier" is on the roadmap.
+Currently, Parqtel stores data on the local filesystem. Support for S3-compatible object storage as a "cold tier" is not yet supported.
 
 ### Ingestion
 
