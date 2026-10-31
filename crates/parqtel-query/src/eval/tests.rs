@@ -1,6 +1,7 @@
 //! Tests for the `eval` module.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+use super::aggregation::{grouping_fingerprint, normalize_grouping};
 use super::*;
 
 fn mk_data() -> SeriesData {
