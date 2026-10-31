@@ -13,6 +13,25 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::RwLock;
 
+/// Series filter for a metric's label matchers, or `None` when there are none.
+///
+/// Evaluated once per distinct series inside the scan (see
+/// [`Scanner::scan_filtered`]), so rows of series that cannot match are never
+/// turned into points.
+fn series_filter(
+    matchers: &[crate::matcher::LabelMatcher],
+    metric: &str,
+) -> Option<parqtel_core::storage::scanner::SeriesFilter> {
+    if matchers.is_empty() {
+        return None;
+    }
+    let matchers = matchers.to_vec();
+    let metric = metric.to_string();
+    Some(Arc::new(move |labels: &parqtel_core::LabelSet| {
+        crate::matcher::evaluate_matchers(&matchers, labels, &metric)
+    }))
+}
+
 /// Executes queries against the storage engine.
 pub struct QueryExecutor {
     #[allow(dead_code)]
@@ -245,21 +264,31 @@ impl QueryExecutor {
                     let idx = self.index.read().await;
                     idx.query(scan_start, end_ns, Some(name))
                 };
-                let mut raw = if blocks.is_empty() {
-                    Vec::new()
-                } else {
-                    Scanner::scan(
+                // Label matchers are evaluated once per distinct series inside
+                // the scan, so rows of series that cannot match never become
+                // points. The service matcher additionally prunes row groups.
+                let filter = series_filter(matchers, name);
+                let mut raw = Vec::new();
+                if !blocks.is_empty() {
+                    let scan = Scanner::scan_filtered(
                         blocks,
                         name.clone(),
                         scan_start,
                         end_ns,
-                        service_of(matchers),
+                        service_of(matchers).map(|s| s.to_string()),
+                        filter.clone(),
                     )
-                    .await?
-                };
+                    .await?;
+                    points_scanned += scan.rows_considered;
+                    raw = scan.points;
+                }
                 // Buffer
-                raw.extend(self.buffer.scan_metrics(name, scan_start, end_ns).await);
-                points_scanned += raw.len() as u64;
+                let (buffered, buffered_rows) = self
+                    .buffer
+                    .scan_metrics_filtered(name, scan_start, end_ns, filter.as_ref())
+                    .await;
+                points_scanned += buffered_rows;
+                raw.extend(buffered);
 
                 // Group by series fingerprint first, then match once per
                 // series. Every point of a series carries the same label set,
@@ -282,16 +311,13 @@ impl QueryExecutor {
                     entry.1.push((dp.timestamp_ns, dp.value));
                 }
 
-                // Apply matchers once per series, then enforce the same
+                // Matchers were applied inside the scan; enforce the same
                 // result limits the plan path applies, so the two engines
                 // cannot disagree about `total_series_count` or escape the
                 // configured memory bound.
                 let mut kept: Vec<(parqtel_core::LabelSet, Vec<(i64, MetricValue)>)> =
                     Vec::with_capacity(by_series.len());
                 for (_fp, (labels, points)) in by_series {
-                    if !crate::matcher::evaluate_matchers(matchers, &labels, name) {
-                        continue;
-                    }
                     // Counted as a matched series regardless of truncation, and
                     // before it, so `total_series_count` reports what matched
                     // rather than what survived.
@@ -410,11 +436,17 @@ impl QueryExecutor {
 
         if blocks.is_empty() {
             // Even with no disk blocks, check the in-memory buffer
-            let buffered = self
+            let filter = series_filter(&plan.matchers, &plan.metric_name);
+            let (buffered, considered) = self
                 .buffer
-                .scan_metrics(&plan.metric_name, plan.start_ns, plan.end_ns)
+                .scan_metrics_filtered(
+                    &plan.metric_name,
+                    plan.start_ns,
+                    plan.end_ns,
+                    filter.as_ref(),
+                )
                 .await;
-            if buffered.is_empty() {
+            if considered == 0 {
                 return Ok(QueryResult {
                     series: Vec::new(),
                     execution_time: start_time.elapsed(),
@@ -425,28 +457,26 @@ impl QueryExecutor {
             }
             // Process buffered data through the same pipeline below
             let raw_points = buffered;
-            let points_scanned = raw_points.len() as u64;
+            let points_scanned = considered;
             let mut series_map: BTreeMap<u64, (LabelSet, Vec<(i64, MetricValue)>)> =
                 BTreeMap::new();
             let mut matched_series_fps = HashSet::new();
             let mut volume_summary = vec![0u64; 60];
             let window_ns = (plan.end_ns - plan.start_ns) / 60;
             for dp in raw_points {
-                if evaluate_matchers(&plan.matchers, &dp.labels, &plan.metric_name) {
-                    if window_ns > 0 {
-                        let bucket =
-                            ((dp.timestamp_ns - plan.start_ns) / window_ns).clamp(0, 59) as usize;
-                        volume_summary[bucket] += 1;
-                    }
-                    let fp = dp.labels.fingerprint();
-                    matched_series_fps.insert(fp);
-                    if series_map.contains_key(&fp) || series_map.len() < plan.max_series {
-                        let entry = series_map
-                            .entry(fp)
-                            .or_insert_with(|| (dp.labels.clone(), Vec::new()));
-                        if entry.1.len() < plan.max_samples_per_series {
-                            entry.1.push((dp.timestamp_ns, dp.value));
-                        }
+                if window_ns > 0 {
+                    let bucket =
+                        ((dp.timestamp_ns - plan.start_ns) / window_ns).clamp(0, 59) as usize;
+                    volume_summary[bucket] += 1;
+                }
+                let fp = dp.labels.fingerprint();
+                matched_series_fps.insert(fp);
+                if series_map.contains_key(&fp) || series_map.len() < plan.max_series {
+                    let entry = series_map
+                        .entry(fp)
+                        .or_insert_with(|| (dp.labels.clone(), Vec::new()));
+                    if entry.1.len() < plan.max_samples_per_series {
+                        entry.1.push((dp.timestamp_ns, dp.value));
                     }
                 }
             }
@@ -502,51 +532,59 @@ impl QueryExecutor {
 
         // 2. Scan blocks concurrently
         let blocks_count = blocks.len();
-        let mut raw_points = Scanner::scan(
+        let filter = series_filter(&plan.matchers, &plan.metric_name);
+        let scan = Scanner::scan_filtered(
             blocks,
             plan.metric_name.clone(),
             plan.start_ns,
             plan.end_ns,
-            service_of(&plan.matchers),
+            service_of(&plan.matchers).map(|s| s.to_string()),
+            filter.clone(),
         )
         .await?;
+        let mut points_scanned = scan.rows_considered;
+        // Block points in time order, as a series' samples must be (the oldest
+        // `max_samples_per_series` are kept); the buffer's points follow.
+        let mut raw_points = scan.points;
+        raw_points.sort_by_key(|p| p.timestamp_ns);
 
         // 2b. Merge in-memory buffer data (not yet flushed to disk)
-        let buffered = self
+        let (buffered, buffered_rows) = self
             .buffer
-            .scan_metrics(&plan.metric_name, plan.start_ns, plan.end_ns)
+            .scan_metrics_filtered(
+                &plan.metric_name,
+                plan.start_ns,
+                plan.end_ns,
+                filter.as_ref(),
+            )
             .await;
+        points_scanned += buffered_rows;
         raw_points.extend(buffered);
 
-        let points_scanned = raw_points.len() as u64;
-
-        // 3. Filter and group by series + Calculate Volume
+        // 3. Group by series + Calculate Volume
         let mut series_map: BTreeMap<u64, (LabelSet, Vec<(i64, MetricValue)>)> = BTreeMap::new();
         let mut matched_series_fps = HashSet::new();
         let mut volume_summary = vec![0u64; 60];
         let window_ns = (plan.end_ns - plan.start_ns) / 60;
 
         for dp in raw_points {
-            if evaluate_matchers(&plan.matchers, &dp.labels, &plan.metric_name) {
-                // Update volume histogram regardless of truncation
-                if window_ns > 0 {
-                    let bucket =
-                        ((dp.timestamp_ns - plan.start_ns) / window_ns).clamp(0, 59) as usize;
-                    volume_summary[bucket] += 1;
-                }
+            // Update volume histogram regardless of truncation
+            if window_ns > 0 {
+                let bucket = ((dp.timestamp_ns - plan.start_ns) / window_ns).clamp(0, 59) as usize;
+                volume_summary[bucket] += 1;
+            }
 
-                let fp = dp.labels.fingerprint();
-                matched_series_fps.insert(fp);
+            let fp = dp.labels.fingerprint();
+            matched_series_fps.insert(fp);
 
-                // Check if we already have this series or if we can add a new one
-                if series_map.contains_key(&fp) || series_map.len() < plan.max_series {
-                    let entry = series_map
-                        .entry(fp)
-                        .or_insert_with(|| (dp.labels.clone(), Vec::new()));
+            // Check if we already have this series or if we can add a new one
+            if series_map.contains_key(&fp) || series_map.len() < plan.max_series {
+                let entry = series_map
+                    .entry(fp)
+                    .or_insert_with(|| (dp.labels.clone(), Vec::new()));
 
-                    if entry.1.len() < plan.max_samples_per_series {
-                        entry.1.push((dp.timestamp_ns, dp.value));
-                    }
+                if entry.1.len() < plan.max_samples_per_series {
+                    entry.1.push((dp.timestamp_ns, dp.value));
                 }
             }
         }
@@ -2370,6 +2408,28 @@ mod tests {
         let res = exec.execute(plan).await.unwrap();
         assert_eq!(res.total_series_count, 1);
         assert_eq!(res.series[0].samples.len(), 2);
+        // The matcher is applied inside the scan, but "points scanned" still
+        // reports every in-window row of the metric (3), not the 2 that matched.
+        assert_eq!(res.points_scanned, 3);
+        // The volume histogram counts matched points only.
+        assert_eq!(res.volume_summary.iter().sum::<u64>(), 2);
+    }
+
+    /// The AST path applies matchers inside the scan too; a matcher that
+    /// rejects every series must still report what was scanned.
+    #[tokio::test]
+    async fn test_execute_ast_matcher_pushdown_counts_scanned_rows() {
+        let (exec, _dir) = setup_with_data().await;
+        let expr = crate::parser::parse_expr(r#"sum(cpu{host="h1"})"#).unwrap();
+        let res = exec.execute_ast(&expr, 0, 5000, Some(1000)).await.unwrap();
+        assert_eq!(res.total_series_count, 1);
+        assert_eq!(res.points_scanned, 3);
+
+        let expr = crate::parser::parse_expr(r#"sum(cpu{host="nope"})"#).unwrap();
+        let res = exec.execute_ast(&expr, 0, 5000, Some(1000)).await.unwrap();
+        assert_eq!(res.total_series_count, 0);
+        assert_eq!(res.points_scanned, 3);
+        assert!(res.series.is_empty());
     }
 
     #[tokio::test]

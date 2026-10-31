@@ -82,6 +82,48 @@ impl MemoryBuffer {
         }
     }
 
+    /// As [`Self::scan_metrics`], dropping series `filter` rejects before their
+    /// points are copied. Returns the points and the number of in-window rows
+    /// considered (what an unfiltered scan would have returned).
+    ///
+    /// The filter runs once per distinct label set, not once per point.
+    pub async fn scan_metrics_filtered(
+        &self,
+        metric_name: &str,
+        start_ns: i64,
+        end_ns: i64,
+        filter: Option<&crate::storage::scanner::SeriesFilter>,
+    ) -> (Vec<DataPoint>, u64) {
+        let buf = self.metrics.read().await;
+        let Some(points) = buf.get(metric_name) else {
+            return (Vec::new(), 0);
+        };
+        let mut out = Vec::new();
+        let mut considered = 0u64;
+        let mut verdicts: HashMap<crate::models::labels::LabelSet, bool> = HashMap::new();
+        for dp in points {
+            if dp.timestamp_ns < start_ns || dp.timestamp_ns > end_ns {
+                continue;
+            }
+            considered += 1;
+            let keep = match filter {
+                None => true,
+                Some(f) => match verdicts.get(&dp.labels) {
+                    Some(v) => *v,
+                    None => {
+                        let v = f(&dp.labels);
+                        verdicts.insert(dp.labels.clone(), v);
+                        v
+                    }
+                },
+            };
+            if keep {
+                out.push(dp.clone());
+            }
+        }
+        (out, considered)
+    }
+
     /// Query logs from the buffer matching the given time range.
     pub async fn scan_logs(&self, start_ns: i64, end_ns: i64) -> Vec<LogRecord> {
         let buf = self.logs.read().await;

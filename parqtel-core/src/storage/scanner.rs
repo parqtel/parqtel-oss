@@ -83,10 +83,205 @@ pub fn metric_scan_indices(schema: &std::sync::Arc<arrow_schema::Schema>) -> Res
     Ok(idx)
 }
 
-/// Label-cache size ceiling per chunk before it is cleared.
-/// ponytail: naive bound — clear-on-overflow instead of LRU; revisit if
-/// high-cardinality queries dominate profiles.
-const LABEL_CACHE_MAX: usize = 10_000;
+/// Predicate over a series' label set (after the `service.name` label has been
+/// merged back in). It is evaluated once per distinct series per block - not
+/// per row - so it may be moderately expensive (regex matchers).
+pub type SeriesFilter = Arc<dyn Fn(&crate::LabelSet) -> bool + Send + Sync>;
+
+/// Result of a filtered metrics scan.
+#[derive(Debug, Default)]
+pub struct MetricScan {
+    /// Points of the series accepted by the filter, in block order (not sorted
+    /// across blocks).
+    pub points: Vec<DataPoint>,
+    /// Rows inside the time window that belong to the metric (and service), i.e.
+    /// what an unfiltered scan would have returned. Reported as "points
+    /// scanned" by the query layer.
+    pub rows_considered: u64,
+}
+
+/// Parsed Parquet footers (with page indexes) by block file.
+///
+/// Block files are immutable once renamed into place, so a footer never goes
+/// stale for a given (path, length, mtime). Re-reading and re-decoding it for
+/// every block of every query was a fixed cost paid before any data moved.
+struct FooterCache {
+    entries: HashMap<(std::path::PathBuf, u64, i128), (Arc<ParquetMetaData>, u64)>,
+    tick: u64,
+}
+
+const FOOTER_CACHE_MAX: usize = 512;
+
+fn footer_cache() -> &'static std::sync::Mutex<FooterCache> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<FooterCache>> = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| {
+        std::sync::Mutex::new(FooterCache {
+            entries: HashMap::new(),
+            tick: 0,
+        })
+    })
+}
+
+/// Opens a block and returns its reader metadata, or `None` if the file is gone.
+///
+/// The `labels` column is requested as a dictionary: every row of a series
+/// carries the same JSON text, and Parquet already stores it dictionary-encoded,
+/// so this hands the reader's dictionary straight through instead of expanding
+/// one string per row. Falls back to the file's own schema if the override is
+/// not accepted.
+fn open_block(path: &std::path::Path) -> Result<Option<(File, ArrowReaderMetadata)>> {
+    let file = match File::open(path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            tracing::warn!("Block file not found, skipping: {:?}", path);
+            return Ok(None);
+        }
+        Err(e) => return Err(Error::Io(e)),
+    };
+    // Metadata is kept, not just the builder: bloom filters and the column
+    // index live on it, and both prune row groups before any page is decoded.
+    //
+    // The page index is what makes column- and page-level pruning possible;
+    // without it only row-group statistics exist. `Optional` rather than
+    // `Required`, because blocks written before bloom filters and page
+    // statistics were added have no page index and must still be readable.
+    let options = ArrowReaderOptions::new().with_page_index_policy(PageIndexPolicy::Optional);
+    let stamp = file.metadata().ok().map(|m| {
+        let mtime = m
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or(0, |d| d.as_nanos() as i128);
+        (m.len(), mtime)
+    });
+    let key = stamp.map(|(len, mtime)| (path.to_path_buf(), len, mtime));
+
+    let cached = key.as_ref().and_then(|k| {
+        let mut cache = footer_cache().lock().unwrap_or_else(|e| e.into_inner());
+        cache.tick += 1;
+        let tick = cache.tick;
+        cache.entries.get_mut(k).map(|(meta, used)| {
+            *used = tick;
+            Arc::clone(meta)
+        })
+    });
+    let base = match cached {
+        Some(meta) => ArrowReaderMetadata::try_new(meta, options.clone()),
+        None => {
+            let loaded = ArrowReaderMetadata::load(&file, options.clone());
+            if let (Ok(m), Some(k)) = (&loaded, key) {
+                let mut cache = footer_cache().lock().unwrap_or_else(|e| e.into_inner());
+                if cache.entries.len() >= FOOTER_CACHE_MAX {
+                    // Drop the older half rather than tracking exact LRU order.
+                    let mut used: Vec<u64> = cache.entries.values().map(|(_, u)| *u).collect();
+                    used.sort_unstable();
+                    let cutoff = used[used.len() / 2];
+                    cache.entries.retain(|_, (_, u)| *u > cutoff);
+                }
+                cache.tick += 1;
+                let tick = cache.tick;
+                cache.entries.insert(k, (Arc::clone(m.metadata()), tick));
+            }
+            loaded
+        }
+    }
+    .map_err(|e| Error::Parquet(e.to_string()))?;
+
+    let meta = match dictionary_labels_schema(base.schema()) {
+        Some(schema) => {
+            ArrowReaderMetadata::try_new(Arc::clone(base.metadata()), options.with_schema(schema))
+                .unwrap_or(base)
+        }
+        None => base,
+    };
+    Ok(Some((file, meta)))
+}
+
+/// `schema` with the `labels` column typed as `Dictionary(Int32, Utf8)`.
+fn dictionary_labels_schema(schema: &arrow_schema::SchemaRef) -> Option<arrow_schema::SchemaRef> {
+    use arrow_schema::DataType;
+    let idx = schema.index_of("labels").ok()?;
+    let field = schema.field(idx);
+    if field.data_type() != &DataType::Utf8 {
+        return None;
+    }
+    let mut fields: Vec<arrow_schema::FieldRef> = schema.fields().iter().cloned().collect();
+    fields[idx] = Arc::new(field.as_ref().clone().with_data_type(DataType::Dictionary(
+        Box::new(DataType::Int32),
+        Box::new(DataType::Utf8),
+    )));
+    Some(Arc::new(arrow_schema::Schema::new_with_metadata(
+        fields,
+        schema.metadata().clone(),
+    )))
+}
+
+/// Rows read per Arrow batch. The default (1024) makes per-batch setup - and,
+/// for dictionary columns, per-batch resolution - a visible share of the work.
+const SCAN_BATCH_ROWS: usize = 8192;
+
+/// How a row's `labels` text is reached: through the reader's dictionary, or as
+/// a plain string column for a file whose schema could not be overridden.
+enum LabelsColumn<'a> {
+    Dict {
+        keys: &'a arrow_array::Int32Array,
+        values: &'a arrow_array::StringArray,
+        values_ref: &'a arrow_array::ArrayRef,
+    },
+    Plain(&'a arrow_array::StringArray),
+}
+
+/// Series resolution state that survives across the batches of one block scan.
+///
+/// A row's series is `(labels dictionary key, service dictionary key)`. While
+/// the reader keeps handing out the same dictionaries, a series' label set is
+/// parsed - and the filter evaluated - once for the whole block instead of once
+/// per batch (let alone once per row).
+struct SeriesResolver {
+    /// Dictionaries the cached slots were computed against. Holding the arrays
+    /// keeps them alive, so a pointer match really is the same dictionary and
+    /// not a freed one whose address was reused.
+    labels_dict: Option<arrow_array::ArrayRef>,
+    svc_dict: Option<arrow_array::ArrayRef>,
+    slots: ahash::AHashMap<u64, Option<crate::LabelSet>>,
+    filter: Option<SeriesFilter>,
+}
+
+impl SeriesResolver {
+    fn new(filter: Option<SeriesFilter>) -> Self {
+        Self {
+            labels_dict: None,
+            svc_dict: None,
+            slots: ahash::AHashMap::new(),
+            filter,
+        }
+    }
+
+    fn rebind(&mut self, labels: &arrow_array::ArrayRef, svc: &arrow_array::ArrayRef) {
+        let same = matches!(
+            (&self.labels_dict, &self.svc_dict),
+            (Some(l), Some(s)) if Arc::ptr_eq(l, labels) && Arc::ptr_eq(s, svc)
+        );
+        if !same {
+            self.slots.clear();
+            self.labels_dict = Some(Arc::clone(labels));
+            self.svc_dict = Some(Arc::clone(svc));
+        }
+    }
+
+    /// Builds the series' label set (merging in `service.name`) and applies the
+    /// filter; `None` means the series is rejected.
+    fn build(&self, labels_json: &str, svc: &str) -> Result<Option<crate::LabelSet>> {
+        let mut l = crate::LabelSet::from_json(labels_json)?;
+        if !svc.is_empty() {
+            l = l.with("service.name", svc);
+        }
+        Ok(match &self.filter {
+            Some(f) if !f(&l) => None,
+            _ => Some(l),
+        })
+    }
+}
 
 /// Reads and filters data points from Parquet files.
 pub struct Scanner;
@@ -106,6 +301,32 @@ impl Scanner {
         end_ns: i64,
         service_name: Option<&str>,
     ) -> Result<Vec<DataPoint>> {
+        let mut scan = Self::scan_filtered(
+            blocks,
+            metric_name,
+            start_ns,
+            end_ns,
+            service_name.map(|s| s.to_string()),
+            None,
+        )
+        .await?;
+        scan.points.sort_by_key(|p| p.timestamp_ns);
+        Ok(scan.points)
+    }
+
+    /// As [`Self::scan`], but series rejected by `filter` are dropped inside the
+    /// scan, so their rows are never turned into points.
+    ///
+    /// The returned points are **not** sorted across blocks; callers that need
+    /// order sort per series, which is far cheaper than sorting everything.
+    pub async fn scan_filtered(
+        blocks: Vec<BlockMetadata>,
+        metric_name: String,
+        start_ns: i64,
+        end_ns: i64,
+        service_name: Option<String>,
+        filter: Option<SeriesFilter>,
+    ) -> Result<MetricScan> {
         let start_time = std::time::Instant::now();
         let block_count = blocks.len();
         tracing::debug!(
@@ -119,8 +340,8 @@ impl Scanner {
         let mut tasks = Vec::new();
         for block in blocks.into_iter().take(MAX_BLOCKS) {
             let m_name = metric_name.clone();
-            // Owned so the blocking closure is 'static.
-            let svc_name = service_name.map(|s| s.to_string());
+            let svc_name = service_name.clone();
+            let filter = filter.clone();
             let permit = sem
                 .clone()
                 .acquire_owned()
@@ -128,24 +349,35 @@ impl Scanner {
                 .map_err(|e| Error::Internal(e.to_string()))?;
             tasks.push(tokio::task::spawn_blocking(move || {
                 let _permit = permit;
-                Self::scan_block(block, m_name, start_ns, end_ns, svc_name.as_deref())
+                Self::scan_block_filtered(
+                    block,
+                    &m_name,
+                    start_ns,
+                    end_ns,
+                    svc_name.as_deref(),
+                    filter,
+                )
             }));
         }
 
-        let mut all_points = Vec::new();
+        let mut out = MetricScan::default();
         for task in tasks {
-            let points = task.await.map_err(|e| Error::Internal(e.to_string()))??;
-            all_points.extend(points);
+            let part = task.await.map_err(|e| Error::Internal(e.to_string()))??;
+            out.rows_considered += part.rows_considered;
+            if out.points.is_empty() {
+                out.points = part.points;
+            } else {
+                out.points.extend(part.points);
+            }
         }
-        all_points.sort_by_key(|p| p.timestamp_ns);
         tracing::debug!(
             metric = %metric_name,
             blocks = block_count,
-            points = all_points.len(),
+            points = out.points.len(),
             duration_ms = start_time.elapsed().as_millis(),
             "scan complete"
         );
-        Ok(all_points)
+        Ok(out)
     }
 
     pub fn scan_block(
@@ -155,29 +387,25 @@ impl Scanner {
         end_ns: i64,
         service_name: Option<&str>,
     ) -> Result<Vec<DataPoint>> {
-        let file = match File::open(&meta.path) {
-            Ok(f) => f,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                tracing::warn!("Block file not found, skipping: {:?}", meta.path);
-                return Ok(Vec::new());
-            }
-            Err(e) => return Err(Error::Io(e)),
-        };
-
-        // Metadata is kept, not just the builder: bloom filters and the column
-        // index live on it, and both prune row groups before any page is
-        // decoded.
-        let meta = ArrowReaderMetadata::load(
-            &file,
-            // The page index is what makes column- and page-level pruning
-            // possible; without it only row-group statistics exist. `Optional`
-            // rather than `Required`, because blocks written before bloom
-            // filters and page statistics were added have no page index and
-            // must still be readable.
-            ArrowReaderOptions::new().with_page_index_policy(PageIndexPolicy::Optional),
+        Ok(
+            Self::scan_block_filtered(meta, &metric_name, start_ns, end_ns, service_name, None)?
+                .points,
         )
-        .map_err(|e| Error::Parquet(e.to_string()))?;
-        let reader_builder = ParquetRecordBatchReaderBuilder::new_with_metadata(file, meta.clone());
+    }
+
+    /// Scans one block. See [`Self::scan_filtered`].
+    pub fn scan_block_filtered(
+        meta: BlockMetadata,
+        metric_name: &str,
+        start_ns: i64,
+        end_ns: i64,
+        service_name: Option<&str>,
+        filter: Option<SeriesFilter>,
+    ) -> Result<MetricScan> {
+        let Some((file, meta)) = open_block(&meta.path)? else {
+            return Ok(MetricScan::default());
+        };
+        let reader_builder = ParquetRecordBatchReaderBuilder::new_with_metadata(file, meta);
 
         // Skip row groups whose timestamp statistics cannot overlap the query
         // window: on a multi-row-group block this turns "decode the block" into
@@ -189,7 +417,7 @@ impl Scanner {
         // Then narrow by value. Time statistics alone cannot help here: a block
         // interleaves every metric it holds, so every row group in the window
         // matches and all of them get decoded.
-        groups = row_groups_matching_value(&reader_builder, &groups, "metric_name", &metric_name);
+        groups = row_groups_matching_value(&reader_builder, &groups, "metric_name", metric_name);
         // Rows are written grouped by (metric, resource), so `service_name`
         // statistics are exact per row group too. Pruning on service is what a
         // `{service.name="api"}` selector needs once the metric has narrowed
@@ -199,7 +427,7 @@ impl Scanner {
             groups = row_groups_matching_value(&reader_builder, &groups, "service_name", service);
         }
         if groups.is_empty() {
-            return Ok(Vec::new());
+            return Ok(MetricScan::default());
         }
         // Read only the seven columns this path decodes; the other eight are
         // per-row data a range query never touches.
@@ -210,16 +438,16 @@ impl Scanner {
         let reader = reader_builder
             .with_row_groups(groups)
             .with_projection(mask)
+            .with_batch_size(SCAN_BATCH_ROWS)
             .build()
             .map_err(|e| Error::Parquet(e.to_string()))?;
 
-        let mut points = Vec::new();
+        let mut out = MetricScan::default();
+        let mut resolver = SeriesResolver::new(filter);
 
         for record_batch in reader {
             let record_batch = record_batch.map_err(|e| Error::Parquet(e.to_string()))?;
 
-            // Cache keys borrow from this chunk — recreate per chunk.
-            let mut labels_cache: HashMap<(&str, &str), crate::LabelSet> = HashMap::new();
             // Resolved by name because the projection renumbers positions.
             let [c_ts, c_name, c_svc, c_labels, c_vf, c_vi, c_vc] =
                 metric_scan_indices(&record_batch.schema())?;
@@ -238,11 +466,6 @@ impl Scanner {
                 .as_any()
                 .downcast_ref::<arrow_array::StringArray>()
                 .ok_or_else(|| Error::Arrow("Invalid metric_name values".into()))?;
-            let labels_col = record_batch
-                .column(c_labels)
-                .as_any()
-                .downcast_ref::<arrow_array::StringArray>()
-                .ok_or_else(|| Error::Arrow("Invalid labels column".into()))?;
             let svc_arr = record_batch
                 .column(c_svc)
                 .as_any()
@@ -253,6 +476,28 @@ impl Scanner {
                 .as_any()
                 .downcast_ref::<arrow_array::StringArray>()
                 .ok_or_else(|| Error::Arrow("Invalid service_name values".into()))?;
+            let labels_col = {
+                let col = record_batch.column(c_labels);
+                match col
+                    .as_any()
+                    .downcast_ref::<arrow_array::DictionaryArray<arrow_array::types::Int32Type>>()
+                {
+                    Some(d) => LabelsColumn::Dict {
+                        keys: d.keys(),
+                        values: d
+                            .values()
+                            .as_any()
+                            .downcast_ref::<arrow_array::StringArray>()
+                            .ok_or_else(|| Error::Arrow("Invalid labels values".into()))?,
+                        values_ref: d.values(),
+                    },
+                    None => LabelsColumn::Plain(
+                        col.as_any()
+                            .downcast_ref::<arrow_array::StringArray>()
+                            .ok_or_else(|| Error::Arrow("Invalid labels column".into()))?,
+                    ),
+                }
+            };
             let vf_arr = record_batch
                 .column(c_vf)
                 .as_any()
@@ -269,55 +514,74 @@ impl Scanner {
                 .downcast_ref::<arrow_array::StringArray>()
                 .ok_or_else(|| Error::Arrow("Invalid value_complex column".into()))?;
 
+            // Which dictionary entries carry the requested metric: one compare
+            // per distinct name, then a table lookup per row.
+            let name_ok: Vec<bool> = (0..name_values.len())
+                .map(|i| metric_name.is_empty() || name_values.value(i) == metric_name)
+                .collect();
+
+            match &labels_col {
+                LabelsColumn::Dict { values_ref, .. } => {
+                    resolver.rebind(values_ref, svc_arr.values());
+                }
+                LabelsColumn::Plain(_) => {
+                    resolver.slots.clear();
+                    resolver.labels_dict = None;
+                    resolver.svc_dict = None;
+                }
+            }
+            let mut plain_cache: HashMap<(&str, &str), Option<crate::LabelSet>> = HashMap::new();
+
             for row in 0..record_batch.num_rows() {
                 // Cheap filters first: no allocations unless the row matches.
                 let t = ts_arr.value(row);
                 if t < start_ns || t > end_ns {
                     continue;
                 }
-
-                let name = name_values.value(name_arr.keys().value(row) as usize);
-                if !metric_name.is_empty() && name != metric_name {
+                if !name_ok[name_arr.keys().value(row) as usize] {
                     continue;
                 }
+                out.rows_considered += 1;
 
-                let labels_json = labels_col.value(row);
-                let svc_json = if svc_arr.is_null(row) {
-                    ""
+                let svc_key = if svc_arr.is_null(row) {
+                    None
                 } else {
-                    svc_values.value(svc_arr.keys().value(row) as usize)
+                    Some(svc_arr.keys().value(row))
                 };
-                let labels = match labels_cache.get(&(labels_json, svc_json)) {
-                    Some(l) => l.clone(),
-                    None => {
-                        if labels_cache.len() >= LABEL_CACHE_MAX {
-                            labels_cache.clear();
-                        }
-                        // Merge the dedicated service_name column back as the
-                        // `service.name` label so label matchers can select on it
-                        // (mirrors StorageModel::row_to_metric's inject_correlation).
-                        let mut l = crate::LabelSet::from_json(labels_json)?;
-                        if !svc_json.is_empty() {
-                            if let Ok(svc) = crate::LabelSet::try_from_iter(vec![(
-                                "service.name",
-                                svc_json.to_string(),
-                            )]) {
-                                l = l.merge(&svc);
+                let slot: &Option<crate::LabelSet> = match &labels_col {
+                    LabelsColumn::Dict { keys, values, .. } => {
+                        let lk = keys.value(row);
+                        let id = ((lk as u32 as u64) << 32)
+                            | svc_key.map_or(u32::MAX, |k| k as u32) as u64;
+                        match resolver.slots.get(&id) {
+                            Some(s) => s,
+                            None => {
+                                let svc = svc_key.map_or("", |k| svc_values.value(k as usize));
+                                let built = resolver.build(values.value(lk as usize), svc)?;
+                                resolver.slots.entry(id).or_insert(built)
                             }
                         }
-                        labels_cache.insert((labels_json, svc_json), l.clone());
-                        l
+                    }
+                    LabelsColumn::Plain(col) => {
+                        let labels_json = col.value(row);
+                        let svc = svc_key.map_or("", |k| svc_values.value(k as usize));
+                        match plain_cache.entry((labels_json, svc)) {
+                            std::collections::hash_map::Entry::Occupied(o) => &*o.into_mut(),
+                            std::collections::hash_map::Entry::Vacant(v) => {
+                                &*v.insert(resolver.build(labels_json, svc)?)
+                            }
+                        }
                     }
                 };
-
-                points.push(DataPoint {
+                let Some(labels) = slot else { continue };
+                out.points.push(DataPoint {
                     timestamp_ns: t,
                     value: decode_value(Some(vf_arr), Some(vi_arr), vc_arr, row)?,
-                    labels,
+                    labels: labels.clone(),
                 });
             }
         }
-        Ok(points)
+        Ok(out)
     }
 
     /// Scans a set of blocks for log records matching a time range.
@@ -807,4 +1071,66 @@ fn decode_value(
     }
     let complex = vc.value(row);
     serde_json::from_str(complex).map_err(Error::Serde)
+}
+
+#[cfg(test)]
+mod dictionary_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+    use super::*;
+    use crate::{DataPoint, LabelSet, Metric, MetricKind, MetricValue, StorageModel};
+    use parquet::arrow::ArrowWriter;
+
+    /// The `labels` column is requested as a dictionary; if the override were
+    /// ever silently rejected the scan would still be correct but lose its fast
+    /// path, so assert it is the type the reader hands back.
+    #[test]
+    fn labels_are_read_as_a_dictionary() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("b.parquet");
+        let metric = Metric {
+            name: "m".into(),
+            kind: MetricKind::Gauge,
+            data_points: (1..=50)
+                .map(|i| {
+                    DataPoint::new(
+                        i,
+                        MetricValue::Double(i as f64),
+                        LabelSet::try_from_iter(vec![("host", format!("h{}", i % 3))]).unwrap(),
+                    )
+                    .unwrap()
+                })
+                .collect(),
+            ..Default::default()
+        };
+        let chunk = StorageModel::metrics_to_chunk(&[metric]).unwrap();
+        let mut w =
+            ArrowWriter::try_new(File::create(&path).unwrap(), chunk.schema(), None).unwrap();
+        w.write(&chunk).unwrap();
+        w.close().unwrap();
+
+        let (file, meta) = open_block(&path).unwrap().unwrap();
+        let idx = meta.schema().index_of("labels").unwrap();
+        assert!(
+            matches!(
+                meta.schema().field(idx).data_type(),
+                arrow_schema::DataType::Dictionary(_, _)
+            ),
+            "labels should be requested as a dictionary, got {:?}",
+            meta.schema().field(idx).data_type()
+        );
+        let mut reader = ParquetRecordBatchReaderBuilder::new_with_metadata(file, meta)
+            .build()
+            .unwrap();
+        let batch = reader.next().unwrap().unwrap();
+        assert!(matches!(
+            batch
+                .column(batch.schema().index_of("labels").unwrap())
+                .data_type(),
+            arrow_schema::DataType::Dictionary(_, _)
+        ));
+
+        // A second open is served from the footer cache and behaves the same.
+        let (_, again) = open_block(&path).unwrap().unwrap();
+        assert_eq!(again.schema().as_ref(), batch.schema_ref().as_ref());
+    }
 }
