@@ -3,6 +3,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 use super::*;
 use parqtel_core::{LabelSet, LogRecord};
+use std::collections::HashMap;
 
 fn log(body: &str, sev: &str, sev_num: i32, svc: &str) -> LogRecord {
     LogRecord {
