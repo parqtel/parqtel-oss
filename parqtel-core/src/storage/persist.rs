@@ -126,6 +126,7 @@ mod tests {
             label_names: HashSet::new(),
             label_values: Default::default(),
             signal_type: SignalType::Metrics,
+            wal_range: None,
         }
     }
 

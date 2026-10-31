@@ -70,14 +70,9 @@ impl Stage for MetricExtractor {
                 ExtractedMetricType::Gauge | ExtractedMetricType::Counter => {
                     MetricValue::Double(val)
                 }
-                ExtractedMetricType::Histogram => MetricValue::Histogram {
-                    count: 1,
-                    sum: val,
-                    min: Some(val),
-                    max: Some(val),
-                    boundaries: vec![],
-                    counts: vec![1],
-                },
+                ExtractedMetricType::Histogram => {
+                    MetricValue::histogram(1, val, Some(val), Some(val), vec![], vec![1])
+                }
             };
 
             let dp = DataPoint {

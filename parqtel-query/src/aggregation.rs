@@ -119,14 +119,8 @@ pub fn aggregate(
 
         AggregationOp::HistogramQuantile => {
             let q = quantile?;
-            if let (
-                _,
-                MetricValue::Histogram {
-                    boundaries, counts, ..
-                },
-            ) = &points[points.len() - 1]
-            {
-                Some(estimate_quantile(boundaries, counts, q))
+            if let (_, MetricValue::Histogram(h)) = &points[points.len() - 1] {
+                Some(estimate_quantile(&h.boundaries, &h.counts, q))
             } else {
                 None
             }
@@ -171,8 +165,8 @@ fn v_to_float(v: &MetricValue) -> f64 {
     match v {
         MetricValue::Double(f) => *f,
         MetricValue::Int(i) => *i as f64,
-        MetricValue::Histogram { sum, .. } => *sum,
-        MetricValue::Summary { sum, .. } => *sum,
+        MetricValue::Histogram(h) => h.sum,
+        MetricValue::Summary(s) => s.sum,
     }
 }
 

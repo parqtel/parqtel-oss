@@ -1,14 +1,23 @@
+pub mod block_file;
 pub mod compactor;
 pub mod index;
+pub mod log_index;
 pub mod persist;
 pub mod retention;
 pub mod scanner;
+pub mod series_index;
 
+pub use block_file::{footer_metadata, write_block_file, FooterIndex};
 pub use compactor::Compactor;
-pub use index::{reconcile, BlockIndex, BlockIndexStore, PendingIndex};
+pub use index::{advance_wal_commit, reconcile, BlockIndex, BlockIndexStore, PendingIndex};
+pub use log_index::{LogIndexBuilder, LogIndexTable, LogSkipIndex, LOG_INDEX_FOOTER_KEY};
 pub use persist::{persist_blocking, persist_once, run_index_persist_loop};
 pub use retention::RetentionPolicy;
-pub use scanner::{LogRowFilter, LogScanStats, Scanner};
+pub use scanner::{LogColumnPrefilter, LogRowFilter, LogScanStats, Scanner};
+pub use series_index::{
+    SeriesIndex, SeriesSelector, SeriesTable, SeriesTableBuilder, ValueTest,
+    SERIES_INDEX_FOOTER_KEY,
+};
 
 use crate::config::BlockConfig;
 use std::sync::Arc;
@@ -192,6 +201,7 @@ mod tests {
                 BTreeSet::from(["200".to_string()]),
             )]),
             signal_type: SignalType::Traces,
+            wal_range: None,
         }
     }
 
@@ -283,6 +293,7 @@ mod tests {
                     BTreeSet::from([format!("h{b}")]),
                 )]),
                 signal_type: SignalType::Metrics,
+                wal_range: None,
             };
             meta.size_bytes = fs::metadata(&meta.path).map(|m| m.len()).unwrap_or(0);
             index.add(meta);
@@ -428,6 +439,7 @@ mod tests {
             label_names: HashSet::new(),
             label_values: Default::default(),
             signal_type: SignalType::Metrics,
+            wal_range: None,
         });
         assert_eq!(index.total_blocks(), 1);
 
@@ -510,6 +522,7 @@ mod tests {
             label_names: HashSet::from(["l1".into()]),
             label_values: Default::default(),
             signal_type: SignalType::Metrics,
+            wal_range: None,
         };
         let results = Scanner::scan(vec![b1], "m1".into(), 0, 300, None)
             .await
@@ -530,6 +543,7 @@ mod tests {
             label_names: HashSet::new(),
             label_values: Default::default(),
             signal_type: SignalType::Logs,
+            wal_range: None,
         };
         let results = Scanner::scan_logs(vec![b1], 0, 300).await.unwrap();
         assert!(results.is_empty());
@@ -549,6 +563,7 @@ mod tests {
             label_names: HashSet::from(["l1".into()]),
             label_values: Default::default(),
             signal_type: SignalType::Metrics,
+            wal_range: None,
         });
 
         // `add` is in-memory only; persistence is the store's job.
@@ -575,6 +590,7 @@ mod tests {
             label_names: HashSet::new(),
             label_values: Default::default(),
             signal_type: SignalType::Metrics,
+            wal_range: None,
         });
         index.add(BlockMetadata {
             path: dir.path().join("b2.parquet"),
@@ -586,6 +602,7 @@ mod tests {
             label_names: HashSet::new(),
             label_values: Default::default(),
             signal_type: SignalType::Metrics,
+            wal_range: None,
         });
 
         assert_eq!(index.query(150, 250, None).len(), 1);
@@ -608,6 +625,7 @@ mod tests {
             label_names: HashSet::new(),
             label_values: Default::default(),
             signal_type: SignalType::Metrics,
+            wal_range: None,
         });
         assert_eq!(index.total_blocks(), 1);
         index.remove(&path);
@@ -628,6 +646,7 @@ mod tests {
             label_names: HashSet::from(["env".into()]),
             label_values: Default::default(),
             signal_type: SignalType::Metrics,
+            wal_range: None,
         });
         assert_eq!(index.total_rows(), 10);
         assert_eq!(index.total_bytes(), 500);
@@ -1044,6 +1063,7 @@ mod tests {
             label_names: HashSet::new(),
             label_values: Default::default(),
             signal_type: SignalType::Metrics,
+            wal_range: None,
         };
 
         let projected =
@@ -1224,6 +1244,7 @@ mod tests {
             label_names: HashSet::from(["host".into()]),
             label_values: Default::default(),
             signal_type: SignalType::Metrics,
+            wal_range: None,
         };
 
         let all = Scanner::scan(vec![meta.clone()], "prune.cpu".into(), 0, i64::MAX, None)
@@ -1244,6 +1265,135 @@ mod tests {
         let got: Vec<i64> = pruned.iter().map(|p| p.timestamp_ns).collect();
         assert_eq!(got, expected);
         assert_eq!(got.len(), 100);
+    }
+
+    /// A block big enough to span several read batches, with interleaved
+    /// series from two services, written with Parquet dictionary encoding on,
+    /// as production blocks are.
+    fn filtered_scan_block(dir: &std::path::Path, rows: usize) -> BlockMetadata {
+        let path = dir.join("filtered.parquet");
+        let svc = |name: &str| LabelSet::try_from_iter(vec![("service.name", name)]).unwrap();
+        let mk = |service: &str, parity: usize| Metric {
+            name: "scan.cpu".into(),
+            kind: MetricKind::Gauge,
+            resource_attributes: svc(service),
+            data_points: (0..rows)
+                .filter(|i| i % 2 == parity)
+                .map(|i| {
+                    DataPoint::new(
+                        i as i64 + 1,
+                        MetricValue::Double(i as f64),
+                        LabelSet::try_from_iter(vec![
+                            ("host", format!("h{}", i % 37)),
+                            ("env", if i % 3 == 0 { "prod" } else { "stage" }.to_string()),
+                        ])
+                        .unwrap(),
+                    )
+                    .unwrap()
+                })
+                .collect(),
+            ..Default::default()
+        };
+        // Another metric in the same block that a scan for `scan.cpu` must skip.
+        let other = Metric {
+            name: "scan.other".into(),
+            kind: MetricKind::Gauge,
+            data_points: vec![
+                DataPoint::new(5, MetricValue::Double(1.0), LabelSet::default()).unwrap(),
+            ],
+            ..Default::default()
+        };
+        write_metrics_parquet_rg(&path, &[mk("a", 0), mk("b", 1), other], 5_000);
+        BlockMetadata {
+            path,
+            start_timestamp_ns: 1,
+            end_timestamp_ns: rows as i64,
+            row_count: rows + 1,
+            size_bytes: 0,
+            metric_names: HashSet::from(["scan.cpu".into(), "scan.other".into()]),
+            label_names: HashSet::new(),
+            label_values: Default::default(),
+            signal_type: SignalType::Metrics,
+            wal_range: None,
+        }
+    }
+
+    /// Pushing a series predicate into the scan must give exactly the rows an
+    /// unfiltered scan gives for the matching series - same values, same labels
+    /// (including the merged-back `service.name`) - and must report the
+    /// unfiltered row count so "points scanned" keeps its meaning.
+    #[tokio::test]
+    async fn test_filtered_scan_equals_unfiltered_scan_then_filter() {
+        let dir = tempdir().unwrap();
+        let meta = filtered_scan_block(dir.path(), 30_000);
+
+        let all = Scanner::scan(vec![meta.clone()], "scan.cpu".into(), 0, i64::MAX, None)
+            .await
+            .unwrap();
+        assert_eq!(all.len(), 30_000);
+        assert!(all
+            .iter()
+            .all(|p| p.labels.get("service.name").is_some() && p.labels.get("host").is_some()));
+
+        let pred: scanner::SeriesFilter = Arc::new(|l: &LabelSet| {
+            l.get("host") == Some("h5") && l.get("service.name") == Some("a")
+        });
+        let got = Scanner::scan_filtered(
+            vec![meta.clone()],
+            "scan.cpu".into(),
+            0,
+            i64::MAX,
+            SeriesSelector::all().with_filter(Some(pred.clone())),
+        )
+        .await
+        .unwrap();
+
+        let mut expected: Vec<_> = all.iter().filter(|p| pred(&p.labels)).cloned().collect();
+        let mut got_points = got.points;
+        expected.sort_by_key(|p| p.timestamp_ns);
+        got_points.sort_by_key(|p| p.timestamp_ns);
+        assert!(!expected.is_empty() && expected.len() < all.len());
+        assert_eq!(got_points, expected);
+        assert_eq!(got.rows_considered, 30_000);
+
+        // A predicate nothing satisfies yields no points but still counts rows.
+        let none = Scanner::scan_filtered(
+            vec![meta],
+            "scan.cpu".into(),
+            0,
+            i64::MAX,
+            SeriesSelector::all().with_filter(Some(Arc::new(|_: &LabelSet| false))),
+        )
+        .await
+        .unwrap();
+        assert!(none.points.is_empty());
+        assert_eq!(none.rows_considered, 30_000);
+    }
+
+    /// The time window and the service prune apply before the series filter,
+    /// and `rows_considered` counts only rows that survive them.
+    #[tokio::test]
+    async fn test_filtered_scan_counts_rows_inside_window_and_service() {
+        let dir = tempdir().unwrap();
+        let meta = filtered_scan_block(dir.path(), 30_000);
+        let got = Scanner::scan_filtered(
+            vec![meta],
+            "scan.cpu".into(),
+            1_001,
+            2_000,
+            SeriesSelector::all().with_service(Some("a".into())),
+        )
+        .await
+        .unwrap();
+        // Service "a" holds the even offsets i, stored with timestamp i + 1,
+        // so the odd timestamps in the window.
+        assert_eq!(got.rows_considered, 500);
+        assert_eq!(got.points.len(), 500);
+        assert!(got
+            .points
+            .iter()
+            .all(|p| p.labels.get("service.name") == Some("a")
+                && (1_001..=2_000).contains(&p.timestamp_ns)));
     }
 
     #[tokio::test]
@@ -1281,11 +1431,402 @@ mod tests {
             label_names: HashSet::from(["host".into()]),
             label_values: Default::default(),
             signal_type: SignalType::Metrics,
+            wal_range: None,
         };
         let points = Scanner::scan(vec![meta], "cpu".into(), 0, 3000, None)
             .await
             .unwrap();
         assert_eq!(points.len(), 2);
+    }
+
+    /// Rejecting rows on the time, severity and body columns before decoding must
+    /// not change what a log scan returns, counts or volume buckets - only how
+    /// much gets decoded. The row filter still decides every row that passes.
+    #[tokio::test]
+    async fn test_log_prefilter_does_not_change_scan_results() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("prefilter_logs.parquet");
+        let logs: Vec<LogRecord> = (0..20_000i64)
+            .map(|i| {
+                LogRecord::new(
+                    i + 1,
+                    i + 1,
+                    [5, 9, 9, 13, 17][(i % 5) as usize],
+                    "X".into(),
+                    format!(
+                        "Request {i} {} path=/a",
+                        if i % 7 == 0 { "TIMEOUT upstream" } else { "ok" }
+                    ),
+                    LabelSet::try_from_iter(vec![("pod", format!("p{}", i % 11))]).unwrap(),
+                    LabelSet::try_from_iter(vec![("service.name", "api")]).unwrap(),
+                    [0u8; 16],
+                    [0u8; 8],
+                    0,
+                    "".into(),
+                    "".into(),
+                )
+            })
+            .collect();
+        write_logs_parquet(&path, &logs);
+        let meta = BlockMetadata {
+            path,
+            start_timestamp_ns: 1,
+            end_timestamp_ns: 20_000,
+            row_count: logs.len(),
+            size_bytes: 0,
+            metric_names: HashSet::new(),
+            label_names: HashSet::new(),
+            label_values: Default::default(),
+            signal_type: SignalType::Logs,
+            wal_range: None,
+        };
+
+        // The row filter is the full predicate: severity, body, and a label test
+        // the prefilter knows nothing about.
+        let filter: LogRowFilter = Arc::new(|l: &LogRecord| {
+            l.severity_number >= 13
+                && l.body.to_ascii_lowercase().contains("timeout")
+                && l.attributes.get("pod") != Some("p3")
+        });
+        let pre = scanner::LogColumnPrefilter {
+            min_severity: Some(13),
+            body_contains_lower: vec!["timeout".into()],
+            exact: false,
+            ..Default::default()
+        };
+
+        for (start, end, keep, newest) in [
+            (0, i64::MAX, usize::MAX, false),
+            (5_000, 15_000, 50, true),
+            (5_000, 15_000, 50, false),
+            (19_990, 40_000, 10, true),
+        ] {
+            let (plain, plain_stats) = Scanner::scan_logs_counted_filtered(
+                vec![meta.clone()],
+                start,
+                end,
+                keep,
+                newest,
+                Some(filter.clone()),
+            )
+            .await
+            .unwrap();
+            let (fast, fast_stats) = Scanner::scan_logs_counted_prefiltered(
+                vec![meta.clone()],
+                start,
+                end,
+                keep,
+                newest,
+                Some(filter.clone()),
+                Some(pre.clone()),
+            )
+            .await
+            .unwrap();
+            let stamps = |v: &[LogRecord]| v.iter().map(|l| l.timestamp_ns).collect::<Vec<_>>();
+            assert_eq!(
+                stamps(&fast),
+                stamps(&plain),
+                "rows for window {start}..{end}"
+            );
+            assert_eq!(fast_stats.total_matched, plain_stats.total_matched);
+            assert_eq!(fast_stats.volume_buckets, plain_stats.volume_buckets);
+            assert!(plain_stats.total_matched > 0 || start == 19_990);
+        }
+    }
+
+    /// When the prefilter is the whole predicate the scan counts matches from three
+    /// columns and decodes the rest only for the rows it returns. The answer -
+    /// the rows themselves, the count and the volume buckets - must be the one the
+    /// row-by-row scan gives, over several row groups and windows.
+    #[tokio::test]
+    async fn test_exact_log_prefilter_matches_row_by_row_scan() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("exact_logs.parquet");
+        let logs: Vec<LogRecord> = (0..30_000i64)
+            .map(|i| {
+                LogRecord::new(
+                    i + 1,
+                    i + 1,
+                    [5, 9, 9, 13, 17][(i % 5) as usize],
+                    "X".into(),
+                    format!(
+                        "Request {i} {} path=/a",
+                        if i % 7 == 0 { "TIMEOUT upstream" } else { "ok" }
+                    ),
+                    LabelSet::try_from_iter(vec![("pod", format!("p{}", i % 11))]).unwrap(),
+                    LabelSet::try_from_iter(vec![("service.name", "api")]).unwrap(),
+                    [0u8; 16],
+                    [0u8; 8],
+                    0,
+                    "".into(),
+                    "".into(),
+                )
+            })
+            .collect();
+        // Small row groups, so selections cross group boundaries.
+        let chunk = StorageModel::logs_to_chunk(&logs).unwrap();
+        let mut w = ArrowWriter::try_new(
+            fs::File::create(&path).unwrap(),
+            chunk.schema(),
+            Some(
+                WriterProperties::builder()
+                    .set_max_row_group_row_count(Some(4_000))
+                    .build(),
+            ),
+        )
+        .unwrap();
+        w.write(&chunk).unwrap();
+        w.close().unwrap();
+        let meta = BlockMetadata {
+            path,
+            start_timestamp_ns: 1,
+            end_timestamp_ns: 30_000,
+            row_count: logs.len(),
+            size_bytes: 0,
+            metric_names: HashSet::new(),
+            label_names: HashSet::new(),
+            label_values: Default::default(),
+            signal_type: SignalType::Logs,
+            wal_range: None,
+        };
+        let filter: LogRowFilter = Arc::new(|l: &LogRecord| {
+            l.severity_number >= 13 && l.body.to_ascii_lowercase().contains("timeout")
+        });
+        let exact = scanner::LogColumnPrefilter {
+            min_severity: Some(13),
+            body_contains_lower: vec!["timeout".into()],
+            exact: true,
+            ..Default::default()
+        };
+        for (start, end, keep, newest) in [
+            (0, i64::MAX, usize::MAX, false),
+            (0, i64::MAX, 100, true),
+            (0, i64::MAX, 100, false),
+            (7_000, 21_000, 37, true),
+            (7_000, 21_000, 37, false),
+            (29_990, 40_000, 5, true),
+            (50_000, 60_000, 5, true),
+            (1, 30_000, 0, true),
+        ] {
+            let (plain, plain_stats) = Scanner::scan_logs_counted_filtered(
+                vec![meta.clone()],
+                start,
+                end,
+                keep,
+                newest,
+                Some(filter.clone()),
+            )
+            .await
+            .unwrap();
+            let (fast, fast_stats) = Scanner::scan_logs_counted_prefiltered(
+                vec![meta.clone()],
+                start,
+                end,
+                keep,
+                newest,
+                Some(filter.clone()),
+                Some(exact.clone()),
+            )
+            .await
+            .unwrap();
+            assert_eq!(fast, plain, "rows for window {start}..{end} keep {keep}");
+            assert_eq!(fast_stats.total_matched, plain_stats.total_matched);
+            assert_eq!(fast_stats.volume_buckets, plain_stats.volume_buckets);
+        }
+    }
+
+    /// A log block read through its skip index returns exactly what the same rows
+    /// return without one - rows, count and volume buckets - for rare, common and
+    /// absent needles, attribute equalities, severities and time windows, over
+    /// several row groups and granules.
+    #[tokio::test]
+    async fn test_log_skip_index_does_not_change_scan_results() {
+        let dir = tempdir().unwrap();
+        const N: i64 = 30_000;
+        let logs: Vec<LogRecord> = (0..N)
+            .map(|i| {
+                let mut attrs = vec![("pod", format!("p{}", i % 11))];
+                if (9_000..9_100).contains(&i) {
+                    attrs.push(("zone", "z-special".to_string()));
+                }
+                LogRecord::new(
+                    i + 1,
+                    i + 1,
+                    [5, 9, 9, 13, 17][(i % 5) as usize],
+                    "X".into(),
+                    if i == 21_345 {
+                        "Request RareCase needle-xyz path=/a".to_string()
+                    } else {
+                        format!(
+                            "Request {i} {} path=/a",
+                            if i % 7 == 0 { "TIMEOUT upstream" } else { "ok" }
+                        )
+                    },
+                    LabelSet::try_from_iter(attrs).unwrap(),
+                    LabelSet::try_from_iter(vec![("service.name", "api")]).unwrap(),
+                    if (17_000..17_050).contains(&i) {
+                        [0xab; 16]
+                    } else {
+                        [0u8; 16]
+                    },
+                    [0u8; 8],
+                    0,
+                    "".into(),
+                    "".into(),
+                )
+            })
+            .collect();
+        let meta_for = |path: std::path::PathBuf| BlockMetadata {
+            path,
+            start_timestamp_ns: 1,
+            end_timestamp_ns: N,
+            row_count: logs.len(),
+            size_bytes: 0,
+            metric_names: HashSet::new(),
+            label_names: HashSet::new(),
+            label_values: Default::default(),
+            signal_type: SignalType::Logs,
+            wal_range: None,
+        };
+
+        let plain_path = dir.path().join("plain.parquet");
+        let chunk = StorageModel::logs_to_chunk(&logs).unwrap();
+        let mut w = ArrowWriter::try_new(
+            fs::File::create(&plain_path).unwrap(),
+            chunk.schema(),
+            Some(
+                WriterProperties::builder()
+                    .set_max_row_group_row_count(Some(7_000))
+                    .build(),
+            ),
+        )
+        .unwrap();
+        w.write(&chunk).unwrap();
+        w.close().unwrap();
+
+        let indexed_path = dir.path().join("indexed.parquet");
+        let (chunk, table) = StorageModel::logs_to_block(&logs).unwrap();
+        write_block_file(
+            &indexed_path,
+            chunk,
+            "zstd",
+            None,
+            7_000,
+            None,
+            Some(FooterIndex::Logs(&table)),
+        )
+        .unwrap();
+        let (plain, indexed) = (meta_for(plain_path), meta_for(indexed_path));
+
+        type Case = (&'static str, LogRowFilter, scanner::LogColumnPrefilter);
+        let cases: Vec<Case> = vec![
+            (
+                "rare needle, exact",
+                Arc::new(|l: &LogRecord| l.body.to_ascii_lowercase().contains("needle-xyz")),
+                scanner::LogColumnPrefilter {
+                    body_contains_lower: vec!["needle-xyz".into()],
+                    exact: true,
+                    ..Default::default()
+                },
+            ),
+            (
+                "common needle and severity, exact",
+                Arc::new(|l: &LogRecord| {
+                    l.severity_number >= 13 && l.body.to_ascii_lowercase().contains("timeout")
+                }),
+                scanner::LogColumnPrefilter {
+                    min_severity: Some(13),
+                    body_contains_lower: vec!["timeout".into()],
+                    exact: true,
+                    ..Default::default()
+                },
+            ),
+            (
+                "absent needle",
+                Arc::new(|l: &LogRecord| l.body.contains("never-there")),
+                scanner::LogColumnPrefilter {
+                    body_contains_lower: vec!["never-there".into()],
+                    exact: true,
+                    ..Default::default()
+                },
+            ),
+            (
+                "rare attribute",
+                Arc::new(|l: &LogRecord| l.attributes.get("zone") == Some("z-special")),
+                scanner::LogColumnPrefilter {
+                    attr_equals: vec![("zone".into(), "z-special".into())],
+                    ..Default::default()
+                },
+            ),
+            (
+                "resource attribute and needle",
+                Arc::new(|l: &LogRecord| {
+                    l.resource_attributes.get("service.name") == Some("api")
+                        && l.body.to_ascii_lowercase().contains("request 2")
+                }),
+                scanner::LogColumnPrefilter {
+                    body_contains_lower: vec!["request 2".into()],
+                    attr_equals: vec![("service.name".into(), "api".into())],
+                    ..Default::default()
+                },
+            ),
+            (
+                "trace id",
+                Arc::new(|l: &LogRecord| l.trace_id == [0xab; 16]),
+                scanner::LogColumnPrefilter {
+                    attr_equals: vec![("trace_id".into(), "ab".repeat(16))],
+                    ..Default::default()
+                },
+            ),
+            (
+                "attribute in a different granule than the needle",
+                Arc::new(|l: &LogRecord| {
+                    l.attributes.get("zone") == Some("z-special")
+                        && l.body.to_ascii_lowercase().contains("needle-xyz")
+                }),
+                scanner::LogColumnPrefilter {
+                    body_contains_lower: vec!["needle-xyz".into()],
+                    attr_equals: vec![("zone".into(), "z-special".into())],
+                    ..Default::default()
+                },
+            ),
+        ];
+        for (label, filter, pre) in cases {
+            for (start, end, keep, newest) in [
+                (0, i64::MAX, usize::MAX, false),
+                (0, i64::MAX, 25, true),
+                (0, i64::MAX, 25, false),
+                (8_000, 22_000, 10, true),
+                (21_000, 22_000, 10, false),
+                (40_000, 50_000, 10, true),
+            ] {
+                let (want, want_stats) = Scanner::scan_logs_counted_filtered(
+                    vec![plain.clone()],
+                    start,
+                    end,
+                    keep,
+                    newest,
+                    Some(filter.clone()),
+                )
+                .await
+                .unwrap();
+                let (got, got_stats) = Scanner::scan_logs_counted_prefiltered(
+                    vec![indexed.clone()],
+                    start,
+                    end,
+                    keep,
+                    newest,
+                    Some(filter.clone()),
+                    Some(pre.clone()),
+                )
+                .await
+                .unwrap();
+                let ctx = format!("{label}, window {start}..{end}, keep {keep}, newest {newest}");
+                assert_eq!(got, want, "rows: {ctx}");
+                assert_eq!(got_stats.total_matched, want_stats.total_matched, "{ctx}");
+                assert_eq!(got_stats.volume_buckets, want_stats.volume_buckets, "{ctx}");
+            }
+        }
     }
 
     #[tokio::test]
@@ -1318,6 +1859,7 @@ mod tests {
             label_names: HashSet::from(["k".into()]),
             label_values: Default::default(),
             signal_type: SignalType::Logs,
+            wal_range: None,
         };
         let logs = Scanner::scan_logs(vec![meta], 0, 2000).await.unwrap();
         assert_eq!(logs.len(), 1);
@@ -1365,6 +1907,7 @@ mod tests {
             label_names: HashSet::new(),
             label_values: Default::default(),
             signal_type: SignalType::Metrics,
+            wal_range: None,
         });
         index.add(BlockMetadata {
             path: p2.clone(),
@@ -1376,6 +1919,7 @@ mod tests {
             label_names: HashSet::new(),
             label_values: Default::default(),
             signal_type: SignalType::Metrics,
+            wal_range: None,
         });
 
         let index = Arc::new(RwLock::new(index));
@@ -1389,6 +1933,91 @@ mod tests {
         assert_eq!(idx.blocks[0].row_count, 2);
         assert!(!p1.exists());
         assert!(!p2.exists());
+    }
+
+    /// A merged block is laid out series by series and carries its own series
+    /// table, whatever the sources looked like, so compaction never turns a
+    /// block that can answer a selector cheaply into one that cannot.
+    #[tokio::test]
+    async fn test_compaction_writes_a_series_table_for_the_merged_block() {
+        let dir = tempdir().unwrap();
+        let config = BlockConfig {
+            data_dir: dir.path().to_path_buf(),
+            compression: "uncompressed".into(),
+            ..Default::default()
+        };
+        let host = |h: &str| LabelSet::try_from_iter(vec![("host", h)]).unwrap();
+        let mut index = BlockIndex::new(dir.path());
+        for (name, base) in [("b1.parquet", 100i64), ("b2.parquet", 110)] {
+            let path = dir.path().join(name);
+            // Both sources interleave the two hosts.
+            let points: Vec<_> = (0..6)
+                .map(|i| {
+                    DataPoint::new(
+                        base + i as i64,
+                        MetricValue::Double((base + i as i64) as f64),
+                        host(if i % 2 == 0 { "h0" } else { "h1" }),
+                    )
+                    .unwrap()
+                })
+                .collect();
+            write_metrics_parquet(
+                &path,
+                &[Metric {
+                    name: "cpu".into(),
+                    kind: MetricKind::Gauge,
+                    data_points: points,
+                    ..Default::default()
+                }],
+            );
+            index.add(BlockMetadata {
+                path: path.clone(),
+                start_timestamp_ns: base,
+                end_timestamp_ns: base + 5,
+                row_count: 6,
+                size_bytes: fs::metadata(&path).unwrap().len(),
+                metric_names: HashSet::from(["cpu".into()]),
+                label_names: HashSet::new(),
+                label_values: Default::default(),
+                signal_type: SignalType::Metrics,
+                wal_range: None,
+            });
+        }
+        let index = Arc::new(RwLock::new(index));
+        let store = Arc::new(BlockIndexStore::at_path(dir.path().join("index.json")));
+        Compactor::compact_once(&index, &store, &config)
+            .await
+            .unwrap();
+        let merged = index.read().await.blocks[0].clone();
+        assert_eq!(merged.row_count, 12);
+
+        let file = fs::File::open(&merged.path).unwrap();
+        let builder =
+            parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(file).unwrap();
+        let text = builder
+            .metadata()
+            .file_metadata()
+            .key_value_metadata()
+            .and_then(|kv| kv.iter().find(|k| k.key == SERIES_INDEX_FOOTER_KEY))
+            .and_then(|k| k.value.clone())
+            .expect("merged block carries a series table");
+        let table =
+            SeriesIndex::from_table(&SeriesTable::from_footer_value(&text).unwrap()).unwrap();
+        // One entry per series, not one per source: 2 hosts, 6 rows each.
+        assert_eq!(table.series.len(), 2);
+        assert!(table.series.iter().all(|s| s.rows == 6));
+
+        let mut sel = SeriesSelector::all()
+            .with_filter(Some(Arc::new(|l: &LabelSet| l.get("host") == Some("h1"))));
+        sel.equals = vec![("host".into(), "h1".into())];
+        let got = Scanner::scan_block_filtered(merged, "cpu", 0, i64::MAX, &sel).unwrap();
+        assert_eq!(got.rows_considered, 6);
+        let ts: Vec<i64> = got.points.iter().map(|p| p.timestamp_ns).collect();
+        assert_eq!(
+            ts,
+            vec![101, 103, 105, 111, 113, 115],
+            "time order inside a series"
+        );
     }
 
     #[tokio::test]
@@ -1414,6 +2043,7 @@ mod tests {
                 label_names: HashSet::new(),
                 label_values: Default::default(),
                 signal_type: SignalType::Metrics,
+                wal_range: None,
             });
         }
 
@@ -1452,6 +2082,7 @@ mod tests {
             label_names: HashSet::new(),
             label_values: Default::default(),
             signal_type: SignalType::Metrics,
+            wal_range: None,
         });
 
         let index = Arc::new(RwLock::new(index));
@@ -1480,6 +2111,7 @@ mod tests {
             label_names: HashSet::new(),
             label_values: Default::default(),
             signal_type: SignalType::Metrics,
+            wal_range: None,
         });
         let index = Arc::new(RwLock::new(index));
         let store = Arc::new(BlockIndexStore::at_path(dir.path().join("index.json")));
@@ -1531,6 +2163,7 @@ mod tests {
                 label_names: HashSet::new(),
                 label_values: Default::default(),
                 signal_type: SignalType::Metrics,
+                wal_range: None,
             });
         }
 
@@ -1584,6 +2217,7 @@ mod tests {
             label_names: HashSet::new(),
             label_values: Default::default(),
             signal_type: SignalType::Metrics,
+            wal_range: None,
         });
         store.mark_dirty();
 

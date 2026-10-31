@@ -692,6 +692,20 @@ async fn run_server(
     // Replay before the listener binds, so nothing is served until recovered
     // telemetry is back in the write path, and through exactly the entry points
     // live exporters use.
+    // Blocks already on disk may cover WAL ranges whose commit never happened
+    // (a crash between the two); skip those instead of writing them twice.
+    if config.ingest.wal_enabled {
+        let data_dir = &config.storage.data_dir;
+        parqtel_core::storage::advance_wal_commit(data_dir, "metrics", &*index.read().await);
+        parqtel_core::storage::advance_wal_commit(data_dir, "traces", &*trace_index.read().await);
+    }
+    if config.ingest.log_wal_enabled {
+        parqtel_core::storage::advance_wal_commit(
+            &config.logs.data_dir,
+            "logs",
+            &*log_index.read().await,
+        );
+    }
     let wal_replay = replay_all_wals(
         &config,
         &ingestion_service,
@@ -765,9 +779,9 @@ async fn run_server(
     // Auto mode: retry packs whose canary metrics have not arrived yet every
     // 5 minutes until the pending set drains. Activations never revert, so
     // the task exits for good once every selected pack has resolved.
-    if !preset_pending.is_empty() {
+    let preset_task = if !preset_pending.is_empty() {
         let preset_state = state.clone();
-        tokio::spawn(async move {
+        Some(tokio::spawn(async move {
             let mut pending = preset_pending;
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
             interval.tick().await; // startup pass already ran; wait a full interval
@@ -782,8 +796,10 @@ async fn run_server(
                 .await;
             }
             tracing::debug!("all selected built-in alert packs resolved");
-        });
-    }
+        }))
+    } else {
+        None
+    };
 
     // Load alert rules from the configured directory (evaluator + router
     // both key off the registry; without this, rules only exist via the API).
@@ -1055,6 +1071,11 @@ async fn run_server(
     grpc_task.abort();
     span_metrics_task.abort();
     alert_router_task.abort();
+    // Every task holding a clone of the app state keeps the ingestion services
+    // (and so the index channels below) alive, so none may outlive this point.
+    if let Some(task) = preset_task {
+        task.abort();
+    }
 
     state.inner.ingestion_service.shutdown().await?;
     state.inner.log_ingestion_service.shutdown().await?;
@@ -1063,14 +1084,16 @@ async fn run_server(
     // Let the index tasks drain the block metadata the flushes above just
     // published, so the final persist pass sees every block.
     drop(state);
-    let _ = index_task.await;
-    let _ = log_index_task.await;
-    let _ = trace_index_task.await;
+    let stop_timeout = std::time::Duration::from_secs(config.server.shutdown_timeout_secs.max(1));
+    // Bounded: an index task only ends when every sender is gone, and a stray
+    // holder must cost a timeout, not an unkillable process.
+    let _ = tokio::time::timeout(stop_timeout, index_task).await;
+    let _ = tokio::time::timeout(stop_timeout, log_index_task).await;
+    let _ = tokio::time::timeout(stop_timeout, trace_index_task).await;
 
     // Maintenance tasks stop and each perform a final persist pass before
     // returning, so the sidecars are complete without anyone writing the
     // index from under a lock here.
-    let stop_timeout = std::time::Duration::from_secs(config.server.shutdown_timeout_secs.max(1));
     metrics_maintenance.shutdown(stop_timeout).await;
     logs_maintenance.shutdown(stop_timeout).await;
     let _ = trace_shutdown_tx.send(true);
@@ -1181,7 +1204,7 @@ fn v_to_f64(v: &parqtel_core::MetricValue) -> f64 {
     match v {
         parqtel_core::MetricValue::Double(f) => *f,
         parqtel_core::MetricValue::Int(i) => *i as f64,
-        parqtel_core::MetricValue::Histogram { sum, .. } => *sum,
-        parqtel_core::MetricValue::Summary { sum, .. } => *sum,
+        parqtel_core::MetricValue::Histogram(h) => h.sum,
+        parqtel_core::MetricValue::Summary(s) => s.sum,
     }
 }

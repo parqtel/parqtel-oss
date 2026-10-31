@@ -103,6 +103,7 @@ fn metadata(path: &std::path::Path, rows: usize) -> BlockMetadata {
         label_names: HashSet::new(),
         label_values: Default::default(),
         signal_type: SignalType::Metrics,
+        wal_range: None,
     }
 }
 

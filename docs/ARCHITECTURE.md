@@ -99,7 +99,8 @@ parqtel-mcp-{slack,pagerduty,jira,notion,discord,gdocs,parqtel}
 4. **Rotate** → `IngestionService` accumulates data points in memory via `BlockRotator`
 4a. **Span-metrics RED bridge** → trace ingestion derives `traces_service_{requests,errors,duration_ms}_total` metrics from `SPAN_KIND_SERVER` spans (grouped by service/operation) and feeds them back through the metrics path — services get out-of-the-box RED metrics without hand-written rules. Trace decode merges resource attributes (service.name, k8s.*) into span attributes, span attrs winning on conflict.
 4b. **Tail sampling** → after RED derivation (which sees the full span set, keeping metric rates accurate), traces are evaluated per trace against the `ingest.tail_sampling` policy: `keep_errors` (ERROR-status spans), `slow_trace_ms` (server spans above threshold), then a deterministic trace_id-hash probabilistic `sampling_ratio` (trace-coherent — whole traces live or die together). Per-service overrides replace the global policy. Dropped spans count in `dropped_spans` stats; default policy keeps everything at zero cost.
-5. **Flush** → When block duration expires or row limit is reached, `BlockWriter` serializes to Parquet with configured compression. Blocking work (encode/compress/IO) runs on `spawn_blocking`; the rotator swaps out its writer so ingest continues during flushes
+5. **Flush** → When block duration expires or row limit is reached, `BlockWriter` serializes to Parquet with configured compression. Blocking work (encode/compress/IO) runs on `spawn_blocking`; the rotator swaps out its writer so ingest continues during flushes. Metrics flush across writer shards (all shards are held for the swap so the WAL position the block commits is exact); logs and traces share one `SerialRotator` that frames a request's WAL records before taking its lock, writes them with one `write`, and encodes each block on a detached task with one flush in flight.
+5a. **Buffer lifetime** → rows stay in the `MemoryBuffer` until the block holding them is durable, then exactly those rows are removed: metrics by writer epoch, logs and spans by count. Rows that arrived during the encode stay queryable.
 6. **Index** → `BlockMetadata` is sent via `mpsc::unbounded_channel` to the index task, which updates the in-memory `BlockIndex`
 7. **Background** → A periodic flush task (5s interval) calls `check_and_flush()` on all three services
 
@@ -110,15 +111,25 @@ A query resolves in three stages, each with its own pruning mechanism:
 1. **Index lookup** — `BlockIndex::query` filters by time range and by metric
    name. A block recovered by reconciliation carries an *empty* name set, which
    means "unknown" rather than "matches nothing", so it stays visible.
-2. **Row-group pruning** — inside each candidate block, timestamp statistics
+2. **Series selection** — a metric block lists its series in its footer
+   (`parqtel.series_index`): labels, the contiguous rows each series occupies and
+   its time bounds. Loaded once per block and cached, the table is also an
+   inverted index (label name → value → series ids). Equality matchers and
+   positive regexes narrow the candidates from it; the candidates' row ranges
+   become a Parquet row selection, so pages holding no candidate row are not
+   read. The matcher still judges every candidate series, so the table only ever
+   narrows. A block without a valid table falls back to step 3.
+3. **Row-group pruning** — inside each candidate block, timestamp statistics
    skip whole row groups, and `metric_name` / `service_name` statistics skip the
    rest. Exact, and free: rows are written grouped by metric, so a row group's
    min and max on those columns are usually the same value. Page statistics and a
-   column index are also written and loaded, but not yet read.
-3. **Column projection** — the metrics scan reads 7 of 15 columns
-   (`timestamp_ns`, `metric_name`, `service_name`, `labels`, and the three value
-   columns). The eight skipped are `metric_kind`, the six k8s dictionaries and
-   `resource_attributes`, all per-row data a range query never touches.
+   column index are also written and loaded.
+4. **Column projection** — a scan through the series table reads 4 of 15 columns
+   (`timestamp_ns` and the three value columns); labels come from the table. The
+   fallback scan reads 7 (adding `metric_name`, `service_name`, `labels`). The
+   rest are per-row data a range query never touches.
+
+Label matchers are pushed into the block scan: a predicate over the series' label set runs once per distinct series per block (the `labels` column is read as a dictionary, so each distinct JSON is parsed once), and rows of series that cannot match are never turned into points. Parsed Parquet footers (and series tables) are cached per immutable block file, within a byte budget. Log search first asks the block's skip index (`parqtel.log_index` in the footer: per 4 096-row granule, time bounds, highest severity and a bloom filter over body three-byte windows and `name=value` attribute pairs) which granules can hold a match, and reads only those. It then rejects rows from the timestamp, severity and body columns alone before decoding the other columns. The prefilter is derived only from the query's AND conjuncts; unless it is the whole predicate (`exact`), the full predicate still judges every row that passes. When it is the whole predicate, matches are counted from three columns and the remaining columns are decoded only for the rows returned. Unflushed log rows are filtered inside the memory buffer, so only matches are copied out.
 
 Evaluation is then handed to the blocking pool. Series labels are shared behind
 an `Arc` (`ast::SharedLabels`), so a series' labels are cloned once per block
@@ -186,6 +197,16 @@ At write time `extract_correlation_labels` pulls `service.name`, `service.versio
 **Logs** (17 columns): timestamp, severity (`severity_number` Int32, `severity_text` Utf8), `body`, `trace_id` (FixedSizeBinary 16), `span_id` (FixedSizeBinary 8), flags, scope, `attributes` (Utf8 JSON), `resource_attributes`, and the same dedicated correlation columns as metrics.
 
 **Traces**: `timestamp_ns`, `span_id` (FixedSizeBinary 8), `span_name` (Dictionary), `span_kind`, dedicated correlation columns, `trace_id` (FixedSizeBinary 16), `parent_span_id`, `status_code`/`status_message`, `start`/`end` timestamps, `duration_ns`, events, links, `attributes`, `resource_attributes`.
+
+**Row order and the series table.** Within a metric (per kind and resource) a
+block's rows are ordered by series, then by timestamp, so every series is one
+contiguous row range. The ingest flush, the compactor and the engine writer all
+produce this layout through `metric_runs_to_block`, which returns the record batch
+together with its `SeriesTable`; `write_block_file` is the single place the
+footer, bloom filters and page statistics are applied. An unordered run is still
+described correctly (a series simply appears as several entries). Time-range row
+group pruning is weaker inside a metric than with time-ordered rows, because a
+row group now holds whole series; the table's per-series time bounds take over.
 
 ### Block Index
 

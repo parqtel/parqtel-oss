@@ -1,5 +1,5 @@
 use super::common::{
-    any_value_to_string, json_attrs_to_labels, parse_json_hex, parse_json_timestamp,
+    any_value_to_string, json_attrs_to_labels, kv_labels, parse_json_hex, parse_json_timestamp,
 };
 use crate::otel::collector::logs::v1::ExportLogsServiceRequest;
 use crate::otel::logs::v1::LogRecord as ProtoLogRecord;
@@ -8,15 +8,9 @@ use parqtel_core::{Error, LabelSet, LogRecord, Result};
 pub(crate) fn decode_logs(request: ExportLogsServiceRequest) -> Result<Vec<LogRecord>> {
     let mut logs = Vec::new();
     for resource_logs in request.resource_logs {
-        let resource_attributes = if let Some(resource) = resource_logs.resource {
-            LabelSet::try_from_iter(resource.attributes.into_iter().map(|attr| {
-                (
-                    attr.key,
-                    attr.value.map(any_value_to_string).unwrap_or_default(),
-                )
-            }))?
-        } else {
-            LabelSet::default()
+        let resource_attributes = match resource_logs.resource.as_ref() {
+            Some(resource) => kv_labels(&resource.attributes)?,
+            None => LabelSet::default(),
         };
         for scope_logs in resource_logs.scope_logs {
             let scope_name = scope_logs
@@ -103,12 +97,7 @@ fn convert_log(
     scope_name: String,
     scope_version: String,
 ) -> Result<LogRecord> {
-    let attributes = LabelSet::try_from_iter(proto.attributes.into_iter().map(|attr| {
-        (
-            attr.key,
-            attr.value.map(any_value_to_string).unwrap_or_default(),
-        )
-    }))?;
+    let attributes = kv_labels(&proto.attributes)?;
     let mut trace_id = [0u8; 16];
     if proto.trace_id.len() == 16 {
         trace_id.copy_from_slice(&proto.trace_id);

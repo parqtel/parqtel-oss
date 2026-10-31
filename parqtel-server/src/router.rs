@@ -45,7 +45,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/v1/metrics/json", post(handlers::ingest::ingest_json))
         .route("/v1/logs", post(handlers::ingest::ingest_otlp_logs))
         .route("/v1/logs/json", post(handlers::ingest::ingest_logs_json))
-        .route("/v1/traces", post(handlers::ingest::ingest_traces_json))
+        .route("/v1/traces", post(handlers::ingest::ingest_otlp_traces))
         .route(
             "/v1/traces/json",
             post(handlers::ingest::ingest_traces_json),
@@ -173,6 +173,11 @@ pub fn build_router(state: AppState) -> Router {
             ingest_config.max_body_size,
         ))
         .layer(RequestBodyLimitLayer::new(ingest_config.max_body_size))
+        // OTLP/HTTP exporters gzip their bodies (the Collector's `otlphttp`
+        // exporter does by default). Placed outside the limits above so they
+        // bound the *decompressed* size: a small gzip bomb is refused with 413
+        // rather than inflated into memory. Other encodings get 415.
+        .layer(tower_http::decompression::RequestDecompressionLayer::new().gzip(true))
         // Outermost layer: records the golden signals (count + latency
         // histogram) for the whole request, including any inner middleware.
         .layer(axum::middleware::from_fn(

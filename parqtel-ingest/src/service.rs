@@ -124,16 +124,12 @@ pub struct BlockRotator {
     /// sync interval — but it will show up in
     /// `parqtel_ingest_lock_wait_seconds` and is worth watching.
     wal: Option<Arc<tokio::sync::Mutex<WalWriter>>>,
-    /// Per-shard: the highest WAL position among the rows currently in that
-    /// shard's writer. Taken and reset under the shard lock at swap time, so a
-    /// block can only ever commit positions for rows it actually contains.
-    ///
-    /// A mutex rather than a plain `Vec` because `push` and `flush_locked`
-    /// take `&self` — the rotator is shared behind an `Arc` and sharding
-    /// deliberately made it lock-free for callers. Always taken *while holding
-    /// the shard lock*, so the value it holds is always consistent with the
-    /// writer it describes.
-    covered: Vec<std::sync::Mutex<WalPosition>>,
+    /// Orders WAL commits and buffer drops across concurrent flushes.
+    order: Arc<std::sync::Mutex<FlushOrder>>,
+    /// Where the previous flush's WAL span ended, so each block can record the
+    /// span `(previous end, this end]` it covers. Only touched under
+    /// `flush_lock`.
+    wal_cursor: std::sync::Mutex<WalPosition>,
     config: BlockConfig,
     /// Unix time of the last completed flush, in milliseconds. An atomic so
     /// the duration check needs no lock — flushes are serialised by
@@ -163,9 +159,8 @@ impl BlockRotator {
                 .map(|_| Mutex::new(BlockWriter::new(config.clone())))
                 .collect(),
             wal: None,
-            covered: (0..shards)
-                .map(|_| std::sync::Mutex::new(WalPosition::START))
-                .collect(),
+            order: Arc::new(std::sync::Mutex::new(FlushOrder::default())),
+            wal_cursor: std::sync::Mutex::new(WalPosition::START),
             flush_lock: tokio::sync::Mutex::new(()),
             flush_tx: std::sync::Mutex::new(None),
             worker: std::sync::Mutex::new(None),
@@ -375,6 +370,21 @@ impl BlockRotator {
         metric: Metric,
         contention: Option<Arc<ContentionMetrics>>,
     ) -> Result<bool> {
+        self.push_buffered(metric, None, contention).await
+    }
+
+    /// As [`Self::push`], also adding `buffered` to the memory buffer.
+    ///
+    /// The buffer is fed **inside** the shard lock, next to the writer, so for
+    /// every metric the buffer holds points in exactly the order the writer
+    /// does. That is what lets a finished block remove precisely its own points
+    /// (see `MemoryBuffer::drop_sealed_metrics`) and leave newer ones queryable.
+    pub async fn push_buffered(
+        &self,
+        metric: Metric,
+        buffered: Option<Vec<DataPoint>>,
+        contention: Option<Arc<ContentionMetrics>>,
+    ) -> Result<bool> {
         let idx = shard_for(&metric.name, self.shards.len());
         let points = metric.data_points.len();
         let mut flushed = false;
@@ -387,6 +397,19 @@ impl BlockRotator {
             flushed = true;
         }
 
+        // The CPU half of logging a metric - serialising it and checksumming the
+        // bytes - needs no lock, so it happens before any is taken. Inside the
+        // shard lock only the ordered append remains.
+        let wal_record = match &self.wal {
+            Some(_) => Some(parqtel_core::wal::encode_record(&metric)?),
+            None => None,
+        };
+        let buffer = self
+            .buffer
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+
         let mut closed = 0usize;
         {
             let waited = Instant::now();
@@ -397,18 +420,30 @@ impl BlockRotator {
             // Logged while the shard lock is held, so WAL order and writer
             // order are the same total order. A failure here is propagated:
             // acknowledging data we could not log would make the WAL a lie.
-            if let Some(wal) = &self.wal {
-                // The shard lock is held across this append so that WAL order
-                // and writer order are the same total order.
-                let pos = wal.lock().await.append(&metric)?;
-                *self.covered[idx].lock().unwrap_or_else(|e| e.into_inner()) = pos;
+            if let (Some(wal), Some(record)) = (&self.wal, &wal_record) {
+                wal.lock().await.append_encoded(record)?;
+            }
+            let epoch = shard.epoch();
+            if let (Some(buffer), Some(points)) = (&buffer, &buffered) {
+                buffer
+                    .push_metrics_tagged(&metric.name, points, idx as u16, epoch)
+                    .await;
             }
             // A single shard may be near its own capacity; let the writer
             // close a block rather than reject the points.
-            for meta in shard.push(metric.clone())? {
+            for meta in shard.push(metric)? {
                 closed += meta.row_count;
                 flushed = true;
                 self.publish(meta, contention.as_deref());
+            }
+            if closed > 0 {
+                // The writer closed blocks by itself, so everything it held up
+                // to its previous epoch is durable.
+                if let Some(buffer) = &buffer {
+                    let mut sealed = vec![0u64; self.shards.len()];
+                    sealed[idx] = shard.epoch().saturating_sub(1);
+                    buffer.drop_sealed_metrics(&sealed).await;
+                }
             }
             // Adjust the counter while still holding the shard lock: a flush
             // subtracts a shard's rows and swaps the writer under the same
@@ -480,40 +515,67 @@ impl BlockRotator {
     /// Flush body, with the flush lock already held.
     async fn flush_locked(&self, contention: Option<Arc<ContentionMetrics>>) -> Result<()> {
         let mut writers = Vec::with_capacity(self.shards.len());
+        let mut sealed = vec![0u64; self.shards.len()];
         let mut row_count = 0usize;
-        // Highest WAL position among the rows this block will actually contain.
-        // Taken per shard under that shard's own lock, at the moment its writer
-        // is swapped, so it can never include a row that lands in the *next*
-        // block.
-        let mut covered = WalPosition::START;
-        for (i, shard) in self.shards.iter().enumerate() {
-            let mut guard = shard.lock().await;
+
+        // Every shard is held for the swap, which only moves pointers. That makes
+        // it one instant for the whole block, and the instant is what the WAL
+        // commit depends on.
+        //
+        // The WAL is a single sequence shared by all shards. Swapping shard by
+        // shard and committing the highest position seen would be wrong: a
+        // record that lands on a shard *after* it was swapped, but before a later
+        // shard was, has a lower position than that later shard's last record. It
+        // belongs to the next block, yet it would sit below the commit point, and
+        // a crash would skip it on replay. With all shards held, no push is in
+        // flight, so every record up to the WAL's current end is in a writer being
+        // taken here (or in a block a writer already closed by itself), and the
+        // end of the WAL is exactly the position this block covers.
+        let mut guards = Vec::with_capacity(self.shards.len());
+        for shard in &self.shards {
+            guards.push(shard.lock().await);
+        }
+        let covered = match &self.wal {
+            Some(wal) => wal.lock().await.position(),
+            None => WalPosition::START,
+        };
+        for (i, guard) in guards.iter_mut().enumerate() {
             if guard.is_empty() {
                 continue;
             }
             let taken = guard.len();
             row_count += taken;
-            // Taken and reset while this shard's lock is held, so the value
-            // always matches the writer being swapped.
-            let mut slot = self.covered[i].lock().unwrap_or_else(|e| e.into_inner());
-            covered = covered.max(*slot);
-            *slot = WalPosition::START;
-            // Subtract while still holding this shard's lock, so a concurrent
+            // Subtract while still holding the shard's lock, so a concurrent
             // push either lands before this (and is subtracted here) or after
             // (and counts up from the decremented total). A `store(0)` after the
             // loop would erase the latter.
             self.buffered.fetch_sub(taken, Ordering::Relaxed);
+            // The old writer's epoch is sealed; the replacement starts the next
+            // one, so points buffered from here on are not part of this block.
+            sealed[i] = guard.epoch();
             writers.push(std::mem::replace(
-                &mut *guard,
-                BlockWriter::new(self.config.clone()),
+                &mut **guard,
+                BlockWriter::with_epoch(self.config.clone(), sealed[i] + 1),
             ));
         }
+        drop(guards);
         if writers.is_empty() {
             tracing::debug!("metric block flush skipped: all shards empty");
             return Ok(());
         }
 
+        let wal_range = self.wal.as_ref().map(|_| {
+            let mut cursor = self.wal_cursor.lock().unwrap_or_else(|e| e.into_inner());
+            let range = (cursor.0, covered.0);
+            *cursor = covered;
+            range
+        });
+        let seq = self.order.lock().unwrap_or_else(|e| e.into_inner()).begin();
         let job = FlushJob {
+            wal_range,
+            seq,
+            order: Arc::clone(&self.order),
+            sealed,
             writers,
             covered,
             row_count,
@@ -555,8 +617,84 @@ impl BlockRotator {
     }
 }
 
+/// Orders the effects of concurrent flushes, so each takes hold only once every
+/// earlier flush has.
+///
+/// Several blocks can be encoding at once. Two things must nevertheless happen
+/// in flush order:
+///
+/// * **WAL commit.** A block covers a WAL range ending at its own position. If a
+///   later block finished first and committed, the commit point would pass an
+///   earlier block that is not on disk yet, and a crash then would lose its
+///   rows: replay skips everything at or below the commit. A block that fails
+///   never completes here, which holds the commit back - the WAL keeps those
+///   rows and a restart replays them - rather than letting later blocks commit
+///   past it.
+/// * **Buffer drop.** Rows leave the memory buffer once a block holds them. If a
+///   later block's rows left first, an earlier block's rows would be in neither
+///   the buffer nor a block until it landed. A failed flush releases this one
+///   (with nothing to drop), because its rows stay in the buffer and only the
+///   WAL.
+#[derive(Default)]
+struct FlushOrder {
+    next_seq: u64,
+    wal_frontier: u64,
+    wal_done: std::collections::BTreeMap<u64, WalPosition>,
+    drop_frontier: u64,
+    drop_done: std::collections::BTreeMap<u64, Vec<u64>>,
+}
+
+impl FlushOrder {
+    /// Numbers a new flush. Called in flush order, under the flush lock.
+    fn begin(&mut self) -> u64 {
+        let seq = self.next_seq;
+        self.next_seq += 1;
+        seq
+    }
+
+    /// Records that flush `seq` is durable, returning the position that may now
+    /// be committed, if the frontier moved.
+    fn wal_complete(&mut self, seq: u64, covered: WalPosition) -> Option<WalPosition> {
+        self.wal_done.insert(seq, covered);
+        let mut advanced: Option<WalPosition> = None;
+        while let Some(p) = self.wal_done.remove(&self.wal_frontier) {
+            advanced = Some(advanced.map_or(p, |a| a.max(p)));
+            self.wal_frontier += 1;
+        }
+        advanced
+    }
+
+    /// Records the buffer epochs flush `seq` sealed (all zero when it failed),
+    /// returning the per-shard epochs that may now be dropped, if the frontier
+    /// moved. Epochs only grow, so the result is the element-wise maximum.
+    fn drop_complete(&mut self, seq: u64, sealed: Vec<u64>) -> Option<Vec<u64>> {
+        self.drop_done.insert(seq, sealed);
+        let mut released: Option<Vec<u64>> = None;
+        while let Some(s) = self.drop_done.remove(&self.drop_frontier) {
+            released = Some(match released {
+                None => s,
+                Some(mut acc) => {
+                    for (a, b) in acc.iter_mut().zip(&s) {
+                        *a = (*a).max(*b);
+                    }
+                    acc
+                }
+            });
+            self.drop_frontier += 1;
+        }
+        released
+    }
+}
+
 /// One block's worth of rows handed to the flush worker.
 struct FlushJob {
+    /// The WAL span `(from, to]` this block covers.
+    wal_range: Option<(u64, u64)>,
+    /// Position in flush order, for [`FlushOrder`].
+    seq: u64,
+    order: Arc<std::sync::Mutex<FlushOrder>>,
+    /// Per writer shard, the epoch this flush sealed (0 = shard not flushed).
+    sealed: Vec<u64>,
     writers: Vec<BlockWriter>,
     /// WAL position this block covers once it is durable.
     covered: WalPosition,
@@ -577,7 +715,45 @@ async fn run_flush_job(
     wal: Option<&Arc<Mutex<WalWriter>>>,
     buffer: &Option<MemoryBuffer>,
 ) -> Result<()> {
+    let (seq, order, shards) = (job.seq, Arc::clone(&job.order), job.sealed.len());
+    let result = encode_publish_commit(job, metadata_tx, wal, buffer).await;
+    if result.is_err() {
+        // The block never landed, so nothing may leave the buffer on its
+        // account - but later flushes' drops are queued behind this one and must
+        // not wait for ever.
+        release_buffer_drops(&order, seq, vec![0; shards], buffer).await;
+    }
+    result
+}
+
+/// Marks flush `seq` as done with the buffer and drops whatever that frees up,
+/// in flush order. See [`FlushOrder`].
+async fn release_buffer_drops(
+    order: &Arc<std::sync::Mutex<FlushOrder>>,
+    seq: u64,
+    sealed: Vec<u64>,
+    buffer: &Option<MemoryBuffer>,
+) {
+    let released = order
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .drop_complete(seq, sealed);
+    if let (Some(buffer), Some(sealed)) = (buffer, released) {
+        buffer.drop_sealed_metrics(&sealed).await;
+    }
+}
+
+async fn encode_publish_commit(
+    job: FlushJob,
+    metadata_tx: &mpsc::UnboundedSender<PendingIndex>,
+    wal: Option<&Arc<Mutex<WalWriter>>>,
+    buffer: &Option<MemoryBuffer>,
+) -> Result<()> {
     let FlushJob {
+        wal_range,
+        seq,
+        order,
+        sealed,
         writers,
         covered,
         row_count,
@@ -588,7 +764,7 @@ async fn run_flush_job(
     let flush_guard = contention
         .as_ref()
         .map(|c| c.flush_started(SignalType::Metrics));
-    let encoded = tokio::task::spawn_blocking(move || merge_and_flush(writers)).await;
+    let encoded = tokio::task::spawn_blocking(move || merge_and_flush(writers, wal_range)).await;
     // Unwrap the JoinError separately from the writer's own Result so the row
     // count can still be attributed when the flush succeeded.
     let metadata = match encoded {
@@ -627,8 +803,18 @@ async fn run_flush_job(
         // replay restores them into a fresh block.
         match tokio::time::timeout(INDEX_DURABILITY_TIMEOUT, durable).await {
             Ok(Ok(())) => {
-                if let Some(wal) = wal {
-                    wal.lock().await.commit(covered)?;
+                // Only the contiguous prefix of finished flushes may be
+                // committed; see `FlushOrder`.
+                let releasable = order
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .wal_complete(seq, covered);
+                if let (Some(wal), Some(position)) = (wal, releasable) {
+                    // A failed commit leaves the rows in the WAL, which only
+                    // costs a replay; it must not keep them in the buffer too.
+                    if let Err(e) = wal.lock().await.commit(position) {
+                        tracing::error!("WAL commit failed; the rows will be replayed: {e}");
+                    }
                 }
             }
             Ok(Err(_)) => tracing::warn!(
@@ -644,157 +830,427 @@ async fn run_flush_job(
     // Safe now: the rows are in a block the index knows about. Draining earlier -
     // when a flush was merely *scheduled* - would leave the rows in neither the
     // buffer nor a block, and they would be invisible to every query until the
-    // block landed.
-    if let Some(buffer) = buffer {
-        buffer.drain_offloaded(SignalType::Metrics).await;
-    }
+    // block landed. Only the rows this block holds leave; newer ones stay.
+    release_buffer_drops(&order, seq, sealed, buffer).await;
     Ok(())
 }
 
 /// Merges every shard writer's rows into one block and encodes it.
-fn merge_and_flush(writers: Vec<BlockWriter>) -> Result<BlockMetadata> {
+fn merge_and_flush(
+    writers: Vec<BlockWriter>,
+    wal_range: Option<(u64, u64)>,
+) -> Result<BlockMetadata> {
     let mut merged = BlockWriter::merge(writers)?;
+    merged.set_wal_range(wal_range);
     merged.flush()
 }
 
-/// Handles automatic rotation and flushing of log blocks.
-pub struct LogRotator {
-    writer: LogWriter,
-    config: LogBlockConfig,
+/// The writer half of a signal that is rotated one block at a time (logs and
+/// traces; metrics have their own sharded rotator).
+#[doc(hidden)]
+pub trait RowWriter: Send + 'static {
+    type Row: serde::Serialize + Send + Sync + 'static;
+    type Config: Clone + Send + Sync + 'static;
+    const SIGNAL: SignalType;
+    const NAME: &'static str;
+
+    fn create(config: Self::Config) -> Self;
+    fn push_row(&mut self, row: Self::Row) -> Result<Option<BlockMetadata>>;
+    fn rows(&self) -> usize;
+    fn write_block(&mut self) -> Result<BlockMetadata>;
+    /// The WAL span `(from, to]` the next block covers.
+    fn set_wal_range(&mut self, range: Option<(u64, u64)>);
+    fn max_rows(config: &Self::Config) -> usize;
+    fn block_duration(config: &Self::Config) -> Duration;
+    /// Adds rows to the memory buffer, in writer order.
+    fn feed_buffer<'a>(
+        buffer: &'a MemoryBuffer,
+        rows: &'a [Self::Row],
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>;
+    /// Removes the oldest `n` rows from the memory buffer.
+    fn drop_flushed<'a>(
+        buffer: &'a MemoryBuffer,
+        n: usize,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>;
+}
+
+impl RowWriter for LogWriter {
+    type Row = LogRecord;
+    type Config = LogBlockConfig;
+    const SIGNAL: SignalType = SignalType::Logs;
+    const NAME: &'static str = "log";
+
+    fn create(config: Self::Config) -> Self {
+        LogWriter::new(config)
+    }
+    fn push_row(&mut self, row: Self::Row) -> Result<Option<BlockMetadata>> {
+        self.push(row)
+    }
+    fn rows(&self) -> usize {
+        self.len()
+    }
+    fn write_block(&mut self) -> Result<BlockMetadata> {
+        self.flush()
+    }
+    fn set_wal_range(&mut self, range: Option<(u64, u64)>) {
+        LogWriter::set_wal_range(self, range)
+    }
+    fn max_rows(config: &Self::Config) -> usize {
+        config.max_rows_per_block
+    }
+    fn block_duration(config: &Self::Config) -> Duration {
+        Duration::from_secs(config.block_duration_secs)
+    }
+    fn feed_buffer<'a>(
+        buffer: &'a MemoryBuffer,
+        rows: &'a [Self::Row],
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+        Box::pin(buffer.push_logs(rows))
+    }
+    fn drop_flushed<'a>(
+        buffer: &'a MemoryBuffer,
+        n: usize,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+        Box::pin(buffer.drop_flushed_logs(n))
+    }
+}
+
+impl RowWriter for TraceWriter {
+    type Row = Span;
+    type Config = BlockConfig;
+    const SIGNAL: SignalType = SignalType::Traces;
+    const NAME: &'static str = "trace";
+
+    fn create(config: Self::Config) -> Self {
+        TraceWriter::new(config)
+    }
+    fn push_row(&mut self, row: Self::Row) -> Result<Option<BlockMetadata>> {
+        self.push(row)
+    }
+    fn rows(&self) -> usize {
+        self.len()
+    }
+    fn write_block(&mut self) -> Result<BlockMetadata> {
+        self.flush()
+    }
+    fn set_wal_range(&mut self, range: Option<(u64, u64)>) {
+        TraceWriter::set_wal_range(self, range)
+    }
+    fn max_rows(config: &Self::Config) -> usize {
+        config.max_rows_per_block
+    }
+    fn block_duration(config: &Self::Config) -> Duration {
+        Duration::from_secs(config.block_duration_secs)
+    }
+    fn feed_buffer<'a>(
+        buffer: &'a MemoryBuffer,
+        rows: &'a [Self::Row],
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+        Box::pin(buffer.push_spans(rows))
+    }
+    fn drop_flushed<'a>(
+        buffer: &'a MemoryBuffer,
+        n: usize,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+        Box::pin(buffer.drop_flushed_spans(n))
+    }
+}
+
+/// Rotates the blocks of one signal: log or trace rows accumulate in a writer,
+/// and a full or old writer is swapped out and encoded in the background.
+///
+/// # Locking
+///
+/// The rotator is used behind one mutex, and that lock covers only the ordered
+/// part of an ingest: the WAL append (one `write` for the whole request), the
+/// memory-buffer push and the writer push. Encoding a block - the slow part - runs
+/// on a detached task after the writer has been swapped out, so requests keep
+/// flowing while it does. At most one encode is in flight: starting another
+/// waits for the gate, which also makes the buffer drop exact (below) and bounds
+/// memory when ingest outruns the disk.
+///
+/// # Buffer
+///
+/// The buffer is fed under the same lock as the writer, so both hold the rows in
+/// the same order. When a block is durable the buffer drops its oldest
+/// `row_count` rows - precisely that block's - and rows that arrived during the
+/// encode stay queryable.
+pub struct SerialRotator<W: RowWriter> {
+    writer: W,
+    config: W::Config,
     last_flush: Instant,
     max_duration: Duration,
     metadata_tx: mpsc::UnboundedSender<PendingIndex>,
-    /// WAL for logs, when enabled. Appended under the rotator lock, which the
-    /// caller already holds, so WAL order and writer order are the same total
-    /// order — the property that makes the committed position correct.
-    wal: Option<WalWriter>,
+    /// WAL for this signal, when enabled. Appended to under the rotator lock, so
+    /// WAL order and writer order are the same total order - the property that
+    /// makes the committed position correct.
+    wal: Option<Arc<Mutex<WalWriter>>>,
     /// Highest WAL position among the rows currently in `writer`.
     covered: WalPosition,
+    /// Where the previous flush's WAL span ended; see `BlockRotator::wal_cursor`.
+    wal_cursor: WalPosition,
+    /// Held by the one flush task in flight.
+    gate: Arc<Mutex<()>>,
+    buffer: Option<MemoryBuffer>,
 }
 
-impl LogRotator {
-    pub fn new(config: LogBlockConfig, metadata_tx: mpsc::UnboundedSender<PendingIndex>) -> Self {
-        let max_duration = Duration::from_secs(config.block_duration_secs);
+/// Handles automatic rotation and flushing of log blocks.
+pub type LogRotator = SerialRotator<LogWriter>;
+/// Handles automatic rotation and flushing of trace blocks.
+pub type TraceRotator = SerialRotator<TraceWriter>;
+
+impl<W: RowWriter> SerialRotator<W> {
+    pub fn new(config: W::Config, metadata_tx: mpsc::UnboundedSender<PendingIndex>) -> Self {
+        let max_duration = W::block_duration(&config);
         Self {
-            writer: LogWriter::new(config.clone()),
-            wal: None,
-            covered: WalPosition::START,
+            writer: W::create(config.clone()),
             config,
             last_flush: Instant::now(),
             max_duration,
             metadata_tx,
+            wal: None,
+            covered: WalPosition::START,
+            wal_cursor: WalPosition::START,
+            gate: Arc::new(Mutex::new(())),
+            buffer: None,
         }
     }
 
-    /// Pushes a log record, closing the block first when it is full.
-    ///
-    /// Returns `true` if a flush happened, so the caller drains the memory
-    /// buffer.
-    fn publish(&self, meta: BlockMetadata, contention: Option<&ContentionMetrics>) {
-        record_block_written(&meta, contention, SignalType::Logs);
-        let _ = self.metadata_tx.send(PendingIndex::untracked(meta));
-    }
-
-    /// Attaches a WAL. After this, every accepted record is logged before it
+    /// Attaches a WAL. After this, every accepted row is logged before it
     /// reaches the writer.
     pub fn with_wal(mut self, wal: WalWriter) -> Self {
-        self.wal = Some(wal);
+        self.wal = Some(Arc::new(Mutex::new(wal)));
         self
     }
 
-    /// Bytes the log WAL currently occupies.
-    pub fn wal_bytes(&self) -> u64 {
-        self.wal.as_ref().map_or(0, |w| w.size_bytes())
+    /// Gives the rotator the memory buffer it keeps in step with its writer.
+    pub fn set_buffer(&mut self, buffer: Option<MemoryBuffer>) {
+        self.buffer = buffer;
     }
 
+    /// Whether rows are logged to a WAL.
+    pub fn has_wal(&self) -> bool {
+        self.wal.is_some()
+    }
+
+    /// Bytes this signal's WAL currently occupies.
+    pub async fn wal_bytes(&self) -> u64 {
+        match &self.wal {
+            Some(w) => w.lock().await.size_bytes(),
+            None => 0,
+        }
+    }
+
+    fn publish(&self, meta: BlockMetadata, contention: Option<&ContentionMetrics>) {
+        record_block_written(&meta, contention, W::SIGNAL);
+        let _ = self.metadata_tx.send(PendingIndex::untracked(meta));
+    }
+
+    /// Pushes one row, closing the block first when it is full.
+    ///
+    /// Returns `true` if a block was closed.
     pub async fn push(
         &mut self,
-        log: LogRecord,
-        contention: Option<&ContentionMetrics>,
+        row: W::Row,
+        contention: Option<&Arc<ContentionMetrics>>,
     ) -> Result<bool> {
-        // Logged first, and failures propagate: acknowledging a record we
-        // could not log would make the WAL a lie.
-        if let Some(wal) = self.wal.as_mut() {
-            self.covered = wal.append(&log)?;
-        }
-        if let Some(meta) = self.writer.push(log)? {
-            self.publish(meta, contention);
-            return Ok(true);
-        }
-        Ok(false)
+        let wal_record = match self.wal {
+            Some(_) => Some(parqtel_core::wal::encode_record(&row)?),
+            None => None,
+        };
+        self.push_batch(vec![row], wal_record, contention).await
     }
 
+    /// Pushes a request's rows.
+    ///
+    /// `wal_records` holds the rows already framed with
+    /// [`parqtel_core::wal::encode_record_into`], one record per row, in order -
+    /// encoded by the caller before taking the rotator lock. Everything else here
+    /// is the cheap, ordered part.
+    ///
+    /// Returns `true` if a block was closed.
+    pub async fn push_batch(
+        &mut self,
+        rows: Vec<W::Row>,
+        wal_records: Option<Vec<u8>>,
+        contention: Option<&Arc<ContentionMetrics>>,
+    ) -> Result<bool> {
+        let max_rows = W::max_rows(&self.config).max(1);
+        let mut flushed = false;
+
+        // A batch that would overflow the open block closes it first, so the
+        // batch is not split across blocks.
+        if self.writer.rows() > 0 && self.writer.rows() + rows.len() > max_rows {
+            self.start_flush(contention).await;
+            flushed = true;
+        }
+        // A batch bigger than a whole block is split by the writer itself, which
+        // writes the full blocks inline. Let any background encode finish first so
+        // the buffer's oldest rows are those blocks' rows.
+        if rows.len() >= max_rows {
+            drop(self.gate.lock().await);
+        }
+
+        // Logged first, and failures propagate: acknowledging a row we could not
+        // log would make the WAL a lie.
+        if let (Some(wal), Some(records)) = (&self.wal, &wal_records) {
+            self.covered = wal.lock().await.append_encoded(records)?;
+        }
+        if let Some(buffer) = &self.buffer {
+            W::feed_buffer(buffer, &rows).await;
+        }
+        for row in rows {
+            if let Some(meta) = self.writer.push_row(row)? {
+                // The writer closed a full block by itself. Those are the oldest
+                // rows in the buffer too.
+                if let Some(buffer) = &self.buffer {
+                    W::drop_flushed(buffer, meta.row_count).await;
+                }
+                self.publish(meta, contention.map(|c| c.as_ref()));
+                flushed = true;
+            }
+        }
+        Ok(flushed)
+    }
+
+    /// Starts a flush when the block duration has elapsed.
     pub async fn check_and_flush(
         &mut self,
-        contention: Option<&ContentionMetrics>,
+        contention: Option<&Arc<ContentionMetrics>>,
     ) -> Result<bool> {
         if Instant::now().duration_since(self.last_flush) >= self.max_duration {
-            self.flush(contention).await?;
+            self.start_flush(contention).await;
             return Ok(true);
         }
         Ok(false)
     }
 
-    pub async fn flush(&mut self, contention: Option<&ContentionMetrics>) -> Result<()> {
-        if self.writer.is_empty() {
-            tracing::debug!("log block flush skipped: buffer empty");
-            return Ok(());
+    /// Waits for the flush in flight, if any, without starting another.
+    pub async fn wait_idle(&self) {
+        drop(self.gate.lock().await);
+    }
+
+    /// Writes the open block and waits until it is done.
+    pub async fn flush(&mut self, contention: Option<&Arc<ContentionMetrics>>) -> Result<()> {
+        self.start_flush(contention).await;
+        // The flush task holds the gate until the block is durable and the WAL
+        // committed; taking it here waits for exactly that.
+        drop(self.gate.lock().await);
+        Ok(())
+    }
+
+    /// Swaps the writer out and encodes it on a detached task.
+    ///
+    /// Waits first for any earlier flush, holding the rotator lock meanwhile:
+    /// that is back-pressure for a disk that cannot keep up, not a stall in the
+    /// normal case.
+    async fn start_flush(&mut self, contention: Option<&Arc<ContentionMetrics>>) {
+        if self.writer.rows() == 0 {
+            tracing::debug!("{} block flush skipped: buffer empty", W::NAME);
+            return;
         }
-        let row_count = self.writer.len();
-        let started = std::time::Instant::now();
-        // Snapshot before the writer is taken: the block will contain exactly
-        // the rows whose WAL positions are at or below this.
-        let covered = self.covered;
-        self.covered = WalPosition::START;
-        let mut writer = std::mem::replace(&mut self.writer, LogWriter::new(self.config.clone()));
-        let flush_guard = contention.map(|c| c.flush_started(SignalType::Logs));
-        let encoded = tokio::task::spawn_blocking(move || writer.flush()).await;
-        let metadata = match encoded {
-            Ok(result) => result,
-            Err(e) => {
-                return Err(Error::Internal(format!("flush task panicked: {}", e)));
-            }
-        };
-        if let (Some(guard), Ok(meta)) = (flush_guard, metadata.as_ref()) {
-            guard.count_rows(meta.row_count as u64);
+        let permit = Arc::clone(&self.gate).lock_owned().await;
+        let rows = self.writer.rows();
+        // Snapshot before the writer is taken: the block will contain exactly the
+        // rows whose WAL positions are at or below this.
+        let covered = std::mem::replace(&mut self.covered, WalPosition::START);
+        let mut writer = std::mem::replace(&mut self.writer, W::create(self.config.clone()));
+        if self.wal.is_some() {
+            writer.set_wal_range(Some((self.wal_cursor.0, covered.0)));
+            self.wal_cursor = covered;
         }
-        let metadata = metadata?;
         self.last_flush = Instant::now();
-        // See the metrics flush for why the sidecar must be durable first.
-        let (pending, durable) = match self.wal.is_some() {
-            true => {
-                let (p, r) = PendingIndex::tracked(metadata);
-                (p, Some(r))
-            }
-            false => (PendingIndex::untracked(metadata), None),
-        };
-        let _ = self.metadata_tx.send(pending);
-        if let Some(durable) = durable {
-            // See the metrics flush: bounded, and on timeout leave the WAL
-            // uncommitted so replay recovers the rows.
-            match tokio::time::timeout(INDEX_DURABILITY_TIMEOUT, durable).await {
-                Ok(Ok(())) => {
-                    if let Some(wal) = self.wal.as_mut() {
-                        wal.commit(covered)?;
+
+        let metadata_tx = self.metadata_tx.clone();
+        let wal = self.wal.clone();
+        let buffer = self.buffer.clone();
+        let contention = contention.cloned();
+        tokio::spawn(async move {
+            let _permit = permit;
+            serial_flush::<W>(writer, covered, rows, metadata_tx, wal, buffer, contention).await;
+        });
+    }
+}
+
+/// Encodes one block, publishes it, commits its WAL range and then removes its
+/// rows from the memory buffer - in that order. See [`SerialRotator`].
+async fn serial_flush<W: RowWriter>(
+    mut writer: W,
+    covered: WalPosition,
+    row_count: usize,
+    metadata_tx: mpsc::UnboundedSender<PendingIndex>,
+    wal: Option<Arc<Mutex<WalWriter>>>,
+    buffer: Option<MemoryBuffer>,
+    contention: Option<Arc<ContentionMetrics>>,
+) {
+    let started = std::time::Instant::now();
+    let flush_guard = contention.as_ref().map(|c| c.flush_started(W::SIGNAL));
+    let encoded = tokio::task::spawn_blocking(move || writer.write_block()).await;
+    let metadata = match encoded {
+        Ok(Ok(meta)) => meta,
+        Ok(Err(e)) => {
+            // The rows are still in the WAL, so this is recoverable by a replay.
+            tracing::error!(rows = row_count, "{} block flush failed: {e}", W::NAME);
+            return drop_from_buffer::<W>(&buffer, row_count).await;
+        }
+        Err(e) => {
+            tracing::error!(
+                rows = row_count,
+                "{} block flush task panicked: {e}",
+                W::NAME
+            );
+            return drop_from_buffer::<W>(&buffer, row_count).await;
+        }
+    };
+    if let Some(guard) = flush_guard {
+        guard.count_rows(metadata.row_count as u64);
+    }
+
+    // Sidecar durable before the WAL moves; see the metrics flush for why.
+    let (pending, durable) = match wal.is_some() {
+        true => {
+            let (p, r) = PendingIndex::tracked(metadata);
+            (p, Some(r))
+        }
+        false => (PendingIndex::untracked(metadata), None),
+    };
+    let _ = metadata_tx.send(pending);
+    if let Some(durable) = durable {
+        // Bounded, and on timeout the WAL stays uncommitted so replay recovers
+        // the rows.
+        match tokio::time::timeout(INDEX_DURABILITY_TIMEOUT, durable).await {
+            Ok(Ok(())) => {
+                if let Some(wal) = &wal {
+                    if let Err(e) = wal.lock().await.commit(covered) {
+                        tracing::error!(
+                            "{} WAL commit failed; the rows will be replayed: {e}",
+                            W::NAME
+                        );
                     }
                 }
-                Ok(Err(_)) => tracing::warn!(
-                    "log index task dropped before the sidecar was persisted; \
-                     leaving the WAL uncommitted"
-                ),
-                Err(_) => tracing::error!(
-                    "timed out waiting for the log index to become durable; \
-                     leaving the WAL uncommitted"
-                ),
             }
+            Ok(Err(_)) => tracing::warn!(
+                "{} index task dropped before the sidecar was persisted; leaving the WAL uncommitted",
+                W::NAME
+            ),
+            Err(_) => tracing::error!(
+                "timed out waiting for the {} index to become durable; leaving the WAL uncommitted",
+                W::NAME
+            ),
         }
-        tracing::debug!(
-            signal = "logs",
-            rows = row_count,
-            duration_ms = started.elapsed().as_millis(),
-            "log block flushed to parquet"
-        );
-        Ok(())
+    }
+    drop_from_buffer::<W>(&buffer, row_count).await;
+    tracing::debug!(
+        signal = W::NAME,
+        rows = row_count,
+        duration_ms = started.elapsed().as_millis(),
+        "block flushed to parquet"
+    );
+}
+
+async fn drop_from_buffer<W: RowWriter>(buffer: &Option<MemoryBuffer>, rows: usize) {
+    if let Some(buffer) = buffer {
+        W::drop_flushed(buffer, rows).await;
     }
 }
 
@@ -863,6 +1319,46 @@ pub struct IngestionService {
     stats: Arc<IngestionStats>,
     memory_buffer: Option<MemoryBuffer>,
     contention: Option<Arc<ContentionMetrics>>,
+}
+
+/// The points of `metric` as the memory buffer should hold them: each carrying
+/// the resource's `service.name` unless the point has its own.
+///
+/// Label sets are shared by many points, so the labels with `service.name`
+/// added are built once per distinct set rather than once per point.
+fn buffer_points(metric: &Metric) -> Vec<DataPoint> {
+    let Some(svc) = metric.resource_attributes.get("service.name") else {
+        return metric.data_points.clone();
+    };
+    let mut resolved: std::collections::HashMap<parqtel_core::LabelSet, parqtel_core::LabelSet> =
+        std::collections::HashMap::new();
+    metric
+        .data_points
+        .iter()
+        .map(|dp| {
+            let labels = match resolved.get(&dp.labels) {
+                Some(l) => l.clone(),
+                None => {
+                    let l = if dp.labels.get("service.name").is_some() {
+                        dp.labels.clone()
+                    } else {
+                        parqtel_core::LabelInterner::global().intern_with(
+                            &dp.labels,
+                            "service.name",
+                            svc,
+                        )
+                    };
+                    resolved.insert(dp.labels.clone(), l.clone());
+                    l
+                }
+            };
+            DataPoint {
+                timestamp_ns: dp.timestamp_ns,
+                value: dp.value.clone(),
+                labels,
+            }
+        })
+        .collect()
 }
 
 impl IngestionService {
@@ -946,6 +1442,18 @@ impl IngestionService {
         self.process_metrics(metrics).await
     }
 
+    /// Ingests a request a transport has already decoded (gRPC), skipping the
+    /// encode and decode a byte-oriented entry point would need.
+    pub async fn ingest_request(&self, request: ExportMetricsServiceRequest) -> Result<u64> {
+        self.stats.total_batches.fetch_add(1, Ordering::Relaxed);
+        let metrics = decode_offloading(move || OtlpDecoder::decode_metrics(request))
+            .await
+            .inspect_err(|_| {
+                self.stats.failed_batches.fetch_add(1, Ordering::Relaxed);
+            })?;
+        self.process_metrics(metrics).await
+    }
+
     /// Ingest already-decoded metrics directly (used by the span-metrics
     /// RED bridge, which derives metrics from trace spans).
     pub async fn ingest_metrics(&self, metrics: Vec<Metric>) -> Result<u64> {
@@ -969,66 +1477,28 @@ impl IngestionService {
 
     async fn process_metrics(&self, metrics: Vec<Metric>) -> Result<u64> {
         let mut count = 0;
-        let mut flushed = false;
-        // Write to in-memory buffer first (before rotator takes ownership).
-        // Inject `service.name` from resource attributes into point labels so
-        // buffered queries match the on-disk scanner behaviour (label matchers
-        // can select on service.name either way).
-        if let Some(ref buf) = self.memory_buffer {
-            for m in &metrics {
-                let svc = m.resource_attributes.get("service.name");
-                let points: Vec<_> = match svc {
-                    Some(svc) => m
-                        .data_points
-                        .iter()
-                        .map(|dp| {
-                            let mut labels = dp.labels.clone();
-                            if labels.get("service.name").is_none() {
-                                labels = labels.merge(
-                                    &parqtel_core::LabelSet::try_from_iter(vec![(
-                                        "service.name",
-                                        svc.to_string(),
-                                    )])
-                                    .unwrap_or_default(),
-                                );
-                            }
-                            DataPoint {
-                                timestamp_ns: dp.timestamp_ns,
-                                value: dp.value.clone(),
-                                labels,
-                            }
-                        })
-                        .collect(),
-                    None => m.data_points.clone(),
-                };
-                buf.push_metrics(&m.name, &points).await;
-            }
-        }
         let contention = self.contention.clone();
         for m in metrics {
             count += m.data_points.len() as u64;
-            // The rotator measures its own per-shard lock wait, so the push is
-            // not wrapped in the service-level measurement the single-lock
-            // design needed.
-            if self.rotator.push(m, contention.clone()).await? {
-                flushed = true;
-            }
+            // The memory buffer copy carries `service.name` from the resource
+            // attributes, so label matchers behave the same before and after a
+            // flush. It is placed by the rotator, inside the shard lock, to keep
+            // buffer order identical to writer order. The rotator measures its
+            // own per-shard lock wait.
+            let buffered = self.memory_buffer.as_ref().map(|_| buffer_points(&m));
+            self.rotator
+                .push_buffered(m, buffered, contention.clone())
+                .await?;
         }
-        if self.rotator.check_and_flush(contention.clone()).await? {
-            flushed = true;
-        }
-        if flushed {
-            if let Some(ref buf) = self.memory_buffer {
-                buf.drain_offloaded(SignalType::Metrics).await;
-            }
-        }
+        // Duration-based rotation. Whatever a flush covers leaves the buffer
+        // when its block is durable, not here.
+        self.rotator.check_and_flush(contention.clone()).await?;
         self.stats
             .ingested_points
             .fetch_add(count, Ordering::Relaxed);
         tracing::debug!(
             signal = "metrics",
             ingested = count,
-            flushed = flushed,
             "metrics ingestion complete"
         );
         Ok(count)
@@ -1062,6 +1532,7 @@ impl IngestionService {
 /// Public service for ingesting OTLP logs.
 pub struct LogIngestionService {
     rotator: Arc<Mutex<LogRotator>>,
+    wal_enabled: bool,
     stats: Arc<IngestionStats>,
     memory_buffer: Option<MemoryBuffer>,
     contention: Option<Arc<ContentionMetrics>>,
@@ -1070,7 +1541,7 @@ pub struct LogIngestionService {
 impl LogIngestionService {
     /// Bytes the log WAL currently occupies.
     pub async fn wal_bytes(&self) -> u64 {
-        self.rotator.lock().await.wal_bytes()
+        self.rotator.lock().await.wal_bytes().await
     }
 
     pub fn new(config: LogBlockConfig, metadata_tx: mpsc::UnboundedSender<PendingIndex>) -> Self {
@@ -1084,11 +1555,13 @@ impl LogIngestionService {
         wal: Option<WalWriter>,
     ) -> Self {
         let mut rotator = LogRotator::new(config, metadata_tx);
+        let wal_enabled = wal.is_some();
         if let Some(w) = wal {
             rotator = rotator.with_wal(w);
         }
         Self {
             rotator: Arc::new(Mutex::new(rotator)),
+            wal_enabled,
             stats: Arc::new(IngestionStats::default()),
             memory_buffer: None,
             contention: None,
@@ -1096,7 +1569,14 @@ impl LogIngestionService {
     }
 
     /// Set the shared memory buffer for stream-queryable data.
+    ///
+    /// The rotator gets a handle too: it feeds the buffer next to its writer and
+    /// removes a block's rows once that block is durable.
     pub fn with_memory_buffer(mut self, buffer: MemoryBuffer) -> Self {
+        // Builder-time, before the service is shared: the lock is uncontended.
+        if let Ok(mut rotator) = self.rotator.try_lock() {
+            rotator.set_buffer(Some(buffer.clone()));
+        }
         self.memory_buffer = Some(buffer);
         self
     }
@@ -1121,6 +1601,17 @@ impl LogIngestionService {
         self.ingest_logs(logs).await
     }
 
+    /// Ingests a request a transport has already decoded (gRPC).
+    pub async fn ingest_request(&self, request: ExportLogsServiceRequest) -> Result<u64> {
+        self.stats.total_batches.fetch_add(1, Ordering::Relaxed);
+        let logs = decode_offloading(move || OtlpDecoder::decode_logs(request))
+            .await
+            .inspect_err(|_| {
+                self.stats.failed_batches.fetch_add(1, Ordering::Relaxed);
+            })?;
+        self.ingest_logs(logs).await
+    }
+
     pub async fn ingest_json(&self, body: Bytes) -> Result<u64> {
         self.stats.total_batches.fetch_add(1, Ordering::Relaxed);
         let logs = decode_offloading(move || {
@@ -1141,28 +1632,28 @@ impl LogIngestionService {
     /// this path, so recovered telemetry is treated identically to live data.
     pub async fn ingest_logs(&self, logs: Vec<LogRecord>) -> Result<u64> {
         let count = logs.len() as u64;
-        let mut flushed = false;
-        // Write to in-memory buffer first
-        if let Some(ref buf) = self.memory_buffer {
-            buf.push_logs(&logs).await;
-        }
+        // Framing the WAL records (JSON + checksum) is the CPU-heavy half of
+        // logging them and needs no lock; the rotator then writes the whole
+        // request in one go.
+        let wal_records = if self.wal_enabled {
+            let mut bytes = Vec::with_capacity(logs.len() * 320);
+            for log in &logs {
+                parqtel_core::wal::encode_record_into(log, &mut bytes)?;
+            }
+            Some(bytes)
+        } else {
+            None
+        };
         let contention = self.contention.clone();
         let mut rotator =
             lock_rotator(&self.rotator, SignalType::Logs, contention.as_deref()).await;
-        for l in logs {
-            if rotator.push(l, contention.as_deref()).await? {
-                flushed = true;
-            }
-        }
-        if rotator.check_and_flush(contention.as_deref()).await? {
+        let mut flushed = rotator
+            .push_batch(logs, wal_records, contention.as_ref())
+            .await?;
+        if rotator.check_and_flush(contention.as_ref()).await? {
             flushed = true;
         }
         drop(rotator);
-        if flushed {
-            if let Some(ref buf) = self.memory_buffer {
-                buf.drain_offloaded(SignalType::Logs).await;
-            }
-        }
         self.stats
             .ingested_points
             .fetch_add(count, Ordering::Relaxed);
@@ -1175,31 +1666,21 @@ impl LogIngestionService {
         Ok(count)
     }
 
-    /// Checks for duration-based flush; returns `true` when a flush happened
-    /// (the shared memory buffer is drained so flushed rows aren't double-read).
+    /// Checks for duration-based flush; returns `true` when a flush started.
+    /// The rows leave the memory buffer when their block is durable.
     pub async fn check_and_flush(&self) -> Result<bool> {
         let contention = self.contention.clone();
-        let flushed = lock_rotator(&self.rotator, SignalType::Logs, contention.as_deref())
+        lock_rotator(&self.rotator, SignalType::Logs, contention.as_deref())
             .await
-            .check_and_flush(contention.as_deref())
-            .await?;
-        if flushed {
-            if let Some(ref buf) = self.memory_buffer {
-                buf.drain_offloaded(SignalType::Logs).await;
-            }
-        }
-        Ok(flushed)
+            .check_and_flush(contention.as_ref())
+            .await
     }
 
     pub async fn shutdown(&self) -> Result<()> {
         let contention = self.contention.clone();
         let mut rotator =
             lock_rotator(&self.rotator, SignalType::Logs, contention.as_deref()).await;
-        let _ = rotator.flush(contention.as_deref()).await;
-        drop(rotator);
-        if let Some(ref buf) = self.memory_buffer {
-            buf.drain_offloaded(SignalType::Logs).await;
-        }
+        let _ = rotator.flush(contention.as_ref()).await;
         Ok(())
     }
 
@@ -1212,145 +1693,10 @@ impl LogIngestionService {
     }
 }
 
-/// Handles automatic rotation and flushing of trace blocks.
-pub struct TraceRotator {
-    writer: TraceWriter,
-    config: BlockConfig,
-    last_flush: Instant,
-    max_duration: Duration,
-    metadata_tx: mpsc::UnboundedSender<PendingIndex>,
-    /// WAL for traces, when enabled. Same contract as [`LogRotator::wal`].
-    wal: Option<WalWriter>,
-    /// Highest WAL position among the rows currently in `writer`.
-    covered: WalPosition,
-}
-
-impl TraceRotator {
-    pub fn new(config: BlockConfig, metadata_tx: mpsc::UnboundedSender<PendingIndex>) -> Self {
-        let max_duration = Duration::from_secs(config.block_duration_secs);
-        Self {
-            writer: TraceWriter::new(config.clone()),
-            wal: None,
-            covered: WalPosition::START,
-            config,
-            last_flush: Instant::now(),
-            max_duration,
-            metadata_tx,
-        }
-    }
-
-    /// Pushes a span, closing the block first when it is full.
-    ///
-    /// Returns `true` if a flush happened, so the caller drains the memory
-    /// buffer.
-    fn publish(&self, meta: BlockMetadata, contention: Option<&ContentionMetrics>) {
-        record_block_written(&meta, contention, SignalType::Traces);
-        let _ = self.metadata_tx.send(PendingIndex::untracked(meta));
-    }
-
-    /// Attaches a WAL. After this, every accepted span is logged before it
-    /// reaches the writer.
-    pub fn with_wal(mut self, wal: WalWriter) -> Self {
-        self.wal = Some(wal);
-        self
-    }
-
-    /// Bytes the trace WAL currently occupies.
-    pub fn wal_bytes(&self) -> u64 {
-        self.wal.as_ref().map_or(0, |w| w.size_bytes())
-    }
-
-    pub async fn push(
-        &mut self,
-        span: Span,
-        contention: Option<&ContentionMetrics>,
-    ) -> Result<bool> {
-        if let Some(wal) = self.wal.as_mut() {
-            self.covered = wal.append(&span)?;
-        }
-        if let Some(meta) = self.writer.push(span)? {
-            self.publish(meta, contention);
-            return Ok(true);
-        }
-        Ok(false)
-    }
-
-    pub async fn check_and_flush(
-        &mut self,
-        contention: Option<&ContentionMetrics>,
-    ) -> Result<bool> {
-        if Instant::now().duration_since(self.last_flush) >= self.max_duration {
-            self.flush(contention).await?;
-            return Ok(true);
-        }
-        Ok(false)
-    }
-
-    pub async fn flush(&mut self, contention: Option<&ContentionMetrics>) -> Result<()> {
-        if self.writer.is_empty() {
-            tracing::debug!("trace block flush skipped: buffer empty");
-            return Ok(());
-        }
-        let row_count = self.writer.len();
-        let started = std::time::Instant::now();
-        // Snapshot before the writer is taken; see LogRotator::flush.
-        let covered = self.covered;
-        self.covered = WalPosition::START;
-        let mut writer = std::mem::replace(&mut self.writer, TraceWriter::new(self.config.clone()));
-        let flush_guard = contention.map(|c| c.flush_started(SignalType::Traces));
-        let encoded = tokio::task::spawn_blocking(move || writer.flush()).await;
-        let metadata = match encoded {
-            Ok(result) => result,
-            Err(e) => {
-                return Err(Error::Internal(format!("flush task panicked: {}", e)));
-            }
-        };
-        if let (Some(guard), Ok(meta)) = (flush_guard, metadata.as_ref()) {
-            guard.count_rows(meta.row_count as u64);
-        }
-        let metadata = metadata?;
-        self.last_flush = Instant::now();
-        // See the metrics flush for why the sidecar must be durable first.
-        let (pending, durable) = match self.wal.is_some() {
-            true => {
-                let (p, r) = PendingIndex::tracked(metadata);
-                (p, Some(r))
-            }
-            false => (PendingIndex::untracked(metadata), None),
-        };
-        let _ = self.metadata_tx.send(pending);
-        if let Some(durable) = durable {
-            // See the metrics flush: bounded, and on timeout leave the WAL
-            // uncommitted so replay recovers the rows.
-            match tokio::time::timeout(INDEX_DURABILITY_TIMEOUT, durable).await {
-                Ok(Ok(())) => {
-                    if let Some(wal) = self.wal.as_mut() {
-                        wal.commit(covered)?;
-                    }
-                }
-                Ok(Err(_)) => tracing::warn!(
-                    "log index task dropped before the sidecar was persisted; \
-                     leaving the WAL uncommitted"
-                ),
-                Err(_) => tracing::error!(
-                    "timed out waiting for the log index to become durable; \
-                     leaving the WAL uncommitted"
-                ),
-            }
-        }
-        tracing::debug!(
-            signal = "traces",
-            rows = row_count,
-            duration_ms = started.elapsed().as_millis(),
-            "trace block flushed to parquet"
-        );
-        Ok(())
-    }
-}
-
 /// Public service for ingesting OTLP traces.
 pub struct TraceIngestionService {
     rotator: Arc<Mutex<TraceRotator>>,
+    wal_enabled: bool,
     stats: Arc<IngestionStats>,
     memory_buffer: Option<MemoryBuffer>,
     /// When set, span-metrics RED derivation sends metric batches here
@@ -1373,11 +1719,13 @@ impl TraceIngestionService {
         wal: Option<WalWriter>,
     ) -> Self {
         let mut rotator = TraceRotator::new(config, metadata_tx);
+        let wal_enabled = wal.is_some();
         if let Some(w) = wal {
             rotator = rotator.with_wal(w);
         }
         Self {
             rotator: Arc::new(Mutex::new(rotator)),
+            wal_enabled,
             stats: Arc::new(IngestionStats::default()),
             memory_buffer: None,
             span_metrics_tx: None,
@@ -1387,7 +1735,14 @@ impl TraceIngestionService {
     }
 
     /// Set the shared memory buffer for stream-queryable spans.
+    ///
+    /// The rotator gets a handle too: it feeds the buffer next to its writer and
+    /// removes a block's spans once that block is durable.
     pub fn with_memory_buffer(mut self, buffer: MemoryBuffer) -> Self {
+        // Builder-time, before the service is shared: the lock is uncontended.
+        if let Ok(mut rotator) = self.rotator.try_lock() {
+            rotator.set_buffer(Some(buffer.clone()));
+        }
         self.memory_buffer = Some(buffer);
         self
     }
@@ -1426,6 +1781,17 @@ impl TraceIngestionService {
         self.ingest_spans(spans).await
     }
 
+    /// Ingests a request a transport has already decoded (gRPC).
+    pub async fn ingest_request(&self, request: ExportTraceServiceRequest) -> Result<u64> {
+        self.stats.total_batches.fetch_add(1, Ordering::Relaxed);
+        let spans = decode_offloading(move || OtlpDecoder::decode_traces(request))
+            .await
+            .inspect_err(|_| {
+                self.stats.failed_batches.fetch_add(1, Ordering::Relaxed);
+            })?;
+        self.ingest_spans(spans).await
+    }
+
     pub async fn ingest_json(&self, body: Bytes) -> Result<u64> {
         self.stats.total_batches.fetch_add(1, Ordering::Relaxed);
         let spans = decode_offloading(move || {
@@ -1446,7 +1812,6 @@ impl TraceIngestionService {
     /// this path, so recovered telemetry is treated identically to live data.
     pub async fn ingest_spans(&self, spans: Vec<Span>) -> Result<u64> {
         let count = spans.len() as u64;
-        let mut flushed = false;
         // Span-metrics RED bridge: derive metrics from the FULL span set
         // (BEFORE tail sampling) so RED rates stay accurate while trace
         // storage is sampled.
@@ -1463,25 +1828,29 @@ impl TraceIngestionService {
                 .dropped_spans
                 .fetch_add(dropped, Ordering::Relaxed);
         }
-        // Write to in-memory buffer first so spans are queryable immediately.
-        if let Some(ref buf) = self.memory_buffer {
-            buf.push_spans(&spans).await;
-        }
+        // Framing the WAL records is the CPU-heavy half of logging them and
+        // needs no lock; the rotator then writes the whole request in one go.
+        let wal_records = if self.wal_enabled {
+            let mut bytes = Vec::with_capacity(spans.len() * 512);
+            for span in &spans {
+                parqtel_core::wal::encode_record_into(span, &mut bytes)?;
+            }
+            Some(bytes)
+        } else {
+            None
+        };
         let contention = self.contention.clone();
         let mut rotator =
             lock_rotator(&self.rotator, SignalType::Traces, contention.as_deref()).await;
-        for s in spans {
-            if rotator.push(s, contention.as_deref()).await? {
-                flushed = true;
-            }
+        // The rotator also makes the spans queryable (memory buffer) as it
+        // accepts them.
+        let mut flushed = rotator
+            .push_batch(spans, wal_records, contention.as_ref())
+            .await?;
+        if rotator.check_and_flush(contention.as_ref()).await? {
+            flushed = true;
         }
-        rotator.check_and_flush(contention.as_deref()).await?;
         drop(rotator);
-        if flushed {
-            if let Some(ref buf) = self.memory_buffer {
-                buf.drain_offloaded(SignalType::Traces).await;
-            }
-        }
         self.stats
             .ingested_points
             .fetch_add(count, Ordering::Relaxed);
@@ -1494,31 +1863,21 @@ impl TraceIngestionService {
         Ok(count)
     }
 
-    /// Checks for duration-based flush; returns `true` when a flush happened
-    /// (the shared memory buffer is drained so flushed spans aren't double-read).
+    /// Checks for duration-based flush; returns `true` when a flush started.
+    /// The spans leave the memory buffer when their block is durable.
     pub async fn check_and_flush(&self) -> Result<bool> {
         let contention = self.contention.clone();
-        let flushed = lock_rotator(&self.rotator, SignalType::Traces, contention.as_deref())
+        lock_rotator(&self.rotator, SignalType::Traces, contention.as_deref())
             .await
-            .check_and_flush(contention.as_deref())
-            .await?;
-        if flushed {
-            if let Some(ref buf) = self.memory_buffer {
-                buf.drain_offloaded(SignalType::Traces).await;
-            }
-        }
-        Ok(flushed)
+            .check_and_flush(contention.as_ref())
+            .await
     }
 
     pub async fn shutdown(&self) -> Result<()> {
         let contention = self.contention.clone();
         let mut rotator =
             lock_rotator(&self.rotator, SignalType::Traces, contention.as_deref()).await;
-        let _ = rotator.flush(contention.as_deref()).await;
-        drop(rotator);
-        if let Some(ref buf) = self.memory_buffer {
-            buf.drain_offloaded(SignalType::Traces).await;
-        }
+        let _ = rotator.flush(contention.as_ref()).await;
         Ok(())
     }
 
@@ -1707,6 +2066,394 @@ mod tests {
         );
         assert_eq!(blocks, 1, "all 8 rows belong to a single block");
         svc.shutdown().await.unwrap();
+    }
+
+    /// Rows that arrive while a block is being encoded belong to the *next*
+    /// block. When the encode finishes, only the rows that went into it may leave
+    /// the memory buffer; draining everything would hide the newer rows from
+    /// queries until a later block is written.
+    #[tokio::test]
+    async fn test_background_flush_keeps_rows_that_arrived_during_the_encode() {
+        let dir = tempdir().unwrap();
+        let buffer = parqtel_core::MemoryBuffer::new();
+        let config = BlockConfig {
+            data_dir: dir.path().to_path_buf(),
+            max_rows_per_block: 100_000,
+            block_duration_secs: 3600,
+            ..Default::default()
+        };
+        let (tx, rx) = mpsc::unbounded_channel::<PendingIndex>();
+        let _index = spawn_index_task(rx);
+        let wal = WalWriter::open(
+            dir.path(),
+            "metrics",
+            WalSyncMode::None,
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        let svc = IngestionService::with_shards(config, tx, 2, Some(wal))
+            .with_memory_buffer(buffer.clone());
+        svc.start_flush_worker(2);
+
+        for i in 0..4i64 {
+            svc.ingest_metrics(vec![metric_named(&format!("old{i}"), i + 1)])
+                .await
+                .unwrap();
+        }
+        // The swap happens before this returns; the encode finishes later.
+        svc.schedule_flush_for_test().await.unwrap();
+        for i in 0..3i64 {
+            svc.ingest_metrics(vec![metric_named(&format!("new{i}"), 100 + i)])
+                .await
+                .unwrap();
+        }
+
+        for _ in 0..300 {
+            if block_file_count(dir.path()) > 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        // Give the post-encode drain time to run.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(
+            block_file_count(dir.path()),
+            1,
+            "the first block was written"
+        );
+        let mut names = buffer.metric_names().await;
+        names.sort();
+        assert_eq!(
+            names,
+            vec!["new0", "new1", "new2"],
+            "only the rows that were flushed may leave the buffer"
+        );
+        svc.shutdown().await.unwrap();
+    }
+
+    /// A block may only commit once every earlier block is durable, whatever
+    /// order the concurrent encodes happen to finish in.
+    #[test]
+    fn test_wal_commit_never_passes_an_unfinished_flush() {
+        let mut f = FlushOrder::default();
+        let (a, b, c) = (f.begin(), f.begin(), f.begin());
+        // The latest block finishes first: nothing may be committed.
+        assert_eq!(f.wal_complete(c, WalPosition(30)), None);
+        // The middle one next: still blocked on the first.
+        assert_eq!(f.wal_complete(b, WalPosition(20)), None);
+        // The first completing releases all three, up to the highest position.
+        assert_eq!(f.wal_complete(a, WalPosition(10)), Some(WalPosition(30)));
+        // And the frontier keeps going for later flushes.
+        let d = f.begin();
+        assert_eq!(f.wal_complete(d, WalPosition(40)), Some(WalPosition(40)));
+    }
+
+    fn log_at(ts: i64, body: &str) -> parqtel_core::LogRecord {
+        parqtel_core::LogRecord::new(
+            ts,
+            ts,
+            9,
+            "INFO".into(),
+            body.into(),
+            parqtel_core::LabelSet::default(),
+            parqtel_core::LabelSet::default(),
+            [0u8; 16],
+            [0u8; 8],
+            0,
+            "".into(),
+            "".into(),
+        )
+    }
+
+    /// Logs: a block is written without holding the ingest path, and rows that
+    /// arrive during the encode stay queryable once it lands; only the block's own
+    /// rows leave the buffer.
+    #[tokio::test]
+    async fn test_log_flush_keeps_rows_that_arrived_during_the_encode() {
+        let dir = tempdir().unwrap();
+        let buffer = parqtel_core::MemoryBuffer::new();
+        let (tx, rx) = mpsc::unbounded_channel::<PendingIndex>();
+        let _index = spawn_index_task(rx);
+        let svc = LogIngestionService::with_wal(
+            LogBlockConfig {
+                data_dir: dir.path().to_path_buf(),
+                max_rows_per_block: 100_000,
+                block_duration_secs: 3600,
+                ..Default::default()
+            },
+            tx,
+            Some(
+                WalWriter::open(
+                    dir.path(),
+                    "logs",
+                    WalSyncMode::None,
+                    Duration::from_secs(1),
+                )
+                .unwrap(),
+            ),
+        )
+        .with_memory_buffer(buffer.clone());
+
+        svc.ingest_logs((0..5).map(|i| log_at(i + 1, "old")).collect())
+            .await
+            .unwrap();
+        // Starts the flush and returns; the encode runs in the background.
+        {
+            let mut rotator = svc.rotator.lock().await;
+            rotator.start_flush(None).await;
+        }
+        svc.ingest_logs((0..3).map(|i| log_at(100 + i, "new")).collect())
+            .await
+            .unwrap();
+
+        // Wait for the block in flight, not for the open one.
+        svc.rotator.lock().await.wait_idle().await;
+
+        let left = buffer.scan_logs(0, i64::MAX).await;
+        let bodies: Vec<_> = left.iter().map(|l| l.body.clone()).collect();
+        assert_eq!(
+            bodies,
+            vec!["new", "new", "new"],
+            "only the flushed rows may leave the buffer"
+        );
+        assert!(
+            block_file_count(dir.path()) >= 1,
+            "the first block must be written"
+        );
+    }
+
+    /// Logs: one WAL write per request still replays record by record, and the
+    /// commit point leaves nothing to replay after a clean flush.
+    #[tokio::test]
+    async fn test_log_batch_wal_append_replays_each_record() {
+        let dir = tempdir().unwrap();
+        let data_dir = dir.path().to_path_buf();
+        let (tx, rx) = mpsc::unbounded_channel::<PendingIndex>();
+        let _index = spawn_index_task(rx);
+        let svc = LogIngestionService::with_wal(
+            LogBlockConfig {
+                data_dir: data_dir.clone(),
+                max_rows_per_block: 100_000,
+                block_duration_secs: 3600,
+                ..Default::default()
+            },
+            tx,
+            Some(
+                WalWriter::open(
+                    &data_dir,
+                    "logs",
+                    WalSyncMode::Always,
+                    Duration::from_millis(0),
+                )
+                .unwrap(),
+            ),
+        );
+        svc.ingest_logs((0..7).map(|i| log_at(i + 1, &format!("m{i}"))).collect())
+            .await
+            .unwrap();
+        svc.ingest_logs(vec![log_at(50, "tail")]).await.unwrap();
+
+        // Nothing flushed yet: a crash here replays all eight, in order.
+        let mut bodies = Vec::new();
+        let stats = parqtel_core::wal::replay::<parqtel_core::LogRecord, _>(
+            &data_dir,
+            "logs",
+            parqtel_core::wal::read_commit(&data_dir, "logs"),
+            |l| bodies.push(l.body),
+        )
+        .unwrap();
+        assert_eq!(stats.records, 8);
+        assert_eq!(bodies[0], "m0");
+        assert_eq!(bodies[6], "m6");
+        assert_eq!(bodies[7], "tail");
+
+        // After a clean shutdown the block covers them, so nothing replays.
+        svc.shutdown().await.unwrap();
+        let mut replayed = 0;
+        parqtel_core::wal::replay::<parqtel_core::LogRecord, _>(
+            &data_dir,
+            "logs",
+            parqtel_core::wal::read_commit(&data_dir, "logs"),
+            |_| replayed += 1,
+        )
+        .unwrap();
+        assert_eq!(replayed, 0, "a durable block must commit its WAL range");
+    }
+
+    /// Spans take the same path as logs.
+    #[tokio::test]
+    async fn test_trace_flush_keeps_spans_that_arrived_during_the_encode() {
+        let dir = tempdir().unwrap();
+        let buffer = parqtel_core::MemoryBuffer::new();
+        let (tx, rx) = mpsc::unbounded_channel::<PendingIndex>();
+        let _index = spawn_index_task(rx);
+        let svc = TraceIngestionService::with_wal(
+            BlockConfig {
+                data_dir: dir.path().to_path_buf(),
+                max_rows_per_block: 100_000,
+                block_duration_secs: 3600,
+                ..Default::default()
+            },
+            tx,
+            Some(
+                WalWriter::open(
+                    dir.path(),
+                    "traces",
+                    WalSyncMode::None,
+                    Duration::from_secs(1),
+                )
+                .unwrap(),
+            ),
+        )
+        .with_memory_buffer(buffer.clone());
+
+        svc.ingest_spans((1..=4).map(test_span).collect())
+            .await
+            .unwrap();
+        {
+            let mut rotator = svc.rotator.lock().await;
+            rotator.start_flush(None).await;
+        }
+        svc.ingest_spans((100..103).map(test_span).collect())
+            .await
+            .unwrap();
+        svc.rotator.lock().await.wait_idle().await;
+
+        let left = buffer.scan_spans(0, i64::MAX).await;
+        assert_eq!(left.len(), 3, "only the newer spans remain buffered");
+        assert!(left.iter().all(|s| s.start_time_ns >= 100));
+        assert!(block_file_count(dir.path()) >= 1);
+    }
+
+    /// A crash between a block becoming durable and its WAL commit leaves the
+    /// rows in both. The block says which WAL span it covers (in its footer, so
+    /// even an un-indexed block does), and startup advances the commit over it.
+    #[tokio::test]
+    async fn test_block_on_disk_without_a_wal_commit_is_not_replayed() {
+        for signal in ["metrics", "logs", "traces"] {
+            let dir = tempdir().unwrap();
+            let data_dir = if signal == "logs" {
+                dir.path().join("logs")
+            } else {
+                dir.path().to_path_buf()
+            };
+            std::fs::create_dir_all(&data_dir).unwrap();
+            let wal = || {
+                WalWriter::open(
+                    &data_dir,
+                    signal,
+                    WalSyncMode::Always,
+                    Duration::from_millis(0),
+                )
+                .unwrap()
+            };
+            let (tx, rx) = mpsc::unbounded_channel::<PendingIndex>();
+            let _index = spawn_index_task(rx);
+            let sig = match signal {
+                "metrics" => SignalType::Metrics,
+                "logs" => SignalType::Logs,
+                _ => SignalType::Traces,
+            };
+            match signal {
+                "metrics" => {
+                    let cfg = BlockConfig {
+                        data_dir: data_dir.clone(),
+                        max_rows_per_block: 10_000,
+                        block_duration_secs: 3600,
+                        ..Default::default()
+                    };
+                    let svc = IngestionService::with_shards(cfg, tx, 2, Some(wal()));
+                    for i in 0..4 {
+                        svc.ingest_metrics(vec![metric_named(&format!("m{i}"), i + 1)])
+                            .await
+                            .unwrap();
+                    }
+                    svc.shutdown().await.unwrap();
+                }
+                "logs" => {
+                    let cfg = LogBlockConfig {
+                        data_dir: data_dir.clone(),
+                        max_rows_per_block: 10_000,
+                        block_duration_secs: 3600,
+                        ..Default::default()
+                    };
+                    let svc = LogIngestionService::with_wal(cfg, tx, Some(wal()));
+                    svc.ingest_logs((0..4).map(|i| log_at(i + 1, "x")).collect())
+                        .await
+                        .unwrap();
+                    svc.shutdown().await.unwrap();
+                }
+                _ => {
+                    let cfg = BlockConfig {
+                        data_dir: data_dir.clone(),
+                        max_rows_per_block: 10_000,
+                        block_duration_secs: 3600,
+                        ..Default::default()
+                    };
+                    let svc = TraceIngestionService::with_wal(cfg, tx, Some(wal()));
+                    svc.ingest_spans((1..=4).map(test_span).collect())
+                        .await
+                        .unwrap();
+                    svc.shutdown().await.unwrap();
+                }
+            }
+
+            // Die before the commit: rewind it, as if the process never wrote it.
+            parqtel_core::wal::commit_position(&data_dir, signal, WalPosition::START).unwrap();
+            let replay_count = || {
+                let mut n = 0;
+                parqtel_core::wal::replay::<serde_json::Value, _>(
+                    &data_dir,
+                    signal,
+                    parqtel_core::wal::read_commit(&data_dir, signal),
+                    |_| n += 1,
+                )
+                .unwrap();
+                n
+            };
+            assert!(replay_count() > 0, "{signal}: the rewound WAL must replay");
+
+            // A restart: the index has never heard of the block, so reconcile
+            // adopts it from the directory - footer and all.
+            let mut index = parqtel_core::storage::BlockIndex::new(&data_dir);
+            parqtel_core::storage::reconcile(&mut index, sig).unwrap();
+            assert_eq!(index.blocks.len(), 1, "{signal}: one block adopted");
+            assert!(
+                index.blocks[0].wal_range.is_some(),
+                "{signal}: the adopted block must report its WAL span"
+            );
+            parqtel_core::storage::advance_wal_commit(&data_dir, signal, &index);
+            assert_eq!(
+                replay_count(),
+                0,
+                "{signal}: rows already in a block must not be replayed"
+            );
+        }
+    }
+
+    /// Buffer drops follow the same order: a later flush finishing first must
+    /// not remove rows before the earlier block holding the older ones landed.
+    #[test]
+    fn test_buffer_drops_are_released_in_flush_order() {
+        let mut f = FlushOrder::default();
+        let (a, b) = (f.begin(), f.begin());
+        assert_eq!(f.drop_complete(b, vec![0, 4]), None);
+        // Releasing the earlier flush frees both, merged element-wise.
+        assert_eq!(f.drop_complete(a, vec![3, 2]), Some(vec![3, 4]));
+        // A failed flush completes with nothing to drop, unblocking the rest.
+        let (c, d) = (f.begin(), f.begin());
+        assert_eq!(f.drop_complete(d, vec![5, 5]), None);
+        assert_eq!(f.drop_complete(c, vec![0, 0]), Some(vec![5, 5]));
+    }
+
+    /// A flush that never completes (it failed) holds back every later commit,
+    /// so replay still recovers its rows.
+    #[test]
+    fn test_wal_commit_holds_back_behind_a_failed_flush() {
+        let mut f = FlushOrder::default();
+        let (_failed, ok1, ok2) = (f.begin(), f.begin(), f.begin());
+        assert_eq!(f.wal_complete(ok1, WalPosition(20)), None);
+        assert_eq!(f.wal_complete(ok2, WalPosition(30)), None);
     }
 
     /// Number of Parquet block files a data dir holds.
@@ -2817,6 +3564,7 @@ mod tests {
                 dir.path().to_path_buf()
             };
             std::fs::create_dir_all(&data_dir).unwrap();
+            // Each service owns the WAL of its own signal.
             let open = || {
                 WalWriter::open_with_segment_limit(
                     &data_dir,
@@ -2839,105 +3587,97 @@ mod tests {
                 block_duration_secs: 3600,
                 ..Default::default()
             };
+            let log_at = |ts: i64, body: &str| {
+                parqtel_core::LogRecord::new(
+                    ts,
+                    ts,
+                    9,
+                    "INFO".into(),
+                    body.into(),
+                    parqtel_core::LabelSet::default(),
+                    parqtel_core::LabelSet::default(),
+                    [0u8; 16],
+                    [0u8; 8],
+                    0,
+                    "".into(),
+                    "".into(),
+                )
+            };
+            let span_at = |i: i64| {
+                let mut sp = test_span(i);
+                sp.start_time_ns = i;
+                sp.end_time_ns = i + 99;
+                sp
+            };
 
             // Crash: accept, acknowledge, drop without flushing.
             {
-                let (ltx, lrx) = mpsc::unbounded_channel();
-                let (ttx, trx) = mpsc::unbounded_channel();
-                let _index_a = spawn_index_task(lrx);
-                let _index_b = spawn_index_task(trx);
-                let logs_svc = LogIngestionService::with_wal(log_config.clone(), ltx, Some(open()));
-                let traces_svc =
-                    TraceIngestionService::with_wal(block_config.clone(), ttx, Some(open()));
-
-                for i in 0..3i64 {
-                    let l = parqtel_core::LogRecord::new(
-                        i + 1,
-                        i + 1,
-                        9,
-                        "INFO".into(),
-                        format!("log-{i}"),
-                        parqtel_core::LabelSet::default(),
-                        parqtel_core::LabelSet::default(),
-                        [0u8; 16],
-                        [0u8; 8],
-                        0,
-                        "".into(),
-                        "".into(),
-                    );
-                    assert_eq!(logs_svc.ingest_logs(vec![l]).await.unwrap(), 1);
-
-                    let mut sp = test_span(i + 1);
-                    sp.start_time_ns = i + 1;
-                    sp.end_time_ns = i + 100;
-                    assert_eq!(traces_svc.ingest_spans(vec![sp]).await.unwrap(), 1);
+                let (tx, rx) = mpsc::unbounded_channel();
+                let _index = spawn_index_task(rx);
+                if signal == "logs" {
+                    let svc = LogIngestionService::with_wal(log_config.clone(), tx, Some(open()));
+                    for i in 0..3i64 {
+                        let l = log_at(i + 1, &format!("log-{i}"));
+                        assert_eq!(svc.ingest_logs(vec![l]).await.unwrap(), 1);
+                    }
+                } else {
+                    let svc =
+                        TraceIngestionService::with_wal(block_config.clone(), tx, Some(open()));
+                    for i in 0..3i64 {
+                        assert_eq!(svc.ingest_spans(vec![span_at(i + 1)]).await.unwrap(), 1);
+                    }
                 }
             }
 
             let commit = parqtel_core::wal::read_commit(&data_dir, signal);
-            let mut lrec = Vec::new();
-            let lstats = parqtel_core::wal::replay::<parqtel_core::LogRecord, _>(
-                &data_dir,
-                signal,
-                commit,
-                |r| lrec.push(r),
-            )
-            .unwrap();
-            let mut srec = Vec::new();
-            let sstats = parqtel_core::wal::replay::<parqtel_core::Span, _>(
-                &data_dir,
-                signal,
-                commit,
-                |r| srec.push(r),
-            )
-            .unwrap();
-
-            assert_eq!(
-                lstats.records, 3,
-                "{signal}: every acknowledged log must replay"
-            );
-            assert_eq!(
-                sstats.records, 3,
-                "{signal}: every acknowledged span must replay"
-            );
-            assert_eq!(
-                lrec.iter().map(|l| l.body.clone()).collect::<Vec<_>>(),
-                vec!["log-0", "log-1", "log-2"]
-            );
-            assert_eq!(srec.len(), 3);
+            if signal == "logs" {
+                let mut recovered = Vec::new();
+                let stats = parqtel_core::wal::replay::<parqtel_core::LogRecord, _>(
+                    &data_dir,
+                    signal,
+                    commit,
+                    |r| recovered.push(r),
+                )
+                .unwrap();
+                assert_eq!(stats.records, 3, "logs: every acknowledged log must replay");
+                assert_eq!(
+                    recovered.iter().map(|l| l.body.clone()).collect::<Vec<_>>(),
+                    vec!["log-0", "log-1", "log-2"]
+                );
+            } else {
+                let mut recovered = Vec::new();
+                let stats = parqtel_core::wal::replay::<parqtel_core::Span, _>(
+                    &data_dir,
+                    signal,
+                    commit,
+                    |r| recovered.push(r),
+                )
+                .unwrap();
+                assert_eq!(
+                    stats.records, 3,
+                    "traces: every acknowledged span must replay"
+                );
+                assert_eq!(recovered.len(), 3);
+            }
 
             // Graceful flush commits, so a second replay finds nothing.
-            let (ltx, lrx) = mpsc::unbounded_channel();
-            let (ttx, trx) = mpsc::unbounded_channel();
-            let _gc_index_a = spawn_index_task(lrx);
-            let _gc_index_b = spawn_index_task(trx);
-            let logs_svc = LogIngestionService::with_wal(log_config.clone(), ltx, Some(open()));
-            let traces_svc =
-                TraceIngestionService::with_wal(block_config.clone(), ttx, Some(open()));
-            // Ingest again so the writers are non-empty and `shutdown` really
-            // flushes — an empty writer short-circuits before the commit, which
+            let (tx, rx) = mpsc::unbounded_channel();
+            let _index = spawn_index_task(rx);
+            // Ingest again so the writer is non-empty and `shutdown` really
+            // flushes - an empty writer short-circuits before the commit, which
             // would leave the earlier records uncommitted and make this phase
             // assert the wrong thing.
-            let l = parqtel_core::LogRecord::new(
-                99,
-                99,
-                9,
-                "INFO".into(),
-                "log-flushed".into(),
-                parqtel_core::LabelSet::default(),
-                parqtel_core::LabelSet::default(),
-                [0u8; 16],
-                [0u8; 8],
-                0,
-                "".into(),
-                "".into(),
-            );
-            logs_svc.ingest_logs(vec![l]).await.unwrap();
-            traces_svc.ingest_spans(vec![test_span(99)]).await.unwrap();
-            logs_svc.shutdown().await.unwrap();
-            traces_svc.shutdown().await.unwrap();
-            // The index tasks consumed the metadata; the WAL commit is what the
-            // second replay checks.
+            if signal == "logs" {
+                let svc = LogIngestionService::with_wal(log_config.clone(), tx, Some(open()));
+                svc.ingest_logs(vec![log_at(99, "log-flushed")])
+                    .await
+                    .unwrap();
+                svc.shutdown().await.unwrap();
+            } else {
+                let svc = TraceIngestionService::with_wal(block_config.clone(), tx, Some(open()));
+                svc.ingest_spans(vec![span_at(99)]).await.unwrap();
+                svc.shutdown().await.unwrap();
+            }
 
             let commit = parqtel_core::wal::read_commit(&data_dir, signal);
             let after = parqtel_core::wal::replay::<serde_json::Value, _>(

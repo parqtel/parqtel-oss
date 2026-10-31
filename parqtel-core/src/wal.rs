@@ -216,25 +216,34 @@ impl WalWriter {
         if let Some(err) = &self.poisoned {
             return Err(Error::Internal(format!("WAL writer is poisoned: {err}")));
         }
-        let payload = match serde_json::to_vec(value) {
-            Ok(p) => p,
+        let record = match encode_record(value) {
+            Ok(r) => r,
             Err(e) => {
                 // Serialisation failure must not be retried on every request.
                 self.poisoned = Some(e.to_string());
-                return Err(Error::Serde(e));
+                return Err(e);
             }
         };
-        let mut record = Vec::with_capacity(RECORD_HEADER_LEN as usize + payload.len());
-        record.extend_from_slice(&(payload.len() as u32).to_le_bytes());
-        record.extend_from_slice(&crc32(&payload).to_le_bytes());
-        record.extend_from_slice(&payload);
+        self.append_encoded(&record)
+    }
 
-        if let Err(e) = self.file.write_all(&record) {
+    /// Appends records that [`encode_record`] already framed, with one write.
+    ///
+    /// Encoding is the CPU-heavy half of an append; doing it before the caller
+    /// takes the lock that orders WAL and writer leaves only a copy and a
+    /// `write` inside it. `records` may hold several back-to-back records, in
+    /// which case the returned position covers the last of them and a request of
+    /// N items costs one syscall rather than N.
+    pub fn append_encoded(&mut self, records: &[u8]) -> Result<WalPosition> {
+        if let Some(err) = &self.poisoned {
+            return Err(Error::Internal(format!("WAL writer is poisoned: {err}")));
+        }
+        if let Err(e) = self.file.write_all(records) {
             let msg = e.to_string();
             self.poisoned = Some(msg.clone());
             return Err(Error::Io(std::io::Error::other(msg)));
         }
-        self.offset += record.len() as u64;
+        self.offset += records.len() as u64;
         // Flush to the OS on **every** append. The `BufWriter` holds records in
         // userspace, so without this a process kill loses everything still
         // buffered - which is exactly the case the WAL exists for. `write` is
@@ -386,8 +395,11 @@ where
                 bad_at = Some(offset);
                 break;
             }
-            // Same 1-based encoding as WalWriter::position.
-            let pos = WalPosition((seq << 32) | (offset as u64 + 1));
+            // The position `WalWriter::append` returned for this record: the
+            // END of the record, 1-based. Labelling by the start would give the
+            // record after a committed one the same number as the commit point,
+            // and it would be skipped.
+            let pos = WalPosition((seq << 32) | (body_end as u64 + 1));
             if pos.is_covered_by(commit) {
                 stats.skipped += 1;
             } else {
@@ -560,20 +572,83 @@ fn read_commit_inner(dir: &Path) -> Option<WalPosition> {
     Some(WalPosition(s.trim().parse().ok()?))
 }
 
-// --- CRC32 -----------------------------------------------------------------
+// --- Block coverage ----------------------------------------------------------
 
-/// CRC-32 (IEEE). Small table-driven implementation; the WAL needs integrity
-/// detection, not speed, and this keeps the dependency surface unchanged.
-fn crc32(data: &[u8]) -> u32 {
-    let mut crc = 0xffff_ffffu32;
-    for &byte in data {
-        crc ^= byte as u32;
-        for _ in 0..8 {
-            let mask = (crc & 1).wrapping_neg();
-            crc = (crc >> 1) ^ (0xedb8_8320 & mask);
+/// Parquet footer key under which a block records the WAL span it covers.
+pub const WAL_RANGE_FOOTER_KEY: &str = "parqtel.wal_range";
+
+/// Footer value for a block covering `(from, to]`.
+pub fn encode_wal_range(range: (u64, u64)) -> String {
+    format!("{}-{}", range.0, range.1)
+}
+
+/// Parses [`encode_wal_range`]'s output.
+pub fn decode_wal_range(value: &str) -> Option<(u64, u64)> {
+    let (from, to) = value.split_once('-')?;
+    let (from, to) = (from.parse().ok()?, to.parse().ok()?);
+    (from <= to).then_some((from, to))
+}
+
+/// How far the WAL is already durable in blocks, starting from `commit`.
+///
+/// A block covers `(from, to]`; the blocks of consecutive flushes chain, each
+/// one's `from` being the previous one's `to`. Starting at the commit point this
+/// follows the chain through every block that is on disk, so a crash between a
+/// block becoming durable and its WAL commit does not replay the block's rows
+/// into a second block.
+///
+/// It deliberately walks the chain instead of taking the largest `to`: with
+/// several blocks encoding at once a later one can be durable while an earlier
+/// one is not, and skipping everything below the later block's end would drop
+/// the earlier block's rows. A gap stops the walk there.
+pub fn covered_through(commit: WalPosition, ranges: &[(u64, u64)]) -> WalPosition {
+    let mut at = commit.0;
+    loop {
+        let next = ranges
+            .iter()
+            .filter(|(from, to)| *from <= at && *to > at)
+            .map(|(_, to)| *to)
+            .max();
+        match next {
+            Some(to) => at = to,
+            None => return WalPosition(at),
         }
     }
-    !crc
+}
+
+// --- Record framing --------------------------------------------------------
+
+/// Frames `value` as one WAL record: `u32` length, `u32` CRC-32, JSON payload.
+///
+/// Pure CPU, no I/O and no state, so callers run it outside any lock and then
+/// hand the bytes to [`WalWriter::append_encoded`]. Several encoded records may
+/// be concatenated and appended together.
+pub fn encode_record<T: Serialize>(value: &T) -> Result<Vec<u8>> {
+    let mut record = Vec::with_capacity(256);
+    encode_record_into(value, &mut record)?;
+    Ok(record)
+}
+
+/// As [`encode_record`], appending to `out` so a batch shares one buffer.
+pub fn encode_record_into<T: Serialize>(value: &T, out: &mut Vec<u8>) -> Result<()> {
+    let start = out.len();
+    out.extend_from_slice(&[0u8; RECORD_HEADER_LEN as usize]);
+    serde_json::to_writer(&mut *out, value).map_err(Error::Serde)?;
+    let payload_len = out.len() - start - RECORD_HEADER_LEN as usize;
+    let crc = crc32(&out[start + RECORD_HEADER_LEN as usize..]);
+    out[start..start + 4].copy_from_slice(&(payload_len as u32).to_le_bytes());
+    out[start + 4..start + 8].copy_from_slice(&crc.to_le_bytes());
+    Ok(())
+}
+
+// --- CRC32 -----------------------------------------------------------------
+
+/// CRC-32 (IEEE 802.3), the same checksum every WAL record has always carried.
+///
+/// Computed with hardware CRC instructions where the CPU has them; the value
+/// is identical to the bitwise reference, so existing segments stay readable.
+fn crc32(data: &[u8]) -> u32 {
+    crc32fast::hash(data)
 }
 
 #[cfg(test)]
@@ -666,6 +741,82 @@ mod tests {
             "everything was committed, nothing should replay: {seen:?}"
         );
         assert!(stats.skipped > 0, "records must be counted as skipped");
+    }
+
+    /// The record right after the commit point is not covered by it. A commit
+    /// position is the end of the last covered record, and replay must label
+    /// records the same way, or the first uncommitted record shares the commit's
+    /// number and is skipped.
+    #[test]
+    fn replay_keeps_the_record_immediately_after_the_commit_point() {
+        let d = tmp();
+        let mut w = open(d.path());
+        let mut after = Vec::new();
+        for i in 0..5 {
+            after.push(
+                w.append(&Rec {
+                    n: format!("r{i}"),
+                    v: i,
+                })
+                .unwrap(),
+            );
+        }
+        w.sync().unwrap();
+        drop(w);
+
+        // Every prefix of the log, committed, must replay exactly the rest.
+        for covered in 0..=5usize {
+            let commit = if covered == 0 {
+                WalPosition::START
+            } else {
+                after[covered - 1]
+            };
+            let mut seen = Vec::new();
+            replay::<Rec, _>(d.path(), "metrics", commit, |r| seen.push(r.v)).unwrap();
+            let want: Vec<i64> = (covered as i64..5).collect();
+            assert_eq!(seen, want, "commit after {covered} records");
+        }
+    }
+
+    #[test]
+    fn wal_range_footer_value_round_trips() {
+        assert_eq!(decode_wal_range(&encode_wal_range((5, 90))), Some((5, 90)));
+        assert_eq!(decode_wal_range("7-7"), Some((7, 7)));
+        assert_eq!(decode_wal_range("9-3"), None);
+        assert_eq!(decode_wal_range("nope"), None);
+        assert_eq!(decode_wal_range("1-"), None);
+    }
+
+    /// The walk follows connected blocks and stops at a gap, whatever order the
+    /// blocks happened to become durable in.
+    #[test]
+    fn covered_through_follows_the_chain_and_stops_at_a_gap() {
+        let start = WalPosition(10);
+        // Nothing on disk: nothing is added.
+        assert_eq!(covered_through(start, &[]), start);
+        // 10 -> 20 -> 35, listed out of order.
+        assert_eq!(
+            covered_through(start, &[(20, 35), (10, 20)]),
+            WalPosition(35)
+        );
+        // The block for (20, 35] is missing: a later block (35, 50] that did
+        // become durable must NOT carry the walk past the gap.
+        assert_eq!(
+            covered_through(start, &[(10, 20), (35, 50)]),
+            WalPosition(20)
+        );
+        // Blocks entirely below the commit change nothing.
+        assert_eq!(
+            covered_through(WalPosition(40), &[(0, 10), (10, 30)]),
+            WalPosition(40)
+        );
+        // A block that straddles the commit extends it.
+        assert_eq!(
+            covered_through(WalPosition(15), &[(10, 30)]),
+            WalPosition(30)
+        );
+        // A range that starts after the commit and does not connect is ignored.
+        assert_eq!(covered_through(start, &[(11, 90)]), start);
     }
 
     #[test]
@@ -815,6 +966,14 @@ mod tests {
                 v: 1
             })
             .is_err());
+    }
+
+    #[test]
+    fn crc_matches_the_ieee_check_value() {
+        // The standard CRC-32 check value; also what the original bitwise
+        // implementation produced, so records written by older builds verify.
+        assert_eq!(crc32(b"123456789"), 0xCBF4_3926);
+        assert_eq!(crc32(b""), 0);
     }
 
     #[test]

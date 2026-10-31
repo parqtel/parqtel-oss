@@ -347,6 +347,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "async-compression"
+version = "0.4.47"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ef217a77a86a6e3dab9a5b3c81dc445b603fe743a90c1cb10a2f2144628d8cfa"
+dependencies = [
+ "compression-codecs",
+ "compression-core",
+ "pin-project-lite",
+ "tokio",
+]
+
+[[package]]
 name = "async-trait"
 version = "0.1.92"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -709,6 +721,23 @@ dependencies = [
  "strum_macros",
  "unicode-width",
 ]
+
+[[package]]
+name = "compression-codecs"
+version = "0.4.42"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "257c7085cbb71be72d8fb97edff08b03d86d5d9f2222b9cc34a6bec87093bc10"
+dependencies = [
+ "compression-core",
+ "flate2",
+ "memchr",
+]
+
+[[package]]
+name = "compression-core"
+version = "0.4.33"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6e8ccc4ea9f6acc32d102c0f6d471d11d913ad15f20c04de743374861fa1d414"
 
 [[package]]
 name = "const-random"
@@ -2012,9 +2041,12 @@ dependencies = [
  "arrow-array",
  "arrow-schema",
  "async-trait",
+ "base64 0.22.1",
  "bytes",
  "chrono",
+ "crc32fast",
  "futures",
+ "memchr",
  "parquet",
  "serde",
  "serde_json",
@@ -2225,6 +2257,7 @@ dependencies = [
 name = "parqtel-query"
 version = "0.3.1"
 dependencies = [
+ "ahash",
  "async-trait",
  "chrono",
  "futures",
@@ -2265,6 +2298,7 @@ dependencies = [
  "pprof",
  "prost 0.13.5",
  "regex",
+ "reqwest",
  "serde",
  "serde_json",
  "sha2",
@@ -3467,6 +3501,7 @@ dependencies = [
  "axum 0.8.9",
  "base64 0.22.1",
  "bytes",
+ "flate2",
  "h2",
  "http",
  "http-body",
@@ -3540,13 +3575,16 @@ version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1e9cd434a998747dd2c4276bc96ee2e0c7a2eadf3cae88e52be55a05fa9053f5"
 dependencies = [
+ "async-compression",
  "bitflags 2.13.1",
  "bytes",
+ "futures-core",
  "http",
  "http-body",
  "http-body-util",
  "pin-project-lite",
  "tokio",
+ "tokio-util",
  "tower-layer",
  "tower-service",
  "tracing",

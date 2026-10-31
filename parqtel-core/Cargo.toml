@@ -21,6 +21,9 @@ uuid = { workspace = true }
 tempfile = { workspace = true }
 futures = { workspace = true }
 bytes = { workspace = true }
+crc32fast = "1"
+memchr = "2"
+base64 = "0.22"
 
 [lints]
 workspace = true

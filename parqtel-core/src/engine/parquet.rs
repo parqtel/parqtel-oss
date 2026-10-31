@@ -1,11 +1,8 @@
 //! Parquet-based implementation of [`StorageEngine`].
 
 use async_trait::async_trait;
-use parquet::arrow::ArrowWriter;
-use parquet::basic::Compression;
-use parquet::file::properties::{WriterProperties, WriterVersion};
 use std::collections::{BTreeSet, HashSet};
-use std::fs::{self, File};
+use std::fs;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use uuid::Uuid;
@@ -14,8 +11,8 @@ use crate::config::BlockConfig;
 use crate::error::{Error, Result};
 use crate::models::logs::LogRecord;
 use crate::models::metrics::{DataPoint, Metric};
-use crate::models::storage::{BlockMetadata, SignalType, StorageModel};
-use crate::storage::{BlockIndex, Scanner};
+use crate::models::storage::{BlockMetadata, MetricRun, SignalType, StorageModel};
+use crate::storage::{write_block_file, BlockIndex, FooterIndex, Scanner};
 
 use super::{
     CompactionStats, LogFieldSnapshot, LogScanRequest, MetricScanRequest, StorageEngine,
@@ -123,7 +120,28 @@ impl ParquetStorageEngine {
             .last()
             .ok_or_else(|| Error::Internal("empty".into()))?;
 
-        let chunk = StorageModel::metrics_to_chunk(metrics)?;
+        // Series-contiguous, time-ordered inside each series, with the series
+        // table that describes it.
+        let runs: Vec<MetricRun<'_>> = metrics
+            .iter()
+            .map(|m| {
+                let mut points: Vec<&DataPoint> = m.data_points.iter().collect();
+                points.sort_by(|a, b| {
+                    a.labels
+                        .fingerprint()
+                        .cmp(&b.labels.fingerprint())
+                        .then(a.timestamp_ns.cmp(&b.timestamp_ns))
+                });
+                MetricRun {
+                    name: &m.name,
+                    kind: m.kind,
+                    resource: &m.resource_attributes,
+                    points,
+                }
+            })
+            .collect();
+        let (chunk, series) = StorageModel::metric_runs_to_block(&runs)?;
+        drop(runs);
         let filename = format!(
             "{}_{}_{}.parquet",
             start_ts,
@@ -133,11 +151,14 @@ impl ParquetStorageEngine {
         let final_path = self.config.data_dir.join(&filename);
         let tmp_path = self.config.data_dir.join(format!(".tmp_{}", filename));
 
-        write_parquet(
+        write_block_file(
             &tmp_path,
             chunk,
             &self.config.compression,
+            None,
             self.config.row_group_size,
+            None,
+            Some(FooterIndex::Series(&series)),
         )?;
         fs::rename(&tmp_path, &final_path)?;
         let size_bytes = fs::metadata(&final_path)?.len();
@@ -152,6 +173,7 @@ impl ParquetStorageEngine {
             label_names,
             label_values: Default::default(),
             signal_type: SignalType::Metrics,
+            wal_range: None,
         })
     }
 
@@ -180,7 +202,7 @@ impl ParquetStorageEngine {
             }
         }
 
-        let chunk = StorageModel::logs_to_chunk(logs)?;
+        let (chunk, skip_index) = StorageModel::logs_to_block(logs)?;
         let filename = format!(
             "logs_{}_{}_{}.parquet",
             start_ts,
@@ -190,11 +212,14 @@ impl ParquetStorageEngine {
         let final_path = self.log_config.data_dir.join(&filename);
         let tmp_path = self.log_config.data_dir.join(format!(".tmp_{}", filename));
 
-        write_parquet(
+        write_block_file(
             &tmp_path,
             chunk,
             &self.log_config.compression,
+            None,
             self.log_config.row_group_size,
+            None,
+            Some(FooterIndex::Logs(&skip_index)),
         )?;
         fs::rename(&tmp_path, &final_path)?;
         let size_bytes = fs::metadata(&final_path)?.len();
@@ -209,6 +234,7 @@ impl ParquetStorageEngine {
             label_names,
             label_values: Default::default(),
             signal_type: SignalType::Logs,
+            wal_range: None,
         })
     }
 }
@@ -390,37 +416,6 @@ impl StorageEngine for ParquetStorageEngine {
             logs_blocks: l_blocks,
         })
     }
-}
-
-fn write_parquet(
-    path: &std::path::Path,
-    record_batch: arrow::record_batch::RecordBatch,
-    compression: &str,
-    row_group_size: usize,
-) -> Result<()> {
-    let file = File::create(path)?;
-
-    let writer_props = WriterProperties::builder()
-        .set_compression(match compression {
-            "zstd" => Compression::ZSTD(Default::default()),
-            "snappy" => Compression::SNAPPY,
-            "lz4" => Compression::LZ4_RAW,
-            _ => Compression::UNCOMPRESSED,
-        })
-        .set_writer_version(WriterVersion::PARQUET_2_0)
-        // Same row-group sizing as the ingest writer so every writer produces
-        // blocks the scanner can prune equally well.
-        .set_max_row_group_row_count(Some(row_group_size.max(1)))
-        .build();
-
-    let mut writer = ArrowWriter::try_new(file, record_batch.schema(), Some(writer_props))
-        .map_err(|e| Error::Parquet(e.to_string()))?;
-
-    writer
-        .write(&record_batch)
-        .map_err(|e| Error::Parquet(e.to_string()))?;
-    writer.close().map_err(|e| Error::Parquet(e.to_string()))?;
-    Ok(())
 }
 
 #[cfg(test)]

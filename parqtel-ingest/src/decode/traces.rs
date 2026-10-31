@@ -1,5 +1,6 @@
 use super::common::{
-    any_value_to_string, json_attrs_to_labels, parse_json_hex, parse_json_timestamp,
+    any_value_to_string, json_attrs_to_labels, kv_labels, kv_labels_over, parse_json_hex,
+    parse_json_timestamp,
 };
 use crate::otel::collector::trace::v1::ExportTraceServiceRequest;
 use crate::otel::trace::v1::Span as ProtoSpan;
@@ -8,15 +9,9 @@ use parqtel_core::{Error, LabelSet, Result, Span, SpanEvent, SpanLink, SpanStatu
 pub(crate) fn decode_traces(request: ExportTraceServiceRequest) -> Result<Vec<Span>> {
     let mut spans = Vec::new();
     for resource_spans in request.resource_spans {
-        let resource_attributes = if let Some(resource) = resource_spans.resource {
-            LabelSet::try_from_iter(resource.attributes.into_iter().map(|attr| {
-                (
-                    attr.key,
-                    attr.value.map(any_value_to_string).unwrap_or_default(),
-                )
-            }))?
-        } else {
-            LabelSet::default()
+        let resource_attributes = match resource_spans.resource.as_ref() {
+            Some(resource) => kv_labels(&resource.attributes)?,
+            None => LabelSet::default(),
         };
         for scope_spans in resource_spans.scope_spans {
             for proto_span in scope_spans.spans {
@@ -82,28 +77,15 @@ fn convert_span(proto: ProtoSpan, resource_attributes: LabelSet) -> Result<Span>
         parent_span_id.copy_from_slice(&proto.parent_span_id);
     }
 
-    let attributes = LabelSet::try_from_iter(proto.attributes.into_iter().map(|attr| {
-        (
-            attr.key,
-            attr.value.map(any_value_to_string).unwrap_or_default(),
-        )
-    }))?;
-
     // Resource attributes (service.name, k8s.*) belong on every span of the
     // resource; span-level attributes win on key conflict.
-    let attributes = resource_attributes.merge(&attributes);
+    let attributes = kv_labels_over(&resource_attributes, &proto.attributes)?;
 
     let events = proto
         .events
         .into_iter()
         .map(|e| {
-            let attrs = LabelSet::try_from_iter(e.attributes.into_iter().map(|attr| {
-                (
-                    attr.key,
-                    attr.value.map(any_value_to_string).unwrap_or_default(),
-                )
-            }))
-            .unwrap_or_default();
+            let attrs = kv_labels(&e.attributes).unwrap_or_default();
             SpanEvent {
                 time_ns: e.time_unix_nano as i64,
                 name: e.name,

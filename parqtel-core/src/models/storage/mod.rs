@@ -4,6 +4,7 @@ mod schema;
 mod writer;
 
 pub use schema::{logs_schema, metrics_schema, traces_schema, BlockMetadata, SignalType};
+pub use writer::{logs_to_block, metric_runs_to_block, metric_runs_to_chunk, MetricRun};
 
 use crate::error::Result;
 use crate::models::labels::LabelSet;
@@ -32,6 +33,19 @@ impl StorageModel {
 
     pub fn metrics_to_chunk(metrics: &[Metric]) -> Result<RecordBatch> {
         writer::metrics_to_chunk(metrics)
+    }
+    pub fn metric_runs_to_chunk(runs: &[MetricRun<'_>]) -> Result<RecordBatch> {
+        writer::metric_runs_to_chunk(runs)
+    }
+    pub fn metric_runs_to_block(
+        runs: &[MetricRun<'_>],
+    ) -> Result<(RecordBatch, crate::storage::SeriesTable)> {
+        writer::metric_runs_to_block(runs)
+    }
+    pub fn logs_to_block(
+        logs: &[LogRecord],
+    ) -> Result<(RecordBatch, crate::storage::LogIndexTable)> {
+        writer::logs_to_block(logs)
     }
     pub fn logs_to_chunk(logs: &[LogRecord]) -> Result<RecordBatch> {
         writer::logs_to_chunk(logs)
@@ -203,6 +217,7 @@ mod tests {
             label_names: std::collections::HashSet::from(["host".into()]),
             label_values: Default::default(),
             signal_type: SignalType::Metrics,
+            wal_range: None,
         };
         let json = serde_json::to_string(&meta).unwrap();
         let decoded: BlockMetadata = serde_json::from_str(&json).unwrap();

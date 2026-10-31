@@ -11,7 +11,96 @@ build cannot reach a registry or the release page.
 
 ## [Unreleased]
 
-Nothing yet.
+Ingest and query performance, and a set of durability and visibility fixes found
+while measuring. Measurements and method are in
+[docs/benchmarks/PERFORMANCE.md](docs/benchmarks/PERFORMANCE.md).
+
+### Performance
+
+- **Ingest**: metrics 0.62 → 2.0 M points/s, logs 0.10 → 1.8 M records/s, p99
+  ingest latency 55 → 17 ms (metrics) and 538 → 10 ms (logs), on 8 cores.
+- **Queries**: single-series selector 156 → 15 ms, aggregations 180 → 28 ms,
+  instant queries 107 → 17 ms, log search 284 → 102 ms (p50, 2.4 M-point
+  dataset).
+- Peak RSS under the same load fell from 2.3 GB to 0.8 GB.
+- **Log search** 102 → 23 ms (a term matching a fifth of the records) and
+  29 → 12 ms (a term in one record) at p50, one client; with 8 clients 311 → 64 ms
+  and 113 → 32 ms.
+- **Series table in every metric block** (see Added): a selective query now reads
+  only the rows of the series it selects. Single-series selector 15 → 0.9 ms,
+  aggregations 28 → 7 ms, instant queries 15 → 3 ms (p50, one client, same
+  dataset and build mode); with 8 concurrent clients 41 → 1.8 ms, 77 → 20 ms and
+  32 → 9.7 ms.
+
+### Added
+
+- **Skip index in each log block.** The Parquet footer (`parqtel.log_index`)
+  holds, per granule of 4 096 rows, the time bounds, the highest severity and a
+  bloom filter over the body's three-byte windows and the records' `name=value`
+  attribute and resource-attribute pairs. A search reads only the granules that
+  can hold a row meeting all its conditions, so a needle that occurs in one
+  record touches one or two granules. A granule is skipped only when it provably
+  holds no match; counts and volume buckets are unchanged. Costs about a byte per
+  row.
+- Log blocks also index trace and span ids; `trace_id`, `span_id`, `service`, `attr.K`
+  and `res.K` equalities of a LogQL query (and bare field names, when no
+  pipeline-enriched fields are in play) narrow the granules read.
+- Searches that are only severity and body conditions count, bucket and rank
+  matches from three columns and decode the other sixteen only for the rows they
+  return.
+- **Series table in each metric block.** Metric blocks are now laid out series by
+  series (each in time order) and carry, in the Parquet footer
+  (`parqtel.series_index`), a table of their series: labels, the rows each one
+  occupies and its time bounds. At load the table becomes an inverted index
+  (label name → value → series) that narrows a selector to its candidate series
+  without touching a row; the candidates' row ranges become a Parquet row
+  selection over the timestamp and value columns only. Labels come from the
+  table, so the label, metric-name and service columns are not read. The
+  matcher still judges every candidate, so a block read through its table
+  returns exactly what a scan of the same block without one returns. Flushed,
+  compacted and engine-written blocks all carry it; a block without a valid
+  table (or one that disagrees with its row count) is scanned as before.
+  `points_scanned` now counts the rows actually read.
+- The memory buffer judges a metric selector once per distinct series before
+  reading any buffered point, so a selector that matches nothing in the buffer
+  costs nothing.
+- Footer cache is bounded by bytes (192 MiB) rather than entry count, and holds
+  each block's parsed series table.
+- **gzip-compressed OTLP**, which the OpenTelemetry Collector's exporters send by
+  default: request bodies on HTTP (limits apply to the decompressed size) and
+  gRPC.
+
+### Fixed
+
+- **A capped query could return different series after every restart.** The
+  label-set fingerprint used a randomly seeded hasher although it is documented
+  as stable, and series are ordered by fingerprint before the series limit is
+  applied. It is now a fixed function of the labels (value pinned in a test).
+- **OTLP/HTTP protobuf traces** were rejected with 400 on `/v1/traces`; only gRPC
+  could ingest protobuf traces. The endpoint now negotiates on `Content-Type`
+  like metrics and logs.
+- **Crash recovery lost data.** Replay numbered WAL records by where they started
+  while commit points are where they end, so the record after the committed one
+  was skipped; and a sharded flush could commit a position past a record that
+  belonged to the next block. After `kill -9` under load, every acknowledged
+  metric, log and span is now recovered.
+- **Concurrent flushes committed out of order**, which could move the WAL commit
+  point past a block that was not yet on disk. Commits are released in flush
+  order.
+- **Recovery no longer duplicates rows.** A crash in the few milliseconds after a
+  block became durable and before its WAL range was committed replayed that
+  range into a second block. Each block now records the WAL span `(from, to]` it
+  covers in its Parquet footer and in the index, and startup advances the commit
+  point along the chain of blocks on disk before replaying. It follows the chain
+  rather than taking the largest `to`, so a later block that finished first can
+  never cause an earlier, unwritten one to be skipped. (A block closed early by
+  the writer on capacity, rather than by a flush, carries no span.)
+- **Fresh data vanished from queries after each flush.** The memory buffer was
+  emptied completely when a block became durable, including rows that arrived
+  while it was being written. Only the rows the block holds are removed now.
+- **SIGTERM could leave the process running** after "Shutting down gracefully":
+  a background task kept the ingestion services alive. Shutdown also bounds its
+  waits on the index tasks.
 
 ## [0.3.1]
 
