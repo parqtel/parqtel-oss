@@ -1,4 +1,4 @@
-use super::block_file::write_block_file;
+use super::block_file::{write_block_file, FooterIndex};
 use super::index::{BlockIndex, BlockIndexStore};
 use crate::config::BlockConfig;
 use crate::error::{Error, Result};
@@ -387,6 +387,7 @@ impl Compactor {
         label_values: LabelValues,
     ) -> Result<BlockMetadata> {
         let mut series = None;
+        let mut log_index = None;
         let (record_batch, start_ts, end_ts, row_count, metric_names, label_names) =
             match signal_type {
                 SignalType::Metrics => {
@@ -453,14 +454,9 @@ impl Compactor {
                             l_names.insert(l.clone());
                         }
                     }
-                    (
-                        StorageModel::logs_to_chunk(&all_logs)?,
-                        start,
-                        end,
-                        rows,
-                        HashSet::new(),
-                        l_names,
-                    )
+                    let (chunk, index) = StorageModel::logs_to_block(&all_logs)?;
+                    log_index = Some(index);
+                    (chunk, start, end, rows, HashSet::new(), l_names)
                 }
                 SignalType::Traces => {
                     // Spans sort by start time so the merged block keeps the
@@ -507,7 +503,10 @@ impl Compactor {
             config.compression_level,
             config.row_group_size,
             None,
-            series.as_ref(),
+            series
+                .as_ref()
+                .map(FooterIndex::Series)
+                .or(log_index.as_ref().map(FooterIndex::Logs)),
         )?;
 
         fs::rename(&tmp_path, &final_path)?;

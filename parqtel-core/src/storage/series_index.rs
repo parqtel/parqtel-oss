@@ -198,29 +198,6 @@ pub struct SeriesEntry {
     pub max_ts: i64,
 }
 
-/// Key/value pairs for a block's Parquet footer: the WAL span it makes durable
-/// and, for metric blocks, the series table.
-pub fn footer_metadata(
-    wal_range: Option<(u64, u64)>,
-    series: Option<&SeriesTable>,
-) -> Result<Option<Vec<parquet::file::metadata::KeyValue>>> {
-    use parquet::file::metadata::KeyValue;
-    let mut out = Vec::new();
-    if let Some(range) = wal_range {
-        out.push(KeyValue::new(
-            crate::wal::WAL_RANGE_FOOTER_KEY.to_string(),
-            crate::wal::encode_wal_range(range),
-        ));
-    }
-    if let Some(table) = series {
-        out.push(KeyValue::new(
-            SERIES_INDEX_FOOTER_KEY.to_string(),
-            table.to_footer_value()?,
-        ));
-    }
-    Ok(if out.is_empty() { None } else { Some(out) })
-}
-
 /// A test applied to a label's distinct values, for narrowing by a regex-like
 /// matcher without visiting series.
 pub type ValueTest = Arc<dyn Fn(&str) -> bool + Send + Sync>;

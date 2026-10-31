@@ -643,16 +643,7 @@ fn push_term_like(toks: &mut Vec<Tok>, t: String) {
 /// allocation per term per row. The needle must already be lowercase, which
 /// the prepared clauses and terms guarantee.
 pub fn contains_ci(haystack: &str, needle_lower: &str) -> bool {
-    if needle_lower.is_empty() {
-        return true;
-    }
-    let h = haystack.as_bytes();
-    let n = needle_lower.as_bytes();
-    if n.len() > h.len() {
-        return false;
-    }
-    h.windows(n.len())
-        .any(|w| w.iter().zip(n).all(|(a, b)| a.to_ascii_lowercase() == *b))
+    parqtel_core::text::contains_ascii_ci(haystack, needle_lower)
 }
 
 /// A [`Clause`] with its per-query work already done.
@@ -799,6 +790,7 @@ impl PreparedPredicate {
     pub fn column_prefilter(&self) -> ColumnPrefilter {
         let mut pre = ColumnPrefilter::default();
         self.0.collect_prefilter(&mut pre);
+        pre.exact = self.0.is_prefilter_exact();
         pre
     }
 
@@ -811,6 +803,19 @@ impl PreparedPredicate {
 
 /// See [`PreparedPredicate::column_prefilter`].
 pub type ColumnPrefilter = parqtel_core::storage::LogColumnPrefilter;
+
+/// Clauses [`PrefilterBuilder::add_clause`] captures completely.
+fn prefilter_clause_is_exact(clause: &PreparedClause) -> bool {
+    matches!(
+        clause,
+        PreparedClause::SeverityMin(_) | PreparedClause::BodyContains { negate: false, .. }
+    )
+}
+
+/// Terms [`PrefilterBuilder::add_term`] captures completely.
+fn prefilter_term_is_exact(term: &PreparedTerm) -> bool {
+    matches!(term, PreparedTerm::Contains { negate: false, .. })
+}
 
 trait PrefilterBuilder {
     fn add_clause(&mut self, clause: &PreparedClause);
@@ -843,6 +848,18 @@ impl PrefilterBuilder for ColumnPrefilter {
 }
 
 impl PreparedPredicateKind {
+    /// Whether the predicate is nothing but conjuncts that
+    /// [`Self::collect_prefilter`] turns into column conditions, so the prefilter
+    /// accepts exactly the rows the predicate does.
+    fn is_prefilter_exact(&self) -> bool {
+        match self {
+            PreparedPredicateKind::And(parts) => parts.iter().all(|p| p.0.is_prefilter_exact()),
+            PreparedPredicateKind::Clause(c) => prefilter_clause_is_exact(c),
+            PreparedPredicateKind::Term(t) => prefilter_term_is_exact(t),
+            PreparedPredicateKind::Or(_) | PreparedPredicateKind::Not(_) => false,
+        }
+    }
+
     fn collect_prefilter(&self, pre: &mut ColumnPrefilter) {
         match self {
             PreparedPredicateKind::And(parts) => {
@@ -946,6 +963,8 @@ impl PreparedLogQuery {
         for term in &self.terms {
             pre.add_term(term);
         }
+        pre.exact = self.clauses.iter().all(prefilter_clause_is_exact)
+            && self.terms.iter().all(prefilter_term_is_exact);
         pre
     }
 

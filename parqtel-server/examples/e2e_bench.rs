@@ -271,7 +271,7 @@ fn pct(sorted: &[u64], p: f64) -> f64 {
 fn report(name: &str, mut s: Stats, wall: Duration) {
     s.lat_us.sort_unstable();
     println!(
-        "{:<22} reqs={:<7} err={:<4} items/s={:<11.0} p50={:>8.2}ms p95={:>8.2}ms p99={:>8.2}ms max={:>8.2}ms",
+        "{:<22} reqs={:<7} err={:<4} items/s={:<11.0} p50={:>8.2}ms p95={:>8.2}ms p99={:>8.2}ms max={:>8.2}ms min={:>8.2}ms",
         name,
         s.lat_us.len(),
         s.errors,
@@ -280,6 +280,7 @@ fn report(name: &str, mut s: Stats, wall: Duration) {
         pct(&s.lat_us, 0.95),
         pct(&s.lat_us, 0.99),
         pct(&s.lat_us, 1.0),
+        pct(&s.lat_us, 0.0),
     );
 }
 
@@ -410,6 +411,8 @@ async fn query_phase(args: &Args, client: &reqwest::Client) {
         ),
         ("instant-sum", instant("sum(bench_m4)")),
         ("logs-search", logs("status=500")),
+        // A needle that occurs in a single record of the whole dataset.
+        ("logs-search-rare", logs("request 150000 handled")),
         (
             "traces-search",
             format!(

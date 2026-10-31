@@ -2,7 +2,8 @@
 
 use crate::config::compression_from_name;
 use crate::error::{Error, Result};
-use crate::storage::series_index::{footer_metadata, SeriesTable};
+use crate::storage::log_index::{LogIndexTable, LOG_INDEX_FOOTER_KEY};
+use crate::storage::series_index::{SeriesTable, SERIES_INDEX_FOOTER_KEY};
 use parquet::arrow::ArrowWriter;
 use parquet::file::properties::{EnabledStatistics, WriterProperties, WriterVersion};
 use parquet::schema::types::ColumnPath;
@@ -18,6 +19,9 @@ use std::path::Path;
 /// bloom filter there would add size for no pruning power.
 const BLOOM_METRIC_NAME: &str = "metric_name";
 const BLOOM_SERVICE_NAME: &str = "service_name";
+
+/// The log body column, which is written without a dictionary.
+const PLAIN_BODY_COLUMN: &str = "body";
 
 /// Bloom filter false-positive probability.
 ///
@@ -38,6 +42,43 @@ const COLUMN_INDEX_TRUNCATE_LENGTH: usize = 64;
 /// `row_group_size` to point at.
 const DATA_PAGE_SIZE_LIMIT: usize = 512 * 1024;
 
+/// The per-block index a file carries in its footer.
+#[derive(Clone, Copy)]
+pub enum FooterIndex<'a> {
+    /// A metric block's series table.
+    Series(&'a SeriesTable),
+    /// A log block's skip index.
+    Logs(&'a LogIndexTable),
+}
+
+/// Key/value pairs for a block's Parquet footer: the WAL span it makes durable
+/// and its per-block index.
+pub fn footer_metadata(
+    wal_range: Option<(u64, u64)>,
+    index: Option<FooterIndex<'_>>,
+) -> Result<Option<Vec<parquet::file::metadata::KeyValue>>> {
+    use parquet::file::metadata::KeyValue;
+    let mut out = Vec::new();
+    if let Some(range) = wal_range {
+        out.push(KeyValue::new(
+            crate::wal::WAL_RANGE_FOOTER_KEY.to_string(),
+            crate::wal::encode_wal_range(range),
+        ));
+    }
+    match index {
+        Some(FooterIndex::Series(t)) => out.push(KeyValue::new(
+            SERIES_INDEX_FOOTER_KEY.to_string(),
+            t.to_footer_value()?,
+        )),
+        Some(FooterIndex::Logs(t)) => out.push(KeyValue::new(
+            LOG_INDEX_FOOTER_KEY.to_string(),
+            t.to_footer_value()?,
+        )),
+        None => {}
+    }
+    Ok(if out.is_empty() { None } else { Some(out) })
+}
+
 /// Writes one block to Parquet, splitting it into `row_group_size`-row groups.
 ///
 /// `row_group_size` is not cosmetic: the scanner skips whole row groups whose
@@ -52,15 +93,15 @@ pub fn write_block_file(
     compression_level: Option<i32>,
     row_group_size: usize,
     wal_range: Option<(u64, u64)>,
-    series: Option<&SeriesTable>,
+    index: Option<FooterIndex<'_>>,
 ) -> Result<()> {
     let file = File::create(path)?;
 
     // The WAL span this block makes durable, and (for metrics) the series it
-    // holds, travel in the file itself: a block found on disk without an index
+    // holds or (for logs) its skip index, travel in the file itself: a block found on disk without an index
     // entry still says what it covers, and the series table cannot fall out of
     // step with the rows it describes.
-    let footer = footer_metadata(wal_range, series)?;
+    let footer = footer_metadata(wal_range, index)?;
 
     let writer_props = WriterProperties::builder()
         .set_key_value_metadata(footer)
@@ -74,6 +115,10 @@ pub fn write_block_file(
         // them were being decoded.
         // Per-column, so only these two pay the size cost. Enabling it for
         // every column would bloat blocks with filters nothing reads.
+        // Log bodies are nearly all distinct, so a dictionary only costs a hash
+        // per row to write and a copy per row to read, and falls back to plain
+        // pages once it outgrows its page anyway.
+        .set_column_dictionary_enabled(ColumnPath::from(PLAIN_BODY_COLUMN), false)
         .set_column_bloom_filter_enabled(ColumnPath::from(BLOOM_METRIC_NAME), true)
         .set_column_bloom_filter_enabled(ColumnPath::from(BLOOM_SERVICE_NAME), true)
         // Default false-positive probability. Named so the trade is visible:

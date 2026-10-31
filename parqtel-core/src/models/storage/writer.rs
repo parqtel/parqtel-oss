@@ -5,6 +5,7 @@ use crate::models::logs::LogRecord;
 use crate::models::metrics::{DataPoint, Metric, MetricKind, MetricValue};
 use crate::models::storage::{logs_schema, metrics_schema, traces_schema};
 use crate::models::traces::Span;
+use crate::storage::log_index::{LogIndexBuilder, LogIndexTable};
 use crate::storage::series_index::{SeriesTable, SeriesTableBuilder};
 use arrow::record_batch::RecordBatch;
 use arrow_array::{
@@ -339,6 +340,23 @@ pub fn logs_to_chunk(logs: &[LogRecord]) -> Result<RecordBatch> {
     .map_err(|e| Error::Arrow(e.to_string()))?;
 
     Ok(record_batch)
+}
+
+/// As [`logs_to_chunk`], and also builds the block's skip index for the rows in
+/// the order they are written.
+pub fn logs_to_block(logs: &[LogRecord]) -> Result<(RecordBatch, LogIndexTable)> {
+    let batch = logs_to_chunk(logs)?;
+    let mut index = LogIndexBuilder::new();
+    for log in logs {
+        index.push_row(
+            log.timestamp_ns,
+            log.severity_number,
+            &log.body,
+            &log.attributes,
+            &log.resource_attributes,
+        );
+    }
+    Ok((batch, index.finish()))
 }
 
 /// Converts a list of [Span]s into a single Arrow [RecordBatch].

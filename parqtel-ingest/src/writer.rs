@@ -1,5 +1,5 @@
 use parqtel_core::models::storage::MetricRun;
-use parqtel_core::storage::write_block_file;
+use parqtel_core::storage::{write_block_file, FooterIndex};
 pub use parqtel_core::BlockMetadata;
 use parqtel_core::{
     BlockConfig, DataPoint, Error, LabelSet, LogBlockConfig, LogRecord, Metric, MetricKind, Result,
@@ -271,7 +271,7 @@ impl BlockWriter {
             self.config.compression_level,
             self.config.row_group_size,
             self.wal_range,
-            Some(&series),
+            Some(FooterIndex::Series(&series)),
         )?;
         fs::rename(&tmp_path, &final_path)?;
         let size_bytes = fs::metadata(&final_path)?.len();
@@ -391,7 +391,7 @@ impl LogWriter {
             }
         }
 
-        let chunk = StorageModel::logs_to_chunk(&self.buffer)?;
+        let (chunk, skip_index) = StorageModel::logs_to_block(&self.buffer)?;
         let filename = format!(
             "logs_{}_{}_{}.parquet",
             start_ts,
@@ -409,7 +409,7 @@ impl LogWriter {
             self.config.compression_level,
             self.config.row_group_size,
             self.wal_range,
-            None,
+            Some(FooterIndex::Logs(&skip_index)),
         )?;
         fs::rename(&tmp_path, &final_path)?;
         let size_bytes = fs::metadata(&final_path)?.len();

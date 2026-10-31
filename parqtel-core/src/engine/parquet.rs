@@ -12,7 +12,7 @@ use crate::error::{Error, Result};
 use crate::models::logs::LogRecord;
 use crate::models::metrics::{DataPoint, Metric};
 use crate::models::storage::{BlockMetadata, MetricRun, SignalType, StorageModel};
-use crate::storage::{write_block_file, BlockIndex, Scanner};
+use crate::storage::{write_block_file, BlockIndex, FooterIndex, Scanner};
 
 use super::{
     CompactionStats, LogFieldSnapshot, LogScanRequest, MetricScanRequest, StorageEngine,
@@ -158,7 +158,7 @@ impl ParquetStorageEngine {
             None,
             self.config.row_group_size,
             None,
-            Some(&series),
+            Some(FooterIndex::Series(&series)),
         )?;
         fs::rename(&tmp_path, &final_path)?;
         let size_bytes = fs::metadata(&final_path)?.len();
@@ -202,7 +202,7 @@ impl ParquetStorageEngine {
             }
         }
 
-        let chunk = StorageModel::logs_to_chunk(logs)?;
+        let (chunk, skip_index) = StorageModel::logs_to_block(logs)?;
         let filename = format!(
             "logs_{}_{}_{}.parquet",
             start_ts,
@@ -219,7 +219,7 @@ impl ParquetStorageEngine {
             None,
             self.log_config.row_group_size,
             None,
-            None,
+            Some(FooterIndex::Logs(&skip_index)),
         )?;
         fs::rename(&tmp_path, &final_path)?;
         let size_bytes = fs::metadata(&final_path)?.len();

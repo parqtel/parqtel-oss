@@ -4,7 +4,7 @@ mod schema;
 mod writer;
 
 pub use schema::{logs_schema, metrics_schema, traces_schema, BlockMetadata, SignalType};
-pub use writer::{metric_runs_to_block, metric_runs_to_chunk, MetricRun};
+pub use writer::{logs_to_block, metric_runs_to_block, metric_runs_to_chunk, MetricRun};
 
 use crate::error::Result;
 use crate::models::labels::LabelSet;
@@ -41,6 +41,11 @@ impl StorageModel {
         runs: &[MetricRun<'_>],
     ) -> Result<(RecordBatch, crate::storage::SeriesTable)> {
         writer::metric_runs_to_block(runs)
+    }
+    pub fn logs_to_block(
+        logs: &[LogRecord],
+    ) -> Result<(RecordBatch, crate::storage::LogIndexTable)> {
+        writer::logs_to_block(logs)
     }
     pub fn logs_to_chunk(logs: &[LogRecord]) -> Result<RecordBatch> {
         writer::logs_to_chunk(logs)

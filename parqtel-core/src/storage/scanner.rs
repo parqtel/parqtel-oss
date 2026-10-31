@@ -3,6 +3,7 @@ use crate::models::logs::LogRecord;
 use crate::models::metrics::DataPoint;
 use crate::models::storage::{BlockMetadata, StorageModel};
 use crate::models::traces::Span;
+use crate::storage::log_index::{LogIndexTable, LogSkipIndex, LOG_INDEX_FOOTER_KEY};
 use crate::storage::series_index::{
     row_ranges, SeriesIndex, SeriesSelector, SeriesTable, SERIES_INDEX_FOOTER_KEY,
 };
@@ -39,26 +40,24 @@ pub struct LogColumnPrefilter {
     pub min_severity: Option<i32>,
     /// Lowercase needles; the body must contain every one, ASCII-case-insensitively.
     pub body_contains_lower: Vec<String>,
+    /// `name = value` pairs that the row's attributes or resource attributes must
+    /// contain. Used only to skip granules; they never decide a row.
+    pub attr_equals: Vec<(String, String)>,
+    /// The row predicate is *equivalent* to the conditions above, not merely
+    /// implied by them. The scan may then count, bucket and rank matching rows
+    /// from the timestamp, severity and body columns alone, and decode the other
+    /// columns only for the rows it returns. Set it only when nothing else
+    /// constrains a row.
+    pub exact: bool,
 }
 
 impl LogColumnPrefilter {
     /// Whether this rules nothing out.
     pub fn is_empty(&self) -> bool {
-        self.min_severity.is_none() && self.body_contains_lower.is_empty()
+        self.min_severity.is_none()
+            && self.body_contains_lower.is_empty()
+            && self.attr_equals.is_empty()
     }
-}
-
-/// Case-insensitive (ASCII) substring test; `needle_lower` must be lowercase.
-fn body_contains_ci(haystack: &str, needle_lower: &str) -> bool {
-    let (h, n) = (haystack.as_bytes(), needle_lower.as_bytes());
-    if n.is_empty() {
-        return true;
-    }
-    if n.len() > h.len() {
-        return false;
-    }
-    h.windows(n.len())
-        .any(|w| w.iter().zip(n).all(|(a, b)| a.to_ascii_lowercase() == *b))
 }
 
 /// Aggregate statistics for a counted log scan: the true match count
@@ -149,16 +148,19 @@ fn log_prefilter_mask(
         .as_any()
         .downcast_ref::<arrow_array::StringArray>()
         .ok_or_else(|| bad("body type"))?;
+    // Prepared once per batch, not once per row.
+    let needles: Vec<crate::text::CiNeedle> = pre
+        .body_contains_lower
+        .iter()
+        .map(|n| crate::text::CiNeedle::new(n))
+        .collect();
     Ok((0..batch.num_rows())
         .map(|i| {
             let t = ts.value(i);
             t >= start_ns
                 && t <= end_ns
                 && pre.min_severity.is_none_or(|m| sev.value(i) >= m)
-                && pre
-                    .body_contains_lower
-                    .iter()
-                    .all(|n| body_contains_ci(body.value(i), n))
+                && needles.iter().all(|n| n.is_in(body.value(i)))
         })
         .collect())
 }
@@ -192,6 +194,7 @@ pub struct MetricScan {
 struct CachedBlock {
     meta: Arc<ParquetMetaData>,
     series: Option<Arc<SeriesIndex>>,
+    log_index: Option<Arc<LogSkipIndex>>,
     bytes: usize,
     used: u64,
 }
@@ -263,34 +266,50 @@ struct OpenedBlock {
     meta: ArrowReaderMetadata,
     /// The block's series table, when it has a valid one.
     series: Option<Arc<SeriesIndex>>,
+    /// The block's log skip index, when it has a valid one.
+    log_index: Option<Arc<LogSkipIndex>>,
 }
 
-/// Parses the footer of `file`, lifting the series table out of it.
+/// A block's footer and the indexes lifted out of it.
+struct LoadedBlock {
+    meta: Arc<ParquetMetaData>,
+    series: Option<Arc<SeriesIndex>>,
+    log_index: Option<Arc<LogSkipIndex>>,
+}
+
+/// Parses the footer of `file`, lifting its series table or log index out.
 ///
-/// The table's JSON can be megabytes for a block with many series. It is parsed
-/// into a [`SeriesIndex`] and then **removed from the cached footer**, so the
-/// text is not held a second time next to the structure built from it.
-fn load_block(file: &File) -> Result<(Arc<ParquetMetaData>, Option<Arc<SeriesIndex>>)> {
+/// Either can be megabytes of text. It is parsed into its queryable form and then
+/// **removed from the cached footer**, so the text is not held a second time next
+/// to the structure built from it. An index that does not parse, or that does not
+/// account for exactly the file's rows, is dropped (and logged): the block is then
+/// scanned without it.
+fn load_block(file: &File) -> Result<LoadedBlock> {
     let md = parquet::file::metadata::ParquetMetaDataReader::new()
         .with_page_index_policy(PageIndexPolicy::Optional)
         .parse_and_finish(file)
         .map_err(|e| Error::Parquet(e.to_string()))?;
 
-    let table_text = md
-        .file_metadata()
-        .key_value_metadata()
-        .and_then(|kv| kv.iter().find(|k| k.key == SERIES_INDEX_FOOTER_KEY))
-        .and_then(|k| k.value.clone());
-    let Some(text) = table_text else {
-        return Ok((Arc::new(md), None));
+    let find = |key: &str| {
+        md.file_metadata()
+            .key_value_metadata()
+            .and_then(|kv| kv.iter().find(|k| k.key == key))
+            .and_then(|k| k.value.clone())
     };
+    let (series_text, log_text) = (find(SERIES_INDEX_FOOTER_KEY), find(LOG_INDEX_FOOTER_KEY));
+    if series_text.is_none() && log_text.is_none() {
+        return Ok(LoadedBlock {
+            meta: Arc::new(md),
+            series: None,
+            log_index: None,
+        });
+    }
+    let rows = md.file_metadata().num_rows().max(0) as u64;
 
-    let series =
+    let series = series_text.and_then(|text| {
         match SeriesTable::from_footer_value(&text).and_then(|t| SeriesIndex::from_table(&t)) {
             // The table must account for every row, or it describes some other file.
-            Ok(idx) if idx.total_rows() == md.file_metadata().num_rows().max(0) as u64 => {
-                Some(Arc::new(idx))
-            }
+            Ok(idx) if idx.total_rows() == rows => Some(Arc::new(idx)),
             Ok(_) => {
                 tracing::warn!("series table disagrees with the block's row count; ignoring it");
                 None
@@ -299,15 +318,29 @@ fn load_block(file: &File) -> Result<(Arc<ParquetMetaData>, Option<Arc<SeriesInd
                 tracing::warn!("unreadable series table, scanning without it: {e}");
                 None
             }
-        };
+        }
+    });
+    let log_index = log_text.and_then(|text| {
+        match LogIndexTable::from_footer_value(&text).and_then(|t| LogSkipIndex::from_table(&t)) {
+            Ok(idx) if idx.rows() == rows => Some(Arc::new(idx)),
+            Ok(_) => {
+                tracing::warn!("log index disagrees with the block's row count; ignoring it");
+                None
+            }
+            Err(e) => {
+                tracing::warn!("unreadable log index, scanning without it: {e}");
+                None
+            }
+        }
+    });
 
-    // Rebuild the footer without the table text.
+    // Rebuild the footer without the index text.
     let fm = md.file_metadata();
     let kept: Vec<_> = fm
         .key_value_metadata()
         .map(|kv| {
             kv.iter()
-                .filter(|k| k.key != SERIES_INDEX_FOOTER_KEY)
+                .filter(|k| k.key != SERIES_INDEX_FOOTER_KEY && k.key != LOG_INDEX_FOOTER_KEY)
                 .cloned()
                 .collect()
         })
@@ -331,7 +364,11 @@ fn load_block(file: &File) -> Result<(Arc<ParquetMetaData>, Option<Arc<SeriesInd
         .set_column_index(column_index)
         .set_offset_index(offset_index)
         .build();
-    Ok((Arc::new(md), series))
+    Ok(LoadedBlock {
+        meta: Arc::new(md),
+        series,
+        log_index,
+    })
 }
 
 /// Opens a block and returns its reader metadata, or `None` if the file is gone.
@@ -373,27 +410,34 @@ fn open_block(path: &std::path::Path) -> Result<Option<OpenedBlock>> {
         let tick = cache.tick;
         cache.entries.get_mut(k).map(|e| {
             e.used = tick;
-            (Arc::clone(&e.meta), e.series.clone())
+            (Arc::clone(&e.meta), e.series.clone(), e.log_index.clone())
         })
     });
-    let (parsed, series) = match cached {
+    let (parsed, series, log_index) = match cached {
         Some(hit) => hit,
         None => {
-            let (meta, series) = load_block(&file)?;
+            let LoadedBlock {
+                meta,
+                series,
+                log_index,
+            } = load_block(&file)?;
             if let Some(k) = key {
-                let bytes = meta.memory_size() + series.as_ref().map_or(0, |s| s.approx_bytes());
+                let bytes = meta.memory_size()
+                    + series.as_ref().map_or(0, |s| s.approx_bytes())
+                    + log_index.as_ref().map_or(0, |s| s.approx_bytes());
                 let mut cache = footer_cache().lock().unwrap_or_else(|e| e.into_inner());
                 cache.insert(
                     k,
                     CachedBlock {
                         meta: Arc::clone(&meta),
                         series: series.clone(),
+                        log_index: log_index.clone(),
                         bytes,
                         used: 0,
                     },
                 );
             }
-            (meta, series)
+            (meta, series, log_index)
         }
     };
     let base = ArrowReaderMetadata::try_new(parsed, options.clone())
@@ -406,7 +450,12 @@ fn open_block(path: &std::path::Path) -> Result<Option<OpenedBlock>> {
         }
         None => base,
     };
-    Ok(Some(OpenedBlock { file, meta, series }))
+    Ok(Some(OpenedBlock {
+        file,
+        meta,
+        series,
+        log_index,
+    }))
 }
 
 /// `schema` with the `labels` column typed as `Dictionary(Int32, Utf8)`.
@@ -1025,31 +1074,31 @@ impl Scanner {
         prefilter: Option<LogColumnPrefilter>,
         window_ns: i64,
     ) -> Result<(Vec<LogRecord>, usize, Vec<u64>)> {
-        let file = match File::open(&meta.path) {
-            Ok(f) => f,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                tracing::warn!("Log block file not found, skipping: {:?}", meta.path);
-                return Ok((Vec::new(), 0, vec![0; 60]));
-            }
-            Err(e) => return Err(Error::Io(e)),
+        // The cached footer carries the page index, which is what lets the row
+        // filter below skip pages rather than decode them.
+        let Some(opened) = open_block(&meta.path)? else {
+            return Ok((Vec::new(), 0, vec![0; 60]));
         };
-
-        let reader_builder = ParquetRecordBatchReaderBuilder::try_new(file)
-            .map_err(|e| Error::Parquet(e.to_string()))?;
-
-        // Prune row groups by timestamp statistics before decoding anything.
-        let reader_builder = match row_groups_in_range(
-            reader_builder.metadata(),
-            "timestamp_ns",
-            start_ns,
-            end_ns,
-        ) {
-            Some(groups) if groups.is_empty() => {
-                return Ok((Vec::new(), 0, vec![0; 60]));
+        if let Some(pre) = prefilter.as_ref().filter(|p| p.exact && !p.is_empty()) {
+            if let Some(found) = Self::scan_log_block_exact(
+                &opened,
+                pre,
+                start_ns,
+                end_ns,
+                keep,
+                keep_newest,
+                window_ns,
+            )? {
+                return Ok(found);
             }
-            Some(groups) => reader_builder.with_row_groups(groups),
-            None => reader_builder,
-        };
+        }
+        let ranges = log_row_ranges(&opened, start_ns, end_ns, prefilter.as_ref());
+        if ranges.is_empty() {
+            return Ok((Vec::new(), 0, vec![0; 60]));
+        }
+        let reader_builder =
+            ParquetRecordBatchReaderBuilder::new_with_metadata(opened.file, opened.meta);
+        let reader_builder = restrict_to_ranges(reader_builder, &ranges);
 
         // Late materialisation: decide from timestamp, severity and body alone,
         // and let the reader decode the other columns only for the rows (and
@@ -1120,6 +1169,163 @@ impl Scanner {
             }
         }
         Ok((kept.into_iter().collect(), matched, buckets))
+    }
+
+    /// Two-phase scan for a predicate that the column prefilter fully decides.
+    ///
+    /// Phase one reads only timestamp, severity and body, and from them counts
+    /// every match, buckets it for the volume histogram and remembers the rows
+    /// that will be returned. Phase two reads all columns for just those rows.
+    /// A search that matches a fifth of a block used to materialise a fifth of
+    /// it, to keep a hundred rows.
+    ///
+    /// Returns `None` when the block lacks the columns this needs, so the caller
+    /// scans it the ordinary way.
+    #[allow(clippy::type_complexity)]
+    fn scan_log_block_exact(
+        opened: &OpenedBlock,
+        pre: &LogColumnPrefilter,
+        start_ns: i64,
+        end_ns: i64,
+        keep: usize,
+        keep_newest: bool,
+        window_ns: i64,
+    ) -> Result<Option<(Vec<LogRecord>, usize, Vec<u64>)>> {
+        let ranges = log_row_ranges(opened, start_ns, end_ns, Some(pre));
+        if ranges.is_empty() {
+            return Ok(Some((Vec::new(), 0, vec![0; 60])));
+        }
+        let builder = ParquetRecordBatchReaderBuilder::new_with_metadata(
+            opened.file.try_clone().map_err(Error::Io)?,
+            opened.meta.clone(),
+        );
+        let cols = project_present(
+            builder.parquet_schema(),
+            &["timestamp_ns", "severity_number", "body"],
+        );
+        if cols.len() != 3 {
+            return Ok(None);
+        }
+        let mask = ProjectionMask::leaves(builder.parquet_schema(), cols);
+
+        // Where each range starts in the stream the reader will produce, to turn
+        // a position in that stream back into a row of the file.
+        let mut stream_ranges: Vec<(u64, u64)> = Vec::with_capacity(ranges.len());
+        let mut stream_pos = 0u64;
+        for (a, b) in &ranges {
+            stream_ranges.push((stream_pos, *a));
+            stream_pos += b - a;
+        }
+        let builder = restrict_to_ranges(builder, &ranges);
+
+        let reader = builder
+            .with_projection(mask)
+            .with_batch_size(SCAN_BATCH_ROWS)
+            .build()
+            .map_err(|e| Error::Parquet(e.to_string()))?;
+
+        let mut matched = 0usize;
+        let mut buckets = vec![0u64; 60];
+        // The `keep` best rows by (timestamp, row), as a bounded heap whose top is
+        // the first to be displaced.
+        let mut best: std::collections::BinaryHeap<std::cmp::Reverse<(i64, u64)>> =
+            std::collections::BinaryHeap::new();
+        let mut best_oldest: std::collections::BinaryHeap<(i64, u64)> =
+            std::collections::BinaryHeap::new();
+        let mut pos = 0u64;
+        let mut group = 0usize;
+        for batch in reader {
+            let batch = batch.map_err(|e| Error::Parquet(e.to_string()))?;
+            let hits = log_prefilter_mask(&batch, pre, start_ns, end_ns)
+                .map_err(|e| Error::Arrow(e.to_string()))?;
+            let ts = batch
+                .column(
+                    batch
+                        .schema()
+                        .index_of("timestamp_ns")
+                        .map_err(|e| Error::Arrow(e.to_string()))?,
+                )
+                .as_any()
+                .downcast_ref::<TimestampNanosecondArray>()
+                .ok_or_else(|| Error::Arrow("Invalid timestamp column".into()))?;
+            for row in 0..batch.num_rows() {
+                let here = pos + row as u64;
+                if !hits.value(row) {
+                    continue;
+                }
+                let t = ts.value(row);
+                matched += 1;
+                if window_ns > 0 {
+                    buckets[((t - start_ns) / window_ns).clamp(0, 59) as usize] += 1;
+                }
+                if keep == 0 {
+                    continue;
+                }
+                while group + 1 < stream_ranges.len() && stream_ranges[group + 1].0 <= here {
+                    group += 1;
+                }
+                let file_row = stream_ranges[group].1 + (here - stream_ranges[group].0);
+                if keep_newest {
+                    best.push(std::cmp::Reverse((t, file_row)));
+                    if best.len() > keep {
+                        best.pop();
+                    }
+                } else {
+                    best_oldest.push((t, file_row));
+                    if best_oldest.len() > keep {
+                        best_oldest.pop();
+                    }
+                }
+            }
+            pos += batch.num_rows() as u64;
+        }
+
+        let mut rows: Vec<u64> = if keep_newest {
+            best.into_iter()
+                .map(|std::cmp::Reverse((_, r))| r)
+                .collect()
+        } else {
+            best_oldest.into_iter().map(|(_, r)| r).collect()
+        };
+        if rows.is_empty() {
+            return Ok(Some((Vec::new(), matched, buckets)));
+        }
+        rows.sort_unstable();
+
+        // Phase two: every column, for the rows being returned.
+        let mut ranges: Vec<(u64, u64)> = Vec::new();
+        for r in &rows {
+            match ranges.last_mut() {
+                Some(last) if last.1 == *r => last.1 += 1,
+                _ => ranges.push((*r, *r + 1)),
+            }
+        }
+        let builder = ParquetRecordBatchReaderBuilder::new_with_metadata(
+            opened.file.try_clone().map_err(Error::Io)?,
+            opened.meta.clone(),
+        );
+        let (groups, selection) = plan_row_selection(builder.metadata(), &ranges);
+        let reader = builder
+            .with_row_groups(groups)
+            .with_row_selection(selection)
+            .with_batch_size(SCAN_BATCH_ROWS)
+            .build()
+            .map_err(|e| Error::Parquet(e.to_string()))?;
+        let mut logs = Vec::with_capacity(rows.len());
+        for batch in reader {
+            let batch = batch.map_err(|e| Error::Parquet(e.to_string()))?;
+            let mut attr_cache: HashMap<&str, crate::LabelSet> = HashMap::new();
+            let mut res_cache: HashMap<&str, crate::LabelSet> = HashMap::new();
+            for row in 0..batch.num_rows() {
+                logs.push(StorageModel::row_to_log(
+                    &batch,
+                    row,
+                    &mut attr_cache,
+                    &mut res_cache,
+                )?);
+            }
+        }
+        Ok(Some((logs, matched, buckets)))
     }
 
     /// Scans a set of blocks for spans matching a time range.
@@ -1420,6 +1626,67 @@ pub fn row_groups_in_range(
     Some(keep)
 }
 
+/// File row ranges a log scan has to read for `[start_ns, end_ns]`.
+///
+/// With the block's skip index these are the granules that might hold a match
+/// (see [`LogSkipIndex::candidate_ranges`]); without one, the row groups whose
+/// timestamp statistics overlap the window.
+fn log_row_ranges(
+    opened: &OpenedBlock,
+    start_ns: i64,
+    end_ns: i64,
+    pre: Option<&LogColumnPrefilter>,
+) -> Vec<(u64, u64)> {
+    if let Some(index) = &opened.log_index {
+        return index.candidate_ranges(start_ns, end_ns, pre);
+    }
+    let md = opened.meta.metadata();
+    let groups = row_groups_in_range(md, "timestamp_ns", start_ns, end_ns)
+        .unwrap_or_else(|| (0..md.num_row_groups()).collect());
+    let mut out: Vec<(u64, u64)> = Vec::new();
+    let mut starts = Vec::with_capacity(md.num_row_groups());
+    let mut at = 0u64;
+    for rg in md.row_groups() {
+        starts.push(at);
+        at += rg.num_rows().max(0) as u64;
+    }
+    for g in groups {
+        let (a, b) = (
+            starts[g],
+            starts[g] + md.row_group(g).num_rows().max(0) as u64,
+        );
+        match out.last_mut() {
+            Some(last) if last.1 == a => last.1 = b,
+            _ => out.push((a, b)),
+        }
+    }
+    out
+}
+
+/// Restricts a reader to the given file row ranges: only the row groups that
+/// hold them are visited, and a selection skips the rest inside those groups.
+/// When the ranges are whole groups no selection is needed.
+fn restrict_to_ranges<T>(
+    builder: ParquetRecordBatchReaderBuilder<T>,
+    ranges: &[(u64, u64)],
+) -> ParquetRecordBatchReaderBuilder<T>
+where
+    T: parquet::file::reader::ChunkReader + 'static,
+{
+    let (groups, selection) = plan_row_selection(builder.metadata(), ranges);
+    let whole: u64 = groups
+        .iter()
+        .map(|g| builder.metadata().row_group(*g).num_rows().max(0) as u64)
+        .sum();
+    let wanted: u64 = ranges.iter().map(|(a, b)| b - a).sum();
+    let builder = builder.with_row_groups(groups);
+    if whole == wanted {
+        builder
+    } else {
+        builder.with_row_selection(selection)
+    }
+}
+
 /// Columns an indexed scan decodes: labels come from the series table.
 const INDEXED_SCAN_COLUMNS: [&str; 4] =
     ["timestamp_ns", "value_float", "value_int", "value_complex"];
@@ -1661,7 +1928,16 @@ mod indexed_scan_tests {
             })
             .collect();
         let (batch, table) = StorageModel::metric_runs_to_block(&runs).unwrap();
-        write_block_file(&indexed, batch, "zstd", None, RG, None, Some(&table)).unwrap();
+        write_block_file(
+            &indexed,
+            batch,
+            "zstd",
+            None,
+            RG,
+            None,
+            Some(crate::storage::FooterIndex::Series(&table)),
+        )
+        .unwrap();
         (block_meta(plain), block_meta(indexed))
     }
 
@@ -1828,6 +2104,86 @@ mod indexed_scan_tests {
             let got =
                 Scanner::scan_block_filtered(bad, "scan.cpu", 0, i64::MAX, &selector).unwrap();
             assert_eq!(canonical(got.points), want);
+        }
+    }
+
+    /// A log index that is not JSON, or that counts the wrong number of rows, is
+    /// ignored and the block still scans.
+    #[test]
+    fn a_damaged_log_index_is_ignored() {
+        use crate::storage::log_index::{LogIndexBuilder, LOG_INDEX_FOOTER_KEY};
+        let dir = tempfile::tempdir().unwrap();
+        let logs: Vec<crate::LogRecord> = (0..10i64)
+            .map(|i| {
+                crate::LogRecord::new(
+                    i + 1,
+                    i + 1,
+                    9,
+                    "INFO".into(),
+                    format!("hello {i}"),
+                    LabelSet::default(),
+                    LabelSet::default(),
+                    [0u8; 16],
+                    [0u8; 8],
+                    0,
+                    "".into(),
+                    "".into(),
+                )
+            })
+            .collect();
+        let mut short = LogIndexBuilder::new();
+        for l in &logs[..4] {
+            short.push_row(
+                l.timestamp_ns,
+                l.severity_number,
+                &l.body,
+                &l.attributes,
+                &l.resource_attributes,
+            );
+        }
+        let wrong_rows = short.finish().to_footer_value().unwrap();
+
+        for (name, value) in [("garbage", "{nope".to_string()), ("wrong", wrong_rows)] {
+            let path = dir.path().join(format!("{name}.parquet"));
+            let chunk = StorageModel::logs_to_chunk(&logs).unwrap();
+            let props = WriterProperties::builder()
+                .set_key_value_metadata(Some(vec![parquet::file::metadata::KeyValue::new(
+                    LOG_INDEX_FOOTER_KEY.to_string(),
+                    value,
+                )]))
+                .build();
+            let mut w =
+                ArrowWriter::try_new(File::create(&path).unwrap(), chunk.schema(), Some(props))
+                    .unwrap();
+            w.write(&chunk).unwrap();
+            w.close().unwrap();
+            let opened = open_block(&path).unwrap().unwrap();
+            assert!(opened.log_index.is_none(), "{name}");
+            let meta = BlockMetadata {
+                path,
+                start_timestamp_ns: 1,
+                end_timestamp_ns: 10,
+                row_count: 10,
+                size_bytes: 0,
+                metric_names: HashSet::new(),
+                label_names: HashSet::new(),
+                label_values: Default::default(),
+                signal_type: SignalType::Logs,
+                wal_range: None,
+            };
+            let (got, stats, _) = Scanner::scan_log_block_filtered(
+                meta,
+                0,
+                i64::MAX,
+                usize::MAX,
+                false,
+                None,
+                None,
+                0,
+            )
+            .unwrap();
+            assert_eq!(got.len(), 10, "{name}");
+            assert_eq!(stats, 10, "{name}");
         }
     }
 

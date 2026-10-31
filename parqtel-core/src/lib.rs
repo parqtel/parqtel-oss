@@ -10,6 +10,7 @@ pub mod error;
 pub mod models;
 pub mod storage;
 pub mod telemetry;
+pub mod text;
 pub mod wal;
 
 pub use buffer::MemoryBuffer;

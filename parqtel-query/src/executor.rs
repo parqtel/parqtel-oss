@@ -770,18 +770,6 @@ impl QueryExecutor {
             idx.query(start_ns, end_ns, None)
         };
 
-        // Scan in-memory buffer for unflushed logs
-        let buffered_logs = self.buffer.scan_logs(start_ns, end_ns).await;
-
-        if blocks.is_empty() && buffered_logs.is_empty() {
-            return Ok(LogQueryResult {
-                logs: Vec::new(),
-                execution_time: start_time.elapsed(),
-                total_logs_count: 0,
-                volume_summary: vec![0; 60],
-            });
-        }
-
         // Build the row predicate once: severity → body search → matchers.
         // It is pushed down INTO the block scan (runs inside the blocking
         // task), so only matching rows materialize — bounded by `limit` —
@@ -794,21 +782,44 @@ impl QueryExecutor {
              severity_min: Option<i32>,
              search: Option<String>|
              -> std::sync::Arc<dyn Fn(&parqtel_core::LogRecord) -> bool + Send + Sync> {
+                // The needle is prepared once, not per row.
+                let needle = search
+                    .as_ref()
+                    .map(|p| parqtel_core::text::CiNeedle::new(&p.to_ascii_lowercase()));
                 std::sync::Arc::new(move |log| {
                     if let Some(min) = severity_min {
                         if log.severity_number < min {
                             return false;
                         }
                     }
-                    if let Some(ref pattern) = search {
-                        if !contains_ci(&log.body, pattern) {
+                    if let Some(ref needle) = needle {
+                        if !needle.is_in(&log.body) {
                             return false;
                         }
+                    }
+                    if matchers.is_empty() {
+                        return true;
                     }
                     let all_labels = log.attributes.merge(&log.resource_attributes);
                     evaluate_matchers(&matchers, &all_labels, "")
                 })
             };
+
+        // Unflushed logs: only the rows that match are copied out of the buffer.
+        let buffered_logs = {
+            let keep = make_filter(matchers.clone(), severity_min, search.clone());
+            self.buffer
+                .scan_logs_filtered(start_ns, end_ns, |l| keep(l))
+                .await
+        };
+        if blocks.is_empty() && buffered_logs.is_empty() {
+            return Ok(LogQueryResult {
+                logs: Vec::new(),
+                execution_time: start_time.elapsed(),
+                total_logs_count: 0,
+                volume_summary: vec![0; 60],
+            });
+        }
 
         // Severity and body search are decidable from two columns, so the scan
         // rejects on them before decoding a row. Folding the needle to ASCII
@@ -819,6 +830,20 @@ impl QueryExecutor {
                 .as_ref()
                 .map(|s| vec![s.to_ascii_lowercase()])
                 .unwrap_or_default(),
+            // Equalities narrow which granules are read; the matcher still
+            // judges every row that is.
+            attr_equals: matchers
+                .iter()
+                .filter(|m| {
+                    m.op == crate::matcher::MatchOp::Equal
+                        && !m.value.is_empty()
+                        && m.name != "__name__"
+                })
+                .map(|m| (m.name.clone(), m.value.clone()))
+                .collect(),
+            // With no label matchers the row predicate is exactly the two
+            // column conditions.
+            exact: matchers.is_empty(),
         };
 
         let window_ns = (end_ns - start_ns) / 60;
@@ -910,7 +935,6 @@ impl QueryExecutor {
             let idx = self.log_index.read().await;
             idx.query(start_ns, end_ns, None)
         };
-        let buffered_logs = self.buffer.scan_logs(start_ns, end_ns).await;
 
         let window_ns = (end_ns - start_ns) / 60;
         let extra = std::collections::HashMap::new();
@@ -935,6 +959,10 @@ impl QueryExecutor {
             move |log: &parqtel_core::LogRecord| prepared_pred.matches(log, &extra)
         };
 
+        let buffered_logs = self
+            .buffer
+            .scan_logs_filtered(start_ns, end_ns, &apply_pred)
+            .await;
         let mut total_logs_count = 0usize;
         let mut volume_summary = vec![0u64; 60];
         let mut buffered_matching: Vec<parqtel_core::LogRecord> = Vec::new();
@@ -1000,15 +1028,6 @@ impl QueryExecutor {
             let idx = self.log_index.read().await;
             idx.query(start_ns, end_ns, None)
         };
-        let buffered_logs = self.buffer.scan_logs(start_ns, end_ns).await;
-        if blocks.is_empty() && buffered_logs.is_empty() {
-            return Ok(LogQueryResult {
-                logs: Vec::new(),
-                execution_time: start_time.elapsed(),
-                total_logs_count: 0,
-                volume_summary: vec![0; 60],
-            });
-        }
 
         let window_ns = (end_ns - start_ns) / 60;
         let extra = std::collections::HashMap::new();
@@ -1027,6 +1046,19 @@ impl QueryExecutor {
             let extra = extra.clone();
             move |log: &parqtel_core::LogRecord| prepared_search.matches(log, &extra)
         };
+
+        let buffered_logs = self
+            .buffer
+            .scan_logs_filtered(start_ns, end_ns, &apply_search)
+            .await;
+        if blocks.is_empty() && buffered_logs.is_empty() {
+            return Ok(LogQueryResult {
+                logs: Vec::new(),
+                execution_time: start_time.elapsed(),
+                total_logs_count: 0,
+                volume_summary: vec![0; 60],
+            });
+        }
 
         let mut total_logs_count = 0usize;
         let mut volume_summary = vec![0u64; 60];
@@ -1893,18 +1925,6 @@ impl QueryExecutor {
             execution_time: start_time.elapsed(),
         })
     }
-}
-
-/// Case-insensitive ASCII substring search without allocating.
-fn contains_ci(haystack: &str, needle: &str) -> bool {
-    let (h, n) = (haystack.as_bytes(), needle.as_bytes());
-    if n.is_empty() {
-        return true;
-    }
-    if n.len() > h.len() {
-        return false;
-    }
-    h.windows(n.len()).any(|w| w.eq_ignore_ascii_case(n))
 }
 
 fn v_to_f64(v: &MetricValue) -> f64 {

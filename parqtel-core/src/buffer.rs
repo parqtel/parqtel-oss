@@ -281,6 +281,19 @@ impl MemoryBuffer {
             .collect()
     }
 
+    /// As [`Self::scan_logs`], but only rows meeting `keep` are cloned out, so a
+    /// selective query does not copy the whole buffer to discard most of it.
+    pub async fn scan_logs_filtered<F>(&self, start_ns: i64, end_ns: i64, keep: F) -> Vec<LogRecord>
+    where
+        F: Fn(&LogRecord) -> bool,
+    {
+        let buf = self.logs.read().await;
+        buf.iter()
+            .filter(|l| l.timestamp_ns >= start_ns && l.timestamp_ns <= end_ns && keep(l))
+            .cloned()
+            .collect()
+    }
+
     /// O(1) — get metric names directly from HashMap keys.
     pub async fn metric_names(&self) -> Vec<String> {
         let mut names = Vec::new();
