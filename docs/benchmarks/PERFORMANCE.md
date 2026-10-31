@@ -1123,7 +1123,11 @@ changelog: the buffer losing fresh rows after each flush, WAL replay skipping th
 record after the commit point, an out-of-order WAL commit across concurrent
 flushes, protobuf traces over HTTP, gzip bodies, and a SIGTERM hang. The
 crash-recovery check is `kill -9` under load followed by comparing rows
-acknowledged with rows recovered; it now accounts for every row of every signal.
+acknowledged with rows recovered. Across repeated runs on the final build every
+acknowledged row of every signal is recovered; in one of six runs the kill landed
+between a block becoming durable in the index and its WAL commit, and that
+block's rows came back a second time. That is the designed at-least-once window
+(publish, wait for the index, then commit), not a loss.
 
 ### Tried and not adopted
 
