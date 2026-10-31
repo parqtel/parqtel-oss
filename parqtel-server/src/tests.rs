@@ -524,6 +524,73 @@ async fn test_ingest_metrics_proto() {
     assert_eq!(response.status(), StatusCode::OK);
 }
 
+/// OTLP/HTTP lets a client send traces as protobuf; `/v1/traces` must accept
+/// that exactly as `/v1/metrics` and `/v1/logs` do, and still take JSON.
+#[tokio::test]
+async fn test_ingest_traces_proto_and_json_on_one_endpoint() {
+    use parqtel_ingest::otel::collector::trace::v1::ExportTraceServiceRequest;
+    use parqtel_ingest::otel::trace::v1::{ResourceSpans, ScopeSpans, Span as ProtoSpan};
+
+    let req_proto = ExportTraceServiceRequest {
+        resource_spans: vec![ResourceSpans {
+            resource: None,
+            scope_spans: vec![ScopeSpans {
+                scope: None,
+                spans: vec![ProtoSpan {
+                    trace_id: vec![1; 16],
+                    span_id: vec![2; 8],
+                    name: "proto-span".into(),
+                    kind: 2,
+                    start_time_unix_nano: 1_000,
+                    end_time_unix_nano: 2_000,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+    };
+    let mut body = Vec::new();
+    req_proto.encode(&mut body).unwrap();
+
+    let app = setup_test_app().await;
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/traces")
+                .header(header::CONTENT_TYPE, "application/x-protobuf")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "protobuf traces accepted"
+    );
+
+    let json_body = r#"{"resourceSpans":[{"scopeSpans":[{"spans":[{"traceId":"01010101010101010101010101010101","spanId":"0202020202020202","name":"json-span","kind":2,"startTimeUnixNano":"1000","endTimeUnixNano":"2000"}]}]}]}"#;
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/traces")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(json_body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "JSON traces still accepted"
+    );
+}
+
 #[tokio::test]
 async fn test_export_logic() {
     let dir = tempfile::tempdir().unwrap();

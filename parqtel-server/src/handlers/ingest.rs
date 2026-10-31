@@ -190,6 +190,19 @@ pub async fn ingest_logs_json(State(state): State<AppState>, body: Bytes) -> Res
 
 /// Handler for POST /v1/traces/json (OTLP JSON).
 pub async fn ingest_traces_json(State(state): State<AppState>, body: Bytes) -> Response {
+    ingest_traces(state, body, false).await
+}
+
+/// OTLP content negotiation for `/v1/traces`.
+pub async fn ingest_otlp_traces(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    body: Bytes,
+) -> Response {
+    ingest_traces(state, body, is_protobuf(&headers)).await
+}
+
+async fn ingest_traces(state: AppState, body: Bytes, protobuf: bool) -> Response {
     if body.is_empty() {
         state
             .inner
@@ -208,7 +221,13 @@ pub async fn ingest_traces_json(State(state): State<AppState>, body: Bytes) -> R
         .batches_received
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let wire_bytes = body.len() as u64;
-    match state.inner.trace_ingestion_service.ingest_json(body).await {
+    let service = &state.inner.trace_ingestion_service;
+    let result = if protobuf {
+        service.ingest_proto(body).await
+    } else {
+        service.ingest_json(body).await
+    };
+    match result {
         Ok(count) => {
             state
                 .inner
