@@ -572,6 +572,50 @@ fn read_commit_inner(dir: &Path) -> Option<WalPosition> {
     Some(WalPosition(s.trim().parse().ok()?))
 }
 
+// --- Block coverage ----------------------------------------------------------
+
+/// Parquet footer key under which a block records the WAL span it covers.
+pub const WAL_RANGE_FOOTER_KEY: &str = "parqtel.wal_range";
+
+/// Footer value for a block covering `(from, to]`.
+pub fn encode_wal_range(range: (u64, u64)) -> String {
+    format!("{}-{}", range.0, range.1)
+}
+
+/// Parses [`encode_wal_range`]'s output.
+pub fn decode_wal_range(value: &str) -> Option<(u64, u64)> {
+    let (from, to) = value.split_once('-')?;
+    let (from, to) = (from.parse().ok()?, to.parse().ok()?);
+    (from <= to).then_some((from, to))
+}
+
+/// How far the WAL is already durable in blocks, starting from `commit`.
+///
+/// A block covers `(from, to]`; the blocks of consecutive flushes chain, each
+/// one's `from` being the previous one's `to`. Starting at the commit point this
+/// follows the chain through every block that is on disk, so a crash between a
+/// block becoming durable and its WAL commit does not replay the block's rows
+/// into a second block.
+///
+/// It deliberately walks the chain instead of taking the largest `to`: with
+/// several blocks encoding at once a later one can be durable while an earlier
+/// one is not, and skipping everything below the later block's end would drop
+/// the earlier block's rows. A gap stops the walk there.
+pub fn covered_through(commit: WalPosition, ranges: &[(u64, u64)]) -> WalPosition {
+    let mut at = commit.0;
+    loop {
+        let next = ranges
+            .iter()
+            .filter(|(from, to)| *from <= at && *to > at)
+            .map(|(_, to)| *to)
+            .max();
+        match next {
+            Some(to) => at = to,
+            None => return WalPosition(at),
+        }
+    }
+}
+
 // --- Record framing --------------------------------------------------------
 
 /// Frames `value` as one WAL record: `u32` length, `u32` CRC-32, JSON payload.
@@ -732,6 +776,47 @@ mod tests {
             let want: Vec<i64> = (covered as i64..5).collect();
             assert_eq!(seen, want, "commit after {covered} records");
         }
+    }
+
+    #[test]
+    fn wal_range_footer_value_round_trips() {
+        assert_eq!(decode_wal_range(&encode_wal_range((5, 90))), Some((5, 90)));
+        assert_eq!(decode_wal_range("7-7"), Some((7, 7)));
+        assert_eq!(decode_wal_range("9-3"), None);
+        assert_eq!(decode_wal_range("nope"), None);
+        assert_eq!(decode_wal_range("1-"), None);
+    }
+
+    /// The walk follows connected blocks and stops at a gap, whatever order the
+    /// blocks happened to become durable in.
+    #[test]
+    fn covered_through_follows_the_chain_and_stops_at_a_gap() {
+        let start = WalPosition(10);
+        // Nothing on disk: nothing is added.
+        assert_eq!(covered_through(start, &[]), start);
+        // 10 -> 20 -> 35, listed out of order.
+        assert_eq!(
+            covered_through(start, &[(20, 35), (10, 20)]),
+            WalPosition(35)
+        );
+        // The block for (20, 35] is missing: a later block (35, 50] that did
+        // become durable must NOT carry the walk past the gap.
+        assert_eq!(
+            covered_through(start, &[(10, 20), (35, 50)]),
+            WalPosition(20)
+        );
+        // Blocks entirely below the commit change nothing.
+        assert_eq!(
+            covered_through(WalPosition(40), &[(0, 10), (10, 30)]),
+            WalPosition(40)
+        );
+        // A block that straddles the commit extends it.
+        assert_eq!(
+            covered_through(WalPosition(15), &[(10, 30)]),
+            WalPosition(30)
+        );
+        // A range that starts after the commit and does not connect is ignored.
+        assert_eq!(covered_through(start, &[(11, 90)]), start);
     }
 
     #[test]

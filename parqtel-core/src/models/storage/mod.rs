@@ -207,6 +207,7 @@ mod tests {
             label_names: std::collections::HashSet::from(["host".into()]),
             label_values: Default::default(),
             signal_type: SignalType::Metrics,
+            wal_range: None,
         };
         let json = serde_json::to_string(&meta).unwrap();
         let decoded: BlockMetadata = serde_json::from_str(&json).unwrap();

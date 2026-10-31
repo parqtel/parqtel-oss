@@ -126,6 +126,10 @@ pub struct BlockRotator {
     wal: Option<Arc<tokio::sync::Mutex<WalWriter>>>,
     /// Orders WAL commits and buffer drops across concurrent flushes.
     order: Arc<std::sync::Mutex<FlushOrder>>,
+    /// Where the previous flush's WAL span ended, so each block can record the
+    /// span `(previous end, this end]` it covers. Only touched under
+    /// `flush_lock`.
+    wal_cursor: std::sync::Mutex<WalPosition>,
     config: BlockConfig,
     /// Unix time of the last completed flush, in milliseconds. An atomic so
     /// the duration check needs no lock — flushes are serialised by
@@ -156,6 +160,7 @@ impl BlockRotator {
                 .collect(),
             wal: None,
             order: Arc::new(std::sync::Mutex::new(FlushOrder::default())),
+            wal_cursor: std::sync::Mutex::new(WalPosition::START),
             flush_lock: tokio::sync::Mutex::new(()),
             flush_tx: std::sync::Mutex::new(None),
             worker: std::sync::Mutex::new(None),
@@ -559,8 +564,15 @@ impl BlockRotator {
             return Ok(());
         }
 
+        let wal_range = self.wal.as_ref().map(|_| {
+            let mut cursor = self.wal_cursor.lock().unwrap_or_else(|e| e.into_inner());
+            let range = (cursor.0, covered.0);
+            *cursor = covered;
+            range
+        });
         let seq = self.order.lock().unwrap_or_else(|e| e.into_inner()).begin();
         let job = FlushJob {
+            wal_range,
             seq,
             order: Arc::clone(&self.order),
             sealed,
@@ -676,6 +688,8 @@ impl FlushOrder {
 
 /// One block's worth of rows handed to the flush worker.
 struct FlushJob {
+    /// The WAL span `(from, to]` this block covers.
+    wal_range: Option<(u64, u64)>,
     /// Position in flush order, for [`FlushOrder`].
     seq: u64,
     order: Arc<std::sync::Mutex<FlushOrder>>,
@@ -736,6 +750,7 @@ async fn encode_publish_commit(
     buffer: &Option<MemoryBuffer>,
 ) -> Result<()> {
     let FlushJob {
+        wal_range,
         seq,
         order,
         sealed,
@@ -749,7 +764,7 @@ async fn encode_publish_commit(
     let flush_guard = contention
         .as_ref()
         .map(|c| c.flush_started(SignalType::Metrics));
-    let encoded = tokio::task::spawn_blocking(move || merge_and_flush(writers)).await;
+    let encoded = tokio::task::spawn_blocking(move || merge_and_flush(writers, wal_range)).await;
     // Unwrap the JoinError separately from the writer's own Result so the row
     // count can still be attributed when the flush succeeded.
     let metadata = match encoded {
@@ -821,8 +836,12 @@ async fn encode_publish_commit(
 }
 
 /// Merges every shard writer's rows into one block and encodes it.
-fn merge_and_flush(writers: Vec<BlockWriter>) -> Result<BlockMetadata> {
+fn merge_and_flush(
+    writers: Vec<BlockWriter>,
+    wal_range: Option<(u64, u64)>,
+) -> Result<BlockMetadata> {
     let mut merged = BlockWriter::merge(writers)?;
+    merged.set_wal_range(wal_range);
     merged.flush()
 }
 
@@ -839,6 +858,8 @@ pub trait RowWriter: Send + 'static {
     fn push_row(&mut self, row: Self::Row) -> Result<Option<BlockMetadata>>;
     fn rows(&self) -> usize;
     fn write_block(&mut self) -> Result<BlockMetadata>;
+    /// The WAL span `(from, to]` the next block covers.
+    fn set_wal_range(&mut self, range: Option<(u64, u64)>);
     fn max_rows(config: &Self::Config) -> usize;
     fn block_duration(config: &Self::Config) -> Duration;
     /// Adds rows to the memory buffer, in writer order.
@@ -870,6 +891,9 @@ impl RowWriter for LogWriter {
     }
     fn write_block(&mut self) -> Result<BlockMetadata> {
         self.flush()
+    }
+    fn set_wal_range(&mut self, range: Option<(u64, u64)>) {
+        LogWriter::set_wal_range(self, range)
     }
     fn max_rows(config: &Self::Config) -> usize {
         config.max_rows_per_block
@@ -908,6 +932,9 @@ impl RowWriter for TraceWriter {
     }
     fn write_block(&mut self) -> Result<BlockMetadata> {
         self.flush()
+    }
+    fn set_wal_range(&mut self, range: Option<(u64, u64)>) {
+        TraceWriter::set_wal_range(self, range)
     }
     fn max_rows(config: &Self::Config) -> usize {
         config.max_rows_per_block
@@ -960,6 +987,8 @@ pub struct SerialRotator<W: RowWriter> {
     wal: Option<Arc<Mutex<WalWriter>>>,
     /// Highest WAL position among the rows currently in `writer`.
     covered: WalPosition,
+    /// Where the previous flush's WAL span ended; see `BlockRotator::wal_cursor`.
+    wal_cursor: WalPosition,
     /// Held by the one flush task in flight.
     gate: Arc<Mutex<()>>,
     buffer: Option<MemoryBuffer>,
@@ -981,6 +1010,7 @@ impl<W: RowWriter> SerialRotator<W> {
             metadata_tx,
             wal: None,
             covered: WalPosition::START,
+            wal_cursor: WalPosition::START,
             gate: Arc::new(Mutex::new(())),
             buffer: None,
         }
@@ -1124,7 +1154,11 @@ impl<W: RowWriter> SerialRotator<W> {
         // Snapshot before the writer is taken: the block will contain exactly the
         // rows whose WAL positions are at or below this.
         let covered = std::mem::replace(&mut self.covered, WalPosition::START);
-        let writer = std::mem::replace(&mut self.writer, W::create(self.config.clone()));
+        let mut writer = std::mem::replace(&mut self.writer, W::create(self.config.clone()));
+        if self.wal.is_some() {
+            writer.set_wal_range(Some((self.wal_cursor.0, covered.0)));
+            self.wal_cursor = covered;
+        }
         self.last_flush = Instant::now();
 
         let metadata_tx = self.metadata_tx.clone();
@@ -2289,6 +2323,112 @@ mod tests {
         assert_eq!(left.len(), 3, "only the newer spans remain buffered");
         assert!(left.iter().all(|s| s.start_time_ns >= 100));
         assert!(block_file_count(dir.path()) >= 1);
+    }
+
+    /// A crash between a block becoming durable and its WAL commit leaves the
+    /// rows in both. The block says which WAL span it covers (in its footer, so
+    /// even an un-indexed block does), and startup advances the commit over it.
+    #[tokio::test]
+    async fn test_block_on_disk_without_a_wal_commit_is_not_replayed() {
+        for signal in ["metrics", "logs", "traces"] {
+            let dir = tempdir().unwrap();
+            let data_dir = if signal == "logs" {
+                dir.path().join("logs")
+            } else {
+                dir.path().to_path_buf()
+            };
+            std::fs::create_dir_all(&data_dir).unwrap();
+            let wal = || {
+                WalWriter::open(
+                    &data_dir,
+                    signal,
+                    WalSyncMode::Always,
+                    Duration::from_millis(0),
+                )
+                .unwrap()
+            };
+            let (tx, rx) = mpsc::unbounded_channel::<PendingIndex>();
+            let _index = spawn_index_task(rx);
+            let sig = match signal {
+                "metrics" => SignalType::Metrics,
+                "logs" => SignalType::Logs,
+                _ => SignalType::Traces,
+            };
+            match signal {
+                "metrics" => {
+                    let cfg = BlockConfig {
+                        data_dir: data_dir.clone(),
+                        max_rows_per_block: 10_000,
+                        block_duration_secs: 3600,
+                        ..Default::default()
+                    };
+                    let svc = IngestionService::with_shards(cfg, tx, 2, Some(wal()));
+                    for i in 0..4 {
+                        svc.ingest_metrics(vec![metric_named(&format!("m{i}"), i + 1)])
+                            .await
+                            .unwrap();
+                    }
+                    svc.shutdown().await.unwrap();
+                }
+                "logs" => {
+                    let cfg = LogBlockConfig {
+                        data_dir: data_dir.clone(),
+                        max_rows_per_block: 10_000,
+                        block_duration_secs: 3600,
+                        ..Default::default()
+                    };
+                    let svc = LogIngestionService::with_wal(cfg, tx, Some(wal()));
+                    svc.ingest_logs((0..4).map(|i| log_at(i + 1, "x")).collect())
+                        .await
+                        .unwrap();
+                    svc.shutdown().await.unwrap();
+                }
+                _ => {
+                    let cfg = BlockConfig {
+                        data_dir: data_dir.clone(),
+                        max_rows_per_block: 10_000,
+                        block_duration_secs: 3600,
+                        ..Default::default()
+                    };
+                    let svc = TraceIngestionService::with_wal(cfg, tx, Some(wal()));
+                    svc.ingest_spans((1..=4).map(test_span).collect())
+                        .await
+                        .unwrap();
+                    svc.shutdown().await.unwrap();
+                }
+            }
+
+            // Die before the commit: rewind it, as if the process never wrote it.
+            parqtel_core::wal::commit_position(&data_dir, signal, WalPosition::START).unwrap();
+            let replay_count = || {
+                let mut n = 0;
+                parqtel_core::wal::replay::<serde_json::Value, _>(
+                    &data_dir,
+                    signal,
+                    parqtel_core::wal::read_commit(&data_dir, signal),
+                    |_| n += 1,
+                )
+                .unwrap();
+                n
+            };
+            assert!(replay_count() > 0, "{signal}: the rewound WAL must replay");
+
+            // A restart: the index has never heard of the block, so reconcile
+            // adopts it from the directory - footer and all.
+            let mut index = parqtel_core::storage::BlockIndex::new(&data_dir);
+            parqtel_core::storage::reconcile(&mut index, sig).unwrap();
+            assert_eq!(index.blocks.len(), 1, "{signal}: one block adopted");
+            assert!(
+                index.blocks[0].wal_range.is_some(),
+                "{signal}: the adopted block must report its WAL span"
+            );
+            parqtel_core::storage::advance_wal_commit(&data_dir, signal, &index);
+            assert_eq!(
+                replay_count(),
+                0,
+                "{signal}: rows already in a block must not be replayed"
+            );
+        }
     }
 
     /// Buffer drops follow the same order: a later flush finishing first must

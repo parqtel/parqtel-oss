@@ -692,6 +692,20 @@ async fn run_server(
     // Replay before the listener binds, so nothing is served until recovered
     // telemetry is back in the write path, and through exactly the entry points
     // live exporters use.
+    // Blocks already on disk may cover WAL ranges whose commit never happened
+    // (a crash between the two); skip those instead of writing them twice.
+    if config.ingest.wal_enabled {
+        let data_dir = &config.storage.data_dir;
+        parqtel_core::storage::advance_wal_commit(data_dir, "metrics", &*index.read().await);
+        parqtel_core::storage::advance_wal_commit(data_dir, "traces", &*trace_index.read().await);
+    }
+    if config.ingest.log_wal_enabled {
+        parqtel_core::storage::advance_wal_commit(
+            &config.logs.data_dir,
+            "logs",
+            &*log_index.read().await,
+        );
+    }
     let wal_replay = replay_all_wals(
         &config,
         &ingestion_service,

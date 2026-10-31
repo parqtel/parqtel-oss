@@ -152,6 +152,36 @@ impl BlockIndex {
     }
 }
 
+/// Moves `signal`'s WAL commit point forward over blocks that are already on
+/// disk, and returns it.
+///
+/// A block becomes durable (renamed, indexed) before the WAL commit that records
+/// it, so a crash in between leaves rows both in a block and in the WAL. Each
+/// block carries the WAL span it covers; following the chain of those spans from
+/// the commit point finds that case, and replay then skips what the block holds.
+/// Call after [`reconcile`], so blocks adopted from the directory count too.
+pub fn advance_wal_commit(
+    data_dir: &Path,
+    signal: &str,
+    index: &BlockIndex,
+) -> crate::wal::WalPosition {
+    let commit = crate::wal::read_commit(data_dir, signal);
+    let ranges: Vec<(u64, u64)> = index.blocks.iter().filter_map(|b| b.wal_range).collect();
+    let through = crate::wal::covered_through(commit, &ranges);
+    if through > commit {
+        match crate::wal::commit_position(data_dir, signal, through) {
+            Ok(()) => tracing::warn!(
+                signal,
+                from = %commit,
+                to = %through,
+                "blocks already on disk cover part of the WAL; it will not be replayed again"
+            ),
+            Err(e) => tracing::warn!(signal, error = %e, "could not advance the WAL commit point"),
+        }
+    }
+    through
+}
+
 /// What a reconcile pass found.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ReconcileStats {
@@ -330,6 +360,16 @@ fn read_block_metadata(path: &Path, signal: SignalType) -> Result<Option<BlockMe
         label_names: HashSet::new(),
         label_values: Default::default(),
         signal_type: signal,
+        // A block adopted without an index entry still says what it covers.
+        wal_range: md
+            .file_metadata()
+            .key_value_metadata()
+            .and_then(|kv| {
+                kv.iter()
+                    .find(|e| e.key == crate::wal::WAL_RANGE_FOOTER_KEY)
+                    .and_then(|e| e.value.as_deref())
+            })
+            .and_then(crate::wal::decode_wal_range),
     };
 
     let columns = schema.columns();
@@ -555,6 +595,7 @@ mod tests {
             label_names: HashSet::new(),
             label_values: Default::default(),
             signal_type: signal,
+            wal_range: None,
         }
     }
 

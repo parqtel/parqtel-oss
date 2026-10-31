@@ -43,11 +43,14 @@ while measuring. Measurements and method are in
 - **Concurrent flushes committed out of order**, which could move the WAL commit
   point past a block that was not yet on disk. Commits are released in flush
   order.
-- Recovery is **at-least-once**: a crash in the few milliseconds after a block
-  is indexed and before its WAL range is committed replays that range into a
-  second block (a duplicate, never a loss). This ordering is deliberate and
-  unchanged; making it exactly-once would mean recording the covered WAL range
-  in the block index.
+- **Recovery no longer duplicates rows.** A crash in the few milliseconds after a
+  block became durable and before its WAL range was committed replayed that
+  range into a second block. Each block now records the WAL span `(from, to]` it
+  covers in its Parquet footer and in the index, and startup advances the commit
+  point along the chain of blocks on disk before replaying. It follows the chain
+  rather than taking the largest `to`, so a later block that finished first can
+  never cause an earlier, unwritten one to be skipped. (A block closed early by
+  the writer on capacity, rather than by a flush, carries no span.)
 - **Fresh data vanished from queries after each flush.** The memory buffer was
   emptied completely when a block became durable, including rows that arrived
   while it was being written. Only the rows the block holds are removed now.

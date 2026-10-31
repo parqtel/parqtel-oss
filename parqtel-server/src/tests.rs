@@ -185,6 +185,7 @@ async fn trace_index_is_persisted_like_every_other_signal() {
         label_names: Default::default(),
         label_values: Default::default(),
         signal_type: parqtel_core::SignalType::Traces,
+        wal_range: None,
     });
 
     // persist_blocking does filesystem I/O, so it belongs off the runtime thread.

@@ -152,6 +152,7 @@ impl ParquetStorageEngine {
             label_names,
             label_values: Default::default(),
             signal_type: SignalType::Metrics,
+            wal_range: None,
         })
     }
 
@@ -209,6 +210,7 @@ impl ParquetStorageEngine {
             label_names,
             label_values: Default::default(),
             signal_type: SignalType::Logs,
+            wal_range: None,
         })
     }
 }

@@ -5,7 +5,7 @@ pub mod retention;
 pub mod scanner;
 
 pub use compactor::Compactor;
-pub use index::{reconcile, BlockIndex, BlockIndexStore, PendingIndex};
+pub use index::{advance_wal_commit, reconcile, BlockIndex, BlockIndexStore, PendingIndex};
 pub use persist::{persist_blocking, persist_once, run_index_persist_loop};
 pub use retention::RetentionPolicy;
 pub use scanner::{LogColumnPrefilter, LogRowFilter, LogScanStats, Scanner};
@@ -192,6 +192,7 @@ mod tests {
                 BTreeSet::from(["200".to_string()]),
             )]),
             signal_type: SignalType::Traces,
+            wal_range: None,
         }
     }
 
@@ -283,6 +284,7 @@ mod tests {
                     BTreeSet::from([format!("h{b}")]),
                 )]),
                 signal_type: SignalType::Metrics,
+                wal_range: None,
             };
             meta.size_bytes = fs::metadata(&meta.path).map(|m| m.len()).unwrap_or(0);
             index.add(meta);
@@ -428,6 +430,7 @@ mod tests {
             label_names: HashSet::new(),
             label_values: Default::default(),
             signal_type: SignalType::Metrics,
+            wal_range: None,
         });
         assert_eq!(index.total_blocks(), 1);
 
@@ -510,6 +513,7 @@ mod tests {
             label_names: HashSet::from(["l1".into()]),
             label_values: Default::default(),
             signal_type: SignalType::Metrics,
+            wal_range: None,
         };
         let results = Scanner::scan(vec![b1], "m1".into(), 0, 300, None)
             .await
@@ -530,6 +534,7 @@ mod tests {
             label_names: HashSet::new(),
             label_values: Default::default(),
             signal_type: SignalType::Logs,
+            wal_range: None,
         };
         let results = Scanner::scan_logs(vec![b1], 0, 300).await.unwrap();
         assert!(results.is_empty());
@@ -549,6 +554,7 @@ mod tests {
             label_names: HashSet::from(["l1".into()]),
             label_values: Default::default(),
             signal_type: SignalType::Metrics,
+            wal_range: None,
         });
 
         // `add` is in-memory only; persistence is the store's job.
@@ -575,6 +581,7 @@ mod tests {
             label_names: HashSet::new(),
             label_values: Default::default(),
             signal_type: SignalType::Metrics,
+            wal_range: None,
         });
         index.add(BlockMetadata {
             path: dir.path().join("b2.parquet"),
@@ -586,6 +593,7 @@ mod tests {
             label_names: HashSet::new(),
             label_values: Default::default(),
             signal_type: SignalType::Metrics,
+            wal_range: None,
         });
 
         assert_eq!(index.query(150, 250, None).len(), 1);
@@ -608,6 +616,7 @@ mod tests {
             label_names: HashSet::new(),
             label_values: Default::default(),
             signal_type: SignalType::Metrics,
+            wal_range: None,
         });
         assert_eq!(index.total_blocks(), 1);
         index.remove(&path);
@@ -628,6 +637,7 @@ mod tests {
             label_names: HashSet::from(["env".into()]),
             label_values: Default::default(),
             signal_type: SignalType::Metrics,
+            wal_range: None,
         });
         assert_eq!(index.total_rows(), 10);
         assert_eq!(index.total_bytes(), 500);
@@ -1044,6 +1054,7 @@ mod tests {
             label_names: HashSet::new(),
             label_values: Default::default(),
             signal_type: SignalType::Metrics,
+            wal_range: None,
         };
 
         let projected =
@@ -1224,6 +1235,7 @@ mod tests {
             label_names: HashSet::from(["host".into()]),
             label_values: Default::default(),
             signal_type: SignalType::Metrics,
+            wal_range: None,
         };
 
         let all = Scanner::scan(vec![meta.clone()], "prune.cpu".into(), 0, i64::MAX, None)
@@ -1293,6 +1305,7 @@ mod tests {
             label_names: HashSet::new(),
             label_values: Default::default(),
             signal_type: SignalType::Metrics,
+            wal_range: None,
         }
     }
 
@@ -1412,6 +1425,7 @@ mod tests {
             label_names: HashSet::from(["host".into()]),
             label_values: Default::default(),
             signal_type: SignalType::Metrics,
+            wal_range: None,
         };
         let points = Scanner::scan(vec![meta], "cpu".into(), 0, 3000, None)
             .await
@@ -1458,6 +1472,7 @@ mod tests {
             label_names: HashSet::new(),
             label_values: Default::default(),
             signal_type: SignalType::Logs,
+            wal_range: None,
         };
 
         // The row filter is the full predicate: severity, body, and a label test
@@ -1541,6 +1556,7 @@ mod tests {
             label_names: HashSet::from(["k".into()]),
             label_values: Default::default(),
             signal_type: SignalType::Logs,
+            wal_range: None,
         };
         let logs = Scanner::scan_logs(vec![meta], 0, 2000).await.unwrap();
         assert_eq!(logs.len(), 1);
@@ -1588,6 +1604,7 @@ mod tests {
             label_names: HashSet::new(),
             label_values: Default::default(),
             signal_type: SignalType::Metrics,
+            wal_range: None,
         });
         index.add(BlockMetadata {
             path: p2.clone(),
@@ -1599,6 +1616,7 @@ mod tests {
             label_names: HashSet::new(),
             label_values: Default::default(),
             signal_type: SignalType::Metrics,
+            wal_range: None,
         });
 
         let index = Arc::new(RwLock::new(index));
@@ -1637,6 +1655,7 @@ mod tests {
                 label_names: HashSet::new(),
                 label_values: Default::default(),
                 signal_type: SignalType::Metrics,
+                wal_range: None,
             });
         }
 
@@ -1675,6 +1694,7 @@ mod tests {
             label_names: HashSet::new(),
             label_values: Default::default(),
             signal_type: SignalType::Metrics,
+            wal_range: None,
         });
 
         let index = Arc::new(RwLock::new(index));
@@ -1703,6 +1723,7 @@ mod tests {
             label_names: HashSet::new(),
             label_values: Default::default(),
             signal_type: SignalType::Metrics,
+            wal_range: None,
         });
         let index = Arc::new(RwLock::new(index));
         let store = Arc::new(BlockIndexStore::at_path(dir.path().join("index.json")));
@@ -1754,6 +1775,7 @@ mod tests {
                 label_names: HashSet::new(),
                 label_values: Default::default(),
                 signal_type: SignalType::Metrics,
+                wal_range: None,
             });
         }
 
@@ -1807,6 +1829,7 @@ mod tests {
             label_names: HashSet::new(),
             label_values: Default::default(),
             signal_type: SignalType::Metrics,
+            wal_range: None,
         });
         store.mark_dirty();
 

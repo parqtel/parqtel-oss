@@ -20,6 +20,13 @@ pub struct BlockMetadata {
     pub label_values: BTreeMap<String, BTreeSet<String>>,
     #[serde(default)]
     pub signal_type: SignalType,
+    /// The span of the write-ahead log this block makes durable, as
+    /// `(from, to]` WAL positions: every record in it is in this block or in an
+    /// earlier one. Also stored in the Parquet footer, so a block found on disk
+    /// without an index entry still says what it covers. `None` for blocks that
+    /// were not cut from a WAL range (compaction output, inline closes).
+    #[serde(default)]
+    pub wal_range: Option<(u64, u64)>,
 }
 
 /// Supported signal types in parqtel.

@@ -539,6 +539,8 @@ impl Compactor {
             label_names,
             label_values,
             signal_type,
+            // Cut from existing blocks, not from a WAL range.
+            wal_range: None,
         })
     }
 }

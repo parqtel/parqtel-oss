@@ -1124,10 +1124,10 @@ record after the commit point, an out-of-order WAL commit across concurrent
 flushes, protobuf traces over HTTP, gzip bodies, and a SIGTERM hang. The
 crash-recovery check is `kill -9` under load followed by comparing rows
 acknowledged with rows recovered. Across repeated runs on the final build every
-acknowledged row of every signal is recovered; in one of six runs the kill landed
-between a block becoming durable in the index and its WAL commit, and that
-block's rows came back a second time. That is the designed at-least-once window
-(publish, wait for the index, then commit), not a loss.
+acknowledged row of every signal is recovered. In one of six early runs the kill
+landed between a block becoming durable and its WAL commit and the block's rows
+came back a second time; blocks now record the WAL span they cover and startup
+skips it (covered by a test, since that window is milliseconds wide).
 
 ### Tried and not adopted
 

@@ -56,6 +56,9 @@ pub struct BlockWriter {
     batches: Vec<PushedBatch>,
     rows: usize,
     capacity: usize,
+    /// WAL span the block written by the next flush covers; see
+    /// [`Self::set_wal_range`].
+    wal_range: Option<(u64, u64)>,
     /// Which generation of this shard's writer this is. Starts at 1 and moves on
     /// every time the writer's rows are written out, so the memory buffer can tell
     /// the points a block holds from the ones that arrived afterwards.
@@ -84,8 +87,14 @@ impl BlockWriter {
             batches: Vec::new(),
             rows: 0,
             capacity,
+            wal_range: None,
             epoch,
         }
+    }
+
+    /// Records the WAL span `(from, to]` that the next flush makes durable.
+    pub fn set_wal_range(&mut self, range: Option<(u64, u64)>) {
+        self.wal_range = range;
     }
 
     /// This writer's generation; see the field docs.
@@ -164,6 +173,7 @@ impl BlockWriter {
             batches,
             rows,
             capacity,
+            wal_range: None,
             epoch: 1,
         })
     }
@@ -262,6 +272,7 @@ impl BlockWriter {
             &self.config.compression,
             self.config.compression_level,
             self.config.row_group_size,
+            self.wal_range,
         )?;
         fs::rename(&tmp_path, &final_path)?;
         let size_bytes = fs::metadata(&final_path)?.len();
@@ -279,6 +290,7 @@ impl BlockWriter {
             label_names: index.names,
             label_values: index.values,
             signal_type: parqtel_core::models::storage::SignalType::Metrics,
+            wal_range: self.wal_range,
         })
     }
 }
@@ -288,6 +300,7 @@ pub struct LogWriter {
     config: LogBlockConfig,
     buffer: Vec<LogRecord>,
     capacity: usize,
+    wal_range: Option<(u64, u64)>,
 }
 
 impl LogWriter {
@@ -299,7 +312,13 @@ impl LogWriter {
             config,
             buffer: Vec::new(),
             capacity,
+            wal_range: None,
         }
+    }
+
+    /// Records the WAL span `(from, to]` that the next flush makes durable.
+    pub fn set_wal_range(&mut self, range: Option<(u64, u64)>) {
+        self.wal_range = range;
     }
 
     /// Appends a log record, flushing first when the buffer is full.
@@ -390,6 +409,7 @@ impl LogWriter {
             &self.config.compression,
             self.config.compression_level,
             self.config.row_group_size,
+            self.wal_range,
         )?;
         fs::rename(&tmp_path, &final_path)?;
         let size_bytes = fs::metadata(&final_path)?.len();
@@ -405,6 +425,7 @@ impl LogWriter {
             label_names,
             label_values,
             signal_type: parqtel_core::models::storage::SignalType::Logs,
+            wal_range: self.wal_range,
         })
     }
 }
@@ -414,6 +435,7 @@ pub struct TraceWriter {
     config: BlockConfig,
     buffer: Vec<Span>,
     capacity: usize,
+    wal_range: Option<(u64, u64)>,
 }
 
 impl TraceWriter {
@@ -426,7 +448,13 @@ impl TraceWriter {
             config,
             buffer: Vec::new(),
             capacity,
+            wal_range: None,
         }
+    }
+
+    /// Records the WAL span `(from, to]` that the next flush makes durable.
+    pub fn set_wal_range(&mut self, range: Option<(u64, u64)>) {
+        self.wal_range = range;
     }
 
     /// Appends a span, flushing first when the buffer is full.
@@ -486,6 +514,7 @@ impl TraceWriter {
             &self.config.compression,
             self.config.compression_level,
             self.config.row_group_size,
+            self.wal_range,
         )?;
         fs::rename(&tmp_path, &final_path)?;
         let size_bytes = fs::metadata(&final_path)?.len();
@@ -501,6 +530,7 @@ impl TraceWriter {
             label_names,
             label_values: Default::default(),
             signal_type: parqtel_core::models::storage::SignalType::Traces,
+            wal_range: self.wal_range,
         })
     }
 }
@@ -547,10 +577,21 @@ fn write_parquet_file(
     compression: &str,
     compression_level: Option<i32>,
     row_group_size: usize,
+    wal_range: Option<(u64, u64)>,
 ) -> Result<()> {
     let file = File::create(path)?;
 
+    // The WAL span this block makes durable travels in the file itself, so a
+    // block found on disk without an index entry still says what it covers.
+    let footer = wal_range.map(|range| {
+        vec![parquet::file::metadata::KeyValue::new(
+            parqtel_core::wal::WAL_RANGE_FOOTER_KEY.to_string(),
+            parqtel_core::wal::encode_wal_range(range),
+        )]
+    });
+
     let writer_props = WriterProperties::builder()
+        .set_key_value_metadata(footer)
         .set_compression(compression_from_name(compression, compression_level))
         .set_writer_version(WriterVersion::PARQUET_2_0)
         .set_max_row_group_row_count(Some(row_group_size.max(1)))
