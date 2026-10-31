@@ -1243,10 +1243,10 @@ without a dictionary takes back about as much.
 
 | Change | Effect on `status=500` |
 |---|---|
-| Log scans use the cached footer and its page index (they re-read the footer and had no page index, so the row filter could not skip pages) | small |
-| Body search looks for the needle's rarest byte with `memchr` instead of comparing a window at every offset | 102 -> ~60 ms with the next row |
-| Predicate that is only severity + body: count and rank from three columns, decode the other sixteen only for the returned rows | -> 36 ms |
-| Memory buffer returns only matching rows instead of cloning every buffered record first | -> 23 ms (rare term: 24 -> 12 ms) |
+| Log scans use the cached footer and its page index (they re-read the footer and had no page index, so the row filter could not skip pages) | 102 -> 100 ms (cached footer and plain body column together) |
+| Body search looks for the needle's rarest byte with `memchr` instead of comparing a window at every offset | not measured on its own (the machine was busy); it is the top frame of the profile before and absent after |
+| Predicate that is only severity + body: count and rank from three columns, decode the other sixteen only for the returned rows | 100 -> 36 ms |
+| Memory buffer returns only matching rows instead of cloning every buffered record first | 36 -> 23 ms together with the memchr search (rare term: 24 -> 12 ms) |
 | Skip index (granule bloom filters) | rare term 30 -> 24 ms before the buffer change; leaves a dense term alone |
 
 The skip index does nothing for `status=500` because a fifth of the records match:
