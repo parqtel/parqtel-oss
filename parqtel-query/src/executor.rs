@@ -13,6 +13,135 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::RwLock;
 
+/// One metric's scanned points, grouped into series and ready to evaluate.
+struct BuiltSeries {
+    numeric: Vec<(crate::ast::SharedLabels, Vec<(i64, f64)>)>,
+    histograms: Vec<(crate::ast::SharedLabels, Vec<crate::ast::HistSample>)>,
+    /// Series that matched, counted before any truncation.
+    total_series: usize,
+    /// Points per volume bucket, over every matched series.
+    volume: [u64; 60],
+}
+
+/// Groups `raw` by series and applies the result limits.
+///
+/// Series come out in fingerprint order, so series ids are deterministic across
+/// runs. Matchers were already applied by the scan.
+fn build_series_data(
+    raw: Vec<parqtel_core::DataPoint>,
+    start_ns: i64,
+    window_ns: i64,
+    max_series: usize,
+    max_samples_per_series: usize,
+) -> BuiltSeries {
+    use ahash::AHashMap;
+
+    // Points of one series share a label set, and every point of a block's
+    // series shares the same handle, so the handle's address finds the series
+    // without hashing its labels. A handle not seen before falls back to the
+    // fingerprint, which also merges the same series coming from other blocks.
+    struct Group {
+        fp: u64,
+        labels: parqtel_core::LabelSet,
+        points: Vec<(i64, MetricValue)>,
+    }
+    let mut groups: Vec<Group> = Vec::new();
+    let mut by_addr: AHashMap<usize, usize> = AHashMap::new();
+    let mut by_fp: AHashMap<u64, usize> = AHashMap::new();
+    for dp in raw {
+        let addr = dp.labels.addr();
+        let idx = match by_addr.get(&addr) {
+            Some(i) => *i,
+            None => {
+                let fp = dp.labels.fingerprint();
+                let i = *by_fp.entry(fp).or_insert_with(|| {
+                    groups.push(Group {
+                        fp,
+                        labels: dp.labels.clone(),
+                        points: Vec::new(),
+                    });
+                    groups.len() - 1
+                });
+                by_addr.insert(addr, i);
+                i
+            }
+        };
+        groups[idx].points.push((dp.timestamp_ns, dp.value));
+    }
+    groups.sort_by_key(|g| g.fp);
+
+    let mut out = BuiltSeries {
+        numeric: Vec::new(),
+        histograms: Vec::new(),
+        total_series: 0,
+        volume: [0; 60],
+    };
+    // Series kept so far; a series counts once whether numeric or histogram.
+    let mut kept = 0usize;
+    for group in groups {
+        // Counted as a matched series regardless of truncation, and before it,
+        // so `total_series_count` reports what matched rather than what
+        // survived.
+        out.total_series += 1;
+        // Count into the volume histogram regardless of series truncation.
+        // Lookback samples timestamped before `start_ns` feed range-selector
+        // windows, not the visible timeline, so they are excluded.
+        if window_ns > 0 {
+            for (ts, _) in &group.points {
+                if *ts >= start_ns {
+                    let bucket = ((*ts - start_ns) / window_ns).clamp(0, 59) as usize;
+                    out.volume[bucket] += 1;
+                }
+            }
+        }
+        // The same result limits the plan path applies, so the two engines
+        // cannot disagree about `total_series_count` or escape the configured
+        // memory bound.
+        if kept >= max_series {
+            continue;
+        }
+        kept += 1;
+        let mut pts = group.points;
+        // Samples were appended in scan order (blocks, then buffer appends), so
+        // keep only the oldest `max_samples_per_series` after sorting.
+        pts.sort_by_key(|(t, _)| *t);
+        if pts.len() > max_samples_per_series {
+            pts.truncate(max_samples_per_series);
+        }
+        // Split histogram-valued samples into the structured channel; numeric
+        // series keep the plain path.
+        let mut hist_pts: Vec<crate::ast::HistSample> = Vec::new();
+        let mut num_pts: Vec<(i64, f64)> = Vec::with_capacity(pts.len());
+        for (t, v) in pts {
+            match v {
+                MetricValue::Histogram(h) => {
+                    let h = *h;
+                    hist_pts.push(crate::ast::HistSample {
+                        timestamp_ns: t,
+                        count: h.count,
+                        sum: h.sum,
+                        boundaries: h.boundaries,
+                        counts: h.counts,
+                    })
+                }
+                other => num_pts.push((t, v_to_f64(&other))),
+            }
+        }
+        // One Arc per series, shared by every step that evaluates it: cloning it
+        // per step is a refcount bump, where cloning the LabelSet was one
+        // allocation per label.
+        let labels = crate::ast::shared_labels(group.labels);
+        if !hist_pts.is_empty() {
+            out.histograms
+                .push((std::sync::Arc::clone(&labels), hist_pts));
+        }
+        if !num_pts.is_empty() {
+            out.numeric.push((labels, num_pts));
+        }
+    }
+    out
+}
+
 /// Series filter for a metric's label matchers, or `None` when there are none.
 ///
 /// Evaluated once per distinct series inside the scan (see
@@ -290,93 +419,27 @@ impl QueryExecutor {
                 points_scanned += buffered_rows;
                 raw.extend(buffered);
 
-                // Group by series fingerprint first, then match once per
-                // series. Every point of a series carries the same label set,
-                // so evaluating matchers per point repeated `points x matchers`
-                // B-tree string lookups where `series x matchers` suffices.
-                //
-                // `BTreeMap` (not `HashMap`) because the resulting
-                // `SeriesData` is walked in fingerprint order downstream, so
-                // series ids are deterministic across runs.
-                use std::collections::BTreeMap;
-                let mut by_series: BTreeMap<
-                    u64,
-                    (parqtel_core::LabelSet, Vec<(i64, MetricValue)>),
-                > = BTreeMap::new();
-                for dp in raw {
-                    let fp = dp.labels.fingerprint();
-                    let entry = by_series
-                        .entry(fp)
-                        .or_insert_with(|| (dp.labels.clone(), Vec::new()));
-                    entry.1.push((dp.timestamp_ns, dp.value));
+                // Grouping, limiting and value conversion are pure CPU over every
+                // point of the metric, so they run on the blocking pool rather
+                // than on the async worker that would otherwise be parked for
+                // the length of a large scan.
+                let (max_series, max_samples) = (self.max_series, self.max_samples_per_series);
+                let built = tokio::task::spawn_blocking(move || {
+                    build_series_data(raw, start_ns, window_ns, max_series, max_samples)
+                })
+                .await
+                .map_err(|e| {
+                    parqtel_core::Error::Internal(format!("series grouping task panicked: {e}"))
+                })?;
+                total_series += built.total_series;
+                for (acc, b) in volume_summary.iter_mut().zip(built.volume) {
+                    *acc += b;
                 }
-
-                // Matchers were applied inside the scan; enforce the same
-                // result limits the plan path applies, so the two engines
-                // cannot disagree about `total_series_count` or escape the
-                // configured memory bound.
-                let mut kept: Vec<(parqtel_core::LabelSet, Vec<(i64, MetricValue)>)> =
-                    Vec::with_capacity(by_series.len());
-                for (_fp, (labels, points)) in by_series {
-                    // Counted as a matched series regardless of truncation, and
-                    // before it, so `total_series_count` reports what matched
-                    // rather than what survived.
-                    total_series += 1;
-                    for (ts, _) in &points {
-                        // Count into the volume histogram regardless of series
-                        // truncation. Lookback samples timestamped before
-                        // `start_ns` feed range-selector windows, not the
-                        // visible timeline, so they are excluded.
-                        if window_ns > 0 && *ts >= start_ns {
-                            let bucket = ((*ts - start_ns) / window_ns).clamp(0, 59) as usize;
-                            volume_summary[bucket] += 1;
-                        }
-                    }
-                    if kept.len() < self.max_series {
-                        kept.push((labels, points));
-                    }
-                }
-
-                let entry = data.entry(name.clone()).or_default();
-                let hist_entry = hist_data.entry(name.clone()).or_default();
-                for (labels, mut pts) in kept {
-                    // Samples were appended in scan order (blocks sorted by
-                    // timestamp, then buffer appends), so keep only the
-                    // oldest `max_samples_per_series` after sorting.
-                    pts.sort_by_key(|(t, _)| *t);
-                    if pts.len() > self.max_samples_per_series {
-                        pts.truncate(self.max_samples_per_series);
-                    }
-                    // Split histogram-valued samples into the structured
-                    // channel; numeric series keep the plain path.
-                    let mut hist_pts: Vec<crate::ast::HistSample> = Vec::new();
-                    let mut num_pts: Vec<(i64, f64)> = Vec::with_capacity(pts.len());
-                    for (t, v) in pts {
-                        match v {
-                            MetricValue::Histogram(h) => {
-                                let h = *h;
-                                hist_pts.push(crate::ast::HistSample {
-                                    timestamp_ns: t,
-                                    count: h.count,
-                                    sum: h.sum,
-                                    boundaries: h.boundaries,
-                                    counts: h.counts,
-                                })
-                            }
-                            other => num_pts.push((t, v_to_f64(&other))),
-                        }
-                    }
-                    // One Arc per series, shared by every step that evaluates
-                    // it: cloning it per step is a refcount bump, where
-                    // cloning the LabelSet was one allocation per label.
-                    let labels = crate::ast::shared_labels(labels);
-                    if !hist_pts.is_empty() {
-                        hist_entry.push((std::sync::Arc::clone(&labels), hist_pts));
-                    }
-                    if !num_pts.is_empty() {
-                        entry.push((labels, num_pts));
-                    }
-                }
+                data.entry(name.clone()).or_default().extend(built.numeric);
+                hist_data
+                    .entry(name.clone())
+                    .or_default()
+                    .extend(built.histograms);
             }
         } // refs non-empty
 
@@ -2833,6 +2896,89 @@ mod tests {
             .unwrap();
         assert_eq!(res.correlation_dimension_used, "none");
         assert!(res.correlated.is_empty());
+    }
+
+    fn point(ts: i64, host: &str, v: MetricValue) -> parqtel_core::DataPoint {
+        parqtel_core::DataPoint::new(
+            ts,
+            v,
+            // A fresh handle every call, as separate blocks produce.
+            LabelSet::try_from_iter(vec![("host", host)]).unwrap(),
+        )
+        .unwrap()
+    }
+
+    /// Grouping must merge a series arriving through different label handles,
+    /// order series deterministically, sort samples within a series, count what
+    /// matched before applying the series cap, and keep histograms apart.
+    #[test]
+    fn test_build_series_data_merges_orders_and_limits() {
+        let d = MetricValue::Double;
+        let raw = vec![
+            point(30, "a", d(3.0)),
+            point(10, "b", d(1.0)),
+            point(20, "a", d(2.0)),
+            point(5, "a", d(0.5)),
+            point(15, "b", MetricValue::Int(2)),
+        ];
+        let built = build_series_data(raw.clone(), 0, 10, 100, 100);
+        assert_eq!(built.total_series, 2, "a and b, merged across handles");
+        assert_eq!(built.volume.iter().sum::<u64>(), 5);
+        assert_eq!(built.numeric.len(), 2);
+        // Fingerprint order, whatever it is, is the same on every run.
+        let again = build_series_data(raw.clone(), 0, 10, 100, 100);
+        let hosts = |b: &BuiltSeries| {
+            b.numeric
+                .iter()
+                .map(|(l, _)| l.get("host").unwrap().to_string())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(hosts(&built), hosts(&again));
+        for (labels, pts) in &built.numeric {
+            assert!(pts.windows(2).all(|w| w[0].0 <= w[1].0), "sorted by time");
+            let want = if labels.get("host") == Some("a") {
+                3
+            } else {
+                2
+            };
+            assert_eq!(pts.len(), want);
+        }
+
+        // The cap keeps one series but still counts both and both in volume.
+        let capped = build_series_data(raw.clone(), 0, 10, 1, 100);
+        assert_eq!(capped.total_series, 2);
+        assert_eq!(capped.numeric.len(), 1);
+        assert_eq!(capped.volume.iter().sum::<u64>(), 5);
+
+        // The per-series sample cap keeps the OLDEST samples.
+        let few = build_series_data(raw, 0, 10, 100, 2);
+        let a = few
+            .numeric
+            .iter()
+            .find(|(l, _)| l.get("host") == Some("a"))
+            .unwrap();
+        assert_eq!(
+            a.1.iter().map(|p| p.0).collect::<Vec<_>>(),
+            vec![5, 10 + 10]
+        );
+    }
+
+    #[test]
+    fn test_build_series_data_separates_histograms() {
+        let h = MetricValue::histogram(3, 6.0, None, None, vec![1.0], vec![1, 2]);
+        let built = build_series_data(
+            vec![point(1, "h", h), point(2, "n", MetricValue::Double(1.0))],
+            0,
+            0,
+            100,
+            100,
+        );
+        assert_eq!(built.total_series, 2);
+        assert_eq!(built.histograms.len(), 1);
+        assert_eq!(built.numeric.len(), 1);
+        assert_eq!(built.histograms[0].1[0].count, 3);
+        // No window: nothing is bucketed.
+        assert_eq!(built.volume.iter().sum::<u64>(), 0);
     }
 
     #[test]

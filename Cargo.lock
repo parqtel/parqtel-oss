@@ -2255,6 +2255,7 @@ dependencies = [
 name = "parqtel-query"
 version = "0.3.1"
 dependencies = [
+ "ahash",
  "async-trait",
  "chrono",
  "futures",

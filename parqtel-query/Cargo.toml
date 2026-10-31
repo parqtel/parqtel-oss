@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 parqtel-core = { workspace = true }
+ahash = { workspace = true }
 async-trait = { workspace = true }
 regex = "1"
 serde = { workspace = true }
