@@ -1,5 +1,4 @@
 use crate::error::{Error, Result};
-use ahash::AHasher;
 use serde::de::{MapAccess, Visitor};
 use serde::ser::SerializeMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -127,16 +126,33 @@ impl LabelSet {
 
     /// Generates a stable numeric fingerprint for this [LabelSet].
     ///
-    /// The fingerprint is derived from the sorted key-value pairs and is stable across
-    /// process restarts and architectures. It is computed once per shared set.
+    /// The fingerprint is derived from the sorted key-value pairs and is the same
+    /// in every process, build and architecture: FNV-1a over length-prefixed
+    /// names and values, then a finaliser to spread the bits. (A randomly seeded
+    /// hasher is not an option: the query layer orders series by fingerprint
+    /// before applying its series limit, so a fingerprint that changed on restart
+    /// would change which series a capped query returns.) Computed once per
+    /// shared set.
     pub fn fingerprint(&self) -> u64 {
         *self.inner.fingerprint.get_or_init(|| {
-            let mut hasher = AHasher::default();
+            const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+            const PRIME: u64 = 0x0000_0100_0000_01b3;
+            let mut h = OFFSET;
+            let mut eat = |bytes: &[u8]| {
+                for b in (bytes.len() as u64).to_le_bytes().iter().chain(bytes) {
+                    h = (h ^ u64::from(*b)).wrapping_mul(PRIME);
+                }
+            };
             for (k, v) in &self.inner.entries {
-                k.hash(&mut hasher);
-                v.hash(&mut hasher);
+                eat(k.as_bytes());
+                eat(v.as_bytes());
             }
-            hasher.finish()
+            // splitmix64 finaliser.
+            h ^= h >> 30;
+            h = h.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+            h ^= h >> 27;
+            h = h.wrapping_mul(0x94d0_49bb_1331_11eb);
+            h ^ (h >> 31)
         })
     }
 
@@ -502,18 +518,19 @@ mod tests {
         assert_eq!(set1.fingerprint(), set2.fingerprint());
     }
 
+    const PINNED: u64 = 4_467_025_367_253_129_411;
+
     #[test]
     fn test_label_set_fingerprint_value_is_pinned() {
-        // The fingerprint keys series identity inside a query, so its value is
-        // part of observable behaviour: pin it against the definition (ahash of
-        // each key then value, in sorted order).
+        // The fingerprint orders series inside a query (and so decides which
+        // survive a series limit), so it must not change between processes or
+        // releases: pin the value itself.
         let set = LabelSet::try_from_iter(vec![("b", "2"), ("a", "1")]).unwrap();
-        let mut h = AHasher::default();
-        "a".hash(&mut h);
-        "1".hash(&mut h);
-        "b".hash(&mut h);
-        "2".hash(&mut h);
-        assert_eq!(set.fingerprint(), h.finish());
+        assert_eq!(set.fingerprint(), PINNED);
+        // The value boundary matters: ("ab","c") is not ("a","bc").
+        let x = LabelSet::try_from_iter(vec![("ab", "c")]).unwrap();
+        let y = LabelSet::try_from_iter(vec![("a", "bc")]).unwrap();
+        assert_ne!(x.fingerprint(), y.fingerprint());
     }
 
     #[test]
