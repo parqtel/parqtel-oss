@@ -1,14 +1,13 @@
+use super::block_file::write_block_file;
 use super::index::{BlockIndex, BlockIndexStore};
-use crate::config::{compression_from_name, BlockConfig};
+use crate::config::BlockConfig;
 use crate::error::{Error, Result};
 use crate::models::labels::LabelSet;
 use crate::models::logs::LogRecord;
-use crate::models::metrics::{DataPoint, Metric, MetricKind};
-use crate::models::storage::{BlockMetadata, SignalType, StorageModel};
+use crate::models::metrics::{DataPoint, MetricKind};
+use crate::models::storage::{BlockMetadata, MetricRun, SignalType, StorageModel};
 use crate::models::traces::Span;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-use parquet::arrow::arrow_writer::ArrowWriter;
-use parquet::file::properties::{WriterProperties, WriterVersion};
 use std::collections::{BTreeMap, HashSet};
 use std::fs::{self, File};
 
@@ -387,6 +386,7 @@ impl Compactor {
         mut all_spans: Vec<Span>,
         label_values: LabelValues,
     ) -> Result<BlockMetadata> {
+        let mut series = None;
         let (record_batch, start_ts, end_ts, row_count, metric_names, label_names) =
             match signal_type {
                 SignalType::Metrics => {
@@ -412,25 +412,29 @@ impl Compactor {
                         }
                         groups.entry((name, kind, resource)).or_default().push(dp);
                     }
-                    let metrics: Vec<_> = groups
-                        .into_iter()
-                        .map(|((name, kind, resource), dps)| Metric {
+                    // Series-contiguous, time-ordered inside each series: the
+                    // layout the series table describes.
+                    let mut ordered: Vec<_> = groups.into_iter().collect();
+                    for (_, dps) in &mut ordered {
+                        dps.sort_by(|a, b| {
+                            a.labels
+                                .fingerprint()
+                                .cmp(&b.labels.fingerprint())
+                                .then(a.timestamp_ns.cmp(&b.timestamp_ns))
+                        });
+                    }
+                    let runs: Vec<MetricRun<'_>> = ordered
+                        .iter()
+                        .map(|((name, kind, resource), dps)| MetricRun {
                             name,
-                            description: "".into(),
-                            unit: "".into(),
-                            kind,
-                            resource_attributes: resource,
-                            data_points: dps,
+                            kind: *kind,
+                            resource,
+                            points: dps.iter().collect(),
                         })
                         .collect();
-                    (
-                        StorageModel::metrics_to_chunk(&metrics)?,
-                        start,
-                        end,
-                        rows,
-                        m_names,
-                        l_names,
-                    )
+                    let (chunk, table) = StorageModel::metric_runs_to_block(&runs)?;
+                    series = Some(table);
+                    (chunk, start, end, rows, m_names, l_names)
                 }
                 SignalType::Logs => {
                     all_logs.sort_by_key(|l| l.timestamp_ns);
@@ -494,29 +498,17 @@ impl Compactor {
 
         fs::create_dir_all(&config.data_dir)?;
 
-        let writer_props = WriterProperties::builder()
-            .set_compression(compression_from_name(
-                &config.compression,
-                config.compression_level,
-            ))
-            .set_writer_version(WriterVersion::PARQUET_2_0)
-            // Compaction rewrites blocks, so it must preserve the row-group
-            // layout the scanner prunes on — otherwise compacted blocks quietly
-            // lose the narrow-query speedup that flushed blocks have.
-            .set_max_row_group_row_count(Some(config.row_group_size.max(1)))
-            .build();
-
-        let mut writer = ArrowWriter::try_new(
-            File::create(&tmp_path)?,
-            record_batch.schema(),
-            Some(writer_props),
-        )
-        .map_err(|e| Error::Parquet(e.to_string()))?;
-
-        writer
-            .write(&record_batch)
-            .map_err(|e| Error::Parquet(e.to_string()))?;
-        writer.close().map_err(|e| Error::Parquet(e.to_string()))?;
+        // The same writer as a flushed block, so a compacted block keeps the
+        // bloom filters, page statistics and series table of its sources.
+        write_block_file(
+            &tmp_path,
+            record_batch,
+            &config.compression,
+            config.compression_level,
+            config.row_group_size,
+            None,
+            series.as_ref(),
+        )?;
 
         fs::rename(&tmp_path, &final_path)?;
         let size_bytes = fs::metadata(&final_path)?.len();

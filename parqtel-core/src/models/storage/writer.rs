@@ -5,6 +5,7 @@ use crate::models::logs::LogRecord;
 use crate::models::metrics::{DataPoint, Metric, MetricKind, MetricValue};
 use crate::models::storage::{logs_schema, metrics_schema, traces_schema};
 use crate::models::traces::Span;
+use crate::storage::series_index::{SeriesTable, SeriesTableBuilder};
 use arrow::record_batch::RecordBatch;
 use arrow_array::{
     builder::{
@@ -100,6 +101,25 @@ pub fn metrics_to_chunk(metrics: &[Metric]) -> Result<RecordBatch> {
 
 /// Converts runs of rows into a single Arrow [RecordBatch], in run order.
 pub fn metric_runs_to_chunk(runs: &[MetricRun<'_>]) -> Result<RecordBatch> {
+    build_metric_batch(runs, None)
+}
+
+/// As [`metric_runs_to_chunk`], and also describes the layout: a
+/// [`SeriesTable`] listing every series of every run with the rows it occupies.
+///
+/// Within a run, consecutive points with equal labels form one series, so a
+/// caller that orders each run by series (then time) gets exactly one entry per
+/// series; an unordered run is still described correctly, only with more entries.
+pub fn metric_runs_to_block(runs: &[MetricRun<'_>]) -> Result<(RecordBatch, SeriesTable)> {
+    let mut table = SeriesTableBuilder::new();
+    let batch = build_metric_batch(runs, Some(&mut table))?;
+    Ok((batch, table.finish()))
+}
+
+fn build_metric_batch(
+    runs: &[MetricRun<'_>],
+    mut table: Option<&mut SeriesTableBuilder>,
+) -> Result<RecordBatch> {
     let total: usize = runs.iter().map(|r| r.points.len()).sum();
     let mut timestamp_ns = TimestampNanosecondBuilder::with_capacity(total);
 
@@ -121,12 +141,15 @@ pub fn metric_runs_to_chunk(runs: &[MetricRun<'_>]) -> Result<RecordBatch> {
     let mut value_int = Int64Builder::with_capacity(total);
     let mut value_complex = StringBuilder::new();
 
+    let mut next_row = 0u64;
     for run in runs {
         let n = run.points.len();
         if n == 0 {
             continue;
         }
         let (resource_labels, correlation) = extract_correlation_labels(run.resource);
+        let first_row = next_row;
+        next_row += n as u64;
 
         metric_name.append_values(run.name, n);
         metric_kind.append_value_n(kind_name(run.kind), n);
@@ -138,6 +161,16 @@ pub fn metric_runs_to_chunk(runs: &[MetricRun<'_>]) -> Result<RecordBatch> {
         k8s_container_name.append_options(correlation.k8s_container_name.as_deref(), n);
         k8s_node_name.append_options(correlation.k8s_node_name.as_deref(), n);
         resource_attributes.append_values(resource_labels.json_str(), n);
+
+        if let Some(t) = table.as_deref_mut() {
+            t.begin_metric(run.name);
+            describe_series(
+                t,
+                &run.points,
+                correlation.service_name.as_deref(),
+                first_row,
+            );
+        }
 
         for dp in &run.points {
             timestamp_ns.append_value(dp.timestamp_ns);
@@ -188,6 +221,40 @@ pub fn metric_runs_to_chunk(runs: &[MetricRun<'_>]) -> Result<RecordBatch> {
     .map_err(|e| Error::Arrow(e.to_string()))?;
 
     Ok(record_batch)
+}
+
+/// Adds one table entry per series of `points`, which occupy the rows starting
+/// at `first_row`. A series ends where the next point's labels differ.
+fn describe_series(
+    table: &mut SeriesTableBuilder,
+    points: &[&DataPoint],
+    service: Option<&str>,
+    first_row: u64,
+) {
+    let mut i = 0;
+    while i < points.len() {
+        let labels = &points[i].labels;
+        let (mut min_ts, mut max_ts) = (points[i].timestamp_ns, points[i].timestamp_ns);
+        let mut j = i + 1;
+        while j < points.len() && (points[j].labels.ptr_eq(labels) || points[j].labels == *labels) {
+            min_ts = min_ts.min(points[j].timestamp_ns);
+            max_ts = max_ts.max(points[j].timestamp_ns);
+            j += 1;
+        }
+        // As a scan reports it: the resource's service name merged in.
+        let merged = match service {
+            Some(svc) if !svc.is_empty() => labels.with("service.name", svc),
+            _ => labels.clone(),
+        };
+        table.push_series(
+            &merged,
+            first_row + i as u64,
+            (j - i) as u32,
+            min_ts,
+            max_ts,
+        );
+        i = j;
+    }
 }
 
 /// Converts a list of [LogRecord]s into a single Arrow [RecordBatch].

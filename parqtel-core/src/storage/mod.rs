@@ -1,14 +1,21 @@
+pub mod block_file;
 pub mod compactor;
 pub mod index;
 pub mod persist;
 pub mod retention;
 pub mod scanner;
+pub mod series_index;
 
+pub use block_file::write_block_file;
 pub use compactor::Compactor;
 pub use index::{advance_wal_commit, reconcile, BlockIndex, BlockIndexStore, PendingIndex};
 pub use persist::{persist_blocking, persist_once, run_index_persist_loop};
 pub use retention::RetentionPolicy;
 pub use scanner::{LogColumnPrefilter, LogRowFilter, LogScanStats, Scanner};
+pub use series_index::{
+    footer_metadata, SeriesIndex, SeriesSelector, SeriesTable, SeriesTableBuilder, ValueTest,
+    SERIES_INDEX_FOOTER_KEY,
+};
 
 use crate::config::BlockConfig;
 use std::sync::Arc;
@@ -1334,8 +1341,7 @@ mod tests {
             "scan.cpu".into(),
             0,
             i64::MAX,
-            None,
-            Some(pred.clone()),
+            SeriesSelector::all().with_filter(Some(pred.clone())),
         )
         .await
         .unwrap();
@@ -1354,8 +1360,7 @@ mod tests {
             "scan.cpu".into(),
             0,
             i64::MAX,
-            None,
-            Some(Arc::new(|_: &LabelSet| false)),
+            SeriesSelector::all().with_filter(Some(Arc::new(|_: &LabelSet| false))),
         )
         .await
         .unwrap();
@@ -1374,8 +1379,7 @@ mod tests {
             "scan.cpu".into(),
             1_001,
             2_000,
-            Some("a".into()),
-            None,
+            SeriesSelector::all().with_service(Some("a".into())),
         )
         .await
         .unwrap();
@@ -1630,6 +1634,91 @@ mod tests {
         assert_eq!(idx.blocks[0].row_count, 2);
         assert!(!p1.exists());
         assert!(!p2.exists());
+    }
+
+    /// A merged block is laid out series by series and carries its own series
+    /// table, whatever the sources looked like, so compaction never turns a
+    /// block that can answer a selector cheaply into one that cannot.
+    #[tokio::test]
+    async fn test_compaction_writes_a_series_table_for_the_merged_block() {
+        let dir = tempdir().unwrap();
+        let config = BlockConfig {
+            data_dir: dir.path().to_path_buf(),
+            compression: "uncompressed".into(),
+            ..Default::default()
+        };
+        let host = |h: &str| LabelSet::try_from_iter(vec![("host", h)]).unwrap();
+        let mut index = BlockIndex::new(dir.path());
+        for (name, base) in [("b1.parquet", 100i64), ("b2.parquet", 110)] {
+            let path = dir.path().join(name);
+            // Both sources interleave the two hosts.
+            let points: Vec<_> = (0..6)
+                .map(|i| {
+                    DataPoint::new(
+                        base + i as i64,
+                        MetricValue::Double((base + i as i64) as f64),
+                        host(if i % 2 == 0 { "h0" } else { "h1" }),
+                    )
+                    .unwrap()
+                })
+                .collect();
+            write_metrics_parquet(
+                &path,
+                &[Metric {
+                    name: "cpu".into(),
+                    kind: MetricKind::Gauge,
+                    data_points: points,
+                    ..Default::default()
+                }],
+            );
+            index.add(BlockMetadata {
+                path: path.clone(),
+                start_timestamp_ns: base,
+                end_timestamp_ns: base + 5,
+                row_count: 6,
+                size_bytes: fs::metadata(&path).unwrap().len(),
+                metric_names: HashSet::from(["cpu".into()]),
+                label_names: HashSet::new(),
+                label_values: Default::default(),
+                signal_type: SignalType::Metrics,
+                wal_range: None,
+            });
+        }
+        let index = Arc::new(RwLock::new(index));
+        let store = Arc::new(BlockIndexStore::at_path(dir.path().join("index.json")));
+        Compactor::compact_once(&index, &store, &config)
+            .await
+            .unwrap();
+        let merged = index.read().await.blocks[0].clone();
+        assert_eq!(merged.row_count, 12);
+
+        let file = fs::File::open(&merged.path).unwrap();
+        let builder =
+            parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(file).unwrap();
+        let text = builder
+            .metadata()
+            .file_metadata()
+            .key_value_metadata()
+            .and_then(|kv| kv.iter().find(|k| k.key == SERIES_INDEX_FOOTER_KEY))
+            .and_then(|k| k.value.clone())
+            .expect("merged block carries a series table");
+        let table =
+            SeriesIndex::from_table(&SeriesTable::from_footer_value(&text).unwrap()).unwrap();
+        // One entry per series, not one per source: 2 hosts, 6 rows each.
+        assert_eq!(table.series.len(), 2);
+        assert!(table.series.iter().all(|s| s.rows == 6));
+
+        let mut sel = SeriesSelector::all()
+            .with_filter(Some(Arc::new(|l: &LabelSet| l.get("host") == Some("h1"))));
+        sel.equals = vec![("host".into(), "h1".into())];
+        let got = Scanner::scan_block_filtered(merged, "cpu", 0, i64::MAX, &sel).unwrap();
+        assert_eq!(got.rows_considered, 6);
+        let ts: Vec<i64> = got.points.iter().map(|p| p.timestamp_ns).collect();
+        assert_eq!(
+            ts,
+            vec![101, 103, 105, 111, 113, 115],
+            "time order inside a series"
+        );
     }
 
     #[tokio::test]

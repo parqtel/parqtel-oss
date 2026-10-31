@@ -161,6 +161,48 @@ fn series_filter(
     }))
 }
 
+/// What a block's series table can use to find a selector's series without
+/// reading rows: the equalities and positive regexes of the matchers.
+///
+/// Only conditions an *absent* label can never satisfy are handed over - an
+/// empty-value equality or a regex that accepts "" would match series that lack
+/// the label, which the table's postings cannot express. They are narrowing
+/// hints only: the full matcher (`series_filter`) still decides every series.
+fn series_selector(
+    matchers: &[crate::matcher::LabelMatcher],
+    metric: &str,
+) -> parqtel_core::storage::SeriesSelector {
+    use crate::matcher::MatchOp;
+    use parqtel_core::storage::{SeriesSelector, ValueTest};
+    let mut selector = SeriesSelector::all().with_filter(series_filter(matchers, metric));
+    // An empty `service.name` matches series that have none, so it cannot be a
+    // posting lookup; it still prunes row groups in blocks without a table.
+    selector.service = service_of(matchers).map(|s| s.to_string());
+    if let Some(svc) = selector.service.clone().filter(|s| !s.is_empty()) {
+        selector.equals.push(("service.name".to_string(), svc));
+    }
+    for m in matchers {
+        // `__name__` is the metric, not a label of any series.
+        if m.name == "__name__" {
+            continue;
+        }
+        match (m.op, &m.regex) {
+            (MatchOp::Equal, _) if !m.value.is_empty() && m.name != "service.name" => {
+                selector.equals.push((m.name.clone(), m.value.clone()));
+            }
+            (MatchOp::RegexMatch, Some(re)) if !re.is_match("") => {
+                let re = re.clone();
+                selector.value_tests.push((
+                    m.name.clone(),
+                    Arc::new(move |v: &str| re.is_match(v)) as ValueTest,
+                ));
+            }
+            _ => {}
+        }
+    }
+    selector
+}
+
 /// Executes queries against the storage engine.
 pub struct QueryExecutor {
     #[allow(dead_code)]
@@ -404,8 +446,7 @@ impl QueryExecutor {
                         name.clone(),
                         scan_start,
                         end_ns,
-                        service_of(matchers).map(|s| s.to_string()),
-                        filter.clone(),
+                        series_selector(matchers, name),
                     )
                     .await?;
                     points_scanned += scan.rows_considered;
@@ -598,8 +639,7 @@ impl QueryExecutor {
             plan.metric_name.clone(),
             plan.start_ns,
             plan.end_ns,
-            service_of(&plan.matchers).map(|s| s.to_string()),
-            filter.clone(),
+            series_selector(&plan.matchers, &plan.metric_name),
         )
         .await?;
         let mut points_scanned = scan.rows_considered;
@@ -2482,27 +2522,28 @@ mod tests {
         let res = exec.execute(plan).await.unwrap();
         assert_eq!(res.total_series_count, 1);
         assert_eq!(res.series[0].samples.len(), 2);
-        // The matcher is applied inside the scan, but "points scanned" still
-        // reports every in-window row of the metric (3), not the 2 that matched.
-        assert_eq!(res.points_scanned, 3);
+        // The block's series table finds the matching series without reading the
+        // others, so only the 2 rows that matched are read - not all 3 of the
+        // metric.
+        assert_eq!(res.points_scanned, 2);
         // The volume histogram counts matched points only.
         assert_eq!(res.volume_summary.iter().sum::<u64>(), 2);
     }
 
-    /// The AST path applies matchers inside the scan too; a matcher that
-    /// rejects every series must still report what was scanned.
+    /// The AST path narrows by series too: rows of series the matcher rejects
+    /// are never read, so they are not counted.
     #[tokio::test]
     async fn test_execute_ast_matcher_pushdown_counts_scanned_rows() {
         let (exec, _dir) = setup_with_data().await;
         let expr = crate::parser::parse_expr(r#"sum(cpu{host="h1"})"#).unwrap();
         let res = exec.execute_ast(&expr, 0, 5000, Some(1000)).await.unwrap();
         assert_eq!(res.total_series_count, 1);
-        assert_eq!(res.points_scanned, 3);
+        assert_eq!(res.points_scanned, 2);
 
         let expr = crate::parser::parse_expr(r#"sum(cpu{host="nope"})"#).unwrap();
         let res = exec.execute_ast(&expr, 0, 5000, Some(1000)).await.unwrap();
         assert_eq!(res.total_series_count, 0);
-        assert_eq!(res.points_scanned, 3);
+        assert_eq!(res.points_scanned, 0);
         assert!(res.series.is_empty());
     }
 

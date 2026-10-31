@@ -34,7 +34,8 @@ pub struct QueryResult {
     pub series: Vec<TimeSeries>,
     /// Time taken to execute the query.
     pub execution_time: Duration,
-    /// Number of raw data points scanned before filtering.
+    /// Number of raw data points read from storage. Series the selector rules
+    /// out by their labels are not read, so they are not counted.
     pub points_scanned: u64,
     /// Total number of series matching the query (before truncation).
     pub total_series_count: usize,

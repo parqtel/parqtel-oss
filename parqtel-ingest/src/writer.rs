@@ -1,15 +1,12 @@
 use parqtel_core::models::storage::MetricRun;
+use parqtel_core::storage::write_block_file;
 pub use parqtel_core::BlockMetadata;
 use parqtel_core::{
-    compression_from_name, BlockConfig, DataPoint, Error, LabelSet, LogBlockConfig, LogRecord,
-    Metric, MetricKind, Result, Span, StorageModel,
+    BlockConfig, DataPoint, Error, LabelSet, LogBlockConfig, LogRecord, Metric, MetricKind, Result,
+    Span, StorageModel,
 };
-use parquet::arrow::ArrowWriter;
-use parquet::file::properties::{EnabledStatistics, WriterProperties, WriterVersion};
-use parquet::schema::types::ColumnPath;
 use std::collections::{BTreeMap, HashSet};
-use std::fs::{self, File};
-use std::path::Path;
+use std::fs;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -224,19 +221,20 @@ impl BlockWriter {
         // (timestamp, batch, index) key rather than moving points around, and
         // the key's tail keeps equal timestamps in arrival order.
         type GroupKey<'a> = (&'a str, MetricKind, &'a LabelSet);
-        let mut groups: BTreeMap<GroupKey<'_>, Vec<(i64, u32, u32)>> = BTreeMap::new();
+        let mut groups: BTreeMap<GroupKey<'_>, Vec<(u64, i64, u32, u32)>> = BTreeMap::new();
         for (bi, batch) in self.batches.iter().enumerate() {
             let keys = groups
                 .entry((&batch.name, batch.kind, &batch.resource))
                 .or_default();
             keys.reserve(batch.points.len());
-            keys.extend(
-                batch
-                    .points
-                    .iter()
-                    .enumerate()
-                    .map(|(pi, dp)| (dp.timestamp_ns, bi as u32, pi as u32)),
-            );
+            keys.extend(batch.points.iter().enumerate().map(|(pi, dp)| {
+                (
+                    dp.labels.fingerprint(),
+                    dp.timestamp_ns,
+                    bi as u32,
+                    pi as u32,
+                )
+            }));
         }
         let runs: Vec<MetricRun<'_>> = groups
             .into_iter()
@@ -248,12 +246,12 @@ impl BlockWriter {
                     resource,
                     points: keys
                         .iter()
-                        .map(|&(_, bi, pi)| &self.batches[bi as usize].points[pi as usize])
+                        .map(|&(_, _, bi, pi)| &self.batches[bi as usize].points[pi as usize])
                         .collect(),
                 }
             })
             .collect();
-        let chunk = StorageModel::metric_runs_to_chunk(&runs)?;
+        let (chunk, series) = StorageModel::metric_runs_to_block(&runs)?;
         drop(runs);
 
         let filename = format!(
@@ -266,13 +264,14 @@ impl BlockWriter {
         let tmp_path = self.config.data_dir.join(format!(".tmp_{}", filename));
 
         fs::create_dir_all(&self.config.data_dir)?;
-        write_parquet_file(
+        write_block_file(
             &tmp_path,
             chunk,
             &self.config.compression,
             self.config.compression_level,
             self.config.row_group_size,
             self.wal_range,
+            Some(&series),
         )?;
         fs::rename(&tmp_path, &final_path)?;
         let size_bytes = fs::metadata(&final_path)?.len();
@@ -403,13 +402,14 @@ impl LogWriter {
         let tmp_path = self.config.data_dir.join(format!(".tmp_{}", filename));
 
         fs::create_dir_all(&self.config.data_dir)?;
-        write_parquet_file(
+        write_block_file(
             &tmp_path,
             chunk,
             &self.config.compression,
             self.config.compression_level,
             self.config.row_group_size,
             self.wal_range,
+            None,
         )?;
         fs::rename(&tmp_path, &final_path)?;
         let size_bytes = fs::metadata(&final_path)?.len();
@@ -508,13 +508,14 @@ impl TraceWriter {
         let tmp_path = self.config.data_dir.join(format!(".tmp_{}", filename));
 
         fs::create_dir_all(&self.config.data_dir)?;
-        write_parquet_file(
+        write_block_file(
             &tmp_path,
             chunk,
             &self.config.compression,
             self.config.compression_level,
             self.config.row_group_size,
             self.wal_range,
+            None,
         )?;
         fs::rename(&tmp_path, &final_path)?;
         let size_bytes = fs::metadata(&final_path)?.len();
@@ -533,98 +534,6 @@ impl TraceWriter {
             wal_range: self.wal_range,
         })
     }
-}
-
-/// Columns that carry a bloom filter.
-///
-/// Chosen because they are the columns a query filters on *before* it can skip
-/// anything: the metric name selects which blocks are relevant at all, and the
-/// service name is the second-level discriminator. `timestamp_ns` is already
-/// covered exactly by row-group statistics, which are cheaper and exact, so a
-/// bloom filter there would add size for no pruning power.
-const BLOOM_METRIC_NAME: &str = "metric_name";
-const BLOOM_SERVICE_NAME: &str = "service_name";
-
-/// Bloom filter false-positive probability.
-///
-/// The reader treats a positive as "the value might be present" and decodes the
-/// row group anyway, so this only affects how often that happens — never
-/// correctness.
-const BLOOM_FPP: f64 = 0.01;
-
-/// Truncation length for the column index, in bytes.
-///
-/// Long enough to keep a full path, short enough that a pathological label
-/// value cannot bloat the footer.
-const COLUMN_INDEX_TRUNCATE_LENGTH: usize = 64;
-
-/// Target data page size, in bytes.
-///
-/// Smaller than the Parquet default so the column index has pages finer than
-/// `row_group_size` to point at.
-const DATA_PAGE_SIZE_LIMIT: usize = 512 * 1024;
-
-/// Writes one block to Parquet, splitting it into `row_group_size`-row groups.
-///
-/// `row_group_size` is not cosmetic: the scanner skips whole row groups whose
-/// timestamp statistics fall outside a query window, so this is what decides
-/// whether a narrow query decodes a slice of the block or all of it. It comes
-/// from `BlockConfig::row_group_size` (100k for metrics, 20k for logs by
-/// default). A zero would be rejected by Parquet itself, so it is clamped.
-fn write_parquet_file(
-    path: &Path,
-    record_batch: arrow::record_batch::RecordBatch,
-    compression: &str,
-    compression_level: Option<i32>,
-    row_group_size: usize,
-    wal_range: Option<(u64, u64)>,
-) -> Result<()> {
-    let file = File::create(path)?;
-
-    // The WAL span this block makes durable travels in the file itself, so a
-    // block found on disk without an index entry still says what it covers.
-    let footer = wal_range.map(|range| {
-        vec![parquet::file::metadata::KeyValue::new(
-            parqtel_core::wal::WAL_RANGE_FOOTER_KEY.to_string(),
-            parqtel_core::wal::encode_wal_range(range),
-        )]
-    });
-
-    let writer_props = WriterProperties::builder()
-        .set_key_value_metadata(footer)
-        .set_compression(compression_from_name(compression, compression_level))
-        .set_writer_version(WriterVersion::PARQUET_2_0)
-        .set_max_row_group_row_count(Some(row_group_size.max(1)))
-        // A bloom filter per row group lets the reader reject a row group for a
-        // metric it does not contain without decoding any page. A metrics block
-        // holds many metric names, so time-range statistics alone cannot narrow
-        // a single-metric query: every row group overlaps in time and all of
-        // them were being decoded.
-        // Per-column, so only these two pay the size cost. Enabling it for
-        // every column would bloat blocks with filters nothing reads.
-        .set_column_bloom_filter_enabled(ColumnPath::from(BLOOM_METRIC_NAME), true)
-        .set_column_bloom_filter_enabled(ColumnPath::from(BLOOM_SERVICE_NAME), true)
-        // Default false-positive probability. Named so the trade is visible:
-        // a filter this good costs roughly 10 bits per distinct value.
-        .set_bloom_filter_fpp(BLOOM_FPP)
-        // Page-level statistics plus a bounded column index. Row-group
-        // statistics are all-or-nothing at `row_group_size` granularity; the
-        // column index lets a reader skip a *page* inside a group.
-        .set_statistics_enabled(EnabledStatistics::Page)
-        .set_column_index_truncate_length(Some(COLUMN_INDEX_TRUNCATE_LENGTH))
-        // Bound the page size so the column index has finer granularity than a
-        // whole row group would otherwise give.
-        .set_data_page_size_limit(DATA_PAGE_SIZE_LIMIT)
-        .build();
-
-    let mut writer = ArrowWriter::try_new(file, record_batch.schema(), Some(writer_props))
-        .map_err(|e| Error::Parquet(e.to_string()))?;
-
-    writer
-        .write(&record_batch)
-        .map_err(|e| Error::Parquet(e.to_string()))?;
-    writer.close().map_err(|e| Error::Parquet(e.to_string()))?;
-    Ok(())
 }
 
 #[cfg(test)]
@@ -710,10 +619,19 @@ mod tests {
         assert_eq!(hosts, vec!["w", "x", "y", "z"]);
 
         let file = std::fs::File::open(&meta.path).unwrap();
-        let reader = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(file)
-            .unwrap()
-            .build()
+        let builder =
+            parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(file).unwrap();
+        let footer = builder
+            .metadata()
+            .file_metadata()
+            .key_value_metadata()
+            .and_then(|kv| {
+                kv.iter()
+                    .find(|k| k.key == parqtel_core::storage::SERIES_INDEX_FOOTER_KEY)
+            })
+            .and_then(|k| k.value.clone())
             .unwrap();
+        let reader = builder.build().unwrap();
         let mut rows = Vec::new();
         for batch in reader {
             let batch = batch.unwrap();
@@ -722,23 +640,43 @@ mod tests {
                 let MetricValue::Double(v) = dp.value else {
                     panic!("not a double")
                 };
-                rows.push((name, dp.timestamp_ns, v));
+                let host = dp.labels.get("host").unwrap().to_string();
+                rows.push((name, host, dp.timestamp_ns, v));
             }
         }
-        let expect: Vec<(String, i64, f64)> = vec![
-            // a / service s0, then a / service s1 (resource order), then b.
-            ("a", 25, 7.0),
-            ("a", 20, 4.0),
-            ("a", 20, 5.0),
-            ("a", 30, 3.0),
-            ("a", 40, 6.0),
-            ("b", 10, 2.0),
-            ("b", 50, 1.0),
-        ]
-        .into_iter()
-        .map(|(n, t, v)| (n.to_string(), t, v))
-        .collect();
-        assert_eq!(rows, expect);
+        let row = |n: &str, h: &str, t: i64, v: f64| (n.to_string(), h.to_string(), t, v);
+        // Groups by (metric, resource): a/s0, a/s1, b/s1. Inside a group each
+        // series is one contiguous, time-ordered run; the order of the series
+        // themselves is by fingerprint, so only the pair is pinned.
+        assert_eq!(rows[0], row("a", "w", 25, 7.0));
+        let mut pair = [rows[1..3].to_vec(), rows[3..5].to_vec()];
+        pair.sort_by(|x, y| x[0].1.cmp(&y[0].1));
+        assert_eq!(
+            pair,
+            [
+                vec![row("a", "y", 20, 4.0), row("a", "y", 30, 3.0)],
+                vec![row("a", "z", 20, 5.0), row("a", "z", 40, 6.0)],
+            ]
+        );
+        assert_eq!(rows[5..], [row("b", "x", 10, 2.0), row("b", "x", 50, 1.0)]);
+
+        // The table in the footer describes exactly that layout: one entry per
+        // series, covering the rows it occupies, with service.name merged in.
+        let table = parqtel_core::storage::SeriesTable::from_footer_value(&footer).unwrap();
+        let index = parqtel_core::storage::SeriesIndex::from_table(&table).unwrap();
+        assert_eq!(index.series.len(), 4);
+        assert_eq!(index.total_rows(), 7);
+        for entry in &index.series {
+            let (a, b) = (
+                entry.start as usize,
+                entry.start as usize + entry.rows as usize,
+            );
+            for r in &rows[a..b] {
+                assert_eq!(entry.labels.get("host"), Some(r.1.as_str()));
+                assert!(entry.min_ts <= r.2 && r.2 <= entry.max_ts);
+            }
+            assert!(entry.labels.get("service.name").is_some());
+        }
     }
 
     /// `BlockConfig::row_group_size` has to reach the Parquet writer, because
