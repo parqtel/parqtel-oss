@@ -47,6 +47,7 @@ urlencoding = "2"
 http-body-util = "0.1"
 hyper = { workspace = true }
 http = "1"
+reqwest = { workspace = true }
 
 [lints]
 workspace = true
