@@ -788,8 +788,20 @@ impl PreparedPredicate {
     /// part's requirement is necessary for the whole. An `OR` or a negation
     /// contributes nothing, because a matching row need not meet any one branch.
     pub fn column_prefilter(&self) -> ColumnPrefilter {
+        self.prefilter(false)
+    }
+
+    /// As [`Self::column_prefilter`], for callers that evaluate the predicate with
+    /// no pipeline-enriched (`extra`) fields. A bare field name is then known to
+    /// resolve to an attribute or resource attribute, so an equality on it can
+    /// also narrow which granules are read.
+    pub fn column_prefilter_without_extra(&self) -> ColumnPrefilter {
+        self.prefilter(true)
+    }
+
+    fn prefilter(&self, bare_ok: bool) -> ColumnPrefilter {
         let mut pre = ColumnPrefilter::default();
-        self.0.collect_prefilter(&mut pre);
+        self.0.collect_prefilter(&mut pre, bare_ok);
         pre.exact = self.0.is_prefilter_exact();
         pre
     }
@@ -803,6 +815,34 @@ impl PreparedPredicate {
 
 /// See [`PreparedPredicate::column_prefilter`].
 pub type ColumnPrefilter = parqtel_core::storage::LogColumnPrefilter;
+
+/// The name under which a record carries the value an equality on `field` looks
+/// at, if the block's skip index records it.
+///
+/// `service`, `attr.K`, `res.K`, `trace_id` and `span_id` name their source
+/// outright. A bare name is looked up in the attributes, then the resource
+/// attributes, then pipeline-enriched fields; only when the caller has no such
+/// fields (`bare_ok`) is the record's own pair a necessary condition.
+fn indexed_pair_name(field: &str, bare_ok: bool) -> Option<String> {
+    match field {
+        "service" | "service.name" => Some("service.name".to_string()),
+        "trace_id" | "span_id" => Some(field.to_string()),
+        // Columns of their own, or not indexed.
+        "body" | "severity" | "severity_text" => None,
+        _ => {
+            if let Some(key) = field
+                .strip_prefix("attr.")
+                .or_else(|| field.strip_prefix("res."))
+            {
+                Some(key.to_string())
+            } else if bare_ok {
+                Some(field.to_string())
+            } else {
+                None
+            }
+        }
+    }
+}
 
 /// Clauses [`PrefilterBuilder::add_clause`] captures completely.
 fn prefilter_clause_is_exact(clause: &PreparedClause) -> bool {
@@ -818,12 +858,12 @@ fn prefilter_term_is_exact(term: &PreparedTerm) -> bool {
 }
 
 trait PrefilterBuilder {
-    fn add_clause(&mut self, clause: &PreparedClause);
+    fn add_clause(&mut self, clause: &PreparedClause, bare_ok: bool);
     fn add_term(&mut self, term: &PreparedTerm);
 }
 
 impl PrefilterBuilder for ColumnPrefilter {
-    fn add_clause(&mut self, clause: &PreparedClause) {
+    fn add_clause(&mut self, clause: &PreparedClause, bare_ok: bool) {
         match clause {
             PreparedClause::SeverityMin(min) => {
                 self.min_severity = Some(self.min_severity.map_or(*min, |m| m.max(*min)));
@@ -832,6 +872,12 @@ impl PrefilterBuilder for ColumnPrefilter {
                 needle_lower,
                 negate: false,
             } => self.body_contains_lower.push(needle_lower.clone()),
+            // An equality can only hold if the record carries that exact pair.
+            PreparedClause::Eq { field, value } => {
+                if let Some(name) = indexed_pair_name(field, bare_ok) {
+                    self.attr_equals.push((name, value.clone()));
+                }
+            }
             _ => {}
         }
     }
@@ -860,14 +906,14 @@ impl PreparedPredicateKind {
         }
     }
 
-    fn collect_prefilter(&self, pre: &mut ColumnPrefilter) {
+    fn collect_prefilter(&self, pre: &mut ColumnPrefilter, bare_ok: bool) {
         match self {
             PreparedPredicateKind::And(parts) => {
                 for part in parts {
-                    part.0.collect_prefilter(pre);
+                    part.0.collect_prefilter(pre, bare_ok);
                 }
             }
-            PreparedPredicateKind::Clause(c) => pre.add_clause(c),
+            PreparedPredicateKind::Clause(c) => pre.add_clause(c, bare_ok),
             PreparedPredicateKind::Term(t) => pre.add_term(t),
             // An OR need not satisfy any one branch, and a NOT inverts its
             // requirement: neither yields a necessary condition.
@@ -956,9 +1002,18 @@ impl PreparedLogQuery {
     /// Conditions on the severity and body columns that every matching row meets,
     /// for rejecting rows before they are decoded. See [`ColumnPrefilter`].
     pub fn column_prefilter(&self) -> ColumnPrefilter {
+        self.prefilter(false)
+    }
+
+    /// See [`PreparedPredicate::column_prefilter_without_extra`].
+    pub fn column_prefilter_without_extra(&self) -> ColumnPrefilter {
+        self.prefilter(true)
+    }
+
+    fn prefilter(&self, bare_ok: bool) -> ColumnPrefilter {
         let mut pre = ColumnPrefilter::default();
         for clause in &self.clauses {
-            pre.add_clause(clause);
+            pre.add_clause(clause, bare_ok);
         }
         for term in &self.terms {
             pre.add_term(term);
@@ -1995,8 +2050,26 @@ mod tests {
         assert!(prefilter_of("-nope").is_empty());
         assert!(prefilter_of("NOT alpha").is_empty());
 
-        // Field clauses on other columns do not enter the prefilter.
-        assert!(prefilter_of("service=api").is_empty());
+        // A field equality never decides a row by itself: it only names a pair
+        // the record must carry, and the predicate stays the judge.
+        let pre = prefilter_of("service=api");
+        assert_eq!(
+            pre.attr_equals,
+            vec![("service.name".to_string(), "api".to_string())]
+        );
+        assert!(!pre.exact);
+        assert!(pre.body_contains_lower.is_empty() && pre.min_severity.is_none());
+        // A bare name could be a pipeline-enriched field, so it is left out
+        // unless the caller says there are none.
+        assert!(prefilter_of("pod=p3").attr_equals.is_empty());
+        let bare = PreparedPredicate::new(&parse_predicate("pod=p3 attr.zone=z res.k=v").unwrap())
+            .column_prefilter_without_extra();
+        assert_eq!(bare.attr_equals.len(), 3);
+        // Equalities under OR/NOT are not necessary conditions.
+        assert!(prefilter_of("service=api OR service=web")
+            .attr_equals
+            .is_empty());
+        assert!(prefilter_of("NOT service=api").attr_equals.is_empty());
     }
 
     #[test]

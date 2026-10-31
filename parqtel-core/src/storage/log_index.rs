@@ -133,6 +133,17 @@ fn pair_hash(name: &str, value: &str) -> u64 {
     mix(h) | (1 << 63)
 }
 
+/// Lower-case hex of `bytes` written into `out` (which must be twice as long).
+fn hex_lower<'a>(bytes: &[u8], out: &'a mut [u8]) -> &'a str {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    for (i, b) in bytes.iter().enumerate() {
+        out[2 * i] = DIGITS[usize::from(b >> 4)];
+        out[2 * i + 1] = DIGITS[usize::from(b & 0xf)];
+    }
+    // Every byte written is an ASCII hex digit.
+    std::str::from_utf8(&out[..2 * bytes.len()]).unwrap_or("")
+}
+
 /// The bit positions a term sets in a filter of `1 << bits_log2` bits.
 fn probes(hash: u64, bits_log2: u8) -> [usize; HASHES as usize] {
     let mask = (1usize << bits_log2) - 1;
@@ -202,6 +213,31 @@ impl LogIndexBuilder {
         attributes: &LabelSet,
         resource: &LabelSet,
     ) {
+        self.push(timestamp_ns, severity, body, attributes, resource, None);
+    }
+
+    /// Adds the next row of the block from a record, including its trace and span
+    /// ids (as the lower-case hex a query compares against).
+    pub fn push_record(&mut self, log: &crate::models::logs::LogRecord) {
+        self.push(
+            log.timestamp_ns,
+            log.severity_number,
+            &log.body,
+            &log.attributes,
+            &log.resource_attributes,
+            Some((&log.trace_id, &log.span_id)),
+        );
+    }
+
+    fn push(
+        &mut self,
+        timestamp_ns: i64,
+        severity: i32,
+        body: &str,
+        attributes: &LabelSet,
+        resource: &LabelSet,
+        ids: Option<(&[u8; 16], &[u8; 8])>,
+    ) {
         self.min_ts = self.min_ts.min(timestamp_ns);
         self.max_ts = self.max_ts.max(timestamp_ns);
         self.max_severity = self.max_severity.max(severity);
@@ -245,6 +281,24 @@ impl LogIndexBuilder {
         if !same_resource {
             self.add_pairs(resource);
             self.last_resource = Some(resource.clone());
+        }
+
+        if let Some((trace_id, span_id)) = ids {
+            // An all-zero id means "none" and is not worth a term.
+            if trace_id.iter().any(|b| *b != 0) {
+                let mut buf = [0u8; 32];
+                let h = pair_hash("trace_id", hex_lower(trace_id, &mut buf));
+                if self.seen_pairs.insert(h) {
+                    self.terms.push(h);
+                }
+            }
+            if span_id.iter().any(|b| *b != 0) {
+                let mut buf = [0u8; 16];
+                let h = pair_hash("span_id", hex_lower(span_id, &mut buf));
+                if self.seen_pairs.insert(h) {
+                    self.terms.push(h);
+                }
+            }
         }
 
         self.in_granule += 1;
@@ -534,6 +588,53 @@ mod tests {
                 0,
                 i64::MAX,
                 Some(&pre(&["needle-xyz"], &[("pod", "p7")], None))
+            )
+            .is_empty());
+    }
+
+    #[test]
+    fn trace_and_span_ids_narrow_to_their_granule() {
+        use crate::models::logs::LogRecord;
+        let mut b = LogIndexBuilder::new();
+        for i in 0..(2 * GRANULE_ROWS) {
+            let (trace, span) = if i == GRANULE_ROWS + 7 {
+                ([0xab; 16], [0xcd; 8])
+            } else {
+                ([0u8; 16], [0u8; 8])
+            };
+            b.push_record(&LogRecord::new(
+                i as i64 + 1,
+                i as i64 + 1,
+                9,
+                "INFO".into(),
+                format!("row {i}"),
+                LabelSet::default(),
+                LabelSet::default(),
+                trace,
+                span,
+                0,
+                "".into(),
+                "".into(),
+            ));
+        }
+        let ix = LogSkipIndex::from_table(&b.finish()).unwrap();
+        let g = GRANULE_ROWS as u64;
+        let trace = "ab".repeat(16);
+        let span = "cd".repeat(8);
+        assert_eq!(
+            ix.candidate_ranges(0, i64::MAX, Some(&pre(&[], &[("trace_id", &trace)], None))),
+            vec![(g, 2 * g)]
+        );
+        assert_eq!(
+            ix.candidate_ranges(0, i64::MAX, Some(&pre(&[], &[("span_id", &span)], None))),
+            vec![(g, 2 * g)]
+        );
+        // The all-zero id is "none", not a value to look up.
+        assert!(ix
+            .candidate_ranges(
+                0,
+                i64::MAX,
+                Some(&pre(&[], &[("trace_id", &"00".repeat(16))], None))
             )
             .is_empty());
     }

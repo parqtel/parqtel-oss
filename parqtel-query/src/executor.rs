@@ -990,7 +990,7 @@ impl QueryExecutor {
                 limit,
                 order_desc,
                 Some(pred_filter),
-                Some(prepared_pred.column_prefilter()),
+                Some(prepared_pred.column_prefilter_without_extra()),
             )
             .await?;
             total_logs_count += stats.total_matched;
@@ -1087,7 +1087,7 @@ impl QueryExecutor {
                 limit,
                 order_desc,
                 Some(search_filter),
-                Some(prepared_search.column_prefilter()),
+                Some(prepared_search.column_prefilter_without_extra()),
             )
             .await?;
             total_logs_count += stats.total_matched;

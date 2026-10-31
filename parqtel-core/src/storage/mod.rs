@@ -1664,7 +1664,11 @@ mod tests {
                     },
                     LabelSet::try_from_iter(attrs).unwrap(),
                     LabelSet::try_from_iter(vec![("service.name", "api")]).unwrap(),
-                    [0u8; 16],
+                    if (17_000..17_050).contains(&i) {
+                        [0xab; 16]
+                    } else {
+                        [0u8; 16]
+                    },
                     [0u8; 8],
                     0,
                     "".into(),
@@ -1763,6 +1767,14 @@ mod tests {
                 scanner::LogColumnPrefilter {
                     body_contains_lower: vec!["request 2".into()],
                     attr_equals: vec![("service.name".into(), "api".into())],
+                    ..Default::default()
+                },
+            ),
+            (
+                "trace id",
+                Arc::new(|l: &LogRecord| l.trace_id == [0xab; 16]),
+                scanner::LogColumnPrefilter {
+                    attr_equals: vec![("trace_id".into(), "ab".repeat(16))],
                     ..Default::default()
                 },
             ),

@@ -246,24 +246,44 @@ impl MemoryBuffer {
         let Some(slot) = map.get(metric_name) else {
             return (Vec::new(), 0);
         };
+        // The filter is judged once per distinct series handle, from the slot's
+        // series list, before any point is looked at. A selector that no series
+        // satisfies then costs nothing, and for the rest each point needs only its
+        // handle's address looked up (and consecutive points of one series, the
+        // usual layout, not even that).
+        let accepted: Option<std::collections::HashSet<usize, ahash::RandomState>> =
+            filter.map(|f| {
+                slot.series
+                    .iter()
+                    .filter(|labels| f(labels))
+                    .map(|labels| labels.addr())
+                    .collect()
+            });
+        if accepted.as_ref().is_some_and(|a| a.is_empty()) {
+            return (Vec::new(), 0);
+        }
         let mut out = Vec::new();
         let mut considered = 0u64;
-        let mut verdicts: HashMap<crate::models::labels::LabelSet, bool> = HashMap::new();
+        // Address of the previous point's handle and the verdict for it.
+        let mut last: Option<(usize, bool)> = None;
         for dp in &slot.points {
             if dp.timestamp_ns < start_ns || dp.timestamp_ns > end_ns {
                 continue;
             }
             considered += 1;
-            let keep = match filter {
+            let keep = match &accepted {
                 None => true,
-                Some(f) => match verdicts.get(&dp.labels) {
-                    Some(v) => *v,
-                    None => {
-                        let v = f(&dp.labels);
-                        verdicts.insert(dp.labels.clone(), v);
-                        v
+                Some(set) => {
+                    let addr = dp.labels.addr();
+                    match last {
+                        Some((a, v)) if a == addr => v,
+                        _ => {
+                            let v = set.contains(&addr);
+                            last = Some((addr, v));
+                            v
+                        }
                     }
-                },
+                }
             };
             if keep {
                 out.push(dp.clone());
@@ -518,6 +538,54 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use crate::models::traces::SpanStatus;
+
+    /// A selector is judged per series, not per point, and must return exactly the
+    /// points of the series it accepts - interleaved with others, split across
+    /// pushes, and with equal-but-unshared label sets.
+    #[tokio::test]
+    async fn filtered_metric_scan_returns_only_accepted_series() {
+        use crate::models::labels::LabelSet;
+        use crate::models::metrics::{DataPoint, MetricValue};
+        let buf = MemoryBuffer::new();
+        let host = |h: &str| LabelSet::try_from_iter(vec![("host", h)]).unwrap();
+        let pt = |ts: i64, h: &LabelSet| {
+            DataPoint::new(ts, MetricValue::Double(ts as f64), h.clone()).unwrap()
+        };
+        let (a, b) = (host("a"), host("b"));
+        buf.push_metrics("m", &[pt(1, &a), pt(2, &b), pt(3, &a), pt(4, &b)])
+            .await;
+        // The same series again as a separate allocation.
+        buf.push_metrics("m", &[pt(5, &host("a")), pt(6, &host("c"))])
+            .await;
+
+        let only_a: crate::storage::scanner::SeriesFilter =
+            std::sync::Arc::new(|l: &LabelSet| l.get("host") == Some("a"));
+        let (got, considered) = buf.scan_metrics_filtered("m", 0, 100, Some(&only_a)).await;
+        let ts: Vec<i64> = got.iter().map(|p| p.timestamp_ns).collect();
+        assert_eq!(ts, vec![1, 3, 5]);
+        assert_eq!(considered, 6);
+
+        // Window applies on top.
+        let (got, _) = buf.scan_metrics_filtered("m", 2, 4, Some(&only_a)).await;
+        assert_eq!(got.len(), 1);
+
+        // No series accepted: nothing is returned or read.
+        let none: crate::storage::scanner::SeriesFilter = std::sync::Arc::new(|_: &LabelSet| false);
+        assert_eq!(
+            buf.scan_metrics_filtered("m", 0, 100, Some(&none)).await,
+            (Vec::new(), 0)
+        );
+        // No filter returns everything in the window.
+        assert_eq!(
+            buf.scan_metrics_filtered("m", 0, 100, None).await.0.len(),
+            6
+        );
+        assert!(buf
+            .scan_metrics_filtered("absent", 0, 100, None)
+            .await
+            .0
+            .is_empty());
+    }
 
     fn test_span(id: u8, start: i64, end: i64) -> Span {
         Span {

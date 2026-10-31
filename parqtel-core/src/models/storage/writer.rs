@@ -348,13 +348,7 @@ pub fn logs_to_block(logs: &[LogRecord]) -> Result<(RecordBatch, LogIndexTable)>
     let batch = logs_to_chunk(logs)?;
     let mut index = LogIndexBuilder::new();
     for log in logs {
-        index.push_row(
-            log.timestamp_ns,
-            log.severity_number,
-            &log.body,
-            &log.attributes,
-            &log.resource_attributes,
-        );
+        index.push_record(log);
     }
     Ok((batch, index.finish()))
 }
