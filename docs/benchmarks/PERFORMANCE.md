@@ -1078,17 +1078,17 @@ target/release/examples/e2e_bench --url http://127.0.0.1:18080 \
 
 | | before | after | |
 |---|---|---|---|
-| metrics ingest | 0.62 M points/s | 2.02 M points/s | 3.3x |
-| metrics ingest p99 | 55 ms | 17 ms | 3.3x |
-| logs ingest | 0.10 M records/s | 1.93 M records/s | 18.8x |
-| logs ingest p99 | 538 ms | 9.4 ms | 57x |
-| traces ingest (OTLP/HTTP protobuf) | rejected (400) | 1.97 M spans/s | |
-| single-series selector, p50 | 156 ms | 13.7 ms | 11x |
-| `sum by (env) (m)`, p50 | 184 ms | 27 ms | 6.7x |
-| `sum by (region) (rate(m[1m]))`, p50 | 182 ms | 29 ms | 6.3x |
-| `topk(5, rate(m[1m]))`, p50 | 182 ms | 28 ms | 6.6x |
-| instant `sum(m)`, p50 | 107 ms | 15 ms | 7.0x |
-| log search, p50 | 284 ms | 100 ms | 2.8x |
+| metrics ingest | 0.62 M points/s | 1.98 M points/s | 3.2x |
+| metrics ingest p99 | 55 ms | 17 ms | 3.2x |
+| logs ingest | 0.10 M records/s | 1.80 M records/s | 17.6x |
+| logs ingest p99 | 538 ms | 10.3 ms | 52x |
+| traces ingest (OTLP/HTTP protobuf) | rejected (400) | 1.83 M spans/s | |
+| single-series selector, p50 | 156 ms | 14.7 ms | 11x |
+| `sum by (env) (m)`, p50 | 184 ms | 28 ms | 6.5x |
+| `sum by (region) (rate(m[1m]))`, p50 | 182 ms | 30 ms | 6.1x |
+| `topk(5, rate(m[1m]))`, p50 | 182 ms | 29 ms | 6.3x |
+| instant `sum(m)`, p50 | 107 ms | 17 ms | 6.5x |
+| log search, p50 | 284 ms | 102 ms | 2.8x |
 | peak RSS | 2.3 GB | 0.8 GB | 3.0x |
 
 In-process (`perf_bench`): full scan 12.9 M -> 101 M points/s, executor query
@@ -1098,7 +1098,7 @@ Two rows of the end-to-end run are **not comparable** and are left out of the
 table on purpose. Trace search (0.04 ms) and label values (0.3 ms) were faster
 before only because the old build rejected every protobuf trace and, after each
 flush, emptied the memory buffer including rows that had just arrived; both
-answered from almost nothing. They now answer from real data (19 ms and 3 ms).
+answered from almost nothing. They now answer from real data (21 ms and 3 ms).
 
 With many small blocks (50 K rows, 36 to 47 files) the gain is the same shape:
 selector 106 -> 15 ms, aggregation 138 -> 36 ms, ingest 0.64 -> 1.9 M points/s.

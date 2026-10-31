@@ -17,10 +17,10 @@ while measuring. Measurements and method are in
 
 ### Performance
 
-- **Ingest**: metrics 0.62 → 2.0 M points/s, logs 0.10 → 1.9 M records/s, p99
-  ingest latency 55 → 17 ms (metrics) and 538 → 9 ms (logs), on 8 cores.
-- **Queries**: single-series selector 156 → 14 ms, aggregations 180 → 27 ms,
-  instant queries 107 → 15 ms, log search 284 → 100 ms (p50, 2.4 M-point
+- **Ingest**: metrics 0.62 → 2.0 M points/s, logs 0.10 → 1.8 M records/s, p99
+  ingest latency 55 → 17 ms (metrics) and 538 → 10 ms (logs), on 8 cores.
+- **Queries**: single-series selector 156 → 15 ms, aggregations 180 → 28 ms,
+  instant queries 107 → 17 ms, log search 284 → 102 ms (p50, 2.4 M-point
   dataset).
 - Peak RSS under the same load fell from 2.3 GB to 0.8 GB.
 
