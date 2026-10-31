@@ -75,7 +75,7 @@ echo ">>> Preparing namespace..."
 kubectl create namespace parqtel --dry-run=client -o yaml | kubectl apply -f -
 
 echo ">>> Deploying parqtel..."
-helm upgrade --install parqtel deploy/charts/parqtel/ \
+helm upgrade --install parqtel deploy/helm/parqtel/ \
     --namespace parqtel \
     --values deploy/k8s/overlays/dev/values.yaml \
     --wait --timeout 120s

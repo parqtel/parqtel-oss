@@ -4,18 +4,33 @@
 
 Parqtel is an ultra-lightweight SRE observability engine written in Rust. It ingests OpenTelemetry (OTLP) metrics, logs, and traces and stores them as compressed Apache Parquet files. Single binary, ~15 MB Docker image (scratch-based, no shell).
 
-## Workspace Layout (14 crates)
+## Repository Layout
 
-| Crate | Role |
-|-------|------|
-| `parqtel-core` | Data models, storage engine, block index, scanner, compaction, retention, config |
-| `parqtel-ingest` | OTLP protobuf/JSON decoding, block rotation, crash-safe Parquet writing |
-| `parqtel-query` | PromQL-compatible query execution, label matching, aggregations |
-| `parqtel-alert` | Alert rule registry, threshold evaluation, state machine |
-| `parqtel-pipeline` | Recording rules, stream processing, expression evaluation |
-| `parqtel-server` | Axum HTTP server, route handlers, embedded web UI (`src/ui.html`) |
-| `parqtel-mcp-core` | Shared MCP framework (JSON-RPC, rate limiting, tool registry) |
-| `parqtel-mcp-{slack,pagerduty,jira,notion,discord,gdocs,parqtel}` | MCP tool servers |
+```text
+.
+├── crates/                  Rust workspace members (one crate per concern)
+│   ├── parqtel-core/        data models, storage engine, block index, scanner, compaction, WAL, config
+│   ├── parqtel-ingest/      OTLP decoding, block rotation, crash-safe Parquet writing
+│   ├── parqtel-query/       PromQL / LogQL execution, label matching, aggregation
+│   ├── parqtel-alert/       alert rules, evaluation, state machine, built-in preset packs
+│   ├── parqtel-pipeline/    recording rules, stream processing, expression evaluation
+│   ├── parqtel-server/      Axum HTTP + gRPC server, handlers, embedded web console (the `parqtel` binary)
+│   ├── parqtel-mcp-core/    shared MCP framework (JSON-RPC, rate limiting, tool registry)
+│   └── parqtel-mcp-*/       MCP tool servers (slack, pagerduty, jira, notion, discord, gdocs, parqtel)
+├── deploy/
+│   ├── compose/             Docker Compose stack (Parqtel, Grafana, Prometheus, load generator, MCP)
+│   ├── helm/parqtel/        Helm chart
+│   ├── k8s/                 Kubernetes overlays, k3d config and helper scripts
+│   └── systemd/             systemd unit
+├── docs/                    user, operator and developer documentation (index: docs/README.md)
+│   └── api/openapi.yaml     HTTP API description, embedded into the binary
+├── rules/                   example alert rules, recording rules, pipelines, preset packs
+├── scripts/                 bench/, load/, demo/, k8s/, checks/, release/
+├── tests/e2e/               Go end-to-end tests against a Kubernetes deployment
+├── examples/                integration examples
+├── Dockerfile               production image
+└── Makefile                 developer entry points (`make help`)
+```
 
 ## Build & Test Commands
 
@@ -60,20 +75,19 @@ make docker        # Build Docker image
 - **Async**: Tokio with full features; blocking I/O (Parquet encode, scans) on `spawn_blocking` with pre-acquired semaphore
 - **Config**: Figment layered (defaults → TOML → env → CLI)
 - **Logging**: tracing + tracing-subscriber
-- **Embedded UI**: single-file `parqtel-server/src/ui.html`, no external requests, no frameworks, gzip+ETag served at `/ui`. Budget: ≤1000 KB gzipped (soft limit — keep it lean; it is a single file embedded in the binary). Keep it dependency-free and render-fast (no heavy libraries, no layout thrash on poll updates).
+- **Embedded UI**: single-file `crates/parqtel-server/src/ui.html`, no external requests, no frameworks, gzip+ETag served at `/ui`. Budget: ≤1000 KB gzipped (soft limit — keep it lean; it is a single file embedded in the binary). Keep it dependency-free and render-fast (no heavy libraries, no layout thrash on poll updates).
 
 ## Key Source Paths
 
-- `parqtel-server/src/main.rs` — CLI entry point
-- `parqtel-server/src/router.rs` — Axum routes
-- `parqtel-server/src/handlers/` — HTTP handlers (ingest, prometheus, alerts, simplejson, pipeline, misc)
-- `parqtel-server/src/ui.html` — embedded console (vanilla JS, embedded via `include_str!`)
-- `parqtel-core/src/storage/` — scanner, block index, compaction
-- `parqtel-core/src/models/storage/schema.rs` — canonical Parquet schemas (metrics/logs/traces)
-- `parqtel-ingest/src/` — OTLP decoding, Parquet writing
-- `parqtel-query/src/` — PromQL query execution
-- `parqtel-alert/src/` — Alert rules, evaluation, state machine
-- `rules/` — Example alert rules, recording rules, pipelines (YAML). `rules/presets/` holds ready-made alert packs (k8s / coredns / external-secrets / service-RED / self-monitoring) that stay inert until copied into the rules dir — validated by `make test-presets-static` and `make test-alert-presets`.
+- `crates/parqtel-server/src/main.rs` — CLI entry point and server bootstrap
+- `crates/parqtel-server/src/router.rs` — Axum routes; `handlers/` — HTTP handlers; `ui.html` — embedded console
+- `crates/parqtel-core/src/storage/` — scanner, block writer, block/series/log indexes, compaction, retention
+- `crates/parqtel-core/src/models/storage/schema.rs` — canonical Parquet schemas (metrics/logs/traces)
+- `crates/parqtel-core/src/wal.rs` — write-ahead log
+- `crates/parqtel-ingest/src/` — OTLP decoding, block rotation, Parquet writing; `proto/` — OTLP definitions (compiled by `build.rs`)
+- `crates/parqtel-query/src/` — PromQL / LogQL parsing and execution
+- `crates/parqtel-alert/src/` — alert rules, evaluation, state machine
+- `rules/` — example rules; `rules/presets/` holds ready-made alert packs, embedded into the binary and inert until copied into the rules dir — validated by `make test-presets-static` and `make test-alert-presets`
 
 ## Configuration
 

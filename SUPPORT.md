@@ -17,10 +17,10 @@ there is no paid support offering.
 
 Most questions are answered by:
 
-- [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md) — the first 15 minutes
-- [docs/CONFIGURATION.md](docs/CONFIGURATION.md) — every knob and its default
-- [docs/PQL_GUIDE.md](docs/PQL_GUIDE.md) — metric and log/trace query syntax
-- [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) — symptoms and the
+- [docs/getting-started/getting-started.md](docs/getting-started/getting-started.md) — the first 15 minutes
+- [docs/operations/configuration.md](docs/operations/configuration.md) — every knob and its default
+- [docs/guides/pql-guide.md](docs/guides/pql-guide.md) — metric and log/trace query syntax
+- [docs/operations/troubleshooting.md](docs/operations/troubleshooting.md) — symptoms and the
   `/metrics` counters that explain them
 
 Two things that surprise people most often:
@@ -31,7 +31,7 @@ Two things that surprise people most often:
   block duration, if you need to see recent history.
 - **A range query does not evaluate the final partial step**, so samples newer
   than one `step` before `end` are invisible to `/api/v1/query_range`. See
-  [docs/PQL_GUIDE.md](docs/PQL_GUIDE.md).
+  [docs/guides/pql-guide.md](docs/guides/pql-guide.md).
 
 ## Producing a useful bug report
 

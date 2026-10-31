@@ -1,0 +1,108 @@
+# Developer Guide
+
+This guide provides deep technical insights into Parqtel's internals for developers who want to contribute to the core engine or build extensions.
+
+## 1. Codebase Architecture
+
+Parqtel is a Rust workspace composed of several specialized crates. This modularity ensures clear boundaries and allows for independent testing.
+
+### Core Crates
+- **`parqtel-core`**: The heart of the system. Contains the `StorageEngine` trait, the `BlockIndex`, and shared data models (`Metric`, `LogRecord`, `Span`).
+- **`parqtel-ingest`**: Handles the heavy lifting of OTLP decoding. It manages the `BlockRotator` and ensures crash-safe writes to Parquet.
+- **`parqtel-query`**: Contains the query execution engine. It handles PromQL parsing and coordinates data retrieval from the storage layer.
+- **`parqtel-server`**: The Axum-based HTTP entry point. This is where routes, middleware, and telemetry are defined.
+
+## 2. Extending the Storage Engine
+
+Parqtel uses a registry pattern for storage backends. If you want to add a new backend (e.g., S3 or a different file format):
+
+1. **Implement the Trait**: Define your backend by implementing the `StorageEngine` trait found in `crates/parqtel-core/src/engine/mod.rs`.
+   ```rust
+   #[async_trait]
+   pub trait StorageEngine: Send + Sync {
+       async fn write_metrics_batch(&self, metrics: Vec<Metric>) -> Result<WrittenBlockMeta>;
+       async fn write_logs_batch(&self, logs: Vec<LogRecord>) -> Result<WrittenBlockMeta>;
+       async fn scan_metrics(&self, request: MetricScanRequest) -> Result<Vec<DataPoint>>;
+       async fn scan_logs(&self, request: LogScanRequest) -> Result<Vec<LogRecord>>;
+       async fn compact_metrics(&self) -> Result<CompactionStats>;
+       async fn compact_logs(&self) -> Result<CompactionStats>;
+       // ... expiry and stats methods
+   }
+   ```
+2. **Register the Backend**: Add your implementation to the `StorageEngineRegistry`.
+
+## 3. Working on the Embedded UI
+
+The web console (`crates/parqtel-server/src/ui.html`) is a single-file vanilla-JS app with strict constraints:
+
+- **Zero external requests** — no CDNs, no web fonts, no frameworks, no icon packs. Use system font stacks and inline SVG.
+- **Size budget: ≤1000 KB gzipped (soft)** — keep lean; check with `gzip -c crates/parqtel-server/src/ui.html | wc -c`.
+- **No build step** — the file is embedded via `include_str!` and served pre-gzipped with an ETag.
+- **Validating changes**: Node may be unavailable locally; verify JS with headless Chrome instead:
+  ```bash
+  "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
+    --headless=new --disable-gpu --enable-logging=stderr \
+    --virtual-time-budget=15000 http://localhost:8080/ui
+  ```
+  Any `Uncaught SyntaxError`/`ReferenceError` lines in stderr indicate a regression.
+- **Design system**: semantic CSS tokens, inline SVG icon sprite, WCAG AA contrast, `prefers-reduced-motion` support. The console is a single embedded file (`crates/parqtel-server/src/ui.html`) with no external requests and no framework — see [Architecture](architecture.md#embedded-web-ui).
+
+## 4. Adding a New MCP Tool
+
+Parqtel's AI-native capabilities come from its MCP servers. To add a new tool (e.g., a "GitHub" tool):
+
+1. **Navigate to `parqtel-mcp-core`**: This crate provides the shared framework. An `McpTool` is a plain struct with `name`, `description`, and `input_schema` fields — not a trait.
+2. **Define the Tool**: Construct an `McpTool` and pair it with a `ToolHandler` closure.
+   ```rust
+   use parqtel_mcp_core::{McpTool, ToolHandler};
+   use serde_json::{json, Value};
+
+   let github_tool = McpTool {
+       name: "create_issue".to_string(),
+       description: "Open a GitHub issue".to_string(),
+       input_schema: json!({
+           "type": "object",
+           "properties": {"title": {"type": "string"}},
+           "required": ["title"]
+       }),
+   };
+
+   let handler: ToolHandler = Arc::new(|params: Value| {
+       Box::pin(async move {
+           // call the GitHub API, then return a JSON Value
+           Ok(json!({"issue": 42}))
+       })
+   });
+   ```
+3. **Register it**: `server.register_tool_with_handler(github_tool, handler)` in the relevant MCP server binary. See `crates/parqtel-mcp-parqtel/src/lib.rs` (tool definitions) and `src/main.rs` (registration) for a complete example.
+
+## 5. Development Workflow
+
+### Prerequisites
+- Rust 1.87 (MSRV — CI pins and checks exactly 1.87; the workspace `Cargo.toml`, `Dockerfile`, and `ci.yml` move together)
+- `protoc` (for OTLP protobuf compilation; `make build`/`make test` auto-fetch it via the `tools` target, or install `protobuf-compiler`)
+
+### Build Commands
+- `cargo build`: Standard debug build.
+- `cargo test --workspace`: Run the entire test suite.
+- `cargo clippy --workspace -- -D warnings`: Ensure code follows project standards (no panics, no unsafe).
+- `make local-rebuild`: Rebuild the Docker compose stack after source changes (required — a stale image silently runs old code).
+
+## 6. Coding Standards
+
+- **Error Handling**: Always use `Result` and the `thiserror` crate for library errors. Avoid `unwrap()` at all costs.
+- **Concurrency**: Use `tokio` primitives. Prefer `mpsc` channels for communication between services. Run blocking I/O (Parquet encode, file scans) on `spawn_blocking` with a pre-acquired semaphore.
+- **Documentation**: All public functions must have doc comments (`///`).
+
+## 7. Testing Strategy
+
+- **Unit Tests**: Found in `src/` of each crate.
+- **Integration Tests**: Found in the `tests/` directory of each crate.
+- **E2E Tests**: The Kubernetes suite in the root `tests/e2e/` directory requires a running cluster and is built with the `e2e` build tag (`cd e2e && go test -tags e2e ./...`; Go + client-go). The PromQL functional suite needs no cluster — `make e2e-promql` runs it against the local compose stack.
+
+## 8. Performance Profiling
+
+We use the `perf_bench` example for hot-path micro-benchmarking (hand-rolled timing, no `criterion` dependency) and `run_perf_audit.sh` for system-level audits.
+- To run micro-benchmarks: `cargo run --release -p parqtel-server --example perf_bench`
+- To run a system audit: `make perf-audit` (release build + `scripts/bench/run_perf_audit.sh`)
+- To drive synthetic load: `make load` (10k points) or `make load-test LOAD_RATE=... LOAD_TIME=...`

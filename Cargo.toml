@@ -1,19 +1,19 @@
 [workspace]
 members = [
-    "parqtel-core",
-    "parqtel-ingest",
-    "parqtel-query",
-    "parqtel-alert",
-    "parqtel-pipeline",
-    "parqtel-server",
-    "parqtel-mcp-core",
-    "parqtel-mcp-slack",
-    "parqtel-mcp-pagerduty",
-    "parqtel-mcp-jira",
-    "parqtel-mcp-notion",
-    "parqtel-mcp-discord",
-    "parqtel-mcp-gdocs",
-    "parqtel-mcp-parqtel",
+    "crates/parqtel-core",
+    "crates/parqtel-ingest",
+    "crates/parqtel-query",
+    "crates/parqtel-alert",
+    "crates/parqtel-pipeline",
+    "crates/parqtel-server",
+    "crates/parqtel-mcp-core",
+    "crates/parqtel-mcp-slack",
+    "crates/parqtel-mcp-pagerduty",
+    "crates/parqtel-mcp-jira",
+    "crates/parqtel-mcp-notion",
+    "crates/parqtel-mcp-discord",
+    "crates/parqtel-mcp-gdocs",
+    "crates/parqtel-mcp-parqtel",
 ]
 resolver = "2"
 
@@ -86,13 +86,13 @@ schemars = "0.8"
 hyper = { version = "1.3", features = ["full"] }
 
 # Internal crates
-parqtel-core = { path = "parqtel-core" }
-parqtel-ingest = { path = "parqtel-ingest" }
-parqtel-query = { path = "parqtel-query" }
-parqtel-alert = { path = "parqtel-alert" }
-parqtel-pipeline = { path = "parqtel-pipeline" }
-parqtel-server = { path = "parqtel-server" }
-parqtel-mcp-core = { path = "parqtel-mcp-core" }
+parqtel-core = { path = "crates/parqtel-core" }
+parqtel-ingest = { path = "crates/parqtel-ingest" }
+parqtel-query = { path = "crates/parqtel-query" }
+parqtel-alert = { path = "crates/parqtel-alert" }
+parqtel-pipeline = { path = "crates/parqtel-pipeline" }
+parqtel-server = { path = "crates/parqtel-server" }
+parqtel-mcp-core = { path = "crates/parqtel-mcp-core" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
