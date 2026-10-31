@@ -1,6 +1,6 @@
 //! Pipeline execution: runs parsed pipeline stages over unified rows.
 //!
-//! Phase 2 executor: `fetch logs` materializes rows from the log scan
+//! `fetch logs` materializes rows from the log scan
 //! (buffer + blocks), then filter/parse/stats/limit/correlate transform
 //! them. Metrics/traces fetch targets and correlate enrichment use the
 //! same executor APIs the handlers use.
@@ -344,7 +344,7 @@ fn finish_stats(
     }
 
     if let Some(interval) = interval_ns {
-        // G15: wall-clock-snapped buckets — timestamps aligned to interval
+        // wall-clock-snapped buckets — timestamps aligned to interval
         // boundaries from the epoch (0, 5m, 10m, ...), and sparse gaps
         // between observed buckets stay explicit.
         let interval = interval.max(1);

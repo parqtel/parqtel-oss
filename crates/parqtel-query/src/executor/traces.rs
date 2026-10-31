@@ -103,7 +103,7 @@ impl QueryExecutor {
         let start_time = Instant::now();
         // Cap blocks scanned to bound I/O — most recent blocks first for
         // relevance. 256 covers a week of hourly blocks or a day of
-        // 5-minute log-trace flush intervals (G8: raised from 64 after the
+        // 5-minute log-trace flush intervals (raised from 64 after the
         // multi-block baseline showed coverage loss at scale).
         const MAX_BLOCKS: usize = 256;
         let mut blocks = {

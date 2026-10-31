@@ -1,6 +1,6 @@
 //! PromQL-compatible expression parser (Pratt / precedence-climbing).
 //!
-//! Grammar (Prometheus-compatible subset for Phase 1A):
+//! Grammar (Prometheus-compatible subset):
 //! ```text
 //! expr        := unary | binary
 //! binary      := expr OP expr                 (precedence-climbed)

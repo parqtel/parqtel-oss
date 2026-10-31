@@ -427,14 +427,16 @@ async fn test_inspect_logic() {
         &dir.path().join("logs"),
     )));
 
-    super::run_inspect(index, log_index).await.unwrap();
+    crate::commands::run_inspect(index, log_index)
+        .await
+        .unwrap();
 }
 
 #[test]
 fn test_v_to_f64() {
     use parqtel_core::MetricValue;
-    assert_eq!(super::v_to_f64(&MetricValue::Double(1.0)), 1.0);
-    assert_eq!(super::v_to_f64(&MetricValue::Int(42)), 42.0);
+    assert_eq!(crate::commands::v_to_f64(&MetricValue::Double(1.0)), 1.0);
+    assert_eq!(crate::commands::v_to_f64(&MetricValue::Int(42)), 42.0);
 }
 
 #[tokio::test]
@@ -814,7 +816,7 @@ async fn test_export_logic() {
     let index = Arc::new(tokio::sync::RwLock::new(BlockIndex::new(dir.path())));
     let output = dir.path().join("export.csv");
 
-    super::run_export(
+    crate::commands::run_export(
         config,
         index,
         "cpu".into(),
@@ -1348,7 +1350,7 @@ async fn test_ast_composed_queries_end_to_end() {
 
     let t_end = now_ns + 100_000_000_000;
 
-    // 1. THE canonical RED pattern — was impossible before Phase 1A.
+    // 1. THE canonical RED pattern.
     let expr = parqtel_query::parser::parse_expr("sum(rate(ast_requests[1m]))").unwrap();
     let r = state
         .inner
@@ -1908,7 +1910,7 @@ async fn test_pipeline_fetch_metrics_and_traces() {
         other => panic!("expected table, got {other:?}"),
     }
 
-    // G11: fetch metrics | correlate traces window — service+window join
+    // fetch metrics | correlate traces window — service+window join
     // (metric rows have no trace_id → fallback path).
     let p = parqtel_query::pipeline::parse_pipeline(
         "fetch metrics | filter service=api | correlate traces window=10m | stats max(correlated.span_count)",

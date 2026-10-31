@@ -3,7 +3,7 @@
 //! The executor loads all matching series once per query; the evaluator then
 //! walks the AST for every step timestamp, producing an instant vector per
 //! step. Range functions look back `range_ns` from each step (Prometheus
-//! semantics established in Phase 0's `downsample_windowed`).
+//! semantics, as in `downsample_windowed`).
 
 use crate::ast::*;
 use crate::matcher::evaluate_matchers;
@@ -570,7 +570,7 @@ impl<'a> Evaluator<'a> {
                 self.eval_histogram_quantile(call, ctx)
             }
             other => Err(Error::Validation(format!(
-                "unknown function {other:?} (Phase 1A supports the documented subset)"
+                "unknown function {other:?} (only the documented subset is supported)"
             ))),
         }
     }
@@ -834,7 +834,7 @@ impl<'a> Evaluator<'a> {
                         })
                     }
                 }
-                AggregationOp::CountValues => None, // param-label based; rare — Phase 1B
+                AggregationOp::CountValues => None, // param-label based; rare, not yet supported
                 AggregationOp::TopK | AggregationOp::BottomK => {
                     // Handled below with per-series labels (not aggregated).
                     None
@@ -1204,7 +1204,7 @@ fn grouping_fingerprint(labels: &LabelSet, grouping: &Grouping) -> u64 {
     h.finish()
 }
 
-/// Result labels for a binary op: the G3 projection.
+/// Result labels for a binary op: the label projection.
 ///
 /// PromQL semantics:
 /// - default (no modifier): LHS labels minus `__name__`
@@ -1536,7 +1536,7 @@ fn apply_range_fn(
     }
 }
 
-/// rate with per-segment reset accumulation + extrapolation (G4):
+/// rate with per-segment reset accumulation + extrapolation:
 /// a window may contain MULTIPLE counter resets; sum the increase of each
 /// monotonic segment instead of collapsing to a single-reset correction.
 /// `range_ns` is the window width for edge extrapolation (0 = none).

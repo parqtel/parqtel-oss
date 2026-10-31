@@ -121,7 +121,7 @@ fn wildcard_field() {
 
 #[test]
 fn not_on_range_clause_flattens_exact() {
-    // G12: NOT duration>500 must invert the comparison exactly,
+    // NOT duration>500 must invert the comparison exactly,
     // not downgrade to positive matching.
     let q = parse_search("NOT duration>500");
     // Flat shape (single Not-of-clause flattens to Clause::Not).
@@ -600,7 +600,7 @@ fn and_or_precedence() {
 
 #[test]
 fn or_flattens_backwards_compatible() {
-    // AND-only queries still flatten into SearchQuery (same shape as Phase 1B)
+    // AND-only queries still flatten into SearchQuery
     let q = parse_search("service=api severity>=ERROR timeout");
     assert_eq!(q.clauses.len(), 2);
     assert_eq!(q.terms.len(), 1);
@@ -617,7 +617,7 @@ fn legacy_selector_shape_converts() {
 
 #[test]
 fn body_prefix_is_contains() {
-    // G13: explicit body: prefix → contains semantics (not full equality).
+    // explicit body: prefix → contains semantics (not full equality).
     let q = parse_search("body:timeout");
     let l = log("upstream timeout after 5000ms", "ERROR", 17, "api");
     assert!(log_matches(&q, &l, &HashMap::new()));
@@ -629,7 +629,7 @@ fn body_prefix_is_contains() {
 
 #[test]
 fn url_values_keep_colons() {
-    // G14: colons INSIDE values stay part of the value term.
+    // colons INSIDE values stay part of the value term.
     let q = parse_search("url:https://api.example.com:8443/health");
     assert!(
         q.clauses.iter().any(|c| matches!(

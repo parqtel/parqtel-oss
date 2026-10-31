@@ -189,7 +189,7 @@ pub async fn query_instant(
         .time
         .unwrap_or_else(|| chrono::Utc::now().timestamp() as f64);
 
-    // Phase 1A: composed queries (nesting, binary ops, subqueries, ALL
+    // Composed queries (nesting, binary ops, subqueries, ALL
     // aggregations) go through the AST evaluator; simple selector shapes
     // keep the legacy plan path. The AST parse is attempted FIRST: the
     // legacy parse_query() mis-handles nested braced selectors — e.g. for
@@ -359,7 +359,7 @@ pub async fn query_range(
         }
     };
 
-    // Phase 1A: composed queries via the AST evaluator — attempted FIRST,
+    // Composed queries via the AST evaluator — attempted FIRST,
     // before the legacy parse_query() (which rejects nested braced range
     // selectors like sum(rate(x{a="b"}[5m])) with "Selector missing closing
     // brace" even though the AST parser accepts them).
@@ -922,7 +922,7 @@ pub async fn search_traces(
     } else {
         Some(trace_id)
     };
-    // ParqtelQL span predicates (Phase 2): pushed down INTO the scan
+    // ParqtelQL span predicates: pushed down INTO the scan
     // pipeline (before the result cap), so q-filters don't lose matches.
     let search = params
         .get("q")
@@ -1055,7 +1055,7 @@ fn parse_duration(s: &str) -> Result<i64, ()> {
     Ok((val * multiplier as f64) as i64)
 }
 
-// ═══ Saved searches (Phase 1B) ═══
+// ═══ Saved searches ═══
 
 pub async fn list_saved_searches(State(state): State<AppState>) -> Response {
     let searches = state.inner.saved_searches.list().await;
@@ -1103,7 +1103,7 @@ pub async fn delete_saved_search(
     }
 }
 
-// ═══ Unified pipeline search (Phase 2) ═══
+// ═══ Unified pipeline search ═══
 
 /// POST /v1/search — executes a ParqtelQL pipeline:
 /// `fetch logs | filter <pql> | parse ".." as f | stats ... | correlate ...`

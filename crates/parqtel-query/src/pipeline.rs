@@ -9,7 +9,7 @@
 //!   | correlate traces window=5m
 //! ```
 //!
-//! Design (Phase 2 of the query-language plan):
+//! Design:
 //! - Stage pipeline over a unified `Row` shape (logs first; metrics/traces
 //!   as later fetch targets)
 //! - `filter` uses the ParqtelQL boolean predicate tree (OR/AND/NOT)

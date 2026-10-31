@@ -13,7 +13,7 @@ use std::time::Instant;
 
 impl QueryExecutor {
     /// Executes a [QueryPlan] for metrics and returns a [QueryResult].
-    /// Executes a parsed AST query (Phase 1A path). Loads every metric
+    /// Executes a parsed AST query. Loads every metric
     /// referenced in the tree once, then evaluates per step.
     pub async fn execute_ast(
         &self,

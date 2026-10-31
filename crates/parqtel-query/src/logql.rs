@@ -1,7 +1,7 @@
 //! ParqtelQL — unified lenient search grammar for logs and traces.
 //!
-//! Design (per docs/QUERY_ENGINE_ANALYSIS.md Phase 1B, modeled on
-//! ClickStack/Elasticsearch `simple_query_string` guidance):
+//! Design (modeled on ClickStack/Elasticsearch
+//! `simple_query_string` guidance):
 //!
 //! - **Lenient**: unknown tokens become body-term searches instead of
 //!   syntax errors — a search box must never 400 on user typing.
@@ -28,7 +28,7 @@ pub struct SearchQuery {
     pub terms: Vec<SearchTerm>,
 }
 
-/// Boolean predicate tree (Phase 2): OR of ANDs of atoms.
+/// Boolean predicate tree OR of ANDs of atoms.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Predicate {
     /// Matches when ALL sub-predicates match.
@@ -69,7 +69,7 @@ pub enum Clause {
     Exists { field: String },
     /// `severity >= WARN` etc. — maps to severity_number thresholds.
     SeverityMin(String),
-    /// G12: `NOT <clause>` — the inner clause must NOT match. Keeps
+    /// `NOT <clause>` — the inner clause must NOT match. Keeps
     /// negation exact for range/comparison/exists clauses instead of
     /// downgrading to positive matching.
     Not(Box<Clause>),
@@ -382,7 +382,7 @@ fn build_field_clause(
             if (field == "severity" || field == "severity_text") && severity_rank(&value).is_some()
             {
                 // >= maps to SeverityMin; other comparisons approximate to
-                // SeverityMin too (documented Phase 1B simplification).
+                // SeverityMin too (a documented simplification).
                 return Ok(Some(Clause::SeverityMin(value)));
             }
             let n: f64 = value.parse().map_err(|_| {
@@ -564,7 +564,7 @@ fn tokenize(input: &str) -> Result<Vec<Tok>> {
                 toks.push(Tok::Op(op));
             }
             ':' => {
-                // G14: `:` separates field from value. The value term may
+                // `:` separates field from value. The value term may
                 // itself contain colons (URLs, times) — scan it to the
                 // next whitespace/quote without breaking on ':'.
                 toks.push(Tok::Op(FieldOp::Colon));

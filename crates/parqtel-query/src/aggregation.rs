@@ -375,7 +375,7 @@ fn downsample_impl(
                         // shape (e.g. `avg(x[5m])` needs avg_over_time).
                         // Previously we silently fell back to lookback
                         // aggregation — plausible-looking but wrong
-                        // semantics (G2): return no samples so callers
+                        // semantics: return no samples so callers
                         // surface the error.
                         _ => return Vec::new(),
                     }
@@ -397,7 +397,7 @@ fn downsample_impl(
 
 /// Per-second rate across a window with counter-reset correction and
 /// Prometheus-style extrapolation to the window edges.
-/// Per-segment counter rate (G4): a window may contain MULTIPLE resets;
+/// Per-segment counter rate: a window may contain MULTIPLE resets;
 /// sum each monotonic segment's increase, divide by the observed span,
 /// extrapolate toward the window edges (Prometheus behaviour).
 fn windowed_rate(window: &[(i64, MetricValue)], range_ns: f64) -> Option<f64> {
@@ -586,7 +586,7 @@ mod windowed_tests {
 
     #[test]
     fn multiple_resets_in_window_sum_segments() {
-        // G4: TWO resets inside one window. Counter: 0→50 (reset) →0→30
+        // TWO resets inside one window. Counter: 0→50 (reset) →0→30
         // (reset) →0→20. True increase in [0,60s] = 50+30+20 = 100 → rate
         // = 100/60 per sec. The old single-reset approximation would use
         // only the last segment (20) — under-counting 5x.
@@ -705,7 +705,7 @@ mod windowed_tests {
 
     #[test]
     fn non_windowed_aggregation_with_range_rejected() {
-        // G2: `sum(x[5m])`-style shapes are invalid PromQL — the windowed
+        // `sum(x[5m])`-style shapes are invalid PromQL — the windowed
         // path returns no samples (callers surface the error) instead of
         // silently aggregating the lookback window.
         let data = [(0, 1.0), (M, 2.0), (2 * M, 3.0)];

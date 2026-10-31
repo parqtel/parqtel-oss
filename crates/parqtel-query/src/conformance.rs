@@ -1,8 +1,8 @@
-//! PromQL conformance corpus (G0) — hand-derived expectations against
+//! PromQL conformance corpus — hand-derived expectations against
 //! Prometheus semantics, run over both engines (AST evaluator and the
 //! legacy plan path) on deterministic fixtures.
 //!
-//! The corpus is the safety net for every semantic change (Wave 1 G0)
+//! The corpus is the safety net for every semantic change
 //! and the gate for the future legacy-engine retirement decision.
 //! Each case declares: query, evaluation timestamp, and the expected
 //! per-series values (approximate where extrapolation applies, exact
@@ -90,7 +90,7 @@ pub fn fixture() -> crate::ast::SeriesData {
     }
     push_series("bursty", &[("service", "api")], bursty);
 
-    // ── multi-reset counter (G4 case) ───────────────────────────────────
+    // ── multi-reset counter ───────────────────────────────────
     let resets = vec![
         (0, 0.0),
         (10 * S, 50.0),
@@ -189,7 +189,7 @@ pub fn corpus() -> Vec<Case> {
                     expect: vec![("api", 0.0), ("web", 0.0)],
                     tol: 0.0,
                 },
-                // ── windowed counters (range semantics — G1-adjacent) ─────
+                // ── windowed counters (range semantics) ─────
                 Case {
                     name: "rate_5m",
                     query: "rate(requests[5m])",
@@ -225,7 +225,7 @@ pub fn corpus() -> Vec<Case> {
                     expect: vec![("api", 20.0), ("web", 60.0)],
                     tol: 5.0,
                 },
-                // ── multi-reset (G4) ───────────────────────────────────────
+                // ── multi-reset ───────────────────────────────────────
                 Case {
                     name: "rate_multireset",
                     query: "rate(churn[1m])",
@@ -317,9 +317,9 @@ pub fn corpus() -> Vec<Case> {
                     expect: vec![("", 1920.0)],
                     tol: 1.0,
                 },
-                // ── vector matching (G3) ───────────────────────────────────
+                // ── vector matching ───────────────────────────────────
                 // Fixture has core="1" only for api — web LHS has no RHS match (dropped),
-                // and the result carries ONLY the on() label (pod/core gone — G3).
+                // and the result carries ONLY the on() label (pod/core gone).
                 Case {
                     name: "on_projection",
                     query: r#"cpu{core="0"} * on(service) cpu{core="1"}"#,
@@ -527,7 +527,7 @@ pub fn full_corpus() -> Vec<Case> {
             tol: 1.0,
         });
     }
-    // G10 new-function coverage.
+    // New-function coverage.
     push(Case {
         name: "absent_emits_labels",
         query: r#"absent_over_time(nonexistent{env="prod"}[5m])"#,
@@ -561,7 +561,7 @@ pub fn full_corpus() -> Vec<Case> {
         });
     }
 
-    // ── G11 function-family breadth: string params, scalar/no-selector,
+    // ── Function-family breadth: string params, scalar/no-selector,
     // label helpers, timestamp — existence + no-error coverage.
     for q in [
         // Scalar/no-selector functions evaluate without a metric.
@@ -752,7 +752,7 @@ mod corpus_tests {
     use super::*;
 
     /// Runs the corpus through the AST evaluator with Prometheus-default
-    /// (5m) lookback — the reference configuration post-G1.
+    /// (5m) lookback, the reference configuration.
     #[test]
     fn ast_engine_conformance() {
         let data = fixture();
@@ -797,7 +797,7 @@ mod legacy_coverage_tests {
     use super::*;
     use crate::matcher::needs_ast;
 
-    /// G0 retirement-decision data: how the corpus splits across engines,
+    /// Engine-split data: how the corpus splits across engines,
     /// and that every AST-routed case parses via the AST (the legacy path
     /// only receives its historically-supported shapes).
     #[test]

@@ -5,8 +5,7 @@
 //! `include_str!`, so a single binary ships working alerts without volume
 //! mounts (same pattern as the embedded UI). Activation is driven by
 //! `[alerts.presets]`: `mode = off | auto | all`, filtered by an
-//! include-only or exclude list of pack keys (plan:
-//! `docs/BUILTIN_ALERT_PRESETS_PLAN.md`).
+//! include-only or exclude list of pack keys.
 
 use crate::rule::registry::AlertRuleRegistry;
 use crate::rule::types::AlertRule;

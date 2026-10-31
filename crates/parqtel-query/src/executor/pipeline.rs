@@ -19,7 +19,7 @@ impl QueryExecutor {
         use serde_json::json;
 
         let signal = pipeline.fetch_signal();
-        // G6: push the first filter stage into row materialization.
+        // push the first filter stage into row materialization.
         let first_filter = pipeline.stages.iter().find_map(|s| match s {
             Stage::Filter { pred } => Some(pred.clone()),
             _ => None,
@@ -39,7 +39,7 @@ impl QueryExecutor {
         };
 
         // Correlate enrichment: join related signal data per row —
-        // trace_id first, service+window fallback (G11) when absent.
+        // trace_id first, service+window fallback when absent.
         if let Some(Stage::Correlate {
             signal: corr_signal,
             window_ns,
@@ -60,7 +60,7 @@ impl QueryExecutor {
                     }
                     m
                 };
-                // G11: service+window index for rows lacking trace_id.
+                // service+window index for rows lacking trace_id.
                 let by_service_time: Vec<&parqtel_core::Span> = spans.iter().collect();
                 let mut enriched: Vec<Row> = Vec::with_capacity(rows.len());
                 for mut row in rows {
@@ -162,7 +162,7 @@ impl QueryExecutor {
         run_stages(pipeline, || Ok(rows))
     }
 
-    /// Logs → rows (G6: filter pushed into materialization).
+    /// Logs → rows (filter pushed into materialization).
     async fn fetch_log_rows(
         &self,
         start_ns: i64,

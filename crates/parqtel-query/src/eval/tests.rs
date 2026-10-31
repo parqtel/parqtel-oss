@@ -803,7 +803,7 @@ fn bool_comparison() {
 
 #[test]
 fn on_projection_drops_non_on_labels() {
-    // G3: a * on(service) b keeps ONLY service (+ group_left extras),
+    // a * on(service) b keeps ONLY service (+ group_left extras),
     // dropping pod/instance from the result — PromQL semantics.
     let mut data = SeriesData::new();
     let l1 = LabelSet::try_from_iter(vec![

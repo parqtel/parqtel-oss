@@ -1,7 +1,6 @@
 //! PromQL-compatible AST for composed queries.
 //!
-//! Phase 1A of the query-language buildout (docs/QUERY_ENGINE_ANALYSIS.md):
-//! replaces the single-function dispatch with a real grammar so queries
+//! A real grammar rather than single-function dispatch, so queries
 //! compose — `sum by (job) (rate(x[5m]))`, `a / b`, `on()` vector matching,
 //! subqueries, and function pipelines evaluate on a per-step matrix model.
 
