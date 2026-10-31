@@ -1076,20 +1076,28 @@ target/release/examples/e2e_bench --url http://127.0.0.1:18080 \
 
 ### Results
 
-| | before | after | |
+| | before | after (first pass) | after, with series table and log index |
 |---|---|---|---|
-| metrics ingest | 0.62 M points/s | 1.98 M points/s | 3.2x |
-| metrics ingest p99 | 55 ms | 17 ms | 3.2x |
-| logs ingest | 0.10 M records/s | 1.80 M records/s | 17.6x |
-| logs ingest p99 | 538 ms | 10.3 ms | 52x |
-| traces ingest (OTLP/HTTP protobuf) | rejected (400) | 1.83 M spans/s | |
-| single-series selector, p50 | 156 ms | 14.7 ms | 11x |
-| `sum by (env) (m)`, p50 | 184 ms | 28 ms | 6.5x |
-| `sum by (region) (rate(m[1m]))`, p50 | 182 ms | 30 ms | 6.1x |
-| `topk(5, rate(m[1m]))`, p50 | 182 ms | 29 ms | 6.3x |
-| instant `sum(m)`, p50 | 107 ms | 17 ms | 6.5x |
-| log search, p50 | 284 ms | 102 ms | 2.8x |
-| peak RSS | 2.3 GB | 0.8 GB | 3.0x |
+| metrics ingest | 0.62 M points/s | 1.98 M points/s | 1.85 M points/s |
+| metrics ingest p99 | 55 ms | 17 ms | 16.8 ms |
+| logs ingest | 0.10 M records/s | 1.80 M records/s | 1.59 M records/s |
+| logs ingest p99 | 538 ms | 10.3 ms | 10.8 ms |
+| traces ingest (OTLP/HTTP protobuf) | rejected (400) | 1.83 M spans/s | 1.66 M spans/s |
+| single-series selector, p50 | 156 ms | 14.7 ms | 0.43 ms |
+| `sum by (env) (m)`, p50 | 184 ms | 28 ms | 7.2 ms |
+| `sum by (region) (rate(m[1m]))`, p50 | 182 ms | 30 ms | 8.7 ms |
+| `avg(m)` over 1 h, p50 | not measured | 30 ms (thin build) | 6.7 ms |
+| `topk(5, rate(m[1m]))`, p50 | 182 ms | 29 ms | 7.2 ms |
+| instant `sum(m)`, p50 | 107 ms | 17 ms | 3.5 ms |
+| log search, term in 20% of records, p50 | 284 ms | 102 ms | 24.7 ms |
+| log search, term in one record, p50 | not measured | 29 ms (thin build) | 14.6 ms |
+| peak RSS | 2.3 GB | 0.8 GB | 0.67 GB |
+
+The last column is one run of the final fat-LTO build (`lto = "fat"`), the others
+are the medians of three. The ingest figures differ from the middle column by
+about as much as separate runs of one build differ from each other (the
+thin-LTO builds measured 1.5-1.7 M logs/s both before and after the indexes);
+building the indexes during a flush is not a visible cost.
 
 In-process (`perf_bench`): full scan 12.9 M -> 101 M points/s, executor query
 3.9 M -> 22.5 M points/s, Parquet flush 1.0 M -> 2.7 M points/s.
@@ -1217,9 +1225,10 @@ fingerprint is now a fixed function of the labels.
 
 ### Not done
 
-- Data still in the memory buffer is scanned for every query without an index. At
-  the benchmark's flush interval most of a query's data is in blocks; a per-series
-  position index for the buffer is the next step if fresh-data latency matters.
+- Data still in the memory buffer has no per-series positions. A selector is
+  judged once per distinct series (a query no series satisfies reads nothing), but
+  the buffered points of the metric are still walked to find the accepted ones;
+  that walk costs a point-by-point timestamp check and a pointer compare.
 - Time pruning inside a long series: a series is read whole when it overlaps the
   window (a series' rows are time-sorted, so a finer table could cut them).
 
@@ -1266,8 +1275,14 @@ scan. An index that is not JSON, or counts the wrong number of rows, is ignored.
 
 ### Not done
 
-- Searching on trace or span ids, and on `service`/`attr.`/`res.` fields of the
-  LogQL predicate path, does not yet use the attribute filters (only label
-  matchers of `/api/v1/logs` do).
 - The memory buffer is filtered row by row. A buffer holding hundreds of
   thousands of rows costs a few milliseconds per search.
+- Equalities inside an `OR`, a `NOT`, a regex or `!=` do not use the attribute
+  filters (they are not necessary conditions), nor do bare field names when the
+  caller supplies pipeline-enriched fields.
+- A term present in a large share of the records cannot be narrowed by an index;
+  `status=500` above is limited by decoding and testing the bodies of the
+  matching granules.
+
+Trace and span ids and `service` / `attr.K` / `res.K` equalities of the LogQL
+path narrow the granules read, as do label matchers of `/api/v1/logs`.

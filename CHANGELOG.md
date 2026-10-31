@@ -42,6 +42,9 @@ while measuring. Measurements and method are in
   record touches one or two granules. A granule is skipped only when it provably
   holds no match; counts and volume buckets are unchanged. Costs about a byte per
   row.
+- Log blocks also index trace and span ids; `trace_id`, `span_id`, `service`, `attr.K`
+  and `res.K` equalities of a LogQL query (and bare field names, when no
+  pipeline-enriched fields are in play) narrow the granules read.
 - Searches that are only severity and body conditions count, bucket and rank
   matches from three columns and decode the other sixteen only for the rows they
   return.
@@ -58,6 +61,9 @@ while measuring. Measurements and method are in
   compacted and engine-written blocks all carry it; a block without a valid
   table (or one that disagrees with its row count) is scanned as before.
   `points_scanned` now counts the rows actually read.
+- The memory buffer judges a metric selector once per distinct series before
+  reading any buffered point, so a selector that matches nothing in the buffer
+  costs nothing.
 - Footer cache is bounded by bytes (192 MiB) rather than entry count, and holds
   each block's parsed series table.
 - **gzip-compressed OTLP**, which the OpenTelemetry Collector's exporters send by
