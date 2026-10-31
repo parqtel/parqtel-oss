@@ -43,6 +43,8 @@ struct Args {
     phases: String,
     /// Stop an ingest phase after this many requests (0 = run for `secs`).
     reqs: u64,
+    /// Concurrent clients for the read workload.
+    query_conc: usize,
 }
 
 fn parse_args() -> Args {
@@ -58,6 +60,7 @@ fn parse_args() -> Args {
         query_secs: 10,
         phases: "metrics,logs,traces,query".into(),
         reqs: 0,
+        query_conc: 8,
     };
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
@@ -75,6 +78,7 @@ fn parse_args() -> Args {
             "--query-secs" => a.query_secs = v.parse().unwrap(),
             "--phases" => a.phases = v,
             "--reqs" => a.reqs = v.parse().unwrap(),
+            "--query-conc" => a.query_conc = v.parse().unwrap(),
             other => panic!("unknown arg {other}"),
         }
         i += 2;
@@ -440,7 +444,7 @@ async fn query_phase(args: &Args, client: &reqwest::Client) {
         let deadline = Instant::now() + Duration::from_secs(args.query_secs.min(4));
         let t0 = Instant::now();
         let mut handles = Vec::new();
-        let conc = args.workers.min(8);
+        let conc = args.query_conc.max(1);
         for _ in 0..conc {
             let client = client.clone();
             let url = url.clone();
@@ -535,7 +539,10 @@ async fn main() {
         report("ingest-traces(spans)", st, wall);
     }
     if args.phases.contains("query") {
-        println!("-- read workload (8 concurrent clients per query)");
+        println!(
+            "-- read workload ({} concurrent clients per query)",
+            args.query_conc
+        );
         query_phase(&args, &client).await;
     }
 }

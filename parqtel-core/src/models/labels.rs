@@ -344,6 +344,20 @@ impl LabelInterner {
     }
 }
 
+impl LabelInterner {
+    /// `base` with `key` set to `value`, resolved to a shared set.
+    ///
+    /// The same set as [`LabelSet::with`], but a repeat of an already seen
+    /// combination returns the shared instance instead of building a new one.
+    pub fn intern_with(&self, base: &LabelSet, key: &str, value: &str) -> LabelSet {
+        let mut pairs: Vec<(&str, &str)> = Vec::with_capacity(base.len() + 1);
+        pairs.extend(base.iter().filter(|(k, _)| *k != key));
+        pairs.push((key, value));
+        self.intern(&pairs)
+            .unwrap_or_else(|_| base.with(key, value))
+    }
+}
+
 fn has_repeated_key<K: AsRef<str>, V>(pairs: &[(K, V)]) -> bool {
     for (i, (k, _)) in pairs.iter().enumerate() {
         if pairs[..i]
@@ -602,6 +616,21 @@ mod tests {
         let c = i.intern(&[("aa_it", "2"), ("zz_it", "other")]).unwrap();
         assert!(!a.ptr_eq(&c));
         assert_ne!(a, c);
+    }
+
+    #[test]
+    fn intern_with_matches_with_and_shares_repeats() {
+        let i = LabelInterner::global();
+        let base = LabelSet::try_from_iter(vec![("iw_host", "a"), ("iw_env", "p")]).unwrap();
+        let a = i.intern_with(&base, "service.name", "api");
+        assert_eq!(a, base.with("service.name", "api"));
+        // A repeat resolves to the very same shared set.
+        let again = i.intern_with(&base.clone(), "service.name", "api");
+        assert!(a.ptr_eq(&again));
+        // Replacing an existing key keeps one entry for it.
+        let over = i.intern_with(&base, "iw_env", "q");
+        assert_eq!(over, base.with("iw_env", "q"));
+        assert_eq!(over.len(), 2);
     }
 
     #[test]

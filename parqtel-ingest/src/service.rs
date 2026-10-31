@@ -1310,7 +1310,11 @@ fn buffer_points(metric: &Metric) -> Vec<DataPoint> {
                     let l = if dp.labels.get("service.name").is_some() {
                         dp.labels.clone()
                     } else {
-                        dp.labels.with("service.name", svc)
+                        parqtel_core::LabelInterner::global().intern_with(
+                            &dp.labels,
+                            "service.name",
+                            svc,
+                        )
                     };
                     resolved.insert(dp.labels.clone(), l.clone());
                     l
