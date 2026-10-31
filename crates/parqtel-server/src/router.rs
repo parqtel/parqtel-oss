@@ -51,43 +51,28 @@ pub fn build_router(state: AppState) -> Router {
             post(handlers::ingest::ingest_traces_json),
         )
         // Prometheus API v1
-        .route("/api/v1/query", get(handlers::prometheus::query_instant))
-        .route(
-            "/api/v1/query_range",
-            get(handlers::prometheus::query_range),
-        )
-        .route("/api/v1/logs", get(handlers::prometheus::query_logs))
+        .route("/api/v1/query", get(handlers::query::query_instant))
+        .route("/api/v1/query_range", get(handlers::query::query_range))
+        .route("/api/v1/logs", get(handlers::query::query_logs))
         .route(
             "/api/v1/label/__name__/values",
-            get(handlers::prometheus::list_metric_names),
+            get(handlers::query::list_metric_names),
         )
         .route(
             "/api/v1/label/:name/values",
-            get(handlers::prometheus::list_label_values),
+            get(handlers::query::list_label_values),
         )
-        .route(
-            "/api/v1/labels",
-            get(handlers::prometheus::list_label_names),
-        )
+        .route("/api/v1/labels", get(handlers::query::list_label_names))
         // Log API
-        .route(
-            "/v1/logs/count",
-            get(handlers::prometheus::query_logs_count),
-        )
-        .route(
-            "/v1/logs/fields",
-            get(handlers::prometheus::list_log_fields),
-        )
+        .route("/v1/logs/count", get(handlers::query::query_logs_count))
+        .route("/v1/logs/fields", get(handlers::query::list_log_fields))
         .route(
             "/v1/logs/field_values",
-            get(handlers::prometheus::list_log_field_values),
+            get(handlers::query::list_log_field_values),
         )
         // Correlation & Traces
-        .route("/v1/correlate", get(handlers::prometheus::correlate))
-        .route(
-            "/v1/traces/search",
-            get(handlers::prometheus::search_traces),
-        )
+        .route("/v1/correlate", get(handlers::query::correlate))
+        .route("/v1/traces/search", get(handlers::query::search_traces))
         // Grafana SimpleJSON
         .route("/search", post(handlers::simplejson::search))
         .route("/query", post(handlers::simplejson::query))
@@ -101,18 +86,14 @@ pub fn build_router(state: AppState) -> Router {
             "/api/v1/alerts/:id/acknowledge",
             post(handlers::alerts::acknowledge_alert),
         )
-        .route(
-            "/v1/search",
-            post(handlers::prometheus::run_pipeline_search),
-        )
+        .route("/v1/search", post(handlers::query::run_pipeline_search))
         .route(
             "/api/v1/saved_searches",
-            get(handlers::prometheus::list_saved_searches)
-                .post(handlers::prometheus::create_saved_search),
+            get(handlers::query::list_saved_searches).post(handlers::query::create_saved_search),
         )
         .route(
             "/api/v1/saved_searches/:id",
-            delete(handlers::prometheus::delete_saved_search),
+            delete(handlers::query::delete_saved_search),
         )
         .route(
             "/api/v1/alerts/routes",
