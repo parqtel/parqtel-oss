@@ -395,8 +395,11 @@ where
                 bad_at = Some(offset);
                 break;
             }
-            // Same 1-based encoding as WalWriter::position.
-            let pos = WalPosition((seq << 32) | (offset as u64 + 1));
+            // The position `WalWriter::append` returned for this record: the
+            // END of the record, 1-based. Labelling by the start would give the
+            // record after a committed one the same number as the commit point,
+            // and it would be skipped.
+            let pos = WalPosition((seq << 32) | (body_end as u64 + 1));
             if pos.is_covered_by(commit) {
                 stats.skipped += 1;
             } else {
@@ -694,6 +697,41 @@ mod tests {
             "everything was committed, nothing should replay: {seen:?}"
         );
         assert!(stats.skipped > 0, "records must be counted as skipped");
+    }
+
+    /// The record right after the commit point is not covered by it. A commit
+    /// position is the end of the last covered record, and replay must label
+    /// records the same way, or the first uncommitted record shares the commit's
+    /// number and is skipped.
+    #[test]
+    fn replay_keeps_the_record_immediately_after_the_commit_point() {
+        let d = tmp();
+        let mut w = open(d.path());
+        let mut after = Vec::new();
+        for i in 0..5 {
+            after.push(
+                w.append(&Rec {
+                    n: format!("r{i}"),
+                    v: i,
+                })
+                .unwrap(),
+            );
+        }
+        w.sync().unwrap();
+        drop(w);
+
+        // Every prefix of the log, committed, must replay exactly the rest.
+        for covered in 0..=5usize {
+            let commit = if covered == 0 {
+                WalPosition::START
+            } else {
+                after[covered - 1]
+            };
+            let mut seen = Vec::new();
+            replay::<Rec, _>(d.path(), "metrics", commit, |r| seen.push(r.v)).unwrap();
+            let want: Vec<i64> = (covered as i64..5).collect();
+            assert_eq!(seen, want, "commit after {covered} records");
+        }
     }
 
     #[test]

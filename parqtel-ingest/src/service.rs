@@ -124,16 +124,6 @@ pub struct BlockRotator {
     /// sync interval — but it will show up in
     /// `parqtel_ingest_lock_wait_seconds` and is worth watching.
     wal: Option<Arc<tokio::sync::Mutex<WalWriter>>>,
-    /// Per-shard: the highest WAL position among the rows currently in that
-    /// shard's writer. Taken and reset under the shard lock at swap time, so a
-    /// block can only ever commit positions for rows it actually contains.
-    ///
-    /// A mutex rather than a plain `Vec` because `push` and `flush_locked`
-    /// take `&self` — the rotator is shared behind an `Arc` and sharding
-    /// deliberately made it lock-free for callers. Always taken *while holding
-    /// the shard lock*, so the value it holds is always consistent with the
-    /// writer it describes.
-    covered: Vec<std::sync::Mutex<WalPosition>>,
     /// Orders WAL commits and buffer drops across concurrent flushes.
     order: Arc<std::sync::Mutex<FlushOrder>>,
     config: BlockConfig,
@@ -165,9 +155,6 @@ impl BlockRotator {
                 .map(|_| Mutex::new(BlockWriter::new(config.clone())))
                 .collect(),
             wal: None,
-            covered: (0..shards)
-                .map(|_| std::sync::Mutex::new(WalPosition::START))
-                .collect(),
             order: Arc::new(std::sync::Mutex::new(FlushOrder::default())),
             flush_lock: tokio::sync::Mutex::new(()),
             flush_tx: std::sync::Mutex::new(None),
@@ -429,8 +416,7 @@ impl BlockRotator {
             // order are the same total order. A failure here is propagated:
             // acknowledging data we could not log would make the WAL a lie.
             if let (Some(wal), Some(record)) = (&self.wal, &wal_record) {
-                let pos = wal.lock().await.append_encoded(record)?;
-                *self.covered[idx].lock().unwrap_or_else(|e| e.into_inner()) = pos;
+                wal.lock().await.append_encoded(record)?;
             }
             let epoch = shard.epoch();
             if let (Some(buffer), Some(points)) = (&buffer, &buffered) {
@@ -526,24 +512,35 @@ impl BlockRotator {
         let mut writers = Vec::with_capacity(self.shards.len());
         let mut sealed = vec![0u64; self.shards.len()];
         let mut row_count = 0usize;
-        // Highest WAL position among the rows this block will actually contain.
-        // Taken per shard under that shard's own lock, at the moment its writer
-        // is swapped, so it can never include a row that lands in the *next*
-        // block.
-        let mut covered = WalPosition::START;
-        for (i, shard) in self.shards.iter().enumerate() {
-            let mut guard = shard.lock().await;
+
+        // Every shard is held for the swap, which only moves pointers. That makes
+        // it one instant for the whole block, and the instant is what the WAL
+        // commit depends on.
+        //
+        // The WAL is a single sequence shared by all shards. Swapping shard by
+        // shard and committing the highest position seen would be wrong: a
+        // record that lands on a shard *after* it was swapped, but before a later
+        // shard was, has a lower position than that later shard's last record. It
+        // belongs to the next block, yet it would sit below the commit point, and
+        // a crash would skip it on replay. With all shards held, no push is in
+        // flight, so every record up to the WAL's current end is in a writer being
+        // taken here (or in a block a writer already closed by itself), and the
+        // end of the WAL is exactly the position this block covers.
+        let mut guards = Vec::with_capacity(self.shards.len());
+        for shard in &self.shards {
+            guards.push(shard.lock().await);
+        }
+        let covered = match &self.wal {
+            Some(wal) => wal.lock().await.position(),
+            None => WalPosition::START,
+        };
+        for (i, guard) in guards.iter_mut().enumerate() {
             if guard.is_empty() {
                 continue;
             }
             let taken = guard.len();
             row_count += taken;
-            // Taken and reset while this shard's lock is held, so the value
-            // always matches the writer being swapped.
-            let mut slot = self.covered[i].lock().unwrap_or_else(|e| e.into_inner());
-            covered = covered.max(*slot);
-            *slot = WalPosition::START;
-            // Subtract while still holding this shard's lock, so a concurrent
+            // Subtract while still holding the shard's lock, so a concurrent
             // push either lands before this (and is subtracted here) or after
             // (and counts up from the decremented total). A `store(0)` after the
             // loop would erase the latter.
@@ -552,10 +549,11 @@ impl BlockRotator {
             // one, so points buffered from here on are not part of this block.
             sealed[i] = guard.epoch();
             writers.push(std::mem::replace(
-                &mut *guard,
+                &mut **guard,
                 BlockWriter::with_epoch(self.config.clone(), sealed[i] + 1),
             ));
         }
+        drop(guards);
         if writers.is_empty() {
             tracing::debug!("metric block flush skipped: all shards empty");
             return Ok(());
@@ -3426,6 +3424,7 @@ mod tests {
                 dir.path().to_path_buf()
             };
             std::fs::create_dir_all(&data_dir).unwrap();
+            // Each service owns the WAL of its own signal.
             let open = || {
                 WalWriter::open_with_segment_limit(
                     &data_dir,
@@ -3448,105 +3447,97 @@ mod tests {
                 block_duration_secs: 3600,
                 ..Default::default()
             };
+            let log_at = |ts: i64, body: &str| {
+                parqtel_core::LogRecord::new(
+                    ts,
+                    ts,
+                    9,
+                    "INFO".into(),
+                    body.into(),
+                    parqtel_core::LabelSet::default(),
+                    parqtel_core::LabelSet::default(),
+                    [0u8; 16],
+                    [0u8; 8],
+                    0,
+                    "".into(),
+                    "".into(),
+                )
+            };
+            let span_at = |i: i64| {
+                let mut sp = test_span(i);
+                sp.start_time_ns = i;
+                sp.end_time_ns = i + 99;
+                sp
+            };
 
             // Crash: accept, acknowledge, drop without flushing.
             {
-                let (ltx, lrx) = mpsc::unbounded_channel();
-                let (ttx, trx) = mpsc::unbounded_channel();
-                let _index_a = spawn_index_task(lrx);
-                let _index_b = spawn_index_task(trx);
-                let logs_svc = LogIngestionService::with_wal(log_config.clone(), ltx, Some(open()));
-                let traces_svc =
-                    TraceIngestionService::with_wal(block_config.clone(), ttx, Some(open()));
-
-                for i in 0..3i64 {
-                    let l = parqtel_core::LogRecord::new(
-                        i + 1,
-                        i + 1,
-                        9,
-                        "INFO".into(),
-                        format!("log-{i}"),
-                        parqtel_core::LabelSet::default(),
-                        parqtel_core::LabelSet::default(),
-                        [0u8; 16],
-                        [0u8; 8],
-                        0,
-                        "".into(),
-                        "".into(),
-                    );
-                    assert_eq!(logs_svc.ingest_logs(vec![l]).await.unwrap(), 1);
-
-                    let mut sp = test_span(i + 1);
-                    sp.start_time_ns = i + 1;
-                    sp.end_time_ns = i + 100;
-                    assert_eq!(traces_svc.ingest_spans(vec![sp]).await.unwrap(), 1);
+                let (tx, rx) = mpsc::unbounded_channel();
+                let _index = spawn_index_task(rx);
+                if signal == "logs" {
+                    let svc = LogIngestionService::with_wal(log_config.clone(), tx, Some(open()));
+                    for i in 0..3i64 {
+                        let l = log_at(i + 1, &format!("log-{i}"));
+                        assert_eq!(svc.ingest_logs(vec![l]).await.unwrap(), 1);
+                    }
+                } else {
+                    let svc =
+                        TraceIngestionService::with_wal(block_config.clone(), tx, Some(open()));
+                    for i in 0..3i64 {
+                        assert_eq!(svc.ingest_spans(vec![span_at(i + 1)]).await.unwrap(), 1);
+                    }
                 }
             }
 
             let commit = parqtel_core::wal::read_commit(&data_dir, signal);
-            let mut lrec = Vec::new();
-            let lstats = parqtel_core::wal::replay::<parqtel_core::LogRecord, _>(
-                &data_dir,
-                signal,
-                commit,
-                |r| lrec.push(r),
-            )
-            .unwrap();
-            let mut srec = Vec::new();
-            let sstats = parqtel_core::wal::replay::<parqtel_core::Span, _>(
-                &data_dir,
-                signal,
-                commit,
-                |r| srec.push(r),
-            )
-            .unwrap();
-
-            assert_eq!(
-                lstats.records, 3,
-                "{signal}: every acknowledged log must replay"
-            );
-            assert_eq!(
-                sstats.records, 3,
-                "{signal}: every acknowledged span must replay"
-            );
-            assert_eq!(
-                lrec.iter().map(|l| l.body.clone()).collect::<Vec<_>>(),
-                vec!["log-0", "log-1", "log-2"]
-            );
-            assert_eq!(srec.len(), 3);
+            if signal == "logs" {
+                let mut recovered = Vec::new();
+                let stats = parqtel_core::wal::replay::<parqtel_core::LogRecord, _>(
+                    &data_dir,
+                    signal,
+                    commit,
+                    |r| recovered.push(r),
+                )
+                .unwrap();
+                assert_eq!(stats.records, 3, "logs: every acknowledged log must replay");
+                assert_eq!(
+                    recovered.iter().map(|l| l.body.clone()).collect::<Vec<_>>(),
+                    vec!["log-0", "log-1", "log-2"]
+                );
+            } else {
+                let mut recovered = Vec::new();
+                let stats = parqtel_core::wal::replay::<parqtel_core::Span, _>(
+                    &data_dir,
+                    signal,
+                    commit,
+                    |r| recovered.push(r),
+                )
+                .unwrap();
+                assert_eq!(
+                    stats.records, 3,
+                    "traces: every acknowledged span must replay"
+                );
+                assert_eq!(recovered.len(), 3);
+            }
 
             // Graceful flush commits, so a second replay finds nothing.
-            let (ltx, lrx) = mpsc::unbounded_channel();
-            let (ttx, trx) = mpsc::unbounded_channel();
-            let _gc_index_a = spawn_index_task(lrx);
-            let _gc_index_b = spawn_index_task(trx);
-            let logs_svc = LogIngestionService::with_wal(log_config.clone(), ltx, Some(open()));
-            let traces_svc =
-                TraceIngestionService::with_wal(block_config.clone(), ttx, Some(open()));
-            // Ingest again so the writers are non-empty and `shutdown` really
-            // flushes — an empty writer short-circuits before the commit, which
+            let (tx, rx) = mpsc::unbounded_channel();
+            let _index = spawn_index_task(rx);
+            // Ingest again so the writer is non-empty and `shutdown` really
+            // flushes - an empty writer short-circuits before the commit, which
             // would leave the earlier records uncommitted and make this phase
             // assert the wrong thing.
-            let l = parqtel_core::LogRecord::new(
-                99,
-                99,
-                9,
-                "INFO".into(),
-                "log-flushed".into(),
-                parqtel_core::LabelSet::default(),
-                parqtel_core::LabelSet::default(),
-                [0u8; 16],
-                [0u8; 8],
-                0,
-                "".into(),
-                "".into(),
-            );
-            logs_svc.ingest_logs(vec![l]).await.unwrap();
-            traces_svc.ingest_spans(vec![test_span(99)]).await.unwrap();
-            logs_svc.shutdown().await.unwrap();
-            traces_svc.shutdown().await.unwrap();
-            // The index tasks consumed the metadata; the WAL commit is what the
-            // second replay checks.
+            if signal == "logs" {
+                let svc = LogIngestionService::with_wal(log_config.clone(), tx, Some(open()));
+                svc.ingest_logs(vec![log_at(99, "log-flushed")])
+                    .await
+                    .unwrap();
+                svc.shutdown().await.unwrap();
+            } else {
+                let svc = TraceIngestionService::with_wal(block_config.clone(), tx, Some(open()));
+                svc.ingest_spans(vec![span_at(99)]).await.unwrap();
+                svc.shutdown().await.unwrap();
+            }
 
             let commit = parqtel_core::wal::read_commit(&data_dir, signal);
             let after = parqtel_core::wal::replay::<serde_json::Value, _>(
