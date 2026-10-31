@@ -23,6 +23,9 @@ while measuring. Measurements and method are in
   instant queries 107 → 17 ms, log search 284 → 102 ms (p50, 2.4 M-point
   dataset).
 - Peak RSS under the same load fell from 2.3 GB to 0.8 GB.
+- **Log search** 102 → 23 ms (a term matching a fifth of the records) and
+  29 → 12 ms (a term in one record) at p50, one client; with 8 clients 311 → 64 ms
+  and 113 → 32 ms.
 - **Series table in every metric block** (see Added): a selective query now reads
   only the rows of the series it selects. Single-series selector 15 → 0.9 ms,
   aggregations 28 → 7 ms, instant queries 15 → 3 ms (p50, one client, same
@@ -31,6 +34,17 @@ while measuring. Measurements and method are in
 
 ### Added
 
+- **Skip index in each log block.** The Parquet footer (`parqtel.log_index`)
+  holds, per granule of 4 096 rows, the time bounds, the highest severity and a
+  bloom filter over the body's three-byte windows and the records' `name=value`
+  attribute and resource-attribute pairs. A search reads only the granules that
+  can hold a row meeting all its conditions, so a needle that occurs in one
+  record touches one or two granules. A granule is skipped only when it provably
+  holds no match; counts and volume buckets are unchanged. Costs about a byte per
+  row.
+- Searches that are only severity and body conditions count, bucket and rank
+  matches from three columns and decode the other sixteen only for the rows they
+  return.
 - **Series table in each metric block.** Metric blocks are now laid out series by
   series (each in time order) and carry, in the Parquet footer
   (`parqtel.series_index`), a table of their series: labels, the rows each one
