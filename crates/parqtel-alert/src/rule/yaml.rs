@@ -2,14 +2,14 @@ use crate::rule::types::AlertRule;
 use std::path::Path;
 
 /// Parse a single alert rule from a YAML string.
-pub fn parse_rule(yaml: &str) -> Result<AlertRule, serde_yaml::Error> {
-    serde_yaml::from_str(yaml)
+pub fn parse_rule(yaml: &str) -> Result<AlertRule, serde_yaml_ng::Error> {
+    serde_yaml_ng::from_str(yaml)
 }
 
 /// Parse multiple rules from a YAML file (supports `---` document separators).
-pub fn parse_rules_from_str(yaml: &str) -> Result<Vec<AlertRule>, serde_yaml::Error> {
+pub fn parse_rules_from_str(yaml: &str) -> Result<Vec<AlertRule>, serde_yaml_ng::Error> {
     let mut rules = Vec::new();
-    for doc in serde_yaml::Deserializer::from_str(yaml) {
+    for doc in serde_yaml_ng::Deserializer::from_str(yaml) {
         let rule = AlertRule::deserialize(doc)?;
         rules.push(rule);
     }

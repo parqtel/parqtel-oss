@@ -1,0 +1,16 @@
+# cargo-audit configuration
+# https://docs.rs/cargo-audit/latest/cargo_audit/
+
+[advisories]
+
+# RUSTSEC-2024-0449: unsafe-libyaml is unmaintained.
+#
+# Pulled in transitively by serde_yaml_ng, which is the maintained community
+# fork of serde_yaml and the best available drop-in. All active serde-compatible
+# YAML forks (serde-yaml-ng, serde-yaml-bw, serde-norway) still vendor
+# unsafe-libyaml; a fork that removes it entirely does not yet exist as a
+# stable crate. The advisory is an "unmaintained" notice — there is no known
+# exploit or memory-safety issue in unsafe-libyaml 0.2.11 itself. We will
+# re-evaluate when a stable serde-compatible YAML crate with a pure-Rust parser
+# (yaml-rust2 / saphyr) reaches broad adoption.
+ignore = ["RUSTSEC-2024-0449"]

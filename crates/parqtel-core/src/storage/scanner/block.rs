@@ -181,15 +181,11 @@ fn load_block(file: &File) -> Result<LoadedBlock> {
         fm.column_orders().cloned(),
     );
     let mut builder = md.into_builder();
-    let (row_groups, column_index, offset_index) = (
-        builder.take_row_groups(),
-        builder.take_column_index(),
-        builder.take_offset_index(),
-    );
+    let row_groups = builder.take_row_groups();
+    let page_index = builder.take_page_index();
     let md = parquet::file::metadata::ParquetMetaDataBuilder::new(stripped)
         .set_row_groups(row_groups)
-        .set_column_index(column_index)
-        .set_offset_index(offset_index)
+        .set_page_index(page_index)
         .build();
     Ok(LoadedBlock {
         meta: Arc::new(md),

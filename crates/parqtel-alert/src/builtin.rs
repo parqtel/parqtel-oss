@@ -91,7 +91,7 @@ pub fn select_packs(cfg: &PresetConfig) -> Vec<&'static BuiltinPack> {
 }
 
 /// Parse a pack's embedded YAML, tagging every rule with `labels.pack`.
-fn pack_rules(pack: &BuiltinPack) -> Result<Vec<AlertRule>, serde_yaml::Error> {
+fn pack_rules(pack: &BuiltinPack) -> Result<Vec<AlertRule>, serde_yaml_ng::Error> {
     let mut rules = parse_rules_from_str(pack.rules)?;
     for rule in &mut rules {
         rule.labels

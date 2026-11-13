@@ -46,7 +46,7 @@ impl RuleRegistry {
     pub fn load_file(&self, path: &Path) -> crate::Result<()> {
         let content = std::fs::read_to_string(path).map_err(|e| crate::Error::Io(e.to_string()))?;
         let rule_set: RuleSet =
-            serde_yaml::from_str(&content).map_err(|e| crate::Error::Parse(e.to_string()))?;
+            serde_yaml_ng::from_str(&content).map_err(|e| crate::Error::Parse(e.to_string()))?;
 
         let validator = RuleValidator;
 
