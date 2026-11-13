@@ -18,7 +18,7 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
-  MSRV: "1.87" # comfy-table 7.2+ (via arrow 59) uses let-chains; matches Cargo.toml rust-version and Dockerfile RUST_VERSION
+  MSRV: "1.88" # arrow 60.1.0 requires Rust 1.88; matches Cargo.toml rust-version and Dockerfile RUST_VERSION
 
 # Global timeout for every job; guards against hung tests or a stuck buildx
 # daemon from burning minutes. Individual jobs can override with timeout-minutes.
@@ -125,7 +125,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        msrv: ["1.87"]
+        msrv: ["1.88"]
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/setup-rust
