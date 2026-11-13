@@ -1,0 +1,268 @@
+use arrow_schema::{DataType, Field, Schema, TimeUnit};
+use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::path::PathBuf;
+
+/// Metadata about a written Parquet block.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BlockMetadata {
+    pub path: PathBuf,
+    pub start_timestamp_ns: i64,
+    pub end_timestamp_ns: i64,
+    pub row_count: usize,
+    pub size_bytes: u64,
+    pub metric_names: HashSet<String>,
+    #[serde(default)]
+    pub label_names: HashSet<String>,
+    /// Per-field distinct values collected at flush time (label-value
+    /// index). Capped per field at flush to bound memory; merged on read.
+    #[serde(default)]
+    pub label_values: BTreeMap<String, BTreeSet<String>>,
+    #[serde(default)]
+    pub signal_type: SignalType,
+    /// The span of the write-ahead log this block makes durable, as
+    /// `(from, to]` WAL positions: every record in it is in this block or in an
+    /// earlier one. Also stored in the Parquet footer, so a block found on disk
+    /// without an index entry still says what it covers. `None` for blocks that
+    /// were not cut from a WAL range (compaction output, inline closes).
+    #[serde(default)]
+    pub wal_range: Option<(u64, u64)>,
+}
+
+/// Supported signal types in parqtel.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub enum SignalType {
+    #[default]
+    Metrics,
+    Logs,
+    Traces,
+}
+
+impl SignalType {
+    /// Every signal, in the canonical order used by telemetry arrays.
+    ///
+    /// `index()` is the position in this array, so
+    /// `SIGNAL_COUNT == SignalType::ALL.len()` keeps per-signal counter
+    /// arrays in step with the enum.
+    pub const ALL: [SignalType; 3] = [SignalType::Metrics, SignalType::Logs, SignalType::Traces];
+
+    /// Stable lowercase name, used as a telemetry label value.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            SignalType::Metrics => "metrics",
+            SignalType::Logs => "logs",
+            SignalType::Traces => "traces",
+        }
+    }
+
+    /// Dense index into a per-signal array.
+    ///
+    /// Const-evaluable, so it can size arrays at compile time.
+    pub const fn index(self) -> usize {
+        match self {
+            SignalType::Metrics => 0,
+            SignalType::Logs => 1,
+            SignalType::Traces => 2,
+        }
+    }
+}
+
+/// Returns the canonical Arrow [Schema] for metric storage.
+pub fn metrics_schema() -> Schema {
+    Schema::new(vec![
+        Field::new(
+            "timestamp_ns",
+            DataType::Timestamp(TimeUnit::Nanosecond, None),
+            false,
+        ),
+        Field::new(
+            "metric_name",
+            DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8)),
+            false,
+        ),
+        Field::new("metric_kind", DataType::Utf8, false),
+        Field::new(
+            "service_name",
+            DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8)),
+            true,
+        ),
+        Field::new(
+            "service_version",
+            DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8)),
+            true,
+        ),
+        Field::new(
+            "k8s_namespace",
+            DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8)),
+            true,
+        ),
+        Field::new(
+            "k8s_pod_name",
+            DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8)),
+            true,
+        ),
+        Field::new(
+            "k8s_pod_uid",
+            DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8)),
+            true,
+        ),
+        Field::new(
+            "k8s_container_name",
+            DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8)),
+            true,
+        ),
+        Field::new(
+            "k8s_node_name",
+            DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8)),
+            true,
+        ),
+        Field::new(
+            "resource_attributes",
+            DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8)),
+            false,
+        ),
+        Field::new("labels", DataType::Utf8, false),
+        Field::new("value_float", DataType::Float64, true),
+        Field::new("value_int", DataType::Int64, true),
+        Field::new("value_complex", DataType::Utf8, true),
+    ])
+}
+
+/// Returns the canonical Arrow [Schema] for log storage.
+pub fn logs_schema() -> Schema {
+    Schema::new(vec![
+        Field::new(
+            "timestamp_ns",
+            DataType::Timestamp(TimeUnit::Nanosecond, None),
+            false,
+        ),
+        Field::new(
+            "observed_timestamp_ns",
+            DataType::Timestamp(TimeUnit::Nanosecond, None),
+            false,
+        ),
+        Field::new("severity_number", DataType::Int32, false),
+        Field::new(
+            "severity_text",
+            DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8)),
+            true,
+        ),
+        Field::new("body", DataType::Utf8, false),
+        Field::new(
+            "service_name",
+            DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8)),
+            true,
+        ),
+        Field::new(
+            "service_version",
+            DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8)),
+            true,
+        ),
+        Field::new(
+            "k8s_namespace",
+            DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8)),
+            true,
+        ),
+        Field::new(
+            "k8s_pod_name",
+            DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8)),
+            true,
+        ),
+        Field::new(
+            "k8s_pod_uid",
+            DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8)),
+            true,
+        ),
+        Field::new(
+            "k8s_container_name",
+            DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8)),
+            true,
+        ),
+        Field::new(
+            "k8s_node_name",
+            DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8)),
+            true,
+        ),
+        Field::new("trace_id", DataType::FixedSizeBinary(16), true),
+        Field::new("span_id", DataType::FixedSizeBinary(8), true),
+        Field::new("flags", DataType::UInt32, true),
+        Field::new("scope_name", DataType::Utf8, true),
+        Field::new("scope_version", DataType::Utf8, true),
+        Field::new("attributes", DataType::Utf8, false),
+        Field::new("resource_attributes", DataType::Utf8, false),
+    ])
+}
+
+/// Returns the canonical Arrow [Schema] for trace storage.
+pub fn traces_schema() -> Schema {
+    Schema::new(vec![
+        Field::new(
+            "timestamp_ns",
+            DataType::Timestamp(TimeUnit::Nanosecond, None),
+            false,
+        ),
+        Field::new("span_id", DataType::FixedSizeBinary(8), false),
+        Field::new(
+            "span_name",
+            DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8)),
+            false,
+        ),
+        Field::new("span_kind", DataType::Utf8, false),
+        Field::new(
+            "start_time_ns",
+            DataType::Timestamp(TimeUnit::Nanosecond, None),
+            false,
+        ),
+        Field::new(
+            "end_time_ns",
+            DataType::Timestamp(TimeUnit::Nanosecond, None),
+            false,
+        ),
+        Field::new("duration_ns", DataType::Int64, false),
+        Field::new("status_code", DataType::Utf8, false),
+        Field::new("status_message", DataType::Utf8, true),
+        Field::new(
+            "service_name",
+            DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8)),
+            true,
+        ),
+        Field::new(
+            "service_version",
+            DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8)),
+            true,
+        ),
+        Field::new(
+            "k8s_namespace",
+            DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8)),
+            true,
+        ),
+        Field::new(
+            "k8s_pod_name",
+            DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8)),
+            true,
+        ),
+        Field::new(
+            "k8s_pod_uid",
+            DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8)),
+            true,
+        ),
+        Field::new(
+            "k8s_container_name",
+            DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8)),
+            true,
+        ),
+        Field::new(
+            "k8s_node_name",
+            DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8)),
+            true,
+        ),
+        Field::new("trace_id", DataType::FixedSizeBinary(16), false),
+        Field::new("parent_span_id", DataType::FixedSizeBinary(8), true),
+        Field::new("flags", DataType::UInt32, true),
+        Field::new("trace_state", DataType::Utf8, true),
+        Field::new("attributes", DataType::Utf8, false),
+        Field::new("resource_attributes", DataType::Utf8, false),
+        Field::new("events", DataType::Utf8, false),
+        Field::new("links", DataType::Utf8, false),
+    ])
+}

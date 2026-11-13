@@ -1,0 +1,44 @@
+# Development Dockerfile for parqtel
+# Keep in sync with the workspace MSRV (Cargo.toml rust-version = 1.87) and the
+# production Dockerfile ARG RUST_VERSION=1.87.
+FROM rust:1.87-slim AS builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends protobuf-compiler pkg-config g++ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Copy full workspace (relies on .dockerignore for exclusions)
+COPY Cargo.toml Cargo.lock ./
+COPY docs/api/openapi.yaml docs/api/openapi.yaml
+COPY crates/parqtel-core/ crates/parqtel-core/
+COPY crates/parqtel-ingest/ crates/parqtel-ingest/
+COPY crates/parqtel-query/ crates/parqtel-query/
+COPY crates/parqtel-alert/ crates/parqtel-alert/
+COPY crates/parqtel-pipeline/ crates/parqtel-pipeline/
+COPY crates/parqtel-server/ crates/parqtel-server/
+COPY crates/parqtel-mcp-core/ crates/parqtel-mcp-core/
+COPY crates/parqtel-mcp-slack/ crates/parqtel-mcp-slack/
+COPY crates/parqtel-mcp-pagerduty/ crates/parqtel-mcp-pagerduty/
+COPY crates/parqtel-mcp-jira/ crates/parqtel-mcp-jira/
+COPY crates/parqtel-mcp-notion/ crates/parqtel-mcp-notion/
+COPY crates/parqtel-mcp-discord/ crates/parqtel-mcp-discord/
+COPY crates/parqtel-mcp-gdocs/ crates/parqtel-mcp-gdocs/
+COPY crates/parqtel-mcp-parqtel/ crates/parqtel-mcp-parqtel/
+# parqtel-alert embeds the built-in alert preset packs at compile time with
+# include_str!, so rules/presets/ must be in the build context or the build
+# fails with "couldn't read ...".
+COPY rules/presets/ rules/presets/
+
+RUN cargo build --release --package parqtel-server
+
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y curl jq && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /var/lib/parqtel
+COPY --from=builder /app/target/release/parqtel /parqtel
+
+ENV RUST_LOG=info
+EXPOSE 9090
+
+ENTRYPOINT ["/parqtel"]
+CMD ["serve"]

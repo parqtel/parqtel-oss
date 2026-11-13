@@ -152,5 +152,5 @@ annotations:
     Blocks are accumulating faster than compaction can merge them, which
     degrades range-query performance. Check storage.compaction_interval_secs
     and whether the compaction task is erroring in the logs.
-  runbook: "https://github.com/parqtel/parqtel-oss/blob/main/docs/STORAGE_BLOCK_COMPACTION_PLAN.md"
+  runbook: "https://github.com/parqtel/parqtel-oss/blob/main/docs/performance/compaction.md"
 enabled: true

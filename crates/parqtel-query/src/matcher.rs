@@ -1,0 +1,791 @@
+use parqtel_core::{Error, LabelSet, Result};
+use regex::Regex;
+
+/// Operators for label matching.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MatchOp {
+    /// Equal (=)
+    Equal,
+    /// Not Equal (!=)
+    NotEqual,
+    /// Regex Match (=~)
+    RegexMatch,
+    /// Regex Not Match (!~)
+    RegexNotMatch,
+}
+
+/// A single label matcher predicate.
+#[derive(Debug, Clone)]
+pub struct LabelMatcher {
+    pub name: String,
+    pub op: MatchOp,
+    pub value: String,
+    pub regex: Option<Regex>,
+}
+
+impl LabelMatcher {
+    /// Creates a new [LabelMatcher] with Equal operator.
+    pub fn equal(name: impl Into<String>, value: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            op: MatchOp::Equal,
+            value: value.into(),
+            regex: None,
+        }
+    }
+
+    /// Creates a new [LabelMatcher] and compiles regex if needed.
+    pub fn new(name: String, op: MatchOp, value: String) -> Result<Self> {
+        let regex = match op {
+            MatchOp::RegexMatch | MatchOp::RegexNotMatch => {
+                let re = Regex::new(&value)
+                    .map_err(|e| Error::Validation(format!("Invalid regex '{}': {}", value, e)))?;
+                Some(re)
+            }
+            _ => None,
+        };
+        Ok(Self {
+            name,
+            op,
+            value,
+            regex,
+        })
+    }
+
+    /// Evaluates this matcher against a label value.
+    pub fn matches(&self, label_value: Option<&str>) -> bool {
+        let val = label_value.unwrap_or("");
+        match self.op {
+            MatchOp::Equal => val == self.value,
+            MatchOp::NotEqual => val != self.value,
+            MatchOp::RegexMatch => self.regex.as_ref().is_some_and(|re| re.is_match(val)),
+            MatchOp::RegexNotMatch => self.regex.as_ref().is_some_and(|re| !re.is_match(val)),
+        }
+    }
+}
+
+/// Evaluates a list of matchers against a set of labels and a metric name.
+pub fn evaluate_matchers(matchers: &[LabelMatcher], labels: &LabelSet, metric_name: &str) -> bool {
+    for m in matchers {
+        let val = if m.name == "__name__" {
+            Some(metric_name)
+        } else {
+            labels.get(&m.name)
+        };
+        if !m.matches(val) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Parses a Prometheus-style selector like `http_requests_total{method="GET"}`.
+pub fn parse_selector(selector: &str) -> Result<(Option<String>, Vec<LabelMatcher>)> {
+    let selector = selector.trim();
+    if selector.is_empty() {
+        return Err(Error::Validation("Empty selector".into()));
+    }
+
+    let (metric_name, labels_part) = if let Some(start) = selector.find('{') {
+        if !selector.ends_with('}') {
+            return Err(Error::Validation("Selector missing closing brace".into()));
+        }
+        let name = selector[..start].trim();
+        let labels = &selector[start + 1..selector.len() - 1];
+        (
+            if name.is_empty() {
+                None
+            } else {
+                Some(name.to_string())
+            },
+            labels,
+        )
+    } else {
+        (Some(selector.to_string()), "")
+    };
+
+    let mut matchers = Vec::new();
+    if !labels_part.is_empty() {
+        for part in labels_part.split(',') {
+            let part = part.trim();
+            if part.is_empty() {
+                continue;
+            }
+
+            let (op, split_idx) = if let Some(idx) = part.find("=~") {
+                (MatchOp::RegexMatch, idx)
+            } else if let Some(idx) = part.find("!~") {
+                (MatchOp::RegexNotMatch, idx)
+            } else if let Some(idx) = part.find("!=") {
+                (MatchOp::NotEqual, idx)
+            } else if let Some(idx) = part.find('=') {
+                (MatchOp::Equal, idx)
+            } else {
+                return Err(Error::Validation(format!(
+                    "Invalid label matcher: {}",
+                    part
+                )));
+            };
+
+            let name = part[..split_idx].trim().to_string();
+            let value = part[split_idx
+                + (if op == MatchOp::RegexMatch
+                    || op == MatchOp::RegexNotMatch
+                    || op == MatchOp::NotEqual
+                {
+                    2
+                } else {
+                    1
+                })..]
+                .trim();
+
+            // Strip quotes
+            let value = if value.starts_with('"') && value.ends_with('"') {
+                &value[1..value.len() - 1]
+            } else {
+                value
+            };
+
+            matchers.push(LabelMatcher::new(name, op, value.to_string())?);
+        }
+    }
+
+    Ok((metric_name, matchers))
+}
+
+pub type ParsedQuery = (
+    String,                                   // metric name
+    Vec<LabelMatcher>,                        // label matchers
+    Option<crate::plan::AggregationOp>,       // aggregation / transform op
+    Option<f64>,                              // quantile (histogram_quantile)
+    Option<usize>,                            // topk_n / bottomk_n
+    Vec<String>,                              // by() labels
+    Vec<String>,                              // without() labels
+    Option<(String, String, String, String)>, // label_replace params
+    Option<f64>,                              // scalar_param (round to_nearest)
+    Option<(Option<f64>, Option<f64>)>,       // clamp (min, max)
+    Option<i64>,                              // range_ns from [Xm] selector
+);
+
+/// Parses a PromQL-style query including all supported aggregation functions.
+pub fn parse_query(query: &str) -> Result<ParsedQuery> {
+    let query = query.trim();
+    // Range-selector duration ([5m]) — only meaningful for the counter
+    // family today; other ops ignore it (None) until the AST engine lands.
+    let mut range_ns: Option<i64> = None;
+
+    // ── histogram_quantile(φ, selector) ────────────────────────────────────
+    if let Some(inner) = strip_fn("histogram_quantile", query) {
+        let (head, tail) = split_first_arg(inner)?;
+        let q: f64 = head
+            .trim()
+            .parse()
+            .map_err(|_| Error::Validation("Invalid quantile value".into()))?;
+        let (name, matchers) = parse_selector(tail.trim())?;
+        return Ok((
+            name.unwrap_or_default(),
+            matchers,
+            Some(crate::plan::AggregationOp::HistogramQuantile),
+            Some(q),
+            None,
+            vec![],
+            vec![],
+            None,
+            None,
+            None,
+            range_ns,
+        ));
+    }
+
+    // ── topk(N, selector) / bottomk(N, selector) ───────────────────────────
+    for (fname, op) in [
+        ("topk", crate::plan::AggregationOp::TopK),
+        ("bottomk", crate::plan::AggregationOp::BottomK),
+    ] {
+        if let Some(inner) = strip_fn(fname, query) {
+            let (head, tail) = split_first_arg(inner)?;
+            let n: usize = head
+                .trim()
+                .parse()
+                .map_err(|_| Error::Validation(format!("{fname} N must be a positive integer")))?;
+            let (selector, by, without) = parse_selector_with_grouping(tail.trim())?;
+            let (name, matchers) = parse_selector(selector)?;
+            return Ok((
+                name.unwrap_or_default(),
+                matchers,
+                Some(op),
+                None,
+                Some(n),
+                by,
+                without,
+                None,
+                None,
+                None,
+                range_ns,
+            ));
+        }
+    }
+
+    // ── label_replace(selector, dst, replacement, src, regex) ──────────────
+    if let Some(inner) = strip_fn("label_replace", query) {
+        let args = split_args(inner);
+        if args.len() != 5 {
+            return Err(Error::Validation(
+                "label_replace requires 5 arguments".into(),
+            ));
+        }
+        let (name, matchers) = parse_selector(args[0].trim())?;
+        let dst = unquote(args[1].trim()).to_string();
+        let repl = unquote(args[2].trim()).to_string();
+        let src = unquote(args[3].trim()).to_string();
+        let regex = unquote(args[4].trim()).to_string();
+        return Ok((
+            name.unwrap_or_default(),
+            matchers,
+            Some(crate::plan::AggregationOp::LabelReplace),
+            None,
+            None,
+            vec![],
+            vec![],
+            Some((dst, repl, src, regex)),
+            None,
+            None,
+            range_ns,
+        ));
+    }
+
+    // ── clamp_min(selector, min) / clamp_max(selector, max) ────────────────
+    if let Some(inner) = strip_fn("clamp_min", query) {
+        let (selector, tail) = split_first_selector(inner)?;
+        let min: f64 = tail
+            .trim()
+            .parse()
+            .map_err(|_| Error::Validation("clamp_min: invalid min value".into()))?;
+        let (name, matchers) = parse_selector(selector)?;
+        return Ok((
+            name.unwrap_or_default(),
+            matchers,
+            Some(crate::plan::AggregationOp::ClampMin),
+            None,
+            None,
+            vec![],
+            vec![],
+            None,
+            None,
+            Some((Some(min), None)),
+            range_ns,
+        ));
+    }
+    if let Some(inner) = strip_fn("clamp_max", query) {
+        let (selector, tail) = split_first_selector(inner)?;
+        let max: f64 = tail
+            .trim()
+            .parse()
+            .map_err(|_| Error::Validation("clamp_max: invalid max value".into()))?;
+        let (name, matchers) = parse_selector(selector)?;
+        return Ok((
+            name.unwrap_or_default(),
+            matchers,
+            Some(crate::plan::AggregationOp::ClampMax),
+            None,
+            None,
+            vec![],
+            vec![],
+            None,
+            None,
+            Some((None, Some(max))),
+            range_ns,
+        ));
+    }
+
+    // ── round(selector[, to_nearest]) ──────────────────────────────────────
+    if let Some(inner) = strip_fn("round", query) {
+        // round has optional second arg
+        let (selector, scalar) = if inner.contains(',') {
+            let (sel, tail) = split_first_selector(inner)?;
+            let s: f64 = tail
+                .trim()
+                .parse()
+                .map_err(|_| Error::Validation("round: invalid to_nearest value".into()))?;
+            (sel, Some(s))
+        } else {
+            (inner, None)
+        };
+        let (name, matchers) = parse_selector(selector.trim())?;
+        return Ok((
+            name.unwrap_or_default(),
+            matchers,
+            Some(crate::plan::AggregationOp::Round),
+            None,
+            None,
+            vec![],
+            vec![],
+            None,
+            scalar,
+            None,
+            range_ns,
+        ));
+    }
+
+    // ── simple one-arg transforms: abs, ceil, floor ─────────────────────────
+    for (fname, op) in [
+        ("abs", crate::plan::AggregationOp::Abs),
+        ("ceil", crate::plan::AggregationOp::Ceil),
+        ("floor", crate::plan::AggregationOp::Floor),
+    ] {
+        if let Some(inner) = strip_fn(fname, query) {
+            let (name, matchers) = parse_selector(inner.trim())?;
+            return Ok((
+                name.unwrap_or_default(),
+                matchers,
+                Some(op),
+                None,
+                None,
+                vec![],
+                vec![],
+                None,
+                None,
+                None,
+                range_ns,
+            ));
+        }
+    }
+
+    // ── range functions: rate, irate, increase, delta ──────────────────────
+    for (fname, op) in [
+        ("irate", crate::plan::AggregationOp::Irate),
+        ("increase", crate::plan::AggregationOp::Increase),
+        ("delta", crate::plan::AggregationOp::Delta),
+        ("rate", crate::plan::AggregationOp::Rate),
+    ] {
+        if let Some(inner) = strip_fn(fname, query) {
+            // Parse the range selector ([5m]) instead of discarding it —
+            // the window is now honored by the executor (per-step lookback).
+            let (sel, parsed_range) = split_range(inner)?;
+            range_ns = parsed_range;
+            let (name, matchers) = parse_selector(sel)?;
+            return Ok((
+                name.unwrap_or_default(),
+                matchers,
+                Some(op),
+                None,
+                None,
+                vec![],
+                vec![],
+                None,
+                None,
+                None,
+                range_ns,
+            ));
+        }
+    }
+
+    // ── standard aggregations with optional by/without ──────────────────────
+    for (fname, op) in [
+        ("avg", crate::plan::AggregationOp::Avg),
+        ("sum", crate::plan::AggregationOp::Sum),
+        ("min", crate::plan::AggregationOp::Min),
+        ("max", crate::plan::AggregationOp::Max),
+        ("count", crate::plan::AggregationOp::Count),
+        ("stddev", crate::plan::AggregationOp::Stddev),
+        ("stdvar", crate::plan::AggregationOp::Stdvar),
+    ] {
+        if let Some(inner) = strip_fn(fname, query) {
+            // a [range] on a non-counter aggregation is invalid PromQL
+            // — reject with the _over_time suggestion instead of silently
+            // mis-windowing (previously fell back to lookback aggregation).
+            if let Some(idx) = inner.rfind('[') {
+                if inner[idx..].trim_end().ends_with(']') {
+                    return Err(Error::Validation(format!(
+                        "{fname}() does not accept a range selector; use the _over_time form (e.g. {fname}_over_time(x[5m])) or drop the [range]"
+                    )));
+                }
+            }
+            let (selector, by, without) = parse_selector_with_grouping(inner)?;
+            let (name, matchers) = parse_selector(selector)?;
+            return Ok((
+                name.unwrap_or_default(),
+                matchers,
+                Some(op),
+                None,
+                None,
+                by,
+                without,
+                None,
+                None,
+                None,
+                range_ns,
+            ));
+        }
+        // Also handle `sum by (label) (selector)` form
+        let by_prefix = format!("{fname} by (");
+        let without_prefix = format!("{fname} without (");
+        if query.starts_with(&by_prefix) || query.starts_with(&without_prefix) {
+            let (grouping_labels, is_without, remainder) = parse_leading_grouping(query, fname)?;
+            // remainder should be (selector)
+            let inner = remainder
+                .trim()
+                .trim_start_matches('(')
+                .trim_end_matches(')');
+            let (name, matchers) = parse_selector(inner)?;
+            let (by, without) = if is_without {
+                (vec![], grouping_labels)
+            } else {
+                (grouping_labels, vec![])
+            };
+            return Ok((
+                name.unwrap_or_default(),
+                matchers,
+                Some(op),
+                None,
+                None,
+                by,
+                without,
+                None,
+                None,
+                None,
+                range_ns,
+            ));
+        }
+    }
+
+    // ── bare selector ───────────────────────────────────────────────────────
+    let (name, matchers) = parse_selector(query)?;
+    Ok((
+        name.unwrap_or_default(),
+        matchers,
+        None,
+        None,
+        None,
+        vec![],
+        vec![],
+        None,
+        None,
+        None,
+        range_ns,
+    ))
+}
+
+/// True when the query requires the Phase-1A AST path (composition, binary
+/// ops, subqueries). Simple single-function queries keep the legacy plan
+/// path — zero behaviour change for existing dashboards.
+pub fn needs_ast(query: &str) -> bool {
+    match crate::parser::parse_expr(query) {
+        Ok(expr) => ast_is_complex(&expr),
+        // Parse failures fall back to the legacy parser for its
+        // historically-precise error messages.
+        Err(_) => false,
+    }
+}
+
+fn ast_is_complex(expr: &crate::ast::Expr) -> bool {
+    use crate::ast::Expr;
+    match expr {
+        Expr::Binary(_) => true,
+        Expr::Paren(e) => ast_is_complex(e),
+        Expr::Call(c) => {
+            // The legacy engine supports a fixed function set; anything
+            // else (e.g. avg_over_time) must take the AST path even when
+            // the argument shape looks legacy-compatible.
+            if !is_legacy_function(&c.name) {
+                return true;
+            }
+            // For legacy-known functions, a Selector or Range-of-Selector
+            // arg is the legacy shape; nested expressions need the AST.
+            c.args.iter().any(|a| match a {
+                Expr::Selector(_) => false,
+                Expr::Range(r) => !matches!(&*r.expr, Expr::Selector(_)),
+                _ => true,
+            })
+        }
+        Expr::Aggregation(_) => {
+            // Aggregations always take the AST path: the legacy plan engine
+            // treats the op as a per-series *downsampler* and never collapses
+            // the cross-series set (sum(x) returned N un-aggregated series),
+            // and its suffix grouping `sum(x) by (l)` mis-parses via
+            // strip_fn (the final ')' belongs to the grouping clause, not
+            // the aggregation). The AST evaluator implements correct PromQL
+            // aggregation semantics for both grouping positions.
+            true
+        }
+        Expr::Range(r) => ast_is_complex(&r.expr),
+        Expr::Selector(_) | Expr::Number(_) | Expr::Str(_) => false,
+    }
+}
+
+/// Functions the legacy single-dispatch engine understands. Everything
+/// else — the _over_time family, label helpers, scalar/vector/time —
+/// is AST-only.
+fn is_legacy_function(name: &str) -> bool {
+    matches!(
+        name,
+        "rate"
+            | "irate"
+            | "increase"
+            | "delta"
+            | "sum"
+            | "avg"
+            | "min"
+            | "max"
+            | "count"
+            | "stddev"
+            | "stdvar"
+            | "topk"
+            | "bottomk"
+            | "abs"
+            | "ceil"
+            | "floor"
+            | "round"
+            | "clamp_min"
+            | "clamp_max"
+            | "histogram_quantile"
+            | "label_replace"
+    )
+}
+
+// ── helpers ─────────────────────────────────────────────────────────────────
+
+/// Strips `fn_name(` prefix and `)` suffix, returning the inner string or None.
+fn strip_fn<'a>(fname: &str, query: &'a str) -> Option<&'a str> {
+    let prefix = format!("{fname}(");
+    if query.starts_with(prefix.as_str()) && query.ends_with(')') {
+        Some(&query[prefix.len()..query.len() - 1])
+    } else {
+        None
+    }
+}
+
+/// Splits a trailing range selector (`[5m]`, `[1h30m]`, `[90s]`, `[3600]`)
+/// into (inner, Some(range_ns)). Returns (trimmed input, None) when no
+/// selector is present. Invalid durations are a validation error — a query
+/// like rate(x[abc]) must not silently fall back to whole-range windowing.
+fn split_range(s: &str) -> Result<(&str, Option<i64>)> {
+    match s.rfind('[') {
+        None => Ok((s.trim(), None)),
+        Some(idx) => {
+            let inner = s[..idx].trim();
+            let dur = s[idx + 1..].strip_suffix(']').ok_or_else(|| {
+                Error::Validation(format!("unterminated range selector in {s:?}"))
+            })?;
+            let ns = parse_duration_str(dur)?;
+            Ok((inner, Some(ns)))
+        }
+    }
+}
+
+/// Parses PromQL duration strings: `5m`, `1h30m`, `2d`, `1w`, `90s`, `250ms`,
+/// or a bare number (seconds). Returns nanoseconds.
+pub fn parse_duration_str(s: &str) -> Result<i64> {
+    const UNITS: &[(&str, i64)] = &[
+        ("ms", 1_000_000i64),
+        ("s", 1_000_000_000),
+        ("m", 60_000_000_000),
+        ("h", 3_600_000_000_000),
+        ("d", 86_400_000_000_000),
+        ("w", 604_800_000_000_000),
+    ];
+    if s.is_empty() {
+        return Err(Error::Validation("empty range selector".into()));
+    }
+    // Bare seconds: `[300]`
+    if let Ok(secs) = s.parse::<i64>() {
+        return Ok(secs * 1_000_000_000);
+    }
+    let mut total: i64 = 0;
+    let mut rest = s;
+    let mut matched = false;
+    while !rest.is_empty() {
+        // longest-unit-first match
+        let mut unit_found = false;
+        for (suffix, mult) in UNITS {
+            if let Some(num_end) = rest.find(|ch: char| !ch.is_ascii_digit()) {
+                let (num_str, maybe_unit) = rest.split_at(num_end);
+                if maybe_unit.starts_with(suffix) {
+                    let n: i64 = num_str
+                        .parse()
+                        .map_err(|_| Error::Validation(format!("invalid duration {s:?}")))?;
+                    total = total
+                        .checked_add(n.checked_mul(*mult).ok_or_else(|| {
+                            Error::Validation(format!("duration {s:?} overflows"))
+                        })?)
+                        .ok_or_else(|| Error::Validation(format!("duration {s:?} overflows")))?;
+                    rest = maybe_unit.strip_prefix(*suffix).unwrap_or(maybe_unit);
+                    unit_found = true;
+                    matched = true;
+                    break;
+                }
+            }
+        }
+        if !unit_found {
+            return Err(Error::Validation(format!(
+                "invalid duration {s:?} (use e.g. 5m, 1h30m, 90s)"
+            )));
+        }
+    }
+    if !matched {
+        return Err(Error::Validation(format!("invalid duration {s:?}")));
+    }
+    Ok(total)
+}
+
+#[cfg(test)]
+mod needs_ast_tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+
+    #[test]
+    fn avg_over_time_is_ast() {
+        assert!(needs_ast("avg_over_time(cpu_usage[5m])"));
+    }
+
+    #[test]
+    fn simple_rate_is_legacy() {
+        assert!(!needs_ast("rate(http_requests_total[5m])"));
+    }
+
+    #[test]
+    fn sum_rate_is_ast() {
+        assert!(needs_ast("sum(rate(http_requests_total[5m]))"));
+    }
+}
+
+#[cfg(test)]
+mod duration_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use super::parse_duration_str;
+
+    #[test]
+    fn parses_units() {
+        assert_eq!(parse_duration_str("5m").unwrap(), 300 * 1_000_000_000);
+        assert_eq!(parse_duration_str("90s").unwrap(), 90 * 1_000_000_000);
+        assert_eq!(parse_duration_str("1h").unwrap(), 3_600 * 1_000_000_000);
+        assert_eq!(parse_duration_str("250ms").unwrap(), 250_000_000);
+        assert_eq!(
+            parse_duration_str("2d").unwrap(),
+            2 * 86_400 * 1_000_000_000
+        );
+    }
+
+    #[test]
+    fn parses_compound_and_bare_seconds() {
+        assert_eq!(
+            parse_duration_str("1h30m").unwrap(),
+            (3_600 + 1_800) * 1_000_000_000
+        );
+        assert_eq!(parse_duration_str("300").unwrap(), 300 * 1_000_000_000);
+    }
+
+    #[test]
+    fn rejects_garbage() {
+        assert!(parse_duration_str("abc").is_err());
+        assert!(parse_duration_str("").is_err());
+        assert!(parse_duration_str("5x").is_err());
+    }
+}
+
+/// Splits `"N, rest"` into `("N", "rest")` at the first comma.
+fn split_first_arg(s: &str) -> Result<(&str, &str)> {
+    s.find(',')
+        .map(|i| (&s[..i], &s[i + 1..]))
+        .ok_or_else(|| Error::Validation("Expected comma-separated arguments".into()))
+}
+
+/// Splits `"selector, scalar"` by finding the closing `}` or end of bare name,
+/// then the first comma after that.
+fn split_first_selector(s: &str) -> Result<(&str, &str)> {
+    // Find end of selector: after `}` if present, else first comma
+    let after_sel = if let Some(brace) = s.find('}') {
+        brace + 1
+    } else if let Some(comma) = s.find(',') {
+        comma
+    } else {
+        return Err(Error::Validation(
+            "Expected two comma-separated arguments".into(),
+        ));
+    };
+    // Now find the comma after the selector end
+    s[after_sel..]
+        .find(',')
+        .map(|i| (&s[..after_sel + i], s[after_sel + i + 1..].trim()))
+        .ok_or_else(|| Error::Validation("Expected comma after selector".into()))
+}
+
+/// Splits a comma-separated argument list, respecting nested `{}` and `()`.
+fn split_args(s: &str) -> Vec<&str> {
+    let mut args = Vec::new();
+    let mut depth = 0usize;
+    let mut start = 0;
+    for (i, c) in s.char_indices() {
+        match c {
+            '(' | '{' | '[' => depth += 1,
+            ')' | '}' | ']' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                args.push(s[start..i].trim());
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    args.push(s[start..].trim());
+    args
+}
+
+/// Strips double or single quotes from a string.
+fn unquote(s: &str) -> &str {
+    if (s.starts_with('"') && s.ends_with('"')) || (s.starts_with('\'') && s.ends_with('\'')) {
+        &s[1..s.len() - 1]
+    } else {
+        s
+    }
+}
+
+/// Parses optional ` by (l1, l2)` or ` without (l1, l2)` suffix from the inner
+/// part of an aggregation, returning (selector_str, by_labels, without_labels).
+fn parse_selector_with_grouping(inner: &str) -> Result<(&str, Vec<String>, Vec<String>)> {
+    // Check for ` by (...)` or ` without (...)` embedded inside the parens
+    // e.g. inner = `http_requests{} by (method, status)`
+    if let Some(by_idx) = find_keyword(inner, " by (") {
+        let selector = inner[..by_idx].trim();
+        let labels_str = &inner[by_idx + 5..]; // skip " by ("
+        let close = labels_str.find(')').unwrap_or(labels_str.len());
+        let labels = parse_label_list(&labels_str[..close]);
+        return Ok((selector, labels, vec![]));
+    }
+    if let Some(wo_idx) = find_keyword(inner, " without (") {
+        let selector = inner[..wo_idx].trim();
+        let labels_str = &inner[wo_idx + 10..]; // skip " without ("
+        let close = labels_str.find(')').unwrap_or(labels_str.len());
+        let labels = parse_label_list(&labels_str[..close]);
+        return Ok((selector, vec![], labels));
+    }
+    Ok((inner, vec![], vec![]))
+}
+
+/// Parses leading `agg by/without (labels) (selector)` form.
+/// Returns (labels, is_without, remainder_after_labels_paren).
+fn parse_leading_grouping<'a>(query: &'a str, fname: &str) -> Result<(Vec<String>, bool, &'a str)> {
+    // e.g. "sum by (service) (metric{...})"
+    let is_without = query.contains(" without (");
+    let keyword = if is_without { " without (" } else { " by (" };
+    let skip_prefix = fname.len() + keyword.len();
+    let rest = &query[skip_prefix..];
+    let close = rest
+        .find(')')
+        .ok_or_else(|| Error::Validation("Missing closing ) in grouping clause".into()))?;
+    let labels = parse_label_list(&rest[..close]);
+    Ok((labels, is_without, rest[close + 1..].trim()))
+}
+
+fn find_keyword(s: &str, kw: &str) -> Option<usize> {
+    s.find(kw)
+}
+
+fn parse_label_list(s: &str) -> Vec<String> {
+    s.split(',')
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect()
+}
+
+#[cfg(test)]
+mod tests;

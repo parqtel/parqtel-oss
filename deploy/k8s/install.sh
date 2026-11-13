@@ -15,7 +15,7 @@ echo ">>> Current Context: $(kubectl config current-context)"
 kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
 
 echo ">>> Installing/Upgrading parqtel..."
-helm upgrade --install "$RELEASE_NAME" deploy/charts/parqtel/ \
+helm upgrade --install "$RELEASE_NAME" deploy/helm/parqtel/ \
     --namespace "$NAMESPACE" \
     --values "$VALUES_FILE" \
     --wait --timeout 300s

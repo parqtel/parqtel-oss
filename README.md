@@ -20,15 +20,15 @@
 </p>
 
 <p align="center">
-  <a href="docs/GETTING_STARTED.md"><b>Getting Started</b></a> •
-  <a href="docs/TUTORIALS.md">Tutorials</a> •
+  <a href="docs/getting-started/getting-started.md"><b>Getting Started</b></a> •
+  <a href="docs/getting-started/tutorials.md">Tutorials</a> •
   <a href="CONTRIBUTING.md">Contributing</a> •
   <a href="#features">Features</a> •
   <a href="#architecture">Architecture</a> •
   <a href="#api-reference">API</a> •
-  <a href="docs/MCP.md">MCP</a> •
-  <a href="docs/DEPLOYMENT.md">Deployment</a> •
-  <a href="docs/TROUBLESHOOTING.md">Troubleshooting</a>
+  <a href="docs/guides/mcp.md">MCP</a> •
+  <a href="docs/operations/deployment.md">Deployment</a> •
+  <a href="docs/operations/troubleshooting.md">Troubleshooting</a>
 </p>
 
 ---
@@ -57,11 +57,11 @@ Parqtel is a single-binary observability backend written in Rust that ingests Op
 
 | Area | Guides |
 |------|--------|
-| **Onboarding** | [Getting Started](docs/GETTING_STARTED.md) • [Docs index](docs/README.md) • [Glossary](docs/GLOSSARY.md) • [FAQ](docs/FAQ.md) |
-| **Learning** | [Tutorials](docs/TUTORIALS.md) • [Use Cases](#common-use-cases) |
-| **Querying** | [**PQL Guide**](docs/PQL_GUIDE.md) — ParQL metrics, ParqtelQL log/trace search, cross-signal pipelines |
-| **Deep Dive** | [Architecture](docs/ARCHITECTURE.md) • [Configuration](docs/CONFIGURATION.md) • [Developer Guide](docs/DEVELOPER_GUIDE.md) • [MCP Integrations](docs/MCP.md) • [Query Functions](docs/QUERY_FUNCTIONS.md) • [Performance](docs/benchmarks/PERFORMANCE.md) • [CI/CD](docs/CI_CD.md) |
-| **Operations** | [Deployment](docs/DEPLOYMENT.md) • [Known Issues](docs/KNOWN_ISSUES.md) • [Troubleshooting](docs/TROUBLESHOOTING.md) • [Best Practices](docs/BEST_PRACTICES.md) • [Testing & Validation](docs/TESTING.md) |
+| **Onboarding** | [Getting Started](docs/getting-started/getting-started.md) • [Docs index](docs/README.md) • [Glossary](docs/development/glossary.md) • [FAQ](docs/getting-started/faq.md) |
+| **Learning** | [Tutorials](docs/getting-started/tutorials.md) • [Use Cases](#common-use-cases) |
+| **Querying** | [**PQL Guide**](docs/guides/pql-guide.md) — ParQL metrics, ParqtelQL log/trace search, cross-signal pipelines |
+| **Deep Dive** | [Architecture](docs/development/architecture.md) • [Configuration](docs/operations/configuration.md) • [Developer Guide](docs/development/developer-guide.md) • [MCP Integrations](docs/guides/mcp.md) • [Query Functions](docs/guides/query-functions.md) • [Performance](docs/performance/README.md) • [CI/CD](docs/development/ci-cd.md) |
+| **Operations** | [Deployment](docs/operations/deployment.md) • [Known Issues](docs/operations/known-issues.md) • [Troubleshooting](docs/operations/troubleshooting.md) • [Best Practices](docs/guides/best-practices.md) • [Testing & Validation](docs/development/testing.md) |
 | **Community** | [Contributing](CONTRIBUTING.md) • [Support](SUPPORT.md) • [Code of Conduct](CODE_OF_CONDUCT.md) • [Security](SECURITY.md) • [Changelog](CHANGELOG.md) |
 
 ## Features
@@ -85,15 +85,15 @@ Parqtel ships with a zero-dependency embedded web console at `/ui` — no CDNs, 
 
 | Overview | Metrics |
 |----------|---------|
-| ![Overview](docs/screenshots/ui-overview.png) | ![Metrics View](docs/screenshots/ui-metrics.png) |
+| ![Overview](docs/assets/screenshots/ui-overview.png) | ![Metrics View](docs/assets/screenshots/ui-metrics.png) |
 
 | Logs | Traces |
 |------|--------|
-| ![Logs View](docs/screenshots/ui-logs.png) | ![Traces View](docs/screenshots/ui-traces.png) |
+| ![Logs View](docs/assets/screenshots/ui-logs.png) | ![Traces View](docs/assets/screenshots/ui-traces.png) |
 
 | Alerts (live firing) | Alert rules |
 |---------------------|-------------|
-| ![Alerts View](docs/screenshots/ui-alerts.png) | ![Rules View](docs/screenshots/ui-alerts-rules.png) |
+| ![Alerts View](docs/assets/screenshots/ui-alerts.png) | ![Rules View](docs/assets/screenshots/ui-alerts-rules.png) |
 
 **Features:** Overview pane with live per-signal ingestion-rate cards (60s average, spike/gap sparkline, status dot — backed by `/api/v1/ingest_rates`), deep-linkable URLs (share the exact query + time range), a metrics query builder with a **92-function catalog** covering the full engine surface — typed argument editors, `by`/`without` grouping, window-function wrapping, live PromQL preview, and label filters with bounded high-cardinality autocomplete — plus a Builder⇄Code toggle that reverse-parses a typed query, log field facets, trace-grouped browse list + waterfall, alert stream with Evidence tab (incident-window metric chart + correlated logs), form-based rule editor with YAML escape hatch, saved views, keyboard shortcuts (`?` for the reference), WCAG AA contrast and reduced-motion support.
 
@@ -113,9 +113,9 @@ Benchmarked with sustained 1000 samples/sec (metrics + logs + traces) for 15 min
 | **Immediate queryability** | 1.7ms (in-memory buffer) |
 | **Data durability** | ✅ Survives container restart |
 
-Hot-path optimizations (non-blocking flushes, row-group pruning, label caching) are detailed in [docs/benchmarks/PERFORMANCE.md](docs/benchmarks/PERFORMANCE.md) — scan throughput +39%, narrow-range queries decode only matching row groups, and Parquet writes no longer stall async workers.
+Hot-path optimizations (non-blocking flushes, row-group pruning, label caching) are detailed in [docs/performance/README.md](docs/performance/README.md) — scan throughput +39%, narrow-range queries decode only matching row groups, and Parquet writes no longer stall async workers.
 
-What changed, and what was measured rather than assumed, is in [docs/benchmarks/PERFORMANCE.md](docs/benchmarks/PERFORMANCE.md).
+What changed, and what was measured rather than assumed, is in [docs/performance/README.md](docs/performance/README.md).
 
 ## Architecture
 
@@ -157,7 +157,7 @@ What changed, and what was measured rather than assumed, is in [docs/benchmarks/
          SERVED:  Prometheus API · Grafana · /ui console · HTTP+gRPC
 ```
 
-**Deep dive:** [Architecture](docs/ARCHITECTURE.md) • [PQL Guide](docs/PQL_GUIDE.md)
+**Deep dive:** [Architecture](docs/development/architecture.md) • [PQL Guide](docs/guides/pql-guide.md)
 
 ---
 
@@ -201,10 +201,10 @@ make dev-setup
 
 # Or manually
 cp .env.example .env
-docker compose up -d
+docker compose -f deploy/compose/docker-compose.yml up -d
 ```
 
-This starts Parqtel (port 9090), Grafana (port 3000), Prometheus (port 9091), and a load generator. MCP servers are defined in `docker-compose.yml` but commented out — uncomment the ones you need after adding the corresponding tokens to `.env`.
+This starts Parqtel (port 9090), Grafana (port 3000), Prometheus (port 9091), and a load generator. MCP servers are defined in `deploy/compose/docker-compose.yml` but commented out — uncomment the ones you need after adding the corresponding tokens to `.env`.
 
 ### Verify
 
@@ -222,7 +222,7 @@ curl -X POST http://localhost:9090/v1/metrics/json \
 curl "http://localhost:9090/api/v1/query?query=http_requests_total"
 ```
 
-Instant queries look back 5 minutes (`query.lookback_delta_ns`); older points become queryable via `/api/v1/query_range` after the block flush (default 2h blocks, checked every 5s). See [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md) for the full walkthrough.
+Instant queries look back 5 minutes (`query.lookback_delta_ns`); older points become queryable via `/api/v1/query_range` after the block flush (default 2h blocks, checked every 5s). See [docs/getting-started/getting-started.md](docs/getting-started/getting-started.md) for the full walkthrough.
 
 ## API Reference
 
@@ -348,18 +348,18 @@ Parqtel ships with 7 Model Context Protocol (MCP) servers that enable LLM-driven
 | `parqtel-mcp-gdocs` | 3006 | Create/update Google Docs for postmortems |
 | `parqtel-mcp-parqtel` | 3007 | Query Parqtel metrics/logs via MCP tools |
 
-See [docs/MCP.md](docs/MCP.md) for detailed configuration and tool schemas.
+See [docs/guides/mcp.md](docs/guides/mcp.md) for detailed configuration and tool schemas.
 
 ## Deployment
 
 | Method | Guide |
 |--------|-------|
 | Docker | Single container with volume mount |
-| Docker Compose | Full stack (Parqtel + Grafana + Prometheus + MCP) — `docker compose up -d` from root |
-| Kubernetes (Helm) | Production-grade with HPA, PDB, NetworkPolicy — chart at `charts/parqtel/` |
+| Docker Compose | Full stack (Parqtel + Grafana + Prometheus + MCP) — `make local-up` |
+| Kubernetes (Helm) | Production-grade with HPA, PDB, NetworkPolicy — chart at `deploy/helm/parqtel/` |
 | systemd | Bare-metal Linux service — unit at `deploy/systemd/parqtel.service` |
 
-See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for detailed instructions.
+See [docs/operations/deployment.md](docs/operations/deployment.md) for detailed instructions.
 
 ## Storage Design
 
@@ -382,7 +382,7 @@ Parqtel uses layered configuration via [Figment](https://github.com/SergioBenite
 3. Environment variables (`PARQTEL__` prefix, `__` as separator)
 4. CLI flags (highest priority)
 
-See [docs/CONFIGURATION.md](docs/CONFIGURATION.md) for the full reference.
+See [docs/operations/configuration.md](docs/operations/configuration.md) for the full reference.
 
 ## Development
 
@@ -424,7 +424,7 @@ Contributions are welcome. Please read [CONTRIBUTING.md](CONTRIBUTING.md) and
 
 Performance changes need a measurement — the number, the command that produced
 it, and the dataset. See [CONTRIBUTING.md](CONTRIBUTING.md#performance-changes)
-and [docs/benchmarks/PERFORMANCE.md](docs/benchmarks/PERFORMANCE.md).
+and [docs/performance/README.md](docs/performance/README.md).
 
 ## Status
 
@@ -432,6 +432,6 @@ and [docs/benchmarks/PERFORMANCE.md](docs/benchmarks/PERFORMANCE.md).
 authorization** — do not expose the HTTP (`8080`) or OTLP gRPC (`4317`) ports
 publicly without a reverse proxy that provides it.
 
-Start at [docs/KNOWN_ISSUES.md](docs/KNOWN_ISSUES.md): the unbounded in-memory
+Start at [docs/operations/known-issues.md](docs/operations/known-issues.md): the unbounded in-memory
 buffer, the 5-minute instant-query lookback, and the range-query final step are
 the three that surprise people most.

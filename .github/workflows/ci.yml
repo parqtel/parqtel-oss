@@ -18,7 +18,7 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
-  MSRV: "1.87" # comfy-table 7.2+ (via arrow 59) uses let-chains; matches Cargo.toml rust-version and Dockerfile RUST_VERSION
+  MSRV: "1.88" # arrow 60.1.0 requires Rust 1.88; matches Cargo.toml rust-version and Dockerfile RUST_VERSION
 
 # Global timeout for every job; guards against hung tests or a stuck buildx
 # daemon from burning minutes. Individual jobs can override with timeout-minutes.
@@ -41,21 +41,21 @@ jobs:
         with:
           filters: |
             helm:
-              - 'charts/**'
-              - 'compose/**'
+              - 'deploy/helm/**'
+              - 'deploy/compose/**'
             docker:
               - 'Dockerfile'
-              - 'parqtel-*/src/**'
-              - 'parqtel-*/proto/**'
-              - 'parqtel-*/build.rs'
+              - 'crates/parqtel-*/src/**'
+              - 'crates/parqtel-*/proto/**'
+              - 'crates/parqtel-*/build.rs'
               - 'Cargo.{toml,lock}'
               - '.github/workflows/ci.yml'
               - 'Makefile'
               - '**/*.rs'
             rust:
-              - 'parqtel-*/src/**'
-              - 'parqtel-*/proto/**'
-              - 'parqtel-*/build.rs'
+              - 'crates/parqtel-*/src/**'
+              - 'crates/parqtel-*/proto/**'
+              - 'crates/parqtel-*/build.rs'
               - 'Cargo.{toml,lock}'
               - '.github/workflows/ci.yml'
               - 'Makefile'
@@ -86,7 +86,7 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Check unsafe code
         run: |
-          if grep -rn "unsafe" --include="*.rs" parqtel-*/src/ \
+          if grep -rn "unsafe" --include="*.rs" crates/parqtel-*/src/ \
              | grep -v "forbid(unsafe_code)" | grep -v "^\s*//" | grep -v "unsafe_"; then
             echo "::error::Unsafe code detected"
             exit 1
@@ -125,7 +125,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        msrv: ["1.87"]
+        msrv: ["1.88"]
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/setup-rust
@@ -163,7 +163,9 @@ jobs:
         with:
           tool: cargo-audit
       - name: Dependency audit
-        run: cargo audit --deny warnings
+        run: cargo audit --deny warnings --ignore RUSTSEC-2024-0449
+        # RUSTSEC-2024-0449: unsafe-libyaml unmaintained — pulled by serde_yaml_ng
+        # (all active serde YAML forks still vendor it; no known exploit)
       - name: Trivy filesystem scan
         uses: aquasecurity/trivy-action@master
         with:
@@ -189,13 +191,13 @@ jobs:
         with:
           version: v3.16.0
       - name: Lint chart (default)
-        run: helm lint charts/parqtel
+        run: helm lint deploy/helm/parqtel
       - name: Lint chart (minimal)
-        run: helm lint charts/parqtel -f charts/parqtel/ci/minimal-values.yaml
+        run: helm lint deploy/helm/parqtel -f deploy/helm/parqtel/ci/minimal-values.yaml
       - name: Lint chart (full)
-        run: helm lint charts/parqtel -f charts/parqtel/ci/full-values.yaml
+        run: helm lint deploy/helm/parqtel -f deploy/helm/parqtel/ci/full-values.yaml
       - name: Template validation
-        run: helm template test charts/parqtel --debug > /dev/null
+        run: helm template test deploy/helm/parqtel --debug > /dev/null
 
   # ── Docker Build + Smoke Test (only when image inputs change) ─────────────
   docker:

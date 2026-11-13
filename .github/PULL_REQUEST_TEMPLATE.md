@@ -49,7 +49,7 @@ Dataset / environment: <what was ingested, block sizes, hardware>
 
 - [ ] Tests added or updated for the new behaviour
 - [ ] Documentation updated (`docs/`, `README.md`) if behaviour or configuration changed
-- [ ] New configuration options documented in `docs/CONFIGURATION.md`
+- [ ] New configuration options documented in `docs/operations/configuration.md`
 - [ ] No `unwrap`, `expect` or `panic` outside tests (`unsafe_code` is forbidden workspace-wide)
 - [ ] Commit messages follow [Conventional Commits](https://www.conventionalcommits.org/)
 

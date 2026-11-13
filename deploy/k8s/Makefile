@@ -27,7 +27,7 @@ images-build: ## Build and push images to local k3d registry
 	docker buildx build --platform $$PLATFORM -t registry.localhost:5050/load-generator:dev --push ../compose/load-generator/
 
 deploy: ## Deploy parqtel using dev overlay
-	helm upgrade --install parqtel ../charts/parqtel/ --namespace parqtel --values overlays/dev/values.yaml --wait
+	helm upgrade --install parqtel ../helm/parqtel/ --namespace parqtel --values overlays/dev/values.yaml --wait
 
 undeploy: ## Remove parqtel and parqtel-test from namespace
 	helm uninstall parqtel -n parqtel --ignore-not-found

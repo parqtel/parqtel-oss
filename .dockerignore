@@ -5,16 +5,17 @@ target/
 .git/
 .github/
 
-# Documentation
-docs/
+# Documentation (the OpenAPI spec is embedded into the binary at compile time)
+docs/**
+!docs/api/openapi.yaml
 *.md
 !README.md
 LICENSE
 
 # Tests & scripts (not needed in image)
-e2e/
-test/
+tests/
 scripts/
+backlog/
 
 # IDE
 .idea/
@@ -46,8 +47,6 @@ data/
 graphify-out/
 .rtk/
 .kiro/
-charts/
-compose/
 rules/
 !rules/presets/
 !rules/presets/*.yaml

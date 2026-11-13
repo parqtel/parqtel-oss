@@ -10,7 +10,9 @@
 # ─── Global config ─────────────────────────────────────────────────────────────
 # Docker CLI (docker / docker-compose) — override with `make DOCKER=... <target>`
 DOCKER       ?= docker
-COMPOSE      ?= $(DOCKER) compose
+# The stack is defined under deploy/compose; .env stays at the repository root.
+COMPOSE_FILE ?= deploy/compose/docker-compose.yml
+COMPOSE      ?= $(DOCKER) compose $(if $(wildcard .env),--env-file .env) -f $(COMPOSE_FILE)
 
 # Ports (mirror .env; only used for printed hints and smoke checks)
 PARQTEL_PORT ?= 9090
@@ -67,9 +69,6 @@ dev-setup: ## First-time setup: copy .env.example → .env, then start the full 
 	else \
 		echo "ℹ️  .env already exists, skipping copy"; \
 	fi
-	@if [ ! -f docker-compose.override.yml ] && [ -f docker-compose.override.yml.example ]; then \
-		echo "ℹ️  To customise ports/mounts copy: cp docker-compose.override.yml.example docker-compose.override.yml"; \
-	fi
 	$(MAKE) local-up
 	@echo ""
 	@echo "🚀 Stack is up! Services:"
@@ -125,7 +124,7 @@ docker-smoke: ## Run built image and verify HEALTHCHECK reaches 'healthy'
 
 # ─── MCP image (Parqtel self-MCP server) ───────────────────────────────────────
 mcp-image: ## Build the standalone Parqtel MCP image (parqtel-mcp-parqtel:local)
-	$(DOCKER) build -f compose/mcp/Dockerfile.parqtel -t parqtel-mcp-parqtel:local .
+	$(DOCKER) build -f deploy/compose/mcp/Dockerfile.parqtel -t parqtel-mcp-parqtel:local .
 	@echo "Image size:"
 	@$(DOCKER) images parqtel-mcp-parqtel:local --format "{{.Size}}"
 
@@ -201,32 +200,32 @@ test-api: ## Smoke-test the local API (requires local-up)
 	@echo "✅ API is healthy"
 
 test-aggregations: ## PromQL aggregation conformance suite (count/sum/avg grouping, rate, topk; requires local-up)
-	@./scripts/test_aggregations.sh http://localhost:$(PARQTEL_PORT)
+	@./scripts/checks/test_aggregations.sh http://localhost:$(PARQTEL_PORT)
 
 test-functions: ## Full PromQL function conformance suite (every function family; requires local-up)
-	@./scripts/test_functions.sh http://localhost:$(PARQTEL_PORT)
+	@./scripts/checks/test_functions.sh http://localhost:$(PARQTEL_PORT)
 
 test-builder: ## E2E validation of every UI query-builder PromQL shape (requires local-up)
-	@./scripts/test_builder.sh http://localhost:$(PARQTEL_PORT)
+	@./scripts/checks/test_builder.sh http://localhost:$(PARQTEL_PORT)
 
 test-builder-ui: ## Headless-browser E2E of the builder UI incl. high-card autocomplete (requires local-up, node, google-chrome)
-	@./scripts/test_builder_ui.sh http://localhost:$(PARQTEL_PORT)
+	@./scripts/checks/test_builder_ui.sh http://localhost:$(PARQTEL_PORT)
 
 test-presets-static: ## Validate every preset alert rule parses + its query is executable (CI-safe, no server)
 	@cargo test -p parqtel-alert --test preset_rules
 
 test-alert-presets: ## End-to-end: preset rules fire on threshold crossings and recover (builds binary if needed; curl, jq, python3)
-	@./scripts/test_alert_presets.sh
+	@./scripts/checks/test_alert_presets.sh
 
 # ─── Load testing ──────────────────────────────────────────────────────────────
 load: ## Send 10,000 synthetic data points to localhost:9090
-	python3 scripts/load-test.py http://localhost:9090 10000
+	python3 scripts/load/load-test.py http://localhost:9090 10000
 
 LOAD_RATE   ?= 1000
 LOAD_TIME   ?= 1
 TARGET_URL  ?= http://localhost:9090
 LOAD_TYPE   ?= all
-LOAD_SCRIPT ?= scripts/load_gen.py
+LOAD_SCRIPT ?= scripts/load/load_gen.py
 
 load-test: ## Full load test (LOAD_RATE, LOAD_TIME, TARGET_URL, LOAD_TYPE overrideable)
 	@echo "========================================================"
@@ -243,27 +242,27 @@ perf-audit: release ## Release build + full performance audit
 	@echo "========================================================"
 	@echo "📊 Parqtel Performance Audit"
 	@echo "========================================================"
-	bash scripts/run_perf_audit.sh
+	bash scripts/bench/run_perf_audit.sh
 
 # ─── Kubernetes ────────────────────────────────────────────────────────────────
 k8s-install: ## Install Parqtel on the current K8s cluster via Helm
-	bash scripts/k8s-install.sh
+	bash scripts/k8s/k8s-install.sh
 
 k8s-validate: ## Run E2E tests against the current K8s cluster (requires Go)
-	bash scripts/validate.sh
-	bash scripts/validate-hpa.sh
+	bash scripts/k8s/validate.sh
+	bash scripts/k8s/validate-hpa.sh
 
 k8s-sre-validate: ## Shell-based SRE validation against the current K8s cluster
-	bash scripts/sre-validate.sh
+	bash scripts/k8s/sre-validate.sh
 
 k8s-undeploy: ## Uninstall Parqtel from the current K8s cluster
 	helm uninstall parqtel -n parqtel --ignore-not-found
 
 local-k3d-up: ## Provision a local k3d cluster and deploy Parqtel
-	bash scripts/k8s-setup.sh
+	bash scripts/k8s/k8s-setup.sh
 
 local-k3d-down: ## Destroy the local k3d cluster
-	bash scripts/k8s-teardown.sh
+	bash scripts/k8s/k8s-teardown.sh
 
 local-k3d-status: ## Show k3d cluster status
 	kubectl get pods -n parqtel
@@ -273,7 +272,7 @@ PARQTEL_E2E_URL ?= http://localhost:9090
 
 e2e-promql: ## Run PromQL functional validation tests against the compose stack (requires local-up)
 	@echo "Running PromQL functional tests against $(PARQTEL_E2E_URL) ..."
-	cd e2e && PARQTEL_URL=$(PARQTEL_E2E_URL) go test -v -count=1 -tags promql ./tests/ \
+	cd tests/e2e && PARQTEL_URL=$(PARQTEL_E2E_URL) go test -v -count=1 -tags promql ./tests/ \
 		-run TestPromQLFunctions \
 		-timeout 120s
 
