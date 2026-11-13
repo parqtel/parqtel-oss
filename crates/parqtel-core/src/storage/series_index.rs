@@ -268,7 +268,9 @@ impl SeriesIndex {
         for i in 0..table.start.len() {
             let flat = &table.labels[i];
             let pairs: Vec<(&str, &str)> = flat
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .map(|kv| {
                     (
                         table.strings[kv[0] as usize].as_str(),
