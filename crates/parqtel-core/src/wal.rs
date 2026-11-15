@@ -359,74 +359,97 @@ where
         return Ok(ReplayStats::default());
     }
     let mut stats = ReplayStats::default();
-
     for seq in segments(&dir)? {
-        let Some(path) = segment_path(&dir, seq) else {
-            continue;
-        };
-        let mut bytes = Vec::new();
-        File::open(&path)?.read_to_end(&mut bytes)?;
+        let segment_stats = replay_segment(&dir, seq, commit, &mut on_record)?;
+        stats.records += segment_stats.records;
+        stats.skipped += segment_stats.skipped;
+        stats.truncated_bytes += segment_stats.truncated_bytes;
+    }
+    Ok(stats)
+}
 
-        let mut offset = 0usize;
-        let mut bad_at: Option<usize> = None;
-        while offset + RECORD_HEADER_LEN as usize <= bytes.len() {
-            let len = u32::from_le_bytes(
-                bytes[offset..offset + 4]
-                    .try_into()
-                    .map_err(|_| Error::Internal("bad WAL header".into()))?,
-            ) as usize;
-            let want_crc = u32::from_le_bytes(
-                bytes[offset + 4..offset + 8]
-                    .try_into()
-                    .map_err(|_| Error::Internal("bad WAL header".into()))?,
-            );
-            let body_start = offset + RECORD_HEADER_LEN as usize;
-            let Some(body_end) = body_start.checked_add(len) else {
-                bad_at = Some(offset);
-                break;
-            };
-            if body_end > bytes.len() {
-                // Torn tail from a crash mid-append.
-                bad_at = Some(offset);
-                break;
-            }
-            let payload = &bytes[body_start..body_end];
-            if crc32(payload) != want_crc {
-                bad_at = Some(offset);
-                break;
-            }
-            // The position `WalWriter::append` returned for this record: the
-            // END of the record, 1-based. Labelling by the start would give the
-            // record after a committed one the same number as the commit point,
-            // and it would be skipped.
-            let pos = WalPosition((seq << 32) | (body_end as u64 + 1));
-            if pos.is_covered_by(commit) {
-                stats.skipped += 1;
-            } else {
-                match serde_json::from_slice::<T>(payload) {
-                    Ok(v) => {
-                        on_record(v);
-                        stats.records += 1;
-                    }
-                    Err(e) => {
-                        // A record we cannot decode is not recoverable, but
-                        // stopping here would silently drop every later record,
-                        // so log and continue.
-                        tracing::warn!(position = %pos, error = %e, "skipping undecodable WAL record");
-                        stats.skipped += 1;
-                    }
+/// Replays a single segment of one signal's WAL, handing each record to a
+/// callback.
+///
+/// Split out of [`replay`] so callers such as startup recovery can ingest
+/// recovered records segment by segment instead of buffering a whole-signal
+/// backlog before ingesting.
+pub fn replay_segment<T, F>(
+    dir: &Path,
+    segment: u64,
+    commit: WalPosition,
+    mut on_record: F,
+) -> Result<ReplayStats>
+where
+    T: for<'de> Deserialize<'de>,
+    F: FnMut(T),
+{
+    let Some(path) = segment_path(dir, segment) else {
+        return Ok(ReplayStats::default());
+    };
+    let mut stats = ReplayStats::default();
+    let mut bytes = Vec::new();
+    File::open(&path)?.read_to_end(&mut bytes)?;
+
+    let mut offset = 0usize;
+    let mut bad_at: Option<usize> = None;
+    while offset + RECORD_HEADER_LEN as usize <= bytes.len() {
+        let len = u32::from_le_bytes(
+            bytes[offset..offset + 4]
+                .try_into()
+                .map_err(|_| Error::Internal("bad WAL header".into()))?,
+        ) as usize;
+        let want_crc = u32::from_le_bytes(
+            bytes[offset + 4..offset + 8]
+                .try_into()
+                .map_err(|_| Error::Internal("bad WAL header".into()))?,
+        );
+        let body_start = offset + RECORD_HEADER_LEN as usize;
+        let Some(body_end) = body_start.checked_add(len) else {
+            bad_at = Some(offset);
+            break;
+        };
+        if body_end > bytes.len() {
+            // Torn tail from a crash mid-append.
+            bad_at = Some(offset);
+            break;
+        }
+        let payload = &bytes[body_start..body_end];
+        if crc32(payload) != want_crc {
+            bad_at = Some(offset);
+            break;
+        }
+        // The position `WalWriter::append` returned for this record: the
+        // END of the record, 1-based. Labelling by the start would give the
+        // record after a committed one the same number as the commit point,
+        // and it would be skipped.
+        let pos = WalPosition((segment << 32) | (body_end as u64 + 1));
+        if pos.is_covered_by(commit) {
+            stats.skipped += 1;
+        } else {
+            match serde_json::from_slice::<T>(payload) {
+                Ok(v) => {
+                    on_record(v);
+                    stats.records += 1;
+                }
+                Err(e) => {
+                    // A record we cannot decode is not recoverable, but
+                    // stopping here would silently drop every later record,
+                    // so log and continue.
+                    tracing::warn!(position = %pos, error = %e, "skipping undecodable WAL record");
+                    stats.skipped += 1;
                 }
             }
-            offset = body_end;
         }
+        offset = body_end;
+    }
 
-        if let Some(at) = bad_at {
-            // Drop the unusable tail so the next append has a clean boundary.
-            let file = OpenOptions::new().write(true).open(&path)?;
-            file.set_len(at as u64)?;
-            file.sync_all()?;
-            stats.truncated_bytes += (bytes.len() - at) as u64;
-        }
+    if let Some(at) = bad_at {
+        // Drop the unusable tail so the next append has a clean boundary.
+        let file = OpenOptions::new().write(true).open(&path)?;
+        file.set_len(at as u64)?;
+        file.sync_all()?;
+        stats.truncated_bytes += (bytes.len() - at) as u64;
     }
     Ok(stats)
 }
@@ -482,7 +505,7 @@ fn wal_size_of(dir: &Path) -> u64 {
 
 // --- segment bookkeeping ---------------------------------------------------
 
-fn segments(dir: &Path) -> Result<Vec<u64>> {
+pub fn segments(dir: &Path) -> Result<Vec<u64>> {
     let mut out = Vec::new();
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
@@ -499,7 +522,7 @@ fn segments(dir: &Path) -> Result<Vec<u64>> {
     Ok(out)
 }
 
-fn segment_path(dir: &Path, seq: u64) -> Option<PathBuf> {
+pub fn segment_path(dir: &Path, seq: u64) -> Option<PathBuf> {
     let p = dir.join(format!("{seq:020}.wal"));
     p.exists().then_some(p)
 }
