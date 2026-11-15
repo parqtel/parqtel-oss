@@ -16,6 +16,13 @@ mod telemetry;
 #[cfg(test)]
 mod tests;
 
+// glibc malloc keeps the freed memory of a block encode and a WAL replay
+// resident (the process held ~4.6 GiB it no longer used after ingesting at
+// Prometheus-mirror volume); jemalloc returns it to the OS.
+#[cfg(not(target_env = "msvc"))]
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 use crate::cli::{Cli, Commands};
 use crate::recovery::reconcile_and_persist;
 use clap::Parser;

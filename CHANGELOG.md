@@ -23,6 +23,14 @@ while measuring. Measurements and method are in
   instant queries 107 → 17 ms, log search 284 → 102 ms (p50, 2.4 M-point
   dataset).
 - Peak RSS under the same load fell from 2.3 GB to 0.8 GB.
+- **Memory at high series counts**: with 578K active series (2.3M points through
+  the HTTP ingest path) peak RSS fell from 4.1 GB to 1.6 GB and steady RSS from
+  3.6 GB to 1.0 GB. Two changes: `ingest.label_interner_capacity` (new, default
+  1048576; set it to at least twice the active series count) and jemalloc as the
+  global allocator on non-MSVC targets, which returns freed block-encode memory
+  to the OS instead of keeping it resident. Startup WAL replay now replays one
+  segment at a time and shares label sets, so replay memory no longer grows with
+  the unflushed backlog.
 - **Log search** 102 → 23 ms (a term matching a fifth of the records) and
   29 → 12 ms (a term in one record) at p50, one client; with 8 clients 311 → 64 ms
   and 113 → 32 ms.
