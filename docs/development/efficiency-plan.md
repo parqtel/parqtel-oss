@@ -209,6 +209,11 @@ RSS remains bounded, and ingest stays healthy during rollups.
   60 s (`PARQTEL__SERVER__ALERT_INTERVAL_SECS=60`). All 20 preset rules stay
   enabled. This env var was set with `kubectl` and is not in the Helm release;
   a Helm upgrade would revert it.
+- Mixed or gapped WAL ranges no longer block L1 forever. If every source range
+  is at or below the metrics WAL commit point, the merge proceeds and the output
+  carries no WAL span: those records can never be replayed, so no span is
+  needed. Ranges above the commit point are still rejected. Not yet deployed;
+  held until the 24-hour soak of the current image finishes.
 
 ### Phase 1b: L1-to-L2 rollups — deferred
 

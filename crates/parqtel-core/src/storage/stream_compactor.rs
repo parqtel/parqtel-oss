@@ -956,7 +956,8 @@ fn compact_metric_blocks(
     config: &BlockConfig,
     target_level: u8,
 ) -> Result<BlockMetadata> {
-    let wal_range = merged_wal_range(blocks)?;
+    let committed = crate::wal::read_commit(&config.data_dir, "metrics");
+    let wal_range = merged_wal_range(blocks, committed)?;
     let sources = blocks
         .iter()
         .cloned()
@@ -1034,29 +1035,40 @@ fn validate_compacted_file(path: &Path, plan: &OutputPlan) -> Result<()> {
     Ok(())
 }
 
-fn merged_wal_range(blocks: &[BlockMetadata]) -> Result<Option<(u64, u64)>> {
+/// The WAL span the merged block makes durable.
+///
+/// Contiguous ranges merge into one span. Mixed or gapped ranges cannot be
+/// described by one span, but if every range is already at or below the WAL
+/// commit point none of those records can be replayed again, so the output
+/// needs no span at all. Otherwise the group is rejected.
+fn merged_wal_range(
+    blocks: &[BlockMetadata],
+    committed: crate::wal::WalPosition,
+) -> Result<Option<(u64, u64)>> {
     let ranges: Vec<_> = blocks.iter().filter_map(|block| block.wal_range).collect();
     if ranges.is_empty() {
-        if blocks.iter().all(|block| block.wal_range.is_none()) {
+        return Ok(None);
+    }
+    let all_committed = ranges
+        .iter()
+        .all(|&(_, to)| crate::wal::WalPosition(to).is_covered_by(committed));
+    if ranges.len() != blocks.len() {
+        if all_committed {
             return Ok(None);
         }
         return Err(Error::Internal(
             "cannot compact blocks with mixed WAL metadata".into(),
         ));
     }
-    if ranges.len() != blocks.len() {
-        return Err(Error::Internal(
-            "cannot compact blocks with mixed WAL metadata".into(),
-        ));
-    }
     let mut ranges = ranges;
     ranges.sort_unstable_by_key(|range| range.0);
-    for pair in ranges.windows(2) {
-        if pair[0].1 != pair[1].0 {
-            return Err(Error::Internal(
-                "cannot compact non-contiguous WAL ranges".into(),
-            ));
+    if ranges.windows(2).any(|pair| pair[0].1 != pair[1].0) {
+        if all_committed {
+            return Ok(None);
         }
+        return Err(Error::Internal(
+            "cannot compact non-contiguous WAL ranges".into(),
+        ));
     }
     Ok(Some((ranges[0].0, ranges[ranges.len() - 1].1)))
 }
@@ -1357,6 +1369,35 @@ mod tests {
         assert!(error
             .to_string()
             .contains("cannot compact blocks with mixed WAL metadata"));
+    }
+
+    #[test]
+    fn committed_mixed_or_gapped_wal_ranges_merge_without_a_span() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = BlockConfig {
+            data_dir: dir.path().to_path_buf(),
+            compression: "uncompressed".into(),
+            ..Default::default()
+        };
+        let with_range = write_metrics_block(dir.path(), "a.parquet", 100, (0, 4), true);
+        let mut without_range = write_metrics_block(dir.path(), "b.parquet", 200, (4, 8), true);
+        without_range.wal_range = None;
+        let gapped = write_metrics_block(dir.path(), "c.parquet", 300, (9, 12), true);
+
+        // Commit below the ranges: still unsafe, still rejected.
+        crate::wal::commit_position(dir.path(), "metrics", crate::wal::WalPosition(3)).unwrap();
+        let mixed = [with_range.clone(), without_range.clone()];
+        assert!(compact_metric_blocks(&mixed, &config, 1).is_err());
+
+        // Every range committed: nothing can be replayed, so merge with no span.
+        crate::wal::commit_position(dir.path(), "metrics", crate::wal::WalPosition(12)).unwrap();
+        let merged = compact_metric_blocks(&mixed, &config, 1).unwrap();
+        assert_eq!(merged.row_count, 8);
+        assert_eq!(merged.wal_range, None);
+
+        let merged = compact_metric_blocks(&[with_range, gapped], &config, 1).unwrap();
+        assert_eq!(merged.row_count, 8);
+        assert_eq!(merged.wal_range, None);
     }
 
     #[test]
