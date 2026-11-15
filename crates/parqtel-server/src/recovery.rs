@@ -106,16 +106,17 @@ async fn replay_metrics(
         return Ok((0, 0, 0));
     }
     let commit = parqtel_core::wal::read_commit(data_dir, "metrics");
-    let segments = parqtel_core::wal::segments(&dir)?;
+    let segments = parqtel_core::wal::segment_lengths(&dir)?;
     let mut pending = Vec::new();
     let mut records = 0u64;
     let mut skipped = 0u64;
     let mut truncated = 0u64;
-    for seq in segments {
+    for (seq, len) in segments {
         let stats = parqtel_core::wal::replay_segment::<serde_json::Value, _>(
             &dir,
             seq,
             commit,
+            len,
             &mut |v: serde_json::Value| pending.push(v),
         )?;
         records += stats.records;
@@ -147,16 +148,17 @@ async fn replay_logs(
         return Ok((0, 0, 0));
     }
     let commit = parqtel_core::wal::read_commit(data_dir, "logs");
-    let segments = parqtel_core::wal::segments(&dir)?;
+    let segments = parqtel_core::wal::segment_lengths(&dir)?;
     let mut pending = Vec::new();
     let mut records = 0u64;
     let mut skipped = 0u64;
     let mut truncated = 0u64;
-    for seq in segments {
+    for (seq, len) in segments {
         let stats = parqtel_core::wal::replay_segment::<serde_json::Value, _>(
             &dir,
             seq,
             commit,
+            len,
             &mut |v: serde_json::Value| pending.push(v),
         )?;
         records += stats.records;
@@ -189,16 +191,17 @@ async fn replay_traces(
         return Ok((0, 0, 0));
     }
     let commit = parqtel_core::wal::read_commit(data_dir, "traces");
-    let segments = parqtel_core::wal::segments(&dir)?;
+    let segments = parqtel_core::wal::segment_lengths(&dir)?;
     let mut pending = Vec::new();
     let mut records = 0u64;
     let mut skipped = 0u64;
     let mut truncated = 0u64;
-    for seq in segments {
+    for (seq, len) in segments {
         let stats = parqtel_core::wal::replay_segment::<serde_json::Value, _>(
             &dir,
             seq,
             commit,
+            len,
             &mut |v: serde_json::Value| pending.push(v),
         )?;
         records += stats.records;

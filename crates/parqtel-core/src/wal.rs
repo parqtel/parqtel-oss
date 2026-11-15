@@ -339,6 +339,20 @@ impl Drop for WalWriter {
     }
 }
 
+/// Each segment of `dir` with its current length in bytes, oldest first.
+pub fn segment_lengths(dir: &Path) -> Result<Vec<(u64, u64)>> {
+    segments(dir)?
+        .into_iter()
+        .map(|seq| {
+            let len = match segment_path(dir, seq) {
+                Some(p) => fs::metadata(p)?.len(),
+                None => 0,
+            };
+            Ok((seq, len))
+        })
+        .collect()
+}
+
 /// Reads a signal's WAL and hands each record to a callback.
 ///
 /// Stops at the first record that is truncated or fails its CRC — that is what
@@ -360,7 +374,7 @@ where
     }
     let mut stats = ReplayStats::default();
     for seq in segments(&dir)? {
-        let segment_stats = replay_segment(&dir, seq, commit, &mut on_record)?;
+        let segment_stats = replay_segment(&dir, seq, commit, u64::MAX, &mut on_record)?;
         stats.records += segment_stats.records;
         stats.skipped += segment_stats.skipped;
         stats.truncated_bytes += segment_stats.truncated_bytes;
@@ -374,10 +388,16 @@ where
 /// Split out of [`replay`] so callers such as startup recovery can ingest
 /// recovered records segment by segment instead of buffering a whole-signal
 /// backlog before ingesting.
+///
+/// Only the first `limit` bytes are read. Recovery re-appends replayed records
+/// to the live writer's segment, so it passes the length taken by
+/// [`segment_lengths`] before replay began; without it the newest segment would
+/// replay the records it was just given.
 pub fn replay_segment<T, F>(
     dir: &Path,
     segment: u64,
     commit: WalPosition,
+    limit: u64,
     mut on_record: F,
 ) -> Result<ReplayStats>
 where
@@ -389,7 +409,7 @@ where
     };
     let mut stats = ReplayStats::default();
     let mut bytes = Vec::new();
-    File::open(&path)?.read_to_end(&mut bytes)?;
+    File::open(&path)?.take(limit).read_to_end(&mut bytes)?;
 
     let mut offset = 0usize;
     let mut bad_at: Option<usize> = None;
