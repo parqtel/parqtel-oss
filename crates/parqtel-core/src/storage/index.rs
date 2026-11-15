@@ -212,6 +212,14 @@ fn filename_may_hold_signal(path: &Path, signal: SignalType) -> bool {
     }
 }
 
+fn is_levelled_metric_block(path: &Path) -> bool {
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_default();
+    name.starts_with("m_n_") || name.starts_with("m_l1_") || name.starts_with("m_l2_")
+}
+
 /// Identifies which signal a Parquet file holds, from its schema.
 ///
 /// The data directory is shared by the metrics and trace writers, and relying
@@ -274,21 +282,43 @@ pub fn reconcile(index: &mut BlockIndex, signal: SignalType) -> Result<Reconcile
     for entry in entries.flatten() {
         let path = entry.path();
         if path.extension().is_some_and(|e| e == "parquet") {
+            if path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with(".tmp_"))
+            {
+                continue;
+            }
             on_disk.insert(path);
         }
     }
 
-    // Drop entries whose file is gone (deleted by retention or compaction that
-    // crashed before publishing).
+    // Compaction provenance makes a renamed output authoritative even if a
+    // crash left its source files behind or the sidecar still lists them.
+    let mut superseded = std::collections::HashSet::new();
+    if signal == SignalType::Metrics {
+        for path in on_disk.iter().filter(|path| is_levelled_metric_block(path)) {
+            match super::block_file::read_compacted_sources(path) {
+                Ok(sources) => superseded.extend(sources.into_iter().map(|name| dir.join(name))),
+                Err(e) => {
+                    tracing::warn!(path = ?path, error = %e, "cannot read compaction provenance")
+                }
+            }
+        }
+    }
+
+    // Drop entries whose file is gone or was superseded by a complete output.
     let before = index.blocks.len();
-    index.blocks.retain(|b| on_disk.contains(&b.path));
+    index
+        .blocks
+        .retain(|b| on_disk.contains(&b.path) && !superseded.contains(&b.path));
     stats.dropped = before - index.blocks.len();
 
     // Adopt files the index does not know about.
     let known: std::collections::HashSet<PathBuf> =
         index.blocks.iter().map(|b| b.path.clone()).collect();
     for path in on_disk {
-        if known.contains(&path) {
+        if known.contains(&path) || superseded.contains(&path) {
             continue;
         }
         // Cheap pre-filter before touching the file. Without it every startup
@@ -315,14 +345,20 @@ pub fn reconcile(index: &mut BlockIndex, signal: SignalType) -> Result<Reconcile
     Ok(stats)
 }
 
-/// Parses `{start}_{end}_{uuid}.parquet` (the metrics/logs/trace naming), or
-/// the `logs_`/`traces_` prefixed variants.
+/// Parses `{start}_{end}_{uuid}.parquet` and the `m_l0_`, `m_n_`, `m_l1_`,
+/// `m_l2_`, `logs_` and `traces_` prefixed variants.
 ///
 /// A last resort for a block whose timestamp statistics are missing, so a
 /// recovered block is not left claiming a zero-width range.
 fn timestamps_from_filename(path: &Path) -> Option<(i64, i64)> {
     let name = path.file_name()?.to_str()?;
     let stem = name.strip_suffix(".parquet")?;
+    let stem = stem
+        .strip_prefix("m_l0_")
+        .or_else(|| stem.strip_prefix("m_n_"))
+        .or_else(|| stem.strip_prefix("m_l1_"))
+        .or_else(|| stem.strip_prefix("m_l2_"))
+        .unwrap_or(stem);
     let stem = stem
         .strip_prefix("logs_")
         .or_else(|| stem.strip_prefix("traces_"))

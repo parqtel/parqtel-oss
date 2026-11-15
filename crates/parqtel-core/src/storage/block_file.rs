@@ -8,7 +8,7 @@ use parquet::arrow::ArrowWriter;
 use parquet::file::properties::{EnabledStatistics, WriterProperties, WriterVersion};
 use parquet::schema::types::ColumnPath;
 use std::fs::File;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Columns that carry a bloom filter.
 ///
@@ -29,6 +29,8 @@ const PLAIN_BODY_COLUMN: &str = "body";
 /// row group anyway, so this only affects how often that happens — never
 /// correctness.
 const BLOOM_FPP: f64 = 0.01;
+/// Footer key listing source block filenames replaced by a compacted block.
+pub const COMPACTED_SOURCES_FOOTER_KEY: &str = "parqtel.compacted_sources";
 
 /// Truncation length for the column index, in bytes.
 ///
@@ -57,6 +59,14 @@ pub fn footer_metadata(
     wal_range: Option<(u64, u64)>,
     index: Option<FooterIndex<'_>>,
 ) -> Result<Option<Vec<parquet::file::metadata::KeyValue>>> {
+    footer_metadata_with_sources(wal_range, index, &[])
+}
+
+fn footer_metadata_with_sources(
+    wal_range: Option<(u64, u64)>,
+    index: Option<FooterIndex<'_>>,
+    compacted_sources: &[PathBuf],
+) -> Result<Option<Vec<parquet::file::metadata::KeyValue>>> {
     use parquet::file::metadata::KeyValue;
     let mut out = Vec::new();
     if let Some(range) = wal_range {
@@ -76,7 +86,123 @@ pub fn footer_metadata(
         )),
         None => {}
     }
+    if !compacted_sources.is_empty() {
+        let names = compacted_sources
+            .iter()
+            .map(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .ok_or_else(|| Error::Internal("invalid compacted source filename".into()))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        out.push(KeyValue::new(
+            COMPACTED_SOURCES_FOOTER_KEY.to_string(),
+            serde_json::to_string(&names).map_err(Error::Serde)?,
+        ));
+    }
     Ok(if out.is_empty() { None } else { Some(out) })
+}
+
+/// Reads compacted source filenames from a block footer.
+pub fn read_compacted_sources(path: &Path) -> Result<Vec<PathBuf>> {
+    let file = File::open(path)?;
+    let metadata = parquet::file::metadata::ParquetMetaDataReader::new()
+        .parse_and_finish(&file)
+        .map_err(|e| Error::Parquet(e.to_string()))?;
+    let value = metadata
+        .file_metadata()
+        .key_value_metadata()
+        .and_then(|items| {
+            items
+                .iter()
+                .find(|item| item.key == COMPACTED_SOURCES_FOOTER_KEY)
+        })
+        .and_then(|item| item.value.as_deref());
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    let names: Vec<String> = serde_json::from_str(value).map_err(Error::Serde)?;
+    names
+        .into_iter()
+        .map(|name| {
+            let path = PathBuf::from(name);
+            if path.components().count() != 1
+                || path.file_name() != Some(path.as_os_str())
+                || path
+                    .extension()
+                    .is_none_or(|extension| extension != "parquet")
+                || path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with(".tmp_"))
+            {
+                return Err(Error::Internal(
+                    "compacted source footer contains an invalid block filename".into(),
+                ));
+            }
+            Ok(path)
+        })
+        .collect()
+}
+
+pub(crate) fn sync_parent_dir(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        let parent = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        File::open(parent)?.sync_all()?;
+    }
+    Ok(())
+}
+
+/// Incremental Parquet block writer used by streaming compaction.
+pub(crate) struct BlockFileWriter {
+    writer: ArrowWriter<File>,
+    sync_file: File,
+}
+
+impl BlockFileWriter {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn create(
+        path: &Path,
+        schema: arrow::datatypes::SchemaRef,
+        compression: &str,
+        compression_level: Option<i32>,
+        row_group_size: usize,
+        wal_range: Option<(u64, u64)>,
+        index: Option<FooterIndex<'_>>,
+        compacted_sources: &[PathBuf],
+    ) -> Result<Self> {
+        let footer = footer_metadata_with_sources(wal_range, index, compacted_sources)?;
+        let properties = writer_properties(compression, compression_level, row_group_size, footer);
+        let file = File::create(path)?;
+        let sync_file = file.try_clone()?;
+        let writer = ArrowWriter::try_new(file, schema, Some(properties))
+            .map_err(|e| Error::Parquet(e.to_string()))?;
+        Ok(Self { writer, sync_file })
+    }
+
+    pub(crate) fn write(&mut self, batch: &arrow::record_batch::RecordBatch) -> Result<()> {
+        self.writer
+            .write(batch)
+            .map_err(|e| Error::Parquet(e.to_string()))
+    }
+
+    pub(crate) fn close(self) -> Result<()> {
+        self.writer
+            .close()
+            .map_err(|e| Error::Parquet(e.to_string()))?;
+        Ok(())
+    }
+
+    pub(crate) fn close_and_sync(self) -> Result<()> {
+        let Self { writer, sync_file } = self;
+        writer.close().map_err(|e| Error::Parquet(e.to_string()))?;
+        sync_file.sync_all()?;
+        Ok(())
+    }
 }
 
 /// Writes one block to Parquet, splitting it into `row_group_size`-row groups.
@@ -95,15 +221,27 @@ pub fn write_block_file(
     wal_range: Option<(u64, u64)>,
     index: Option<FooterIndex<'_>>,
 ) -> Result<()> {
-    let file = File::create(path)?;
+    let mut writer = BlockFileWriter::create(
+        path,
+        record_batch.schema(),
+        compression,
+        compression_level,
+        row_group_size,
+        wal_range,
+        index,
+        &[],
+    )?;
+    writer.write(&record_batch)?;
+    writer.close()
+}
 
-    // The WAL span this block makes durable, and (for metrics) the series it
-    // holds or (for logs) its skip index, travel in the file itself: a block found on disk without an index
-    // entry still says what it covers, and the series table cannot fall out of
-    // step with the rows it describes.
-    let footer = footer_metadata(wal_range, index)?;
-
-    let writer_props = WriterProperties::builder()
+fn writer_properties(
+    compression: &str,
+    compression_level: Option<i32>,
+    row_group_size: usize,
+    footer: Option<Vec<parquet::file::metadata::KeyValue>>,
+) -> WriterProperties {
+    WriterProperties::builder()
         .set_key_value_metadata(footer)
         .set_compression(compression_from_name(compression, compression_level))
         .set_writer_version(WriterVersion::PARQUET_2_0)
@@ -132,14 +270,5 @@ pub fn write_block_file(
         // Bound the page size so the column index has finer granularity than a
         // whole row group would otherwise give.
         .set_data_page_size_limit(DATA_PAGE_SIZE_LIMIT)
-        .build();
-
-    let mut writer = ArrowWriter::try_new(file, record_batch.schema(), Some(writer_props))
-        .map_err(|e| Error::Parquet(e.to_string()))?;
-
-    writer
-        .write(&record_batch)
-        .map_err(|e| Error::Parquet(e.to_string()))?;
-    writer.close().map_err(|e| Error::Parquet(e.to_string()))?;
-    Ok(())
+        .build()
 }

@@ -226,6 +226,35 @@ fn selective_scan_reads_only_the_selected_series() {
     assert!(!got.points.is_empty() && got.points.len() < ROWS / 20);
 }
 
+#[test]
+fn label_less_block_without_a_valid_series_index_fails_closed() {
+    let dir = tempfile::tempdir().unwrap();
+    let ms = metrics();
+    let runs: Vec<MetricRun<'_>> = ms
+        .iter()
+        .map(|m| MetricRun {
+            name: &m.name,
+            kind: m.kind,
+            resource: &m.resource_attributes,
+            points: m.data_points.iter().collect(),
+        })
+        .collect();
+    let (batch, _) = StorageModel::metric_runs_to_block(&runs).unwrap();
+    assert!(batch.schema().index_of("labels").is_err());
+
+    let path = dir.path().join("missing-index.parquet");
+    write_block_file(&path, batch, "zstd", None, RG, None, None).unwrap();
+    let error = Scanner::scan_block_filtered(
+        block_meta(path),
+        "scan.cpu",
+        0,
+        i64::MAX,
+        &SeriesSelector::all(),
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("requires a valid series index"));
+}
+
 /// A table the file does not agree with is ignored, not trusted.
 #[test]
 fn a_damaged_series_table_falls_back_to_a_full_scan() {

@@ -60,6 +60,19 @@ impl StorageModel {
     ) -> Result<(String, MetricKind, LabelSet, DataPoint)> {
         reader::row_to_point(batch, row)
     }
+    pub(crate) fn row_to_point_with_labels(
+        batch: &RecordBatch,
+        row: usize,
+        labels: LabelSet,
+    ) -> Result<(String, MetricKind, LabelSet, DataPoint)> {
+        reader::row_to_point_with_labels(batch, row, Some(labels))
+    }
+    pub(crate) fn metric_group_from_row(
+        batch: &RecordBatch,
+        row: usize,
+    ) -> Result<(MetricKind, LabelSet)> {
+        reader::metric_group_from_row(batch, row)
+    }
     pub fn row_to_log<'a>(
         batch: &'a RecordBatch,
         row: usize,
@@ -83,6 +96,7 @@ mod tests {
     #[test]
     fn test_metrics_schema_definition() {
         assert_eq!(StorageModel::metrics_schema().fields.len(), 15);
+        assert!(StorageModel::metrics_schema().index_of("labels").is_ok());
     }
 
     #[test]
@@ -179,6 +193,29 @@ mod tests {
         assert_eq!(decoded.flags, 5);
         assert_eq!(decoded.trace_state, "state");
         assert_eq!(decoded.attributes.get("key"), Some("val"));
+    }
+
+    #[test]
+    fn metric_group_reader_restores_correlation_resource_labels() {
+        let resource = LabelSet::try_from_iter(vec![
+            ("service.name", "api"),
+            ("k8s.namespace.name", "prod"),
+            ("zone", "east"),
+        ])
+        .unwrap();
+        let metric = Metric {
+            name: "cpu".into(),
+            kind: MetricKind::Sum,
+            resource_attributes: resource.clone(),
+            data_points: vec![
+                DataPoint::new(100, MetricValue::Double(1.0), LabelSet::default()).unwrap(),
+            ],
+            ..Default::default()
+        };
+        let batch = StorageModel::metrics_to_chunk(&[metric]).unwrap();
+        let (kind, got_resource) = StorageModel::metric_group_from_row(&batch, 0).unwrap();
+        assert_eq!(kind, MetricKind::Sum);
+        assert_eq!(got_resource, resource);
     }
 
     #[test]

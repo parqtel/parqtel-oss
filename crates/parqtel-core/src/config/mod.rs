@@ -439,6 +439,7 @@ mod tests {
         assert_eq!(config.block_duration_secs, 7200);
         assert_eq!(config.max_rows_per_block, 1_000_000);
         assert_eq!(config.retention_days, 7);
+        assert_eq!(config.compaction_interval_secs, 300);
         assert_eq!(config.row_group_size, 100_000);
     }
 

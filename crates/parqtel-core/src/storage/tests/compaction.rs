@@ -2,6 +2,7 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 use super::*;
+use crate::models::storage::MetricRun;
 
 fn trace_meta(path: &std::path::Path, spans: &[Span]) -> BlockMetadata {
     BlockMetadata {
@@ -19,6 +20,27 @@ fn trace_meta(path: &std::path::Path, spans: &[Span]) -> BlockMetadata {
         signal_type: SignalType::Traces,
         wal_range: None,
     }
+}
+
+fn write_indexed_metrics_parquet(path: &std::path::Path, metric: &Metric) {
+    let runs = [MetricRun {
+        name: &metric.name,
+        kind: metric.kind,
+        resource: &metric.resource_attributes,
+        points: metric.data_points.iter().collect(),
+    }];
+    let (batch, table) = StorageModel::metric_runs_to_block(&runs).unwrap();
+    assert!(batch.schema().index_of("labels").is_err());
+    crate::storage::write_block_file(
+        path,
+        batch,
+        "uncompressed",
+        None,
+        100,
+        None,
+        Some(crate::storage::FooterIndex::Series(&table)),
+    )
+    .unwrap();
 }
 
 /// Trace blocks used to be skipped by compaction entirely, so they never
@@ -223,15 +245,13 @@ async fn test_compaction_writes_a_series_table_for_the_merged_block() {
                 .unwrap()
             })
             .collect();
-        write_metrics_parquet(
-            &path,
-            &[Metric {
-                name: "cpu".into(),
-                kind: MetricKind::Gauge,
-                data_points: points,
-                ..Default::default()
-            }],
-        );
+        let metric = Metric {
+            name: "cpu".into(),
+            kind: MetricKind::Gauge,
+            data_points: points,
+            ..Default::default()
+        };
+        write_indexed_metrics_parquet(&path, &metric);
         index.add(BlockMetadata {
             path: path.clone(),
             start_timestamp_ns: base,
@@ -279,6 +299,66 @@ async fn test_compaction_writes_a_series_table_for_the_merged_block() {
         vec![101, 103, 105, 111, 113, 115],
         "time order inside a series"
     );
+}
+
+#[tokio::test]
+async fn compaction_reads_non_finite_summaries_from_indexed_blocks_without_labels_column() {
+    let dir = tempdir().unwrap();
+    let config = BlockConfig {
+        data_dir: dir.path().to_path_buf(),
+        compression: "uncompressed".into(),
+        ..Default::default()
+    };
+    let mut index = BlockIndex::new(dir.path());
+    for (i, host) in ["h0", "h1"].into_iter().enumerate() {
+        let ts = 1000 + i as i64;
+        let metric = Metric {
+            name: "request_duration".into(),
+            kind: MetricKind::Summary,
+            data_points: vec![DataPoint::new(
+                ts,
+                MetricValue::summary(1, 1.0, vec![(0.5, f64::NAN)]),
+                LabelSet::try_from_iter(vec![("host", host)]).unwrap(),
+            )
+            .unwrap()],
+            ..Default::default()
+        };
+        let path = dir.path().join(format!("summary-{i}.parquet"));
+        write_indexed_metrics_parquet(&path, &metric);
+        index.add(BlockMetadata {
+            path: path.clone(),
+            start_timestamp_ns: ts,
+            end_timestamp_ns: ts,
+            row_count: 1,
+            size_bytes: fs::metadata(&path).unwrap().len(),
+            metric_names: HashSet::from(["request_duration".into()]),
+            label_names: HashSet::from(["host".into()]),
+            label_values: Default::default(),
+            signal_type: SignalType::Metrics,
+            wal_range: None,
+        });
+    }
+    let index = Arc::new(RwLock::new(index));
+    let store = Arc::new(BlockIndexStore::at_path(dir.path().join("index.json")));
+
+    Compactor::compact_once(&index, &store, &config)
+        .await
+        .unwrap();
+
+    let merged = index.read().await.blocks[0].clone();
+    let scan = Scanner::scan_block_filtered(
+        merged,
+        "request_duration",
+        0,
+        i64::MAX,
+        &crate::storage::SeriesSelector::all(),
+    )
+    .unwrap();
+    assert_eq!(scan.points.len(), 2);
+    assert!(scan.points.iter().all(|point| match &point.value {
+        MetricValue::Summary(summary) => summary.quantiles[0].1.is_nan(),
+        _ => false,
+    }));
 }
 
 /// Compaction publishes the merged block in the in-memory index and marks

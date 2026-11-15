@@ -5,7 +5,9 @@ use super::pruning::{
     plan_row_selection, project_present, restrict_to_ranges, row_groups_in_range,
 };
 use super::Scanner;
-use super::{MAX_BLOCKS, MAX_CONCURRENT, SCAN_BATCH_ROWS};
+use super::{
+    acquire_scan_slot, record_scan_block, record_scan_output, MAX_BLOCKS, SCAN_BATCH_ROWS,
+};
 use crate::error::{Error, Result};
 use crate::models::logs::LogRecord;
 use crate::models::storage::{BlockMetadata, StorageModel};
@@ -199,19 +201,19 @@ impl Scanner {
         filter: Option<LogRowFilter>,
         prefilter: Option<LogColumnPrefilter>,
     ) -> Result<(Vec<LogRecord>, LogScanStats)> {
-        let sem = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT));
         let window_ns = (end_ns - start_ns) / 60;
         let mut tasks = Vec::new();
+        let mut blocks_scheduled = 0;
+        let mut admission_wait = std::time::Duration::ZERO;
         for block in blocks.into_iter().take(MAX_BLOCKS) {
-            let permit = sem
-                .clone()
-                .acquire_owned()
-                .await
-                .map_err(|e| Error::Internal(e.to_string()))?;
+            let waiting = std::time::Instant::now();
+            let permit = acquire_scan_slot().await?;
+            admission_wait += waiting.elapsed();
             let filter = filter.clone();
             let prefilter = prefilter.clone();
             tasks.push(tokio::task::spawn_blocking(move || {
                 let _permit = permit;
+                record_scan_block();
                 Self::scan_log_block_filtered(
                     block,
                     start_ns,
@@ -223,6 +225,7 @@ impl Scanner {
                     window_ns,
                 )
             }));
+            blocks_scheduled += 1;
         }
 
         let mut all_logs = Vec::new();
@@ -250,6 +253,14 @@ impl Scanner {
                 }
             }
         }
+        record_scan_output(0, all_logs.len());
+        tracing::debug!(
+            blocks = blocks_scheduled,
+            matched = stats.total_matched,
+            retained = all_logs.len(),
+            admission_wait_ms = admission_wait.as_millis(),
+            "log scan complete"
+        );
         Ok((all_logs, stats))
     }
 

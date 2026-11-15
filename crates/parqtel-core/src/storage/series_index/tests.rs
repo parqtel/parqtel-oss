@@ -60,6 +60,48 @@ fn table_round_trips_through_the_footer_text() {
 }
 
 #[test]
+fn table_exposes_compaction_runs_without_building_postings() {
+    let mut builder = SeriesTableBuilder::new();
+    builder.begin_metric("m");
+    builder.push_series(&ls(&[("host", "a")]), 0, 3, 5, 9);
+    builder.begin_metric("m");
+    builder.push_series(&ls(&[("host", "b")]), 3, 2, 10, 12);
+    let table = builder.finish();
+
+    let first = table.metric_run(0).unwrap();
+    assert_eq!(first.metric_name, "m");
+    assert_eq!(
+        (first.first_series, first.series_count, first.first_row),
+        (0, 1, 0)
+    );
+    let second = table.metric_run(1).unwrap();
+    assert_eq!(
+        (second.first_series, second.series_count, second.first_row),
+        (1, 1, 3)
+    );
+    assert_eq!(table.total_rows(), 5);
+    assert_eq!(table.series_entry(1).unwrap().labels, ls(&[("host", "b")]));
+}
+
+#[test]
+fn large_footer_indexes_are_compressed_and_legacy_json_still_reads() {
+    let mut b = SeriesTableBuilder::new();
+    b.begin_metric("m");
+    for i in 0..4_000u64 {
+        let host = format!("host-{i:05}");
+        b.push_series(&ls(&[("host", &host)]), i, 1, i as i64, i as i64);
+    }
+    let table = b.finish();
+    let legacy = serde_json::to_string(&table).unwrap();
+    let compressed = table.to_footer_value().unwrap();
+
+    assert!(compressed.starts_with(COMPRESSED_FOOTER_PREFIX));
+    assert!(compressed.len() < legacy.len());
+    assert_eq!(SeriesTable::from_footer_value(&compressed).unwrap(), table);
+    assert_eq!(SeriesTable::from_footer_value(&legacy).unwrap(), table);
+}
+
+#[test]
 fn corrupt_tables_are_rejected() {
     let mut b = SeriesTableBuilder::new();
     b.begin_metric("m");

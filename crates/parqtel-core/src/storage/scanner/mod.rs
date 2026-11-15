@@ -12,14 +12,18 @@ mod metrics;
 mod pruning;
 mod traces;
 
+use crate::error::{Error, Result};
 pub use logs::{LogColumnPrefilter, LogRowFilter, LogScanStats};
 pub use metrics::{metric_scan_indices, MetricScan, SeriesFilter, METRIC_SCAN_COLUMNS};
 pub use pruning::{
     project_present, row_groups_in_range, row_groups_matching_metric, row_groups_matching_value,
 };
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
-/// Max concurrent blocking scans; also bounds tokio blocking-pool usage.
-const MAX_CONCURRENT: usize = 16;
+/// Process-wide block-scan admission budget for the 4 GiB UAT pod.
+const MAX_CONCURRENT_BLOCK_SCANS: usize = 4;
 /// Hard cap on blocks scanned per query.
 const MAX_BLOCKS: usize = 128;
 
@@ -27,8 +31,175 @@ const MAX_BLOCKS: usize = 128;
 /// for dictionary columns, per-batch resolution - a visible share of the work.
 const SCAN_BATCH_ROWS: usize = 8192;
 
+fn scan_admission() -> Arc<tokio::sync::Semaphore> {
+    static ADMISSION: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
+    Arc::clone(
+        ADMISSION.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_BLOCK_SCANS))),
+    )
+}
+
+#[derive(Default)]
+struct ScanMetrics {
+    active_slots: AtomicU64,
+    low_priority_skips: AtomicU64,
+    admission_wait_ns: AtomicU64,
+    blocks: AtomicU64,
+    footer_cache_hits: AtomicU64,
+    footer_cache_misses: AtomicU64,
+    footer_load_ns: AtomicU64,
+    index_estimated_bytes: AtomicU64,
+    rows_considered: AtomicU64,
+    rows_returned: AtomicU64,
+}
+
+fn scan_metrics() -> &'static ScanMetrics {
+    static METRICS: OnceLock<ScanMetrics> = OnceLock::new();
+    METRICS.get_or_init(ScanMetrics::default)
+}
+
+/// Cumulative scanner counters exposed by `/metrics`.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ScanMetricsSnapshot {
+    pub active_slots: u64,
+    pub slot_limit: u64,
+    pub low_priority_skips: u64,
+    pub admission_wait_ns: u64,
+    pub blocks: u64,
+    pub footer_cache_hits: u64,
+    pub footer_cache_misses: u64,
+    pub footer_cache_bytes: u64,
+    pub footer_load_ns: u64,
+    pub index_estimated_bytes: u64,
+    pub rows_considered: u64,
+    pub rows_returned: u64,
+}
+
+pub(crate) struct ScanPermit {
+    _permit: tokio::sync::OwnedSemaphorePermit,
+    slots: u64,
+}
+
+impl Drop for ScanPermit {
+    fn drop(&mut self) {
+        scan_metrics()
+            .active_slots
+            .fetch_sub(self.slots, Ordering::Relaxed);
+    }
+}
+
+async fn acquire_scan_slot() -> Result<ScanPermit> {
+    let started = std::time::Instant::now();
+    let permit = scan_admission()
+        .acquire_owned()
+        .await
+        .map_err(|e| Error::Internal(e.to_string()))?;
+    let metrics = scan_metrics();
+    metrics
+        .admission_wait_ns
+        .fetch_add(duration_ns(started.elapsed()), Ordering::Relaxed);
+    metrics.active_slots.fetch_add(1, Ordering::Relaxed);
+    Ok(ScanPermit {
+        _permit: permit,
+        slots: 1,
+    })
+}
+
+fn reserve_scan_slots(count: usize) -> Option<ScanPermit> {
+    let permits = u32::try_from(count).ok()?;
+    if permits == 0 {
+        return None;
+    }
+    let permit = match scan_admission().try_acquire_many_owned(permits) {
+        Ok(permit) => permit,
+        Err(_) => {
+            scan_metrics()
+                .low_priority_skips
+                .fetch_add(1, Ordering::Relaxed);
+            return None;
+        }
+    };
+    scan_metrics()
+        .active_slots
+        .fetch_add(u64::from(permits), Ordering::Relaxed);
+    Some(ScanPermit {
+        _permit: permit,
+        slots: u64::from(permits),
+    })
+}
+
+fn duration_ns(duration: Duration) -> u64 {
+    duration.as_nanos().min(u64::MAX as u128) as u64
+}
+
+fn record_scan_block() {
+    scan_metrics().blocks.fetch_add(1, Ordering::Relaxed);
+}
+
+fn record_footer_cache_hit() {
+    scan_metrics()
+        .footer_cache_hits
+        .fetch_add(1, Ordering::Relaxed);
+}
+
+fn record_footer_cache_miss() {
+    scan_metrics()
+        .footer_cache_misses
+        .fetch_add(1, Ordering::Relaxed);
+}
+
+fn record_footer_load(elapsed: Duration, estimated_bytes: usize) {
+    let metrics = scan_metrics();
+    metrics
+        .footer_load_ns
+        .fetch_add(duration_ns(elapsed), Ordering::Relaxed);
+    metrics
+        .index_estimated_bytes
+        .fetch_add(estimated_bytes as u64, Ordering::Relaxed);
+}
+
+fn record_scan_output(rows_considered: u64, rows_returned: usize) {
+    let metrics = scan_metrics();
+    metrics
+        .rows_considered
+        .fetch_add(rows_considered, Ordering::Relaxed);
+    metrics
+        .rows_returned
+        .fetch_add(rows_returned as u64, Ordering::Relaxed);
+}
+
 /// Reads and filters data points from Parquet files.
 pub struct Scanner;
+
+impl Scanner {
+    /// Reserves one scan slot without waiting, for best-effort background work.
+    pub fn try_reserve_scan_slot() -> Option<impl Send> {
+        reserve_scan_slots(1)
+    }
+
+    /// Reserves several process-wide scan slots without waiting.
+    pub(crate) fn try_reserve_scan_slots(count: usize) -> Option<ScanPermit> {
+        reserve_scan_slots(count)
+    }
+
+    /// Cumulative process-wide scanner counters.
+    pub fn scan_metrics_snapshot() -> ScanMetricsSnapshot {
+        let metrics = scan_metrics();
+        ScanMetricsSnapshot {
+            active_slots: metrics.active_slots.load(Ordering::Relaxed),
+            slot_limit: MAX_CONCURRENT_BLOCK_SCANS as u64,
+            low_priority_skips: metrics.low_priority_skips.load(Ordering::Relaxed),
+            admission_wait_ns: metrics.admission_wait_ns.load(Ordering::Relaxed),
+            blocks: metrics.blocks.load(Ordering::Relaxed),
+            footer_cache_hits: metrics.footer_cache_hits.load(Ordering::Relaxed),
+            footer_cache_misses: metrics.footer_cache_misses.load(Ordering::Relaxed),
+            footer_cache_bytes: block::cached_bytes() as u64,
+            footer_load_ns: metrics.footer_load_ns.load(Ordering::Relaxed),
+            index_estimated_bytes: metrics.index_estimated_bytes.load(Ordering::Relaxed),
+            rows_considered: metrics.rows_considered.load(Ordering::Relaxed),
+            rows_returned: metrics.rows_returned.load(Ordering::Relaxed),
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests;

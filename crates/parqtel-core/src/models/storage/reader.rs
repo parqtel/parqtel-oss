@@ -1,4 +1,4 @@
-use super::correlation::{inject_correlation, row_to_correlation};
+use super::correlation::{inject_correlation, row_to_correlation, CorrelationLabels};
 use crate::error::{Error, Result};
 use crate::models::labels::LabelSet;
 use crate::models::logs::LogRecord;
@@ -17,15 +17,29 @@ pub fn row_to_point(
     batch: &RecordBatch,
     row: usize,
 ) -> Result<(String, MetricKind, LabelSet, DataPoint)> {
+    row_to_point_with_labels(batch, row, None)
+}
+
+pub(crate) fn row_to_point_with_labels(
+    batch: &RecordBatch,
+    row: usize,
+    series_labels: Option<LabelSet>,
+) -> Result<(String, MetricKind, LabelSet, DataPoint)> {
+    let schema = batch.schema();
+    let column_index = |name: &str| {
+        schema
+            .index_of(name)
+            .map_err(|_| Error::Arrow(format!("Missing {name} column")))
+    };
     let timestamp_ns = batch
-        .column(0)
+        .column(column_index("timestamp_ns")?)
         .as_any()
         .downcast_ref::<TimestampNanosecondArray>()
         .ok_or_else(|| Error::Arrow("Invalid timestamp column".into()))?
         .value(row);
 
     let metric_name_arr = batch
-        .column(1)
+        .column(column_index("metric_name")?)
         .as_any()
         .downcast_ref::<DictionaryArray<Int32Type>>()
         .ok_or_else(|| Error::Arrow("Invalid metric_name column".into()))?;
@@ -38,7 +52,7 @@ pub fn row_to_point(
         .to_string();
 
     let kind_str = batch
-        .column(2)
+        .column(column_index("metric_kind")?)
         .as_any()
         .downcast_ref::<StringArray>()
         .ok_or_else(|| Error::Arrow("Invalid metric_kind column".into()))?
@@ -52,7 +66,7 @@ pub fn row_to_point(
     };
 
     let resource_attr_arr = batch
-        .column(10)
+        .column(column_index("resource_attributes")?)
         .as_any()
         .downcast_ref::<DictionaryArray<Int32Type>>()
         .ok_or_else(|| Error::Arrow("Invalid resource_attributes column".into()))?;
@@ -66,26 +80,31 @@ pub fn row_to_point(
     let correlation = row_to_correlation(batch, row, 3);
     let resource_attributes = inject_correlation(resource_attributes, correlation);
 
-    let labels_json = batch
-        .column(11)
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .ok_or_else(|| Error::Arrow("Invalid labels column".into()))?
-        .value(row);
-    let labels = LabelSet::from_json(labels_json)?;
+    let labels = match series_labels {
+        Some(labels) => labels,
+        None => {
+            let labels_json = batch
+                .column(column_index("labels")?)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .ok_or_else(|| Error::Arrow("Invalid labels column".into()))?
+                .value(row);
+            LabelSet::from_json(labels_json)?
+        }
+    };
 
     let value_float = batch
-        .column(12)
+        .column(column_index("value_float")?)
         .as_any()
         .downcast_ref::<Float64Array>()
         .ok_or_else(|| Error::Arrow("Invalid value_float column".into()))?;
     let value_int = batch
-        .column(13)
+        .column(column_index("value_int")?)
         .as_any()
         .downcast_ref::<Int64Array>()
         .ok_or_else(|| Error::Arrow("Invalid value_int column".into()))?;
     let value_complex = batch
-        .column(14)
+        .column(column_index("value_complex")?)
         .as_any()
         .downcast_ref::<StringArray>()
         .ok_or_else(|| Error::Arrow("Invalid value_complex column".into()))?;
@@ -105,6 +124,63 @@ pub fn row_to_point(
         resource_attributes,
         DataPoint::new(timestamp_ns, value, labels)?,
     ))
+}
+
+pub(crate) fn metric_group_from_row(
+    batch: &RecordBatch,
+    row: usize,
+) -> Result<(MetricKind, LabelSet)> {
+    let schema = batch.schema();
+    let kind_idx = schema
+        .index_of("metric_kind")
+        .map_err(|_| Error::Arrow("Missing metric_kind column".into()))?;
+    let kind_name = batch
+        .column(kind_idx)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .ok_or_else(|| Error::Arrow("Invalid metric_kind column".into()))?
+        .value(row);
+    let kind = match kind_name {
+        "Gauge" => MetricKind::Gauge,
+        "Sum" => MetricKind::Sum,
+        "Histogram" => MetricKind::Histogram,
+        "Summary" => MetricKind::Summary,
+        _ => {
+            return Err(Error::Arrow(format!(
+                "Invalid metric_kind value: {kind_name}"
+            )))
+        }
+    };
+    let resource_json = dictionary_value_by_name(batch, "resource_attributes", row)
+        .ok_or_else(|| Error::Arrow("Invalid resource_attributes column".into()))?;
+    let resource = LabelSet::from_json(&resource_json)?;
+    let correlation = CorrelationLabels {
+        service_name: dictionary_value_by_name(batch, "service_name", row),
+        service_version: dictionary_value_by_name(batch, "service_version", row),
+        k8s_namespace: dictionary_value_by_name(batch, "k8s_namespace", row),
+        k8s_pod_name: dictionary_value_by_name(batch, "k8s_pod_name", row),
+        k8s_pod_uid: dictionary_value_by_name(batch, "k8s_pod_uid", row),
+        k8s_container_name: dictionary_value_by_name(batch, "k8s_container_name", row),
+        k8s_node_name: dictionary_value_by_name(batch, "k8s_node_name", row),
+    };
+    Ok((kind, inject_correlation(resource, correlation)))
+}
+
+fn dictionary_value_by_name(batch: &RecordBatch, name: &str, row: usize) -> Option<String> {
+    let index = batch.schema().index_of(name).ok()?;
+    let array = batch
+        .column(index)
+        .as_any()
+        .downcast_ref::<DictionaryArray<Int32Type>>()?;
+    if array.is_null(row) {
+        return None;
+    }
+    let values = array.values().as_any().downcast_ref::<StringArray>()?;
+    let key = usize::try_from(array.keys().value(row)).ok()?;
+    if key >= values.len() || values.is_null(key) {
+        return None;
+    }
+    Some(values.value(key).to_string())
 }
 
 /// Reads a single row from an Arrow [RecordBatch] back into a [LogRecord].

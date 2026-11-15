@@ -67,9 +67,18 @@ impl SignalType {
     }
 }
 
-/// Returns the canonical Arrow [Schema] for metric storage.
+/// Returns the Arrow [Schema] for metric chunks and legacy metric blocks.
 pub fn metrics_schema() -> Schema {
-    Schema::new(vec![
+    metrics_schema_with_labels(true)
+}
+
+/// Schema persisted by new indexed metric blocks.
+pub(crate) fn metrics_block_schema() -> Schema {
+    metrics_schema_with_labels(false)
+}
+
+fn metrics_schema_with_labels(include_labels: bool) -> Schema {
+    let mut fields = vec![
         Field::new(
             "timestamp_ns",
             DataType::Timestamp(TimeUnit::Nanosecond, None),
@@ -121,11 +130,16 @@ pub fn metrics_schema() -> Schema {
             DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8)),
             false,
         ),
-        Field::new("labels", DataType::Utf8, false),
+    ];
+    if include_labels {
+        fields.push(Field::new("labels", DataType::Utf8, false));
+    }
+    fields.extend([
         Field::new("value_float", DataType::Float64, true),
         Field::new("value_int", DataType::Int64, true),
         Field::new("value_complex", DataType::Utf8, true),
-    ])
+    ]);
+    Schema::new(fields)
 }
 
 /// Returns the canonical Arrow [Schema] for log storage.
