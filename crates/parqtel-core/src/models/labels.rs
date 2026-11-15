@@ -283,14 +283,32 @@ struct InternShard {
     entries: usize,
 }
 
-/// Shards, and the number of distinct sets each may hold before it is emptied.
-/// 16 x 16K bounds the table at ~262K series (tens of MB).
+/// Shards, and the number of distinct sets the table may hold before a shard is
+/// emptied.
 const INTERN_SHARDS: usize = 16;
-const INTERN_SHARD_CAP: usize = 16 * 1024;
+/// Default total capacity of the table, in label sets.
+pub const DEFAULT_INTERN_CAPACITY: usize = 1 << 20;
+static INTERN_SHARD_CAP: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(DEFAULT_INTERN_CAPACITY / INTERN_SHARDS);
 /// Attribute lists longer than this are not interned.
 const INTERN_MAX_PAIRS: usize = 32;
 
 impl LabelInterner {
+    /// Sets how many distinct label sets the table holds before a shard is
+    /// emptied.
+    ///
+    /// A shard that fills is cleared whole, so a working set larger than the
+    /// capacity gets almost no sharing: every series is rebuilt on every scrape
+    /// and each point keeps its own copy of its labels. Size it to at least the
+    /// number of active series, and twice that when the memory buffer is on,
+    /// because it interns a second set per series with `service.name` added.
+    pub fn set_capacity(total: usize) {
+        INTERN_SHARD_CAP.store(
+            (total / INTERN_SHARDS).max(1),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+
     /// The shared instance.
     pub fn global() -> &'static LabelInterner {
         static GLOBAL: OnceLock<LabelInterner> = OnceLock::new();
@@ -350,7 +368,7 @@ impl LabelInterner {
         }
         let built = build()?;
         let mut guard = shard.lock().unwrap_or_else(|e| e.into_inner());
-        if guard.entries >= INTERN_SHARD_CAP {
+        if guard.entries >= INTERN_SHARD_CAP.load(std::sync::atomic::Ordering::Relaxed) {
             guard.buckets.clear();
             guard.entries = 0;
         }

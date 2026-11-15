@@ -431,6 +431,11 @@
               "type": "integer",
               "description": "WAL fsync interval in milliseconds",
               "minimum": 0
+            },
+            "labelInternerCapacity": {
+              "type": "integer",
+              "description": "Distinct label sets shared across points; at least twice the active series count",
+              "minimum": 0
             }
           }
         },

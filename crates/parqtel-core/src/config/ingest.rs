@@ -73,6 +73,21 @@ pub struct IngestConfig {
     /// one extra lock acquisition per push.
     #[serde(default = "default_rotator_shards")]
     pub rotator_shards: usize,
+    /// How many distinct label sets the process-wide interner holds before it
+    /// starts emptying shards.
+    ///
+    /// Interning lets points of one series share a single copy of their labels.
+    /// A working set larger than this loses that sharing and memory grows with
+    /// points instead of series. Set it to at least twice the active series
+    /// count (each series is interned twice: as received, and with
+    /// `service.name` for the memory buffer). The table holds only sets that
+    /// were actually seen, so a high value costs nothing on a small deployment.
+    #[serde(default = "default_label_interner_capacity")]
+    pub label_interner_capacity: usize,
+}
+
+fn default_label_interner_capacity() -> usize {
+    crate::models::labels::DEFAULT_INTERN_CAPACITY
 }
 
 fn default_max_inflight_flushes() -> usize {
@@ -139,6 +154,7 @@ impl Default for IngestConfig {
             wal_max_segment_bytes: default_wal_max_segment_bytes(),
             tail_sampling: TailSamplingConfig::default(),
             rotator_shards: default_rotator_shards(),
+            label_interner_capacity: default_label_interner_capacity(),
         }
     }
 }

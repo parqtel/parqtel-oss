@@ -323,6 +323,7 @@ mod tests {
             config.wal_max_segment_bytes,
             crate::wal::DEFAULT_MAX_SEGMENT_BYTES
         );
+        assert_eq!(config.label_interner_capacity, 1 << 20);
     }
 
     /// A config file written before the WAL knobs existed must still load,
@@ -341,6 +342,7 @@ mod tests {
             c.wal_max_segment_bytes,
             crate::wal::DEFAULT_MAX_SEGMENT_BYTES
         );
+        assert_eq!(c.label_interner_capacity, 1 << 20);
     }
 
     #[test]
