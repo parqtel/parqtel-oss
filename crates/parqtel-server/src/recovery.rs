@@ -94,6 +94,23 @@ fn finish_replay(
     }
 }
 
+/// Points a WAL record's label sets at shared instances.
+///
+/// Deserialising builds a fresh set for every point, so a replayed backlog held
+/// one copy of the same labels per sample, and each carried its own cached JSON.
+/// The live OTLP path already interns; this gives replay the same sharing.
+fn intern_labels(metric: &mut parqtel_core::Metric) {
+    let interner = parqtel_core::LabelInterner::global();
+    let share = |labels: &parqtel_core::LabelSet| {
+        let pairs: Vec<(&str, &str)> = labels.iter().collect();
+        interner.intern(&pairs).unwrap_or_else(|_| labels.clone())
+    };
+    metric.resource_attributes = share(&metric.resource_attributes);
+    for dp in &mut metric.data_points {
+        dp.labels = share(&dp.labels);
+    }
+}
+
 /// Replays the metrics WAL segment by segment, ingesting each segment before
 /// moving to the next, so recovery flushes as it recovers instead of buffering
 /// a whole-signal backlog before ingesting.
@@ -124,7 +141,8 @@ async fn replay_metrics(
         truncated += stats.truncated_bytes;
         for v in pending.drain(..) {
             match serde_json::from_value::<parqtel_core::Metric>(v) {
-                Ok(m) => {
+                Ok(mut m) => {
+                    intern_labels(&mut m);
                     // One bad record must not strand the rest of the WAL.
                     if let Err(e) = metrics.ingest_metrics(vec![m]).await {
                         tracing::error!(signal = "metrics", "WAL replay: re-ingest failed: {e}");
@@ -272,4 +290,38 @@ pub(crate) async fn replay_all_wals(
     }
 
     out
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+    use parqtel_core::{DataPoint, LabelSet, Metric, MetricValue};
+
+    #[test]
+    fn replayed_points_with_equal_labels_share_one_set() {
+        let point = |ts| DataPoint {
+            timestamp_ns: ts,
+            value: MetricValue::Double(1.0),
+            labels: LabelSet::try_from_iter([("pod", "recovery-test-pod")]).unwrap(),
+        };
+        let mut m = Metric {
+            name: "m".into(),
+            data_points: vec![point(1), point(2)],
+            ..Default::default()
+        };
+        assert_ne!(
+            m.data_points[0].labels.addr(),
+            m.data_points[1].labels.addr()
+        );
+        intern_labels(&mut m);
+        assert_eq!(
+            m.data_points[0].labels.addr(),
+            m.data_points[1].labels.addr()
+        );
+        assert_eq!(
+            m.data_points[0].labels.get("pod"),
+            Some("recovery-test-pod")
+        );
+    }
 }
