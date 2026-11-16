@@ -227,16 +227,13 @@ Metric blocks form two levels. The streaming compactor coalesces canonical
 blocks into 5-minute windows.
 
 ```mermaid
-stateDiagram-v2
-    [*] --> Flushed: ingest flush
-    Flushed: "L0 · m_l0_<start>_<end>_<id>.parquet<br/>written per flush, series-sorted"
-    Flushed --> Normalized: "legacy block<br/>≤500K rows, one per pass"
-    Normalized: "L0-normalised · m_n_…<br/>series order agrees with its index"
-    Normalized --> LevelOne: "streaming k-way merge<br/>within one 5-minute bucket"
-    Flushed --> LevelOne: "streaming k-way merge<br/>within one 5-minute bucket"
-    LevelOne: "L1 · m_l1_…<br/>one 5-minute window per block"
-    LevelOne --> Retired: "sources deleted after<br/>a 5-minute query grace period"
-    Retired --> [*]: retention sweep
+flowchart TD
+    F["Ingest flush"] --> L0["L0 · m_l0_[start]_[end]_[id].parquet<br/>series-sorted by the final query-visible labels"]
+    L0 -->|"legacy block, at most 500K rows<br/>one per pass"| N["L0-normalised · m_n_…<br/>series order agrees with its index"]
+    N -->|"streaming k-way merge<br/>within one 5-minute bucket"| L1["L1 · m_l1_[start]_[end]_[id].parquet<br/>one 5-minute window per block"]
+    L0 -->|"streaming k-way merge<br/>within one 5-minute bucket"| L1
+    L1 -->|"sources deleted after<br/>a 5-minute query grace period"| R["Retired"]
+    R -->|"retention sweep"| X["Removed"]
 ```
 
 **How a merge works.** A streaming k-way merge reads one Arrow batch at a time
