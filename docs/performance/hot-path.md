@@ -3,7 +3,7 @@
 The first round of changes to the ingest and query hot paths.
 Harness: `crates/parqtel-server/examples/perf_bench.rs`
 (`cargo run --release -p parqtel-server --example perf_bench`). Raw output is in
-[`data/`](data/).
+[`data/`](data/) (raw benchmark output).
 
 ## What changed
 

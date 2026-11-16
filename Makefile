@@ -95,6 +95,9 @@ lint: | tools ## rustfmt check + clippy
 bench: | tools ## Run benchmarks
 	cargo bench
 
+docs-check: ## Validate documentation links and anchors (no broken links)
+	@python3 scripts/docs/check_links.py
+
 run: | tools ## Start the server locally from source (default config)
 	cargo run --bin parqtel -- serve
 
