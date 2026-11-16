@@ -292,6 +292,19 @@ Per block, on a representative shape (600 series, 4 label fields):
 `metric_names` dominates *because the same name is stored once per block* — on the
 load stack, where a block spans 50–100 distinct metric names, more so still.
 
+### Update: the dictionary is shared now
+
+The `label_values` half of this was built after all, and the `metric_names`
+half was not needed. `BlockIndex` now owns **one** label-value dictionary per
+signal (10 K values per field) instead of a copy per block, and the sidecar
+shape became `{"blocks": [...], "label_values": {...}}`.
+
+Measured on 97 real blocks, the sidecar went from **73.5 MiB to 12.6 MiB**
+(17 % of its former size) — the per-block copies were ~85 % of it. The loader
+still accepts the legacy bare-array sidecar and folds its per-block values in,
+so an existing sidecar migrates on the first start. Older binaries cannot parse
+the new shape.
+
 ### Why this is recorded rather than built
 
 The fix — a per-block **bloom filter** over metric names, ~10 bits per name
