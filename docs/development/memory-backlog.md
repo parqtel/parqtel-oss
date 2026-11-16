@@ -23,4 +23,5 @@ per series). `scanner/block.rs` re-parses a table on every query when it exceeds
 | 13 | Metrics blocks store labels twice: `labels` column (5.4 B/row, 71% of column bytes) plus the series table | Up to ~5 B/row more | implemented; UAT verification pending |
 
 Done and committed: segment-wise replay, no duplicate replay, replay label sharing,
-`ingest.label_interner_capacity`, jemalloc.
+`ingest.label_interner_capacity`, jemalloc, the process-wide 4-slot scan budget
+(item 1), and the 5-minute L1 block rollup (item 3).

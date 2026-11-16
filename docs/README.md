@@ -41,6 +41,8 @@ Documentation for Parqtel, an open-source SRE telemetry store.
 | [Test plan](development/test-plan.md) | End-to-end scenarios |
 | [CI/CD](development/ci-cd.md) | Pipelines, gates, release process |
 | [Glossary](development/glossary.md) | Terminology |
+| [Efficiency plan](development/efficiency-plan.md) | The measured plan behind the scan budget and the L1 rollup |
+| [Memory backlog](development/memory-backlog.md) | Open memory items and what each one costs |
 
 ## Reference
 
