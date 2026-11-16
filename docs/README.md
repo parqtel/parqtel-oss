@@ -35,6 +35,7 @@ Documentation for Parqtel, an open-source SRE telemetry store.
 | | |
 |---|---|
 | [Architecture](development/architecture.md) | Crates, data flow, storage engine, concurrency model |
+| [Diagrams](development/diagrams.md) | Visual architecture: context, crate graph, data flow, block lifecycle |
 | [Developer guide](development/developer-guide.md) | Local setup, conventions, repository layout |
 | [Testing](development/testing.md) | Test strategy and how to run each layer |
 | [Test plan](development/test-plan.md) | End-to-end scenarios |

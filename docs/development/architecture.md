@@ -2,6 +2,10 @@
 
 This document describes the internal architecture of Parqtel, its crate boundaries, data flow, and key design decisions.
 
+> **Diagrams.** [Diagrams](diagrams.md) holds the visual version of everything
+> below — system context, crate graph, ingest and query paths, block lifecycle,
+> storage layout and admission control — as Mermaid diagrams.
+
 ## High-Level Overview
 
 Parqtel is a Rust workspace organized into focused crates that communicate through well-defined interfaces. The system follows a pipeline architecture: data enters through OTLP endpoints, flows through ingestion and optional pipeline processing, and lands in compressed Parquet blocks on the filesystem.
