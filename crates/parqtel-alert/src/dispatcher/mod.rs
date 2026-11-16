@@ -226,6 +226,87 @@ mod tests {
         cfg
     }
 
+    #[test]
+    fn test_from_config_rejects_invalid_durations() {
+        let metrics = Arc::new(RoutingMetrics::new());
+        for (field, value) in [
+            ("http_timeout", "bad"),
+            ("resolve_timeout", "bad"),
+            ("retry_initial_backoff", "bad"),
+            ("retry_max_backoff", "bad"),
+        ] {
+            let mut cfg = test_config("http://127.0.0.1:1/hook".to_string());
+            match field {
+                "http_timeout" => cfg.global.http_timeout = value.to_string(),
+                "resolve_timeout" => cfg.global.resolve_timeout = value.to_string(),
+                "retry_initial_backoff" => cfg.global.retry_initial_backoff = value.to_string(),
+                _ => cfg.global.retry_max_backoff = value.to_string(),
+            }
+            assert!(matches!(
+                AlertDispatcher::from_config(&cfg, Arc::clone(&metrics)),
+                Err(NotificationError::Config(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn test_from_config_propagates_evaluator_error() {
+        // A routing config `validate()` accepts (dangling receiver is reported,
+        // not rejected here) still fails when the tree compiles.
+        let mut cfg = test_config("http://127.0.0.1:1/hook".to_string());
+        cfg.route.as_mut().unwrap().receiver = Some("missing".to_string());
+        let mut errors = Vec::new();
+        cfg.validate_into("alerts", &mut errors);
+        assert!(!errors.is_empty());
+        assert!(matches!(
+            AlertDispatcher::from_config(&cfg, Arc::new(RoutingMetrics::new())),
+            Err(NotificationError::Config(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_dispatcher_accessors_and_flush_without_groups() {
+        let (url, _rx) = spawn_webhook_receiver().await;
+        let dispatcher =
+            AlertDispatcher::from_config(&test_config(url), Arc::new(RoutingMetrics::new()))
+                .unwrap();
+        assert_eq!(
+            dispatcher
+                .evaluator()
+                .match_routes_only(&BTreeMap::new())
+                .len(),
+            1
+        );
+        assert_eq!(dispatcher.metrics().active_groups(), 0);
+
+        // No groups -> flush enqueues nothing and keeps the gauge at 0.
+        dispatcher.flush_due().await;
+        assert_eq!(dispatcher.metrics().active_groups(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_dispatcher_ingest_into_route_without_receiver() {
+        // Route points at a receiver with no notifier configs -> worker drops the batch.
+        let mut cfg = test_config("http://127.0.0.1:1/hook".to_string());
+        cfg.receivers = vec![ReceiverConfig {
+            name: "wh".to_string(),
+            ..Default::default()
+        }];
+        let metrics = Arc::new(RoutingMetrics::new());
+        let dispatcher = AlertDispatcher::from_config(&cfg, Arc::clone(&metrics)).unwrap();
+
+        dispatcher
+            .ingest_event(make_alert(1, &[("service", "api")]), &[], &[])
+            .await;
+        assert_eq!(metrics.active_groups(), 1);
+        // Delivery finds no registered worker for the route's receiver.
+        dispatcher.flush_due().await;
+        assert!(
+            crate::notifier::build_notifiers(&cfg, reqwest::Client::new()).unwrap()["wh"]
+                .is_empty()
+        );
+    }
+
     #[tokio::test]
     async fn test_dispatcher_silences_inhibits_and_delivers() {
         let (url, mut rx) = spawn_webhook_receiver().await;

@@ -367,6 +367,215 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_backoff_with_jitter_bounds() {
+        // Zero backoff never grows.
+        assert_eq!(backoff_with_jitter(Duration::ZERO, 3, "g"), Duration::ZERO);
+
+        // Non-zero backoff grows by at most 25% (and by at least 1ns jitter slot).
+        let base = Duration::from_millis(100);
+        for attempt in 0..4 {
+            let d = backoff_with_jitter(base, attempt, "alertgroup-1");
+            assert!(d >= base, "{d:?} < {base:?}");
+            assert!(d <= base + Duration::from_millis(25), "{d:?} too large");
+        }
+
+        // Sub-nanosecond-quarter backoffs still produce an in-range value.
+        let tiny = Duration::from_nanos(3);
+        let d = backoff_with_jitter(tiny, 1, "g");
+        assert!(d >= tiny);
+    }
+
+    #[tokio::test]
+    async fn test_deliver_zero_max_attempts_still_sends_once() {
+        let (url, calls) = spawn_sequence_server(vec![(StatusCode::OK, None, "ok")]).await;
+        let notifier = make_webhook("ops", url, true);
+        let metrics = RoutingMetrics::new();
+        let policy = RetryPolicy {
+            initial_backoff: Duration::from_millis(1),
+            max_backoff: Duration::from_millis(5),
+            max_attempts: 0,
+        };
+
+        deliver_with_retry(&notifier, &sample_firing_batch(), &policy, &metrics)
+            .await
+            .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_delivery_queue_unknown_receiver_and_empty_notifier_list() {
+        let metrics = Arc::new(RoutingMetrics::new());
+        let mut map = HashMap::new();
+        // Receiver with no notifiers: the worker exits as soon as the queue closes.
+        map.insert("empty".to_string(), Vec::new());
+        let queue = DeliveryQueue::new(map, RetryPolicy::default(), Arc::clone(&metrics), 1);
+
+        let route = |receiver: &str| ResolvedRoute {
+            route_path_id: "root".to_string(),
+            receiver: receiver.to_string(),
+            group_by: vec![],
+            disable_grouping: false,
+            group_wait: Duration::from_secs(0),
+            group_interval: Duration::from_secs(0),
+            repeat_interval: Duration::from_secs(60),
+        };
+
+        // Unknown receiver -> warn + drop.
+        queue.enqueue(route("nope"), sample_firing_batch());
+
+        // The lone capacity-1 slot is taken by the worker immediately (it has no
+        // notifiers), so this send is either queued or dropped, never panicking.
+        queue.enqueue(route("empty"), sample_firing_batch());
+
+        // A non-zero capacity clamps to at least one slot, so `new(.., 0)` is legal.
+        let zero = DeliveryQueue::new(HashMap::new(), RetryPolicy::default(), metrics, 0);
+        zero.enqueue(route("nope"), sample_firing_batch());
+    }
+
+    #[tokio::test]
+    async fn test_delivery_queue_drops_batch_when_channel_is_full() {
+        // A notifier whose send() blocks forever keeps the worker busy, so the
+        // bounded channel stays full and try_send fails.
+        struct BlockingNotifier;
+        #[async_trait::async_trait]
+        impl Notifier for BlockingNotifier {
+            fn name(&self) -> &str {
+                "blocked"
+            }
+            fn channel_type(&self) -> &'static str {
+                "webhook"
+            }
+            fn send_resolved(&self) -> bool {
+                true
+            }
+            async fn send(&self, _batch: &NotificationBatch) -> Result<(), NotificationError> {
+                std::future::pending::<()>().await;
+                Ok(())
+            }
+        }
+
+        let metrics = Arc::new(RoutingMetrics::new());
+        let mut map = HashMap::new();
+        map.insert(
+            "blocked".to_string(),
+            vec![Arc::new(BlockingNotifier) as Arc<dyn Notifier>],
+        );
+        let queue = DeliveryQueue::new(map, RetryPolicy::default(), Arc::clone(&metrics), 1);
+        let route = ResolvedRoute {
+            route_path_id: "root".to_string(),
+            receiver: "blocked".to_string(),
+            group_by: vec![],
+            disable_grouping: false,
+            group_wait: Duration::from_secs(0),
+            group_interval: Duration::from_secs(0),
+            repeat_interval: Duration::from_secs(60),
+        };
+
+        queue.enqueue(route.clone(), sample_firing_batch());
+        // Let the worker pick up the first batch before filling the channel.
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        queue.enqueue(route.clone(), sample_firing_batch());
+        // Third enqueue cannot fit: capacity 1 already holds the second batch.
+        queue.enqueue(route, sample_firing_batch());
+        assert_eq!(
+            metrics.get_notification_count("blocked", "webhook", "success"),
+            0
+        );
+    }
+
+    /// `handle_seq` replies with the configured `Retry-After` header, or none.
+    #[tokio::test]
+    async fn test_sequence_server_sets_retry_after_header() {
+        let (code, header, _body) = handle_seq(State(SequenceState {
+            calls: Arc::new(AtomicUsize::new(0)),
+            responses: vec![(
+                StatusCode::TOO_MANY_REQUESTS,
+                Some("11".to_string()),
+                "slow".to_string(),
+            )],
+        }))
+        .await;
+        assert_eq!(code, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(header[axum::http::header::RETRY_AFTER], "11");
+
+        let (code, header, _) = handle_seq(State(SequenceState {
+            calls: Arc::new(AtomicUsize::new(9)),
+            responses: Vec::new(),
+        }))
+        .await;
+        assert_eq!(code, StatusCode::OK);
+        assert!(header.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_worker_exit_log_after_queue_close() {
+        let metrics = Arc::new(RoutingMetrics::new());
+        let mut map = HashMap::new();
+        map.insert("empty".to_string(), Vec::new());
+        let queue = DeliveryQueue::new(map, RetryPolicy::default(), Arc::clone(&metrics), 1);
+        // Dropping the queue closes every sender, so the worker's recv() returns None
+        // and the exit branch runs.
+        drop(queue);
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn test_retry_and_failure_log_paths_with_subscriber() {
+        // The retry/exhausted/permanent branches log via `tracing`; with no
+        // subscriber installed llvm-cov reports those statements as missed, so
+        // this test installs a sink subscriber for exactly the span of the test.
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::level_filters::LevelFilter::TRACE)
+            .with_writer(std::io::sink)
+            .finish();
+        let guard = tracing::subscriber::set_default(subscriber);
+
+        let (url, _calls) = spawn_sequence_server(vec![
+            (StatusCode::SERVICE_UNAVAILABLE, None, "busy"),
+            (StatusCode::OK, None, "ok"),
+        ])
+        .await;
+        let notifier = make_webhook("ops", url, true);
+        let metrics = RoutingMetrics::new();
+        let policy = RetryPolicy {
+            initial_backoff: Duration::from_millis(1),
+            max_backoff: Duration::from_millis(2),
+            max_attempts: 2,
+        };
+        deliver_with_retry(&notifier, &sample_firing_batch(), &policy, &metrics)
+            .await
+            .unwrap();
+
+        let (url, _calls) =
+            spawn_sequence_server(vec![(StatusCode::BAD_REQUEST, None, "bad")]).await;
+        deliver_with_retry(
+            &make_webhook("ops", url, true),
+            &sample_firing_batch(),
+            &policy,
+            &metrics,
+        )
+        .await
+        .unwrap_err();
+
+        let (url, _calls) =
+            spawn_sequence_server(vec![(StatusCode::SERVICE_UNAVAILABLE, None, "down")]).await;
+        deliver_with_retry(
+            &make_webhook("ops", url, true),
+            &sample_firing_batch(),
+            &policy,
+            &metrics,
+        )
+        .await
+        .unwrap_err();
+
+        drop(guard);
+    }
+
+    #[tokio::test]
     async fn test_delivery_queue_dispatches_to_worker() {
         let (url, calls) = spawn_sequence_server(vec![(StatusCode::OK, None, "ok")]).await;
         let notifier: Arc<dyn Notifier> = Arc::new(make_webhook("ops", url, true));

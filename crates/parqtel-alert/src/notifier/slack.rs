@@ -239,6 +239,75 @@ mod tests {
         assert_eq!(att["title"], "[RESOLVED] High Error Rate");
     }
 
+    #[test]
+    fn test_slack_payload_fallbacks() {
+        let notifier = SlackNotifier::new(
+            "s".into(),
+            "http://127.0.0.1/hook".into(),
+            None,
+            None,
+            None,
+            false,
+            reqwest::Client::new(),
+        );
+        let field = |p: &SlackPayload, title: &str| {
+            p.attachments[0]
+                .fields
+                .iter()
+                .find(|f| f.title == title)
+                .map(|f| f.value.clone())
+                .unwrap()
+        };
+
+        // No summary annotation -> falls back to the alert count description.
+        let mut batch = sample_firing_batch();
+        batch.alerts[0].annotations.clear();
+        let payload = notifier.build_payload(&batch);
+        assert_eq!(payload.channel, None);
+        assert_eq!(
+            payload.attachments[0].text,
+            "1 alert(s) in group alertgroup-1"
+        );
+        assert_eq!(field(&payload, "Service"), "checkout");
+
+        // `description` annotation is used when `summary` is absent.
+        batch.alerts[0]
+            .annotations
+            .insert("description".into(), "desc text".into());
+        assert_eq!(
+            notifier.build_payload(&batch).attachments[0].text,
+            "High Error Rate: desc text"
+        );
+
+        // group_labels fallbacks: service, then alert labels, then "unknown".
+        batch.group_labels.remove("service.name");
+        batch
+            .group_labels
+            .insert("service".into(), "checkout-svc".into());
+        assert_eq!(
+            field(&notifier.build_payload(&batch), "Service"),
+            "checkout-svc"
+        );
+        batch.group_labels.clear();
+        assert_eq!(
+            field(&notifier.build_payload(&batch), "Service"),
+            "checkout"
+        );
+        batch.alerts[0].labels.clear();
+        assert_eq!(field(&notifier.build_payload(&batch), "Service"), "unknown");
+
+        // Value formatting: trailing zeros trimmed, missing values render "n/a".
+        batch.alerts[0].value = Some(1.5);
+        assert_eq!(field(&notifier.build_payload(&batch), "Value"), "1.5");
+        batch.alerts[0].value = Some(2.0);
+        assert_eq!(field(&notifier.build_payload(&batch), "Value"), "2");
+        batch.alerts[0].value = None;
+        assert_eq!(field(&notifier.build_payload(&batch), "Value"), "n/a");
+        batch.alerts.clear();
+        assert_eq!(field(&notifier.build_payload(&batch), "Value"), "n/a");
+        assert_eq!(field(&notifier.build_payload(&batch), "Labels"), "none");
+    }
+
     #[tokio::test]
     async fn test_slack_http_error_classification() {
         let (url_429, _rx) =

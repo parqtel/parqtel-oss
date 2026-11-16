@@ -226,6 +226,82 @@ mod tests {
     }
 
     #[test]
+    fn test_compile_propagates_tree_and_inhibition_errors() {
+        // Root receiver that does not exist -> routing tree compile error.
+        let mut cfg = make_cfg();
+        cfg.route.as_mut().unwrap().receiver = Some("missing".to_string());
+        assert!(matches!(
+            RoutingEvaluator::compile(&cfg),
+            Err(NotificationError::Config(_))
+        ));
+
+        // Invalid inhibit matcher -> inhibition compile error.
+        let mut cfg = make_cfg();
+        cfg.inhibit_rules[0].source_matchers = vec!["not a matcher".to_string()];
+        assert!(matches!(
+            RoutingEvaluator::compile(&cfg),
+            Err(NotificationError::Config(_))
+        ));
+
+        // Invalid inhibit regex -> inhibition compile error from the regex branch.
+        let mut cfg = make_cfg();
+        cfg.inhibit_rules[0].source_matchers = vec!["severity =~ [unclosed".to_string()];
+        assert!(matches!(
+            RoutingEvaluator::compile(&cfg),
+            Err(NotificationError::Config(_))
+        ));
+
+        // `new` stores pre-compiled components as given.
+        let tree = CompiledRoutingTree::compile(&make_cfg()).unwrap();
+        let inhibition = InhibitionEvaluator::compile(&[]).unwrap();
+        let eval = RoutingEvaluator::new(tree, inhibition);
+        assert_eq!(
+            eval.tree()
+                .evaluate(&labels(&[("severity", "critical")]))
+                .len(),
+            1
+        );
+        assert!(!eval
+            .inhibition()
+            .is_inhibited(&labels(&[("severity", "warning")]), 1, &[]));
+        assert!(RoutingEvaluator::default()
+            .match_routes_only(&labels(&[("severity", "critical")]))
+            .is_empty());
+    }
+
+    #[test]
+    fn test_silence_requires_all_match_labels() {
+        let eval = RoutingEvaluator::compile(&make_cfg()).unwrap();
+        let silence = SilenceConfig {
+            name: "svc".into(),
+            created_by: "ops".into(),
+            match_labels: labels(&[("service", "api")]),
+            starts_at: 0,
+            ends_at: 1000,
+        };
+        // Label map lacks the silence's label -> not silenced, routes evaluated.
+        let res = eval.evaluate(
+            &labels(&[("severity", "warning")]),
+            2,
+            std::slice::from_ref(&silence),
+            &[],
+            500,
+        );
+        assert!(!res.silenced);
+        assert_eq!(res.matched_routes[0].receiver, "default");
+
+        // Exact label value matches -> silenced.
+        let res = eval.evaluate(
+            &labels(&[("service", "api"), ("severity", "warning")]),
+            2,
+            &[silence],
+            &[],
+            500,
+        );
+        assert!(res.silenced);
+    }
+
+    #[test]
     fn test_match_routes_only_ignores_silences_and_inhibition() {
         let eval = RoutingEvaluator::compile(&make_cfg()).unwrap();
         let alert_labels = labels(&[("severity", "warning"), ("service", "api")]);

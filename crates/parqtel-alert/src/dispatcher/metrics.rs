@@ -161,6 +161,7 @@ fn escape_label_value(val: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
 
     #[test]
@@ -187,6 +188,32 @@ mod tests {
             1
         );
         assert_eq!(metrics.active_groups(), 7);
+    }
+
+    #[test]
+    fn test_escape_label_value_backslash() {
+        assert_eq!(escape_label_value(r"a\b"), r"a\\b");
+        assert_eq!(escape_label_value("q\"x\ny"), "q\\\"x\\ny");
+        assert_eq!(escape_label_value("plain"), "plain");
+    }
+
+    #[test]
+    fn test_poisoned_lock_falls_back_to_zero() {
+        let metrics = RoutingMetrics::new();
+        metrics.inc_notification("ops", "slack", "success");
+        // Poison the inner mutex so the `else` fallbacks run.
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let guard = metrics.inner.lock();
+            assert!(guard.is_ok());
+            panic!("poison the metrics lock");
+        }));
+        assert_eq!(metrics.get_notification_count("ops", "slack", "success"), 0);
+        // Inc/observe/render become no-ops but must not panic.
+        metrics.inc_notification("ops", "slack", "success");
+        metrics.observe_duration("ops", "slack", 1.0);
+        assert!(!metrics
+            .render_prometheus()
+            .contains("parqtel_alert_notifications_total{"));
     }
 
     #[test]

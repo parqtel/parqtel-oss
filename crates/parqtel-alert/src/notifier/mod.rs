@@ -302,9 +302,12 @@ pub(crate) mod test_util {
             .with_state(state);
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            let _ = axum::serve(listener, app).await;
-        });
+        // Detached on purpose: tests never wait for the server to shut down.
+        let served = tokio::spawn(std::future::IntoFuture::into_future(axum::serve(
+            listener, app,
+        )));
+        // Observe the task handle's completion instead of discarding it with `let _`.
+        tokio::spawn(async move { served.await.is_ok() });
         (format!("http://{addr}/hook"), rx)
     }
 
@@ -534,6 +537,180 @@ mod tests {
         assert!(!list[1].send_resolved());
         assert_eq!(list[2].channel_type(), "teams");
         assert_eq!(list[3].channel_type(), "webhook");
+    }
+
+    #[tokio::test]
+    async fn test_classify_http_status_outside_error_ranges_is_transient() {
+        // 3xx is neither success nor client/server error -> transient with the code.
+        let (url, _rx) = spawn_mock_server(StatusCode::MULTIPLE_CHOICES, None, "").await;
+        let resp = reqwest::Client::new()
+            .post(&url)
+            .json(&serde_json::json!({}))
+            .send()
+            .await
+            .unwrap();
+        let err = classify_http_response(resp).await.unwrap_err();
+        assert!(matches!(
+            err,
+            NotificationError::Transient {
+                status: Some(300),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_format_batch_title_and_labels_edge_cases() {
+        let mut batch = sample_firing_batch();
+        batch.group_labels.clear();
+        assert_eq!(format_labels(&batch.group_labels), "none");
+        batch.group_labels.insert("b".into(), "2".into());
+        batch.group_labels.insert("a".into(), "1".into());
+        assert_eq!(format_labels(&batch.group_labels), "a=1, b=2");
+
+        // Empty rule name falls back to the group key.
+        batch.alerts[0].rule_name.clear();
+        assert_eq!(format_batch_title(&batch), "[FIRING:1] alertgroup-1");
+        // No alerts falls back to the group key; firing count floors at 1.
+        batch.alerts.clear();
+        assert_eq!(format_batch_title(&batch), "[FIRING:1] alertgroup-1");
+        batch.status = "resolved".into();
+        assert_eq!(format_batch_title(&batch), "[RESOLVED] alertgroup-1");
+    }
+
+    #[test]
+    fn test_highest_severity_and_severity_str() {
+        let mut warning = sample_firing_batch();
+        warning.alerts[0].severity = Severity::Warning;
+        assert_eq!(highest_severity(&[]), Severity::Info);
+        assert_eq!(highest_severity(&warning.alerts), Severity::Warning);
+
+        let mut info = warning.clone();
+        info.alerts[0].severity = Severity::Info;
+        assert_eq!(highest_severity(&info.alerts), Severity::Info);
+
+        assert_eq!(severity_str(Severity::Info), "info");
+        assert_eq!(severity_str(Severity::Warning), "warning");
+        assert_eq!(severity_str(Severity::Critical), "critical");
+    }
+
+    #[test]
+    fn test_build_notifiers_config_errors_for_each_channel() {
+        let build = |receiver: ReceiverConfig| {
+            let mut cfg = AlertmanagerRoutingConfig::default();
+            cfg.receivers.push(receiver);
+            build_notifiers(&cfg, reqwest::Client::new()).err().unwrap()
+        };
+        let missing = "${PARQTEL_NONEXISTENT_SECRET_99999}";
+
+        // pagerduty routing key
+        assert!(matches!(
+            build(ReceiverConfig {
+                name: "pd".into(),
+                pagerduty_configs: vec![PagerDutyReceiverConfig {
+                    routing_key: missing.into(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            NotificationError::Config(_)
+        ));
+
+        // pagerduty url
+        assert!(matches!(
+            build(ReceiverConfig {
+                name: "pd".into(),
+                pagerduty_configs: vec![PagerDutyReceiverConfig {
+                    routing_key: "rk".into(),
+                    url: Some(missing.into()),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            NotificationError::Config(_)
+        ));
+
+        // teams webhook url
+        assert!(matches!(
+            build(ReceiverConfig {
+                name: "teams".into(),
+                teams_configs: vec![TeamsReceiverConfig {
+                    webhook_url: missing.into(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            NotificationError::Config(_)
+        ));
+
+        // webhook url
+        assert!(matches!(
+            build(ReceiverConfig {
+                name: "wh".into(),
+                webhook_configs: vec![WebhookReceiverConfig {
+                    url: missing.into(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            NotificationError::Config(_)
+        ));
+
+        // webhook header value
+        assert!(matches!(
+            build(ReceiverConfig {
+                name: "wh".into(),
+                webhook_configs: vec![WebhookReceiverConfig {
+                    url: "http://127.0.0.1/hook".into(),
+                    headers: BTreeMap::from([("X-Token".to_string(), missing.to_string())]),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            NotificationError::Config(_)
+        ));
+
+        // webhook with a bad header name surfaces the notifier's Config error
+        assert!(matches!(
+            build(ReceiverConfig {
+                name: "wh".into(),
+                webhook_configs: vec![WebhookReceiverConfig {
+                    url: "http://127.0.0.1/hook".into(),
+                    headers: BTreeMap::from([("bad header".to_string(), "v".to_string())]),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            NotificationError::Config(_)
+        ));
+    }
+
+    #[test]
+    fn test_build_notifiers_defaults_for_optional_fields() {
+        let mut cfg = AlertmanagerRoutingConfig::default();
+        cfg.receivers.push(ReceiverConfig {
+            name: "bare".into(),
+            pagerduty_configs: vec![PagerDutyReceiverConfig {
+                routing_key: "rk".into(),
+                url: None,
+                severity: None,
+                send_resolved: false,
+            }],
+            teams_configs: vec![TeamsReceiverConfig {
+                webhook_url: "http://127.0.0.1/teams".into(),
+                title: None,
+                send_resolved: false,
+            }],
+            ..Default::default()
+        });
+
+        let built = build_notifiers(&cfg, reqwest::Client::new()).unwrap();
+        let list = built.get("bare").unwrap();
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].channel_type(), "pagerduty");
+        assert!(!list[0].send_resolved());
+        assert_eq!(list[1].channel_type(), "teams");
+        assert!(!list[1].send_resolved());
     }
 
     #[test]

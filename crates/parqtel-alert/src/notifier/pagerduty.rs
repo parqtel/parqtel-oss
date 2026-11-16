@@ -201,6 +201,58 @@ mod tests {
     }
 
     #[test]
+    fn test_pagerduty_source_fallback_chain() {
+        let notifier = PagerDutyNotifier::new(
+            "pd".into(),
+            "rk".into(),
+            Some("  ".into()),
+            None,
+            false,
+            reqwest::Client::new(),
+        );
+        // Blank url falls back to the default endpoint.
+        assert_eq!(notifier.url, DEFAULT_PAGERDUTY_URL);
+
+        let mut batch = sample_firing_batch();
+        let source = |b: &NotificationBatch| notifier.build_event(b).payload.source;
+
+        // group_labels: service.name > service > host
+        assert_eq!(source(&batch), "checkout");
+        batch.group_labels.remove("service.name");
+        batch
+            .group_labels
+            .insert("service".into(), "checkout-svc".into());
+        assert_eq!(source(&batch), "checkout-svc");
+        batch.group_labels.remove("service");
+        batch.group_labels.insert("host".into(), "node-1".into());
+        assert_eq!(source(&batch), "node-1");
+
+        // Falls back to the first alert's labels.
+        batch.group_labels.clear();
+        assert_eq!(source(&batch), "checkout");
+        batch.alerts[0].labels.remove("service.name");
+        batch.alerts[0]
+            .labels
+            .insert("service".into(), "alert-svc".into());
+        assert_eq!(source(&batch), "alert-svc");
+        batch.alerts[0].labels.remove("service");
+        batch.alerts[0]
+            .labels
+            .insert("host".into(), "alert-host".into());
+        assert_eq!(source(&batch), "alert-host");
+
+        // Nothing usable -> "parqtel".
+        batch.alerts[0].labels.clear();
+        assert_eq!(source(&batch), "parqtel");
+
+        // No alerts at all -> "parqtel" and a timestamp taken from now.
+        batch.alerts.clear();
+        let event = notifier.build_event(&batch);
+        assert_eq!(event.payload.source, "parqtel");
+        assert!(!event.payload.timestamp.is_empty());
+    }
+
+    #[test]
     fn test_pagerduty_default_url_and_severity_override() {
         let notifier = PagerDutyNotifier::new(
             "pd".into(),

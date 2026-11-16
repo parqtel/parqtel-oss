@@ -90,7 +90,7 @@ impl MatcherSet {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
 
     fn labels(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
@@ -176,6 +176,11 @@ mod tests {
         assert!(CompiledMatcher::compile("=val").is_err());
         assert!(CompiledMatcher::compile("service =~ [invalid").is_err());
         assert!(CompiledMatcher::compile("service !~ (unclosed").is_err());
+
+        // The regex layer's own error arm (lines 24-28) cannot run: every value
+        // that would fail `Regex::new("^(?:value)$")` is already rejected by
+        // `parse_matcher_str`, which compiles the identical anchored pattern.
+        assert!(CompiledMatcher::compile("service =~ 'a\\q'").is_err());
     }
 
     #[test]

@@ -234,6 +234,49 @@ mod tests {
         assert_eq!(card["body"][1]["facts"][1]["value"], "resolved");
     }
 
+    #[test]
+    fn test_teams_empty_alert_list_renders_none() {
+        let notifier = TeamsNotifier::new(
+            "t".into(),
+            "http://127.0.0.1/hook".into(),
+            Some(String::new()),
+            false,
+            reqwest::Client::new(),
+        );
+        let mut batch = sample_firing_batch();
+        batch.alerts.clear();
+        batch.group_labels.clear();
+
+        let json = serde_json::to_value(notifier.build_message(&batch)).unwrap();
+        // Empty (not absent) title override falls back to the plain batch title.
+        assert_eq!(
+            json["attachments"][0]["content"]["body"][0]["text"],
+            "[FIRING:1] alertgroup-1"
+        );
+        let body = &json["attachments"][0]["content"]["body"][1]["facts"];
+        assert_eq!(body[2]["title"], "Labels");
+        assert_eq!(body[2]["value"], "none");
+        assert_eq!(body[3]["title"], "Alerts");
+        assert_eq!(body[3]["value"], "none");
+    }
+
+    #[test]
+    fn test_teams_alert_summary_without_value() {
+        let notifier = TeamsNotifier::new(
+            "t".into(),
+            "http://127.0.0.1/hook".into(),
+            None,
+            false,
+            reqwest::Client::new(),
+        );
+        let mut batch = sample_firing_batch();
+        batch.alerts[0].value = None;
+
+        let json = serde_json::to_value(notifier.build_message(&batch)).unwrap();
+        let facts = &json["attachments"][0]["content"]["body"][1]["facts"];
+        assert_eq!(facts[3]["value"], "High Error Rate [firing]");
+    }
+
     #[tokio::test]
     async fn test_teams_http_error_classification() {
         let (url_429, _rx) =

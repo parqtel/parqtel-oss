@@ -537,6 +537,150 @@ mod tests {
         assert!(grp.resolved_at.is_some());
     }
 
+    #[test]
+    fn test_new_group_ignored_when_max_active_groups_is_zero() {
+        let mut mgr = GroupManager::new(0, Duration::from_secs(60));
+        let route = sample_route("ops", &["service"], false);
+        let a1 = sample_alert(1, AlertState::Firing, &[("service", "api")]);
+        mgr.ingest(route.clone(), a1, Instant::now());
+        assert_eq!(mgr.active_count(), 0);
+
+        // An already-known key is still updated even with a zero budget.
+        let mut mgr = GroupManager::new(1, Duration::from_secs(60));
+        let a1 = sample_alert(1, AlertState::Firing, &[("service", "api")]);
+        let (key, _) = compute_group_key(&route, &a1);
+        mgr.ingest(route.clone(), a1, Instant::now());
+        mgr.max_active_groups = 0;
+        mgr.ingest(
+            route,
+            sample_alert(1, AlertState::Resolved, &[("service", "api")]),
+            Instant::now(),
+        );
+        assert_eq!(mgr.active_count(), 1);
+        assert_eq!(mgr.get(&key).unwrap().phase, GroupPhase::Resolved);
+    }
+
+    #[tokio::test]
+    async fn test_resolved_eventually_gc_even_without_further_notification() {
+        tokio::time::pause();
+        let mut mgr = GroupManager::new(10, Duration::from_secs(60));
+        let route = sample_route("ops", &["service"], false);
+        let a1 = sample_alert(1, AlertState::Firing, &[("service", "api")]);
+        let (key, _) = compute_group_key(&route, &a1);
+
+        mgr.ingest(route.clone(), a1, Instant::now());
+        tokio::time::advance(Duration::from_secs(30)).await;
+        assert_eq!(mgr.collect_due_batches(Instant::now()).len(), 1);
+
+        // Resolve -> dirty, but the resolved group is never notified again because
+        // the caller stops flushing; retention still expires it on the next tick.
+        mgr.ingest(
+            route,
+            sample_alert(1, AlertState::Resolved, &[("service", "api")]),
+            Instant::now(),
+        );
+        assert_eq!(mgr.get(&key).unwrap().phase, GroupPhase::Resolved);
+        tokio::time::advance(Duration::from_secs(61)).await;
+        assert_eq!(mgr.collect_due_batches(Instant::now()).len(), 1);
+        tokio::time::advance(Duration::from_secs(59)).await;
+        assert!(mgr.collect_due_batches(Instant::now()).is_empty());
+        tokio::time::advance(Duration::from_secs(2)).await;
+        assert!(mgr.collect_due_batches(Instant::now()).is_empty());
+        assert_eq!(mgr.active_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_empty_member_set_reports_no_firing_and_resolves() {
+        tokio::time::pause();
+        let mut mgr = GroupManager::new(10, Duration::from_secs(600));
+        let route = sample_route("ops", &["service"], false);
+        let a1 = sample_alert(1, AlertState::Resolved, &[("service", "api")]);
+        let (key, _) = compute_group_key(&route, &a1);
+        mgr.ingest(route, a1, Instant::now());
+
+        // Drop the only member: the group now has no members at all.
+        mgr.groups.get_mut(&key).unwrap().members.clear();
+        let group = mgr.get(&key).unwrap();
+        assert!(!group.all_resolved());
+        assert!(!group.has_firing());
+        let batch = group.to_notification_batch();
+        assert_eq!(batch.status, "resolved");
+        assert!(batch.alerts.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_collect_due_batches_orders_by_route_path_then_hash() {
+        tokio::time::pause();
+        let mut mgr = GroupManager::new(10, Duration::from_secs(600));
+        let route_b = ResolvedRoute {
+            route_path_id: "root.1".to_string(),
+            ..sample_route("ops", &["service"], false)
+        };
+        let route_a = sample_route("ops", &["service"], false);
+
+        // Insert in reverse order so sorting has to reorder the keys, and give the
+        // earlier route two groups sharing a route_path_id to hit the hash compare.
+        mgr.ingest(
+            route_b.clone(),
+            sample_alert(3, AlertState::Firing, &[("service", "s3")]),
+            Instant::now(),
+        );
+        mgr.ingest(
+            route_a.clone(),
+            sample_alert(2, AlertState::Firing, &[("service", "s2")]),
+            Instant::now(),
+        );
+        mgr.ingest(
+            route_a.clone(),
+            sample_alert(1, AlertState::Firing, &[("service", "s1")]),
+            Instant::now(),
+        );
+        assert_eq!(mgr.active_count(), 3);
+
+        tokio::time::advance(Duration::from_secs(30)).await;
+        let batches = mgr.collect_due_batches(Instant::now());
+        assert_eq!(batches.len(), 3);
+        // Both root.0 groups come before the root.1 group, bit-identical order each tick.
+        assert_eq!(batches[0].0.route_path_id, "root.0");
+        assert_eq!(batches[1].0.route_path_id, "root.0");
+        assert_eq!(batches[2].0.route_path_id, "root.1");
+        let keys: Vec<&str> = batches.iter().map(|(_, b)| b.group_key.as_str()).collect();
+        let mut sorted = keys.clone();
+        sorted.sort_unstable();
+        assert_eq!(keys, sorted);
+    }
+
+    #[tokio::test]
+    async fn test_repeat_interval_skipped_when_nothing_firing_and_dirty_resolved_waits() {
+        tokio::time::pause();
+        let mut mgr = GroupManager::new(10, Duration::from_secs(600));
+        let route = sample_route("ops", &["service"], false);
+        let a1 = sample_alert(1, AlertState::Firing, &[("service", "api")]);
+        mgr.ingest(route.clone(), a1, Instant::now());
+        tokio::time::advance(Duration::from_secs(30)).await;
+        assert_eq!(mgr.collect_due_batches(Instant::now()).len(), 1);
+
+        // No change while firing -> repeat_interval (300s) re-notifies.
+        tokio::time::advance(Duration::from_secs(299)).await;
+        assert!(mgr.collect_due_batches(Instant::now()).is_empty());
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert_eq!(mgr.collect_due_batches(Instant::now()).len(), 1);
+
+        // Resolve: dirty, but inside group_interval -> nothing due yet.
+        mgr.ingest(
+            route.clone(),
+            sample_alert(1, AlertState::Resolved, &[("service", "api")]),
+            Instant::now(),
+        );
+        tokio::time::advance(Duration::from_secs(59)).await;
+        assert!(mgr.collect_due_batches(Instant::now()).is_empty());
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert_eq!(mgr.collect_due_batches(Instant::now()).len(), 1);
+        // Clean, resolved, member resolved -> no further repeats.
+        tokio::time::advance(Duration::from_secs(300)).await;
+        assert!(mgr.collect_due_batches(Instant::now()).is_empty());
+    }
+
     #[tokio::test]
     async fn test_eviction_prefers_resolved_then_oldest_active() {
         tokio::time::pause();

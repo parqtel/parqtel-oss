@@ -115,26 +115,34 @@ mod tests {
     #[test]
     fn test_webhook_rejects_invalid_headers() {
         let bad_name = BTreeMap::from([("bad header name".to_string(), "val".to_string())]);
-        let err = WebhookNotifier::new(
+        let bad_name_err = WebhookNotifier::new(
             "wh".into(),
             "http://127.0.0.1/hook".into(),
             false,
             bad_name,
             reqwest::Client::new(),
         )
-        .unwrap_err();
-        assert!(matches!(err, NotificationError::Config(_)));
+        .unwrap_err()
+        .to_string();
+        assert!(
+            bad_name_err.contains("invalid webhook header name 'bad header name'"),
+            "{bad_name_err}"
+        );
 
         let bad_val = BTreeMap::from([("X-Good".to_string(), "bad\nvalue".to_string())]);
-        let err = WebhookNotifier::new(
+        let bad_val_err = WebhookNotifier::new(
             "wh".into(),
             "http://127.0.0.1/hook".into(),
             false,
             bad_val,
             reqwest::Client::new(),
         )
-        .unwrap_err();
-        assert!(matches!(err, NotificationError::Config(_)));
+        .unwrap_err()
+        .to_string();
+        assert!(
+            bad_val_err.contains("invalid webhook header value for 'X-Good'"),
+            "{bad_val_err}"
+        );
     }
 
     #[tokio::test]
