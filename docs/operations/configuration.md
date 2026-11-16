@@ -3,7 +3,7 @@
 Parqtel uses [Figment](https://github.com/SergioBenitez/Figment) for layered configuration. Settings are resolved in this priority order (highest wins):
 
 1. **CLI flags** — `--bind`, `--data-dir`, `--config`, `--log-level`
-2. **Environment variables** — prefixed with `PARQTEL__`, using `__` as section separator
+2. **Environment variables** — prefixed with `PARQTEL__`, using `__` as section separator (`PARQTEL_SERVER__BIND_ADDRESS` with a single underscore is accepted as an alias)
 3. **TOML config file** — optional; specified via `--config` / `PARQTEL_CONFIG`, or auto-detected at `config/default.toml` if present (not shipped by default)
 4. **Built-in defaults** — hardcoded in the source
 
@@ -29,7 +29,7 @@ max_rows_per_block = 1000000
 compression = "zstd"              # zstd | snappy | lz4 | none
 compression_level = 1             # optional zstd level (1-22); unset = codec default
 retention_days = 7
-compaction_interval_secs = 300    # 5 minutes
+compaction_interval_secs = 300    # 5 minutes (floored at 60 s)
 row_group_size = 100000
 compaction_max_merge_blocks = 12  # max source blocks merged in one pass
 compaction_max_merges_per_pass = 8 # max merges one cycle performs
@@ -81,8 +81,8 @@ otlp_enabled = false
 otlp_endpoint = "http://127.0.0.1:4317"  # http:// = plaintext gRPC; https:// = TLS
 otlp_trace_level = "info"          # span level exported; independent of log_level
 export_interval_secs = 30          # SLI metric push interval
-profiling_enabled = false          # /debug/pprof/* endpoints; 404 while disabled
-profiling_frequency = 99           # CPU sampling frequency (Hz)
+profiling_enabled = false          # /debug/pprof/profile and /summary; 404 while disabled
+profiling_frequency = 99           # CPU sampling frequency in Hz (10-999)
 
 [alerts]
 rules_dir = "rules"
@@ -105,7 +105,7 @@ exclude = []
 enabled = true
 auto_draft = true
 postmortem_delay_minutes = 5
-template_path = ""
+# template_path = ""             # unset by default
 auto_publish_notion = false
 auto_publish_gdocs = false
 auto_publish_slack = true
@@ -115,14 +115,10 @@ min_severity = "warning"
 max_knowledge_entries = 1000
 
 [alerts.notifications]
-dedup_flush_interval_secs = 300
-max_concurrent_sends = 10
-send_timeout_secs = 30
-self_monitoring_failure_threshold = 0.5
-
-[alerts.notifications.egress]
-allow_private = false
-allow_hosts = ["*.internal.example"]
+send_timeout_secs = 30            # the only key this build reads
+# dedup_flush_interval_secs = 300
+# max_concurrent_sends = 10
+# self_monitoring_failure_threshold = 0.5
 # [[alerts.notifications.routes]]
 # name = "slack-critical"
 # match_severity = "critical"
@@ -228,7 +224,7 @@ key_path = "/etc/parqtel/tls.key"
 | `compression` | String | `"zstd"` | Parquet compression: `zstd`, `snappy`, `lz4`, `none` |
 | `compression_level` | Integer | unset | Compression level for `zstd` (`1`–`22`). Unset uses the codec default. Lower levels encode faster and compress less; use a low level for frequently rewritten blocks |
 | `retention_days` | Integer | `7` | Days to retain metric data |
-| `compaction_interval_secs` | Integer | `300` | Interval between compaction passes. Each pass merges small log blocks, rolls metric blocks up into 5-minute L1 windows, and runs the tiered log merge. Lower it to roll up sooner; raise it on a store where each pass is expensive |
+| `compaction_interval_secs` | Integer | `300` | Interval between compaction passes. Each pass merges small log blocks, rolls metric blocks up into 5-minute L1 windows, and runs the tiered log merge. Lower it to roll up sooner; raise it on a store where each pass is expensive. The interval is floored at 60 s; the logs compactor has its own interval, default 1 hour |
 | `row_group_size` | Integer | `100000` | Rows per Parquet row group. Must be ≤ `max_rows_per_block` — this is what row-group pruning depends on, so a too-large value silently costs query time |
 | `compaction_max_merge_blocks` | Integer | `12` | Max source blocks merged into one compacted block. Too few and the small-block population grows faster than compaction removes it |
 | `compaction_max_merges_per_pass` | Integer | `8` | Max merges one compaction cycle performs. Bounds the disk I/O a single cycle can take |
@@ -286,7 +282,7 @@ format = "json"          # only json is implemented
 |-----|------|---------|-------------|
 | `max_body_size` | Integer | `10485760` | Maximum request body size in bytes (10 MB) |
 | `wal_enabled` | Boolean | `true` | Write-ahead log for metrics. Bounds crash loss to the sync interval instead of the whole block window. A WAL that cannot be opened **fails startup** rather than silently accepting unrecoverable data. **Also gates the background flush worker**: the worker acknowledges a request once the WAL has its rows rather than once the block is on disk, which is only sound with a WAL. Setting this `false` disables the worker too and flushing falls back to synchronous — still acknowledged only once the block is durable |
-| `max_inflight_flushes` | Integer | `4` | Max block encodes in flight for the background flush worker, which also bounds its queue. When the queue is full a flush encodes inline, so backpressure degrades to synchronous rather than growing a backlog. Requires `wal_enabled` |
+| `max_inflight_flushes` | Integer | `4` | Max block encodes in flight for the background flush worker, which also bounds its queue. When the queue is full a flush encodes inline, so backpressure degrades to synchronous rather than growing a backlog. The worker only starts when `wal_enabled` is `true` — with the WAL off, flushing falls back to synchronous. This is a runtime consequence, not a startup validation error |
 | `wal_sync_mode` | String | `interval` | `none` (write only — survives a *process* crash, not a machine loss), `interval` (periodic `fsync`, the default), `always` (fsync per batch) |
 | `wal_sync_interval_ms` | Integer | `1000` | How often the WAL is `fsync`ed in `interval` mode |
 | `wal_max_segment_bytes` | Integer | `67108864` | Size at which the WAL rolls to a new segment. Segments are deleted once the commit point passes them, so the on-disk WAL stays bounded |
@@ -349,11 +345,11 @@ Per-service overrides; each entry fully replaces the global policy for that serv
 | `otlp_enabled` | Boolean | `false` | Export Parqtel's own traces + SLI metrics over OTLP/gRPC |
 | `otlp_endpoint` | String | `"http://127.0.0.1:4317"` | OTLP/gRPC collector endpoint (`http://` = plaintext, `https://` = TLS) |
 | `otlp_trace_level` | String | `"info"` | Minimum span level exported over OTLP — independent of `log_level`, so trace export survives a raised console level |
-| `export_interval_secs` | Integer | `30` | SLI metric push interval (seconds) |
-| `profiling_enabled` | Boolean | `false` | Enable the `/debug/pprof/{profile,summary,memory}` endpoints (they 404 while disabled) |
-| `profiling_frequency` | Integer | `99` | CPU sampling frequency in Hz (1–1000) |
+| `export_interval_secs` | Integer | `30` | SLI metric push interval (seconds). Values outside 5–300 are clamped |
+| `profiling_enabled` | Boolean | `false` | Enable the `/debug/pprof/profile` and `/debug/pprof/summary` endpoints (they 404 while disabled). `/debug/pprof/memory` is always available |
+| `profiling_frequency` | Integer | `99` | CPU sampling frequency in Hz. Values outside 10–999 are clamped |
 
-> **Operational note**: when `otlp_enabled = true` but the OTLP SDK fails to initialise (e.g. an unreachable collector), the server logs a warning and continues with console logs only — ingestion is never blocked by self-telemetry.
+> **Operational note**: when `otlp_enabled = true` but the OTLP SDK fails to initialise (e.g. an unreachable collector), the server prints the reason to **stderr** and continues with console logs only — ingestion is never blocked by self-telemetry. The message is not part of the structured log stream and is not filtered by `log_level`.
 
 ### Dataset isolation
 
@@ -456,11 +452,11 @@ values. Webhook URLs are redacted before they reach the file.
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `rules_dir` | String | `"rules"` | Directory containing alert rule YAML files |
-| `noise_window_firings` | Integer | `30` | Reserved; no noise detector exists in 0.3.x |
-| `refinement_enabled` | Boolean | `true` | Enable automatic alert refinement |
-| `noise_suppression_threshold` | Float | `0.7` | Reserved; no noise detector exists in 0.3.x |
-| `allow_runtime_updates` | Boolean | `false` | Permit REST writes to alert routes, recording rules, and pipelines. Keep off unless an authenticating proxy fronts the API. |
-| `recording_rules_enabled` | Boolean | `true` | Evaluate `rules/recording/` groups on their intervals and write results through the metrics ingest path |
+| `noise_window_firings` | Integer | `30` | Number of firings in window to calculate noise score. Parsed, but not read by this build
+| `refinement_enabled` | Boolean | `true` | Enable automatic alert refinement. Parsed, but not read by this build
+| `noise_suppression_threshold` | Float | `0.7` | Threshold for noise suppression (0.0–1.0). Parsed, but not read by this build — use the per-rule `noise_suppression_threshold` instead, which the alert engine does honour. The range is not validated at startup
+| `allow_runtime_updates` | Boolean | `false` | Permit REST writes to alert routes, recording rules, and pipelines. Keep off unless an authenticating proxy fronts the API. 
+| `recording_rules_enabled` | Boolean | `true` | Evaluate `rules/recording/` groups on their intervals and write results through the metrics ingest path
 
 ### `[alerts.presets]`
 
@@ -479,6 +475,10 @@ built-in.
 Pack keys: `kubernetes`, `coredns`, `external-secrets`, `service-red`,
 `parqtel` (more packs land with the remaining plan phases).
 
+The packs live in `rules/presets/` (embedded in the binary) but are inert until
+copied into the `alerts.rules_dir` tree; the directory itself is not scanned
+automatically.
+
 Env override examples:
 
 ```bash
@@ -489,12 +489,15 @@ PARQTEL__ALERTS__PRESETS__EXCLUDE=service-red          # exclude
 
 ### `[alerts.postmortem]`
 
+> **Not implemented in this build.** The section is parsed and validated, but no
+> postmortem engine is wired up, so every key below is currently inert.
+
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `enabled` | Boolean | `true` | Enable the postmortem engine |
 | `auto_draft` | Boolean | `true` | Auto-generate drafts when alerts resolve |
 | `postmortem_delay_minutes` | Integer | `5` | Minutes to wait after resolution before generating draft |
-| `template_path` | String (optional) | `""` | Path to custom template directory |
+| `template_path` | String (optional) | unset | Path to custom template directory. Unset by default — `""` is a *set* value, not the default |
 | `auto_publish_notion` | Boolean | `false` | Auto-publish to Notion |
 | `auto_publish_gdocs` | Boolean | `false` | Auto-publish to Google Docs |
 | `auto_publish_slack` | Boolean | `true` | Auto-publish to Slack |
@@ -507,10 +510,10 @@ PARQTEL__ALERTS__PRESETS__EXCLUDE=service-red          # exclude
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `dedup_flush_interval_secs` | Integer | `300` | Deduplication flush interval |
-| `max_concurrent_sends` | Integer | `10` | Max concurrent webhook sends |
-| `send_timeout_secs` | Integer | `30` | Webhook send timeout |
-| `self_monitoring_failure_threshold` | Float | `0.5` | Self-monitoring failure threshold |
+| `dedup_flush_interval_secs` | Integer | `0` | Deduplication flush interval. Parsed, but not read by this build |
+| `max_concurrent_sends` | Integer | `0` | Max concurrent webhook sends. Parsed, but not read by this build |
+| `send_timeout_secs` | Integer | `0` | Webhook send timeout. **The only key this build reads** — the router clamps it to at least 1 s, so the effective timeout is 1 s until you set it explicitly |
+| `self_monitoring_failure_threshold` | Float | `0.0` | Self-monitoring failure threshold. Parsed, but not read by this build |
 | `routes` | Array | `[]` | Alert routing rules (see RouteConfig) |
 | `egress` | Table | fail-closed | Outbound destination policy (see below) |
 
@@ -532,15 +535,22 @@ allow_private = false
 allow_hosts = ["*.internal.example"]
 ```
 
+> **Note on the defaults.** The serde defaults for these keys are
+> `300 / 10 / 30 / 0.5`, but the section is seeded from the struct's
+> `Default` (all zeros) before the TOML file is merged over it, so an omitted
+> key keeps its **zero** value rather than the serde default. The table above
+> lists the values a running server actually uses. Set `send_timeout_secs`
+> explicitly — the default 0 is clamped up to a 1-second webhook timeout.
+
 ### `[alerts.notifications.routes]` (array of tables)
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `name` | String | required | Route name |
-| `match_severity` | String | `"info"` | Minimum severity: critical, page, warning, info |
+| `match_severity` | String | `"info"` | Minimum severity: `critical`, `warning`, `info`. A route matches when the alert's severity is at or above this level; routes are evaluated in order and the first match wins. Any other string ranks as `info` |
 | `match_labels` | Map | `{}` | Exact label matches required |
 | `webhook_url` | String | required | Webhook URL for delivery |
-| `repeat_minutes` | Integer | `240` | Re-notification interval (0 = no repeat) |
+| `repeat_minutes` | Integer | `240` | Re-notification interval (0 = no repeat). Parsed, but not read by this build — repeats are tracked by the router itself |
 
 ### `[alerting.routing]`
 
@@ -588,6 +598,9 @@ Matchers use `=`, `!=`, `=~` (anchored regex), `!~`; a missing label compares as
 
 ### `[k8s_provider]`
 
+> **Not implemented in this build.** The section is parsed and validated, but
+> no custom-metrics provider is started, so `enabled = true` has no effect.
+
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `enabled` | Boolean | `false` | Enable Kubernetes custom metrics API server |
@@ -599,7 +612,7 @@ Matchers use `=`, `!=`, `=~` (anchored regex), `!~`; a missing label compares as
 
 ## Environment Variables
 
-Environment variables use the `PARQTEL__` prefix with `__` as the section separator. Examples:
+Environment variables use the `PARQTEL__` prefix with `__` as the section separator. The single-underscore form (`PARQTEL_SERVER__BIND_ADDRESS`) is accepted as an alias. Examples:
 
 ```bash
 # Server
@@ -754,7 +767,9 @@ Files under `rules/recording/` contain a `groups:` list. Each group is
 evaluated on its `interval`; every rule runs its PromQL expression over the
 configured instant lookback and writes the resulting series under `record`
 through the normal metrics ingest path (WAL, buffer, index). Set
-`alerts.recording_rules_enabled = false` to disable the scheduler.
+`alerts.recording_rules_enabled = false` to disable the scheduler. The
+interval is a **group-level** duration string, and each rule uses `record:`
+and `expr:`.
 
 ```yaml
 groups:
@@ -773,26 +788,35 @@ Invalid expressions are logged and skipped; a group's cadence is tracked in
 
 ## Pipeline YAML Schema
 
-Files under `rules/pipelines/` contain a `pipelines:` list. Each pipeline
+Pipelines live in a file with a `pipelines:` list. Stage settings are **flat**
+fields on the stage — there is no nested `config:` object. Each pipeline
 matches log records (`match.signal: logs`) and runs stages in order. The
 first matching pipeline wins; unmatched logs pass through unchanged.
+
+A worked example ships in
+[`rules/pipelines/nginx-access-logs.yaml`](../../rules/pipelines/nginx-access-logs.yaml).
+
+As with recording rules, pipelines are registered through the HTTP API in this
+build (`POST /api/v1/pipelines`); the shipped YAML file is the reference
+implementation.
 
 ```yaml
 pipelines:
   - name: nginx-access-logs
+    description: "Parse Nginx access logs and extract request counters"
     match:
       signal: logs
       conditions:
         - field: service_name
           op: "="
-          value: nginx
     stages:
       - type: processor
-        name: parse
+        name: parse_nginx_log
         processor: regex_extract
         source_field: body
-        pattern: '^(?P<ip>\S+) .* "(?P<method>\S+) (?P<path>\S+)'
+        pattern: '(?P<client_ip>\d+\.\d+\.\d+\.\d+) .* "(?P<method>[A-Z]+) (?P<path>[^ ]*)"'
         target_fields:
+          http.client_ip: client_ip
           http.method: method
           http.target: path
         on_parse_failure: keep_original
@@ -831,3 +855,20 @@ Configuration is validated at startup. Invalid configurations produce clear erro
 ```
 Error: server.bind_address cannot be empty; storage.compression must be one of: zstd, snappy, lz4, none
 ```
+
+The full set of rules enforced at startup:
+
+| Section | Rule |
+|---------|------|
+| `server` | `bind_address` must not be empty |
+| `storage` | `data_dir` must not be empty |
+| `storage` | `compression` must be one of `zstd`, `snappy`, `lz4`, `none` |
+| `storage` | `compression_level` must be between 1 and 22 (0, negative and 23+ are rejected) |
+| `storage` | `row_group_size` must be greater than 0 and no larger than `max_rows_per_block` |
+| `logs` | `data_dir` must not be empty |
+| `logs` | `compression` must be one of `zstd`, `snappy`, `lz4`, `none` |
+| `logs` | `compression_level` must be between 1 and 22 |
+| `logs` | `row_group_size` must be greater than 0 and no larger than `max_rows_per_block` |
+| `telemetry` | `log_format` must be `text` or `json` |
+| `ingest.tail_sampling` | `sampling_ratio` must be between 0.0 and 1.0 |
+| `ingest.tail_sampling.per_service.<service>` | `sampling_ratio` must be between 0.0 and 1.0 |
