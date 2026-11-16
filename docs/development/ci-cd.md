@@ -80,6 +80,6 @@ Local builds of `parqtel-ingest` need `protoc` (prost-build compiles the OTLP sc
 
 ## Maintenance notes
 
-- **MSRV is 1.87** and lives in three places that must move together: `ci.yml` (`MSRV` env + toolchain matrix), `Cargo.toml` `[workspace.package].rust-version`, and `Dockerfile` `RUST_VERSION`. It's pinned by the lockfile: comfy-table 7.2+ (via arrow 59) uses let-chains that require rustc 1.87, so lowering it needs precise dependency pins.
+- **MSRV is 1.88** and lives in three places that must move together: `ci.yml` (`MSRV` env + toolchain matrix), `Cargo.toml` `[workspace.package].rust-version`, and `Dockerfile` `RUST_VERSION`. It's pinned by the lockfile: arrow 60.1.0 requires rustc 1.88, so lowering it needs precise dependency pins.
 - CI installs `cargo-audit` via `taiki-e/install-action` and runs `cargo audit --deny warnings` plus a Trivy filesystem scan (CRITICAL/HIGH). Both read `Cargo.lock`/the tree only — run `cargo update` deliberately and review the audit diff. (The old `rustsec/audit-check` action was dropped: its embedded cargo exited 101 under the Node 24 runner migration.)
 - If runner minutes ever matter less than latency again, the Docker job is safe to promote back to always-on via the `changes.outputs.docker` condition.

@@ -48,7 +48,7 @@ make docker        # Build Docker image
 
 ## Key Facts (verify before documenting)
 
-- **MSRV**: 1.87 (workspace `Cargo.toml`; comfy-table 7.2+ via arrow 59 uses let-chains). Dockerfile `ARG RUST_VERSION=1.87`. CI matrix pins 1.87 — update all three together if bumping.
+- **MSRV**: 1.88 (workspace `Cargo.toml`; arrow 60.1.0 requires rustc 1.88). Dockerfile `ARG RUST_VERSION=1.88`. CI matrix pins 1.88 — update all three together if bumping.
 - **gRPC stack**: tonic 0.13 / prost 0.13 (hyper 1.x + h2 0.4 — RUSTSEC-2026-0258 fixed by the upgrade from tonic 0.11)
 - **Arrow stack**: `arrow`/`parquet` 60.x (migrated from arrow2/parquet2 — RUSTSEC-2025-0038). Old arrow2-era Parquet blocks are unreadable by the current reader; wipe the data dir when upgrading across that boundary.
 - **Binary name**: `parqtel` (not `parqtel-server`) — the crate is `parqtel-server` but `[[bin]] name = "parqtel"`.
@@ -115,7 +115,7 @@ Layered via Figment (priority: CLI > env > TOML > defaults):
 
 - **Lint**: fmt + clippy with `-D warnings`
 - **Test**: All workspace tests + doc tests
-- **MSRV**: Checks minimum supported Rust version (1.87 matrix — see Key Facts)
+- **MSRV**: Checks minimum supported Rust version (1.88 matrix — see Key Facts)
 - **Security**: `cargo-audit` (installed via `taiki-e/install-action`, `--deny warnings`) + Trivy filesystem scan
 - **Helm**: Lint chart with multiple value files
 - **Docker**: Build + smoke test (health check + metrics endpoint)

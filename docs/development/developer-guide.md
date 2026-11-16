@@ -79,7 +79,7 @@ Parqtel's AI-native capabilities come from its MCP servers. To add a new tool (e
 ## 5. Development Workflow
 
 ### Prerequisites
-- Rust 1.87 (MSRV — CI pins and checks exactly 1.87; the workspace `Cargo.toml`, `Dockerfile`, and `ci.yml` move together)
+- Rust 1.88 (MSRV — CI pins and checks exactly 1.88; the workspace `Cargo.toml`, `Dockerfile`, and `ci.yml` move together)
 - `protoc` (for OTLP protobuf compilation; `make build`/`make test` auto-fetch it via the `tools` target, or install `protobuf-compiler`)
 
 ### Build Commands
