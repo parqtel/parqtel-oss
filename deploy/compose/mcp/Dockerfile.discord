@@ -1,6 +1,6 @@
 # rustls keeps this image OpenSSL-free, so the builder needs no libssl-dev.
 # g++/make are required to compile ring's C/asm sources.
-FROM rust:1.87-slim AS builder
+FROM rust:1.88-slim AS builder
 WORKDIR /build
 RUN apt-get update && apt-get install -y g++ make && rm -rf /var/lib/apt/lists/*
 
@@ -17,7 +17,7 @@ resolver = "2"
 [workspace.package]
 version = "0.3.0"
 edition = "2021"
-rust-version = "1.87"
+rust-version = "1.88"
 authors = ["parqtel team"]
 license = "Apache-2.0"
 

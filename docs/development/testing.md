@@ -70,7 +70,7 @@ Our GitHub Actions workflows gate every PR:
 - **Detect Changes** — path filtering gates the expensive jobs (docs-only PRs finish in ~10 s)
 - **Lint** — `cargo fmt --check` + `cargo clippy --workspace --all-targets --locked -- -D warnings` (also forbids `unsafe` code workspace-wide)
 - **Test** — `cargo test --workspace` plus doc tests, all `--locked`
-- **MSRV** — checks the pinned minimum Rust version (1.87)
+- **MSRV** — checks the pinned minimum Rust version (1.88)
 - **Security Audit** — `cargo audit --deny warnings` + Trivy filesystem scan
 - **Helm Lint** — validates `deploy/helm/parqtel` against `deploy/helm/parqtel/ci/minimal-values.yaml`, `deploy/helm/parqtel/ci/default-values.yaml`, and `deploy/helm/parqtel/ci/full-values.yaml`
 - **Docker Build & Smoke Test** — builds the image and probes `/health` and `/metrics`
