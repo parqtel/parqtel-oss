@@ -53,7 +53,7 @@ The web console (`crates/parqtel-server/src/ui.html`) is a single-file vanilla-J
     --virtual-time-budget=15000 http://localhost:8080/ui
   ```
   Any `Uncaught SyntaxError`/`ReferenceError` lines in stderr indicate a regression.
-- **Design system**: semantic CSS tokens, inline SVG icon sprite, WCAG AA contrast, `prefers-reduced-motion` support. The console is a single embedded file (`crates/parqtel-server/src/ui.html`) with no external requests and no framework — see [Architecture](architecture.md#embedded-web-ui).
+- **Design system**: semantic CSS tokens, inline SVG icon sprite, WCAG AA contrast, `prefers-reduced-motion` support. The console is a single embedded file (`crates/parqtel-server/src/ui.html`) with no external requests and no framework — see [Architecture](architecture.md#11-embedded-web-ui).
 
 ## 4. Adding a New MCP Tool
 

@@ -5,282 +5,62 @@
 
 <p align="center">
   <a href="https://github.com/parqtel/parqtel-oss/actions/workflows/ci.yml"><img src="https://github.com/parqtel/parqtel-oss/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <a href="https://github.com/parqtel/parqtel-oss/releases"><img src="https://img.shields.io/github/v/release/parqtel/parqtel-oss?color=success&include_prereleases" alt="Release"></a>
+  <a href="https://github.com/parqtel/parqtel-oss/actions/workflows/release.yml"><img src="https://github.com/parqtel/parqtel-oss/actions/workflows/release.yml/badge.svg" alt="Release"></a>
   <a href="https://github.com/parqtel/parqtel-oss/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" alt="License"></a>
+  <a href="https://ghcr.io/parqtel/parqtel-oss"><img src="https://img.shields.io/badge/docker-ghcr.io-blue?logo=docker" alt="Docker"></a>
+  <a href="https://github.com/parqtel/parqtel-oss/pkgs/container/charts%2Fparqtel"><img src="https://img.shields.io/badge/helm-OCI-blue?logo=helm" alt="Helm"></a>
+  <img src="https://img.shields.io/badge/MSRV-1.88-orange?logo=rust" alt="MSRV">
+  <img src="https://img.shields.io/badge/unsafe-forbidden-success.svg" alt="Unsafe Forbidden">
   <a href="https://securityscorecards.dev/viewer/?uri=github.com/parqtel/parqtel-oss"><img src="https://api.securityscorecards.dev/projects/github.com/parqtel/parqtel-oss/badge" alt="OpenSSF Scorecard"></a>
-  <a href="https://github.com/parqtel/parqtel-oss/pkgs/container/parqtel-oss"><img src="https://img.shields.io/badge/docker-ghcr.io-blue?logo=docker" alt="Docker ghcr.io"></a>
-  <a href="https://parqtel.github.io"><img src="https://img.shields.io/badge/docs-parqtel.github.io-success?logo=github" alt="Docs"></a>
+  <a href="https://github.com/parqtel/parqtel-oss/security"><img src="https://img.shields.io/badge/trivy-scanned-blueviolet?logo=aqua" alt="Trivy Scanned"></a>
+  <a href="https://github.com/parqtel/parqtel-oss/actions/workflows/release.yml"><img src="https://img.shields.io/badge/cosign-signed-green?logo=sigstore" alt="Cosign Signed"></a>
+  <a href="https://github.com/parqtel/parqtel-oss/releases"><img src="https://img.shields.io/github/v/release/parqtel/parqtel-oss?color=success&include_prereleases" alt="GitHub Release"></a>
+  <a href="https://parqtel.github.io"><img src="https://img.shields.io/badge/docs-parqtel.github.io-success?logo=github" alt="GitHub Pages"></a>
+  <img src="https://img.shields.io/badge/query-PQL%20%7C%20ParQL%20%7C%20ParqtelQL%20%7C%20Pipelines-00F5D4" alt="PQL query surfaces">
 </p>
 
 <p align="center">
   <a href="docs/getting-started/getting-started.md"><b>Getting Started</b></a> •
   <a href="docs/getting-started/tutorials.md">Tutorials</a> •
   <a href="CONTRIBUTING.md">Contributing</a> •
-  <a href="#why-parqtel">Why Parqtel?</a> •
-  <a href="#architecture--storage-design">Architecture</a> •
+  <a href="#features">Features</a> •
+  <a href="#architecture">Architecture</a> •
   <a href="#api-reference">API</a> •
   <a href="docs/guides/mcp.md">MCP</a> •
   <a href="docs/operations/deployment.md">Deployment</a> •
   <a href="docs/operations/troubleshooting.md">Troubleshooting</a>
 </p>
 
-<p align="center">
-  <img src="docs/assets/screenshots/ui-overview.png" alt="Parqtel web console overview: live per-signal ingestion-rate cards for metrics, logs and traces, with a spike/gap sparkline" width="900">
-</p>
-
-<details>
-<summary><b>Explore all UI views (Metrics, Logs, Traces, Alerts)</b></summary>
-
-<br>
-
-| Metrics | Logs |
-|---------|------|
-| ![Metrics View](docs/assets/screenshots/ui-metrics.png) | ![Logs View](docs/assets/screenshots/ui-logs.png) |
-
-| Traces | Alerts (live firing) |
-|--------|----------------------|
-| ![Traces View](docs/assets/screenshots/ui-traces.png) | ![Alerts View](docs/assets/screenshots/ui-alerts.png) |
-
-| Alert rules |
-|-------------|
-| ![Rules View](docs/assets/screenshots/ui-alerts-rules.png) |
-
-The embedded console at `/ui` is a single file, gzipped, served with `gzip` +
-`ETag` — no CDNs, no web fonts, no frameworks, so it works air-gapped. It
-includes an Overview pane with live ingestion-rate cards, deep-linkable URLs, a
-metrics query builder with a 92-function catalog and a Builder⇄Code toggle, log
-field facets, a trace-grouped browse list with waterfall, an alert stream with an
-Evidence tab, saved views, keyboard shortcuts (`?` for the reference), WCAG AA
-contrast and reduced-motion support.
-
-</details>
-
 ---
 
-## Why Parqtel?
+## What is Parqtel?
 
-- **One ~15 MB static binary.** Scratch-based container image with no shell, no
-  OS packages and no OpenSSL; Rust with `#[forbid(unsafe_code)]` workspace-wide.
-  The web console ships inside the binary, so there is nothing else to deploy.
-- **Columnar Parquet + Zstd on local disk.** Metric blocks carry a series table in
-  the Parquet footer, so a selective query reads only the rows of the series it
-  selects. Storage is **local-disk only** — the backend is a directory path
-  (`storage.data_dir`), with no object-store or S3 driver.
-- **Span-Metrics and tail sampling built in.** Server-kind spans automatically
-  derive unsampled RED metrics (`traces_service_{requests,errors,duration_ms}_total`),
-  and tail sampling is trace-coherent — no separate OTel Collector gateway needed.
-- **Drop-in query surfaces and AI tooling.** Prometheus-compatible `/api/v1/*`,
-  a Grafana SimpleJSON datasource, YAML log-to-metric pipelines, and an MCP server
-  that lets an LLM agent query your telemetry directly.
+Parqtel is a single-binary observability backend written in Rust that ingests OpenTelemetry (OTLP) signals and stores them as compressed Apache Parquet files. It exposes a Prometheus-compatible query API, a Grafana SimpleJSON datasource, and a built-in alerting engine — all with minimal resource footprint.
 
-## 60-Second Quick Start
+**Key design goals:**
+- **Minimal footprint** — single static binary, ~15 MB Docker image (scratch-based, no shell)
+- **Columnar storage** — Parquet + Zstd compression for 10-20x storage reduction
+- **Drop-in compatibility** — works with existing Prometheus/Grafana dashboards
+- **AI-native** — Model Context Protocol (MCP) servers for LLM-driven incident response
 
-No Rust toolchain needed — the [`docker run`](#docker) and
-[Homebrew](#homebrew-linux--macos) paths install a published release
-([v0.3.1](https://github.com/parqtel/parqtel-oss/releases) is the latest).
-Building from source is in [CONTRIBUTING.md](CONTRIBUTING.md#3-building-and-running-from-source).
+## Common Use Cases
 
-### Docker
-
-```bash
-docker run -d --name parqtel \
-  -p 8080:8080 \
-  -p 4317:4317 \
-  -v parqtel_data:/var/lib/parqtel \
-  ghcr.io/parqtel/parqtel-oss:0.3.1
-```
-
-- `8080` is the HTTP API and web console; `4317` is OTLP gRPC.
-- The image runs as non-root **UID 65532** on a `scratch` base. The `parqtel_data`
-  named volume is created by Docker and initially root-owned, so either
-  `chown 65532` it once or pass `--user 65532:65532` with a pre-created volume.
-  The image's own `/data` directory is already owned by 65532.
-
-### Homebrew (Linux & macOS)
-
-```bash
-brew tap parqtel/tap
-brew install parqtel-oss
-parqtel serve          # http://localhost:8080/ui
-```
-
-The formula downloads the compiled release binary for linux-amd64/arm64 and
-darwin-amd64/arm64 from GitHub releases. The tap is bumped automatically on each
-release.
-
-### Docker Compose (full stack)
-
-```bash
-make dev-setup         # copies .env.example → .env and starts everything
-```
-
-This starts Parqtel on **port `9090`**, Grafana on `3000`, Prometheus on `9091`
-and a load generator, and publishes the Parqtel MCP server (`mcp-parqtel`) on `3007`.
-
-> **Why two ports?** The single container and the bare binary use `8080`. The
-> Compose stack uses `9090` (`deploy/compose/parqtel/config/dev.toml`) so it does
-> not collide with Prometheus, which the stack publishes on `9091`. Use the URL
-> that matches your install in the commands below.
-
-### Verify
-
-```bash
-# 8080 for docker run / Homebrew, 9090 for Compose
-curl http://localhost:8080/health
-
-# Send a metric via OTLP JSON (stamp it "now" — instant queries look back 5 minutes)
-TS=$(date +%s)000000000
-curl -X POST http://localhost:8080/v1/metrics/json \
-  -H "Content-Type: application/json" \
-  -d '{"resourceMetrics":[{"resource":{"attributes":[{"key":"service.name","value":{"stringValue":"demo"}}]},"scopeMetrics":[{"metrics":[{"name":"http_requests_total","gauge":{"dataPoints":[{"asDouble":42,"timeUnixNano":"'$TS'","attributes":[{"key":"method","value":{"stringValue":"GET"}}]}]}}]}]}]}'
-
-# Query it back through the Prometheus API
-curl "http://localhost:8080/api/v1/query?query=http_requests_total"
-```
-
-The query returns the Prometheus envelope — the shape verified in
-`handlers/query/metrics.rs`:
-
-```json
-{
-  "status": "success",
-  "data": {
-    "resultType": "vector",
-    "result": [
-      {
-        "metric": { "__name__": "http_requests_total", "method": "GET", "service.name": "demo" },
-        "value": [1731000123.456, "42"],
-        "values": [[1731000123.456, "42"]]
-      }
-    ],
-    "totalSeriesCount": 1,
-    "volumeSummary": []
-  }
-}
-```
-
-Open **http://localhost:8080/ui** for the console. Instant queries only look back
-5 minutes (`query.lookback_delta_ns`); older points become visible through
-`/api/v1/query_range` once a block is flushed. Full walkthrough:
-[docs/getting-started/getting-started.md](docs/getting-started/getting-started.md).
-
----
-
-## Architecture & Storage Design
-
-**The telemetry flow** — OTLP in, Parquet down, three query surfaces up
-(animated; [full diagram set](docs/development/diagrams.md)):
-
-![Parqtel system context: telemetry producers feed the ingest endpoints over OTLP gRPC and HTTP, Parqtel stores compressed Parquet blocks and block-index sidecars, and Grafana, Prometheus, operators and LLM agents read the query and alert surfaces](docs/assets/diagrams/system-context.svg)
-
-Parqtel uses a **block-based storage model** on the local filesystem:
-
-- **Metric blocks**: 2-hour duration, up to 1M rows, Zstd by default
-  (`storage.block_duration_secs = 7200`, `max_rows_per_block = 1_000_000`)
-- **Log blocks**: shorter windows and smaller row caps, own config section
-  (`logs.*`), also Zstd by default
-- **Compaction**: every 5 minutes (`compaction_interval_secs = 300`); small
-  blocks are merged and metric blocks rolled into 5-minute **L1** windows with a
-  streaming merge
-- **Retention**: configurable per signal (`storage.retention_days`, default 7)
-- **Index**: `index.json` sidecar holding the block list and a shared
-  label-value dictionary, written atomically (tmp + rename)
-- **Series table**: metric blocks write series-by-series and record a series
-  index in the Parquet footer, so a selective query reads only those rows
-
-Each block is a self-contained Parquet file with row groups sized for pruning.
-
-**Deep dive:** [Architecture](docs/development/architecture.md) •
-[Diagrams](docs/development/diagrams.md) • [PQL Guide](docs/guides/pql-guide.md)
-
-## Performance
-
-Benchmarked with sustained 1000 samples/sec (metrics + logs + traces) for 15
-minutes using [`scripts/bench/perf_test.py`](scripts/bench/perf_test.py):
-
-| Metric | Result |
-|--------|--------|
-| **Sustained throughput** | 972 samples/sec (zero errors) |
-| **Total ingested** | 875,100 samples in 15 min |
-| **Ingest p50** | 4.4ms per batch |
-| **Ingest p99** | 63ms per batch |
-| **Query p50 (instant)** | 12.7ms |
-| **Query p99 (range)** | 160ms |
-| **Immediate queryability** | 1.7ms (in-memory buffer) |
-| **Data durability** | Survives container restart |
-| **Peak RSS memory** | `[TODO: measure RSS]` — not captured by this harness |
-| **Compressed disk size** | `[TODO: measure disk]` — not captured by this harness |
-
-The 15-minute harness records latency, throughput and errors only. Memory and
-disk are measured separately: a higher-throughput end-to-end run (2.4M metric
-points, 300K logs, 150K spans) measured **peak RSS 0.67 GB** on an M1 with 8 GB
-RAM, alongside scan throughput of 101M points/s — see
-[docs/performance/README.md](docs/performance/README.md) for the method and the
-per-query numbers, including the cases where a measured optimisation was *not*
-adopted.
-
-RSS scales with the buffered row count, so `ingest.buffer_max_points` (5M) and
-`ingest.buffer_max_bytes` (2 GiB estimated) bound it; under overload the oldest
-buffered rows are evicted (`drop_oldest`, the default) or the batch is refused
-(`reject_new`). Read
-[Performance & Memory Sizing](docs/operations/performance-sizing.md) before
-raising the rate.
-
-## Query & Pipeline Example
-
-Pipelines are plain YAML: match a signal, run stages, extract metrics. This
-excerpt is from [`rules/pipelines/nginx-access-logs.yaml`](rules/pipelines/nginx-access-logs.yaml):
-
-```yaml
-pipelines:
-  - name: nginx-access-logs
-    match:
-      signal: logs
-      conditions:
-        - field: service_name
-          op: "="
-          value: "nginx"
-    stages:
-      - type: processor
-        processor: regex_extract
-        source_field: body
-        pattern: '(?P<status>\d+) (?P<bytes>\d+)'
-        target_fields:
-          http.status_code: status
-      - type: metric_extract
-        metric_name: nginx_requests_total
-        metric_type: counter
-        value_field: "constant:1"
-        dimensions: [http.status_code, service_name]
-```
-
-Alert rules are YAML too — see
-[`rules/http-error-rate.yaml`](rules/http-error-rate.yaml):
-
-```yaml
-id: http-error-rate-high
-query: 'http_requests_total{status=~"5.."}'
-condition:
-  type: threshold
-  operator: ">"
-  value: 0.05
-  for_duration_secs: 300
-severity: warning
-```
-
-More: [PQL Guide](docs/guides/pql-guide.md) •
-[Best Practices](docs/guides/best-practices.md)
-
----
+| Use Case | Solution |
+|----------|----------|
+| **Low-cost Archiving** | Stream OTel data to Parquet for long-term storage with 90% compression vs Prometheus TSDB. |
+| **Edge Observability** | Deploy on resource-constrained edge devices (IoT, ARM) to local-first telemetry. |
+| **Log-to-Metric Pipelines** | Extract business metrics from high-volume Nginx or app logs using YAML pipelines. |
+| **AI Incident Response** | Use MCP servers to give LLMs direct access to your telemetry for automated RCAs. |
+| **Serverless Monitoring** | Ingest ephemeral logs/metrics from Lambda/Cloud Run without managing a heavy cluster. |
 
 ## 🗺 Documentation Map
 
 | Area | Guides |
 |------|--------|
 | **Onboarding** | [Getting Started](docs/getting-started/getting-started.md) • [Docs index](docs/README.md) • [Glossary](docs/development/glossary.md) • [FAQ](docs/getting-started/faq.md) |
-| **Learning** | [Tutorials](docs/getting-started/tutorials.md) |
-| **Querying** | [**PQL Guide**](docs/guides/pql-guide.md) — ParQL metrics, ParqtelQL log/trace search, cross-signal pipelines • [API Reference](docs/reference/api.md) |
-| **Deep Dive** | [Architecture](docs/development/architecture.md) • [Diagrams](docs/development/diagrams.md) • [Configuration](docs/operations/configuration.md) • [Developer Guide](docs/development/developer-guide.md) • [MCP Integrations](docs/guides/mcp.md) • [Query Functions](docs/guides/query-functions.md) • [Performance](docs/performance/README.md) • [CI/CD](docs/development/ci-cd.md) |
+| **Learning** | [Tutorials](docs/getting-started/tutorials.md) • [Use Cases](#common-use-cases) |
+| **Querying** | [**PQL Guide**](docs/guides/pql-guide.md) — ParQL metrics, ParqtelQL log/trace search, cross-signal pipelines |
+| **Deep Dive** | [Architecture](docs/development/architecture.md) • [Configuration](docs/operations/configuration.md) • [Developer Guide](docs/development/developer-guide.md) • [MCP Integrations](docs/guides/mcp.md) • [Query Functions](docs/guides/query-functions.md) • [Performance](docs/performance/README.md) • [CI/CD](docs/development/ci-cd.md) |
 | **Operations** | [Deployment](docs/operations/deployment.md) • [Known Issues](docs/operations/known-issues.md) • [Troubleshooting](docs/operations/troubleshooting.md) • [Best Practices](docs/guides/best-practices.md) • [Testing & Validation](docs/development/testing.md) |
 | **Community** | [Contributing](CONTRIBUTING.md) • [Support](SUPPORT.md) • [Code of Conduct](CODE_OF_CONDUCT.md) • [Security](SECURITY.md) • [Changelog](CHANGELOG.md) |
 
@@ -291,27 +71,241 @@ More: [PQL Guide](docs/guides/pql-guide.md) •
 | **Ingestion** | OTLP gRPC (`:4317`, the OTel SDK default) + HTTP protobuf & JSON for metrics, logs, and traces |
 | **Storage** | Block-based Parquet with Zstd/Snappy/LZ4, automatic compaction, configurable retention |
 | **Query** | PromQL-compatible instant & range queries, label matching, aggregations (sum, avg, rate, histogram_quantile, etc.) |
-| **Alerting** | YAML-defined threshold rules, state machine (Inactive→Pending→Firing→Resolved), 15s evaluation loop, Alertmanager-style routing/inhibition/grouping, silences, Slack/Teams/PagerDuty/webhook receivers. Baseline anomaly rules use median+MAD over a configured window; alert instances expose a history-derived noise score |
-| **Pipeline** | Recording rules and log→metric stream pipelines, applied on live ingest; extracted metrics enter the normal metrics path |
+| **Alerting** | YAML-defined rules, threshold & anomaly detection, state machine (Inactive→Pending→Firing→Resolved), background evaluation loop (15s), noise scoring |
+| **Pipeline** | Recording rules, stream processing pipelines, metric extraction from logs |
 | **Span-metrics (RED)** | Auto-derived `traces_service_{requests,errors,duration_ms}_total` per service/operation from server spans — zero-config RED dashboards in Grafana |
 | **Tail sampling** | Trace-coherent sampling (errors/slow traces always kept, deterministic ratio per service) — controls trace storage volume while RED metrics stay unsampled |
 | **Visualization** | Built-in web UI, Grafana SimpleJSON datasource, Prometheus-compatible `/api/v1/*` |
-| **MCP** | `parqtel-mcp-parqtel` server — exposes metrics, logs, alerts, ingest rates, and topology over Streamable HTTP (`/mcp`) |
+| **MCP** | 7 AI tool servers (Slack, PagerDuty, Jira, Notion, Discord, Google Docs, Parqtel) |
 | **Operations** | Health checks, `/metrics` endpoint, graceful shutdown, CLI subcommands |
+
+## Built-in Web UI
+
+Parqtel ships with a zero-dependency embedded web console at `/ui` — no CDNs, no web fonts, no frameworks, works air-gapped. Single file, gzipped, soft budget 1000 KB, served with gzip + ETag caching at zero per-request server cost.
+
+| Overview | Metrics |
+|----------|---------|
+| ![Overview](docs/assets/screenshots/ui-overview.png) | ![Metrics View](docs/assets/screenshots/ui-metrics.png) |
+
+| Logs | Traces |
+|------|--------|
+| ![Logs View](docs/assets/screenshots/ui-logs.png) | ![Traces View](docs/assets/screenshots/ui-traces.png) |
+
+| Alerts (live firing) | Alert rules |
+|---------------------|-------------|
+| ![Alerts View](docs/assets/screenshots/ui-alerts.png) | ![Rules View](docs/assets/screenshots/ui-alerts-rules.png) |
+
+**Features:** Overview pane with live per-signal ingestion-rate cards (60s average, spike/gap sparkline, status dot — backed by `/api/v1/ingest_rates`), deep-linkable URLs (share the exact query + time range), a metrics query builder with a **92-function catalog** covering the full engine surface — typed argument editors, `by`/`without` grouping, window-function wrapping, live PromQL preview, and label filters with bounded high-cardinality autocomplete — plus a Builder⇄Code toggle that reverse-parses a typed query, log field facets, trace-grouped browse list + waterfall, alert stream with Evidence tab (incident-window metric chart + correlated logs), form-based rule editor with YAML escape hatch, saved views, keyboard shortcuts (`?` for the reference), WCAG AA contrast and reduced-motion support.
+
+
+## Performance
+
+Benchmarked with sustained 1000 samples/sec (metrics + logs + traces) for 15 minutes:
+
+| Metric | Result |
+|--------|--------|
+| **Sustained throughput** | 972 samples/sec (zero errors) |
+| **Total ingested** | 875,100 samples in 15 min |
+| **Ingest p50** | 4.4ms per batch |
+| **Ingest p99** | 63ms per batch |
+| **Query p50 (instant)** | 12.7ms |
+| **Query p99 (range)** | 160ms |
+| **Immediate queryability** | 1.7ms (in-memory buffer) |
+| **Data durability** | ✅ Survives container restart |
+
+Hot-path optimizations (non-blocking flushes, row-group pruning, label caching) are detailed in [docs/performance/README.md](docs/performance/README.md) — scan throughput +39%, narrow-range queries decode only matching row groups, and Parquet writes no longer stall async workers.
+
+What changed, and what was measured rather than assumed, is in [docs/performance/README.md](docs/performance/README.md).
+
+## Architecture
+
+**The telemetry flow** — OTLP in, Parquet down, three query surfaces up:
+
+```
+                          ┌─────────────────────────────────┐
+                          │      OpenTelemetry SDKs          │
+                          │   metrics · logs · traces       │
+                          └───────┬─────────────────┬───────┘
+                     OTLP gRPC :4317   OTLP HTTP /v1/*
+                          └───────┴────────┬────────┘
+                                            ▼
+        ┌───────────────────────────────────────────────────────────────┐
+        │                      parqtel (single binary)                   │
+        │                                                                │
+        │  INGEST          QUERY                 ANALYZE                 │
+        │  ───────         ─────                 ───────                 │
+        │  OTLP decode     ParQL (PromQL)        Alert engine            │
+        │  Span-metrics    ├ instant + range      ├ rules + eval         │
+        │    RED bridge    ├ binary ops/on()      ├ webhook routes       │
+        │  Tail sampling   ParqtelQL search       ├ silences             │
+        │  Memory buffer   ├ logs + traces        └ MCP servers          │
+        │  (all signals)   └ predicate pushdown     (Slack·PagerDuty·     │
+        │                  PQL Pipelines            Jira·Notion·…)       │
+        │                  fetch│filter│parse│                          │
+        │                  stats│correlate          ── signals:          │
+        │                                          metrics·logs·        │
+        │  ── shared engine ──────────────────      traces·alerts        │
+        │  BlockIndex · Scanner · label-value index · compaction         │
+        └───────────────────────────┬───────────────────────────────────┘
+                                    ▼
+                    ┌───────────────────────────────┐
+                    │   Compressed Parquet blocks    │
+                    │   zstd · open format · query   │
+                    │   with DuckDB/Spark/Athena     │
+                    └───────────────────────────────┘
+
+         SERVED:  Prometheus API · Grafana · /ui console · HTTP+gRPC
+```
+
+**Deep dive:** [Architecture](docs/development/architecture.md) • [PQL Guide](docs/guides/pql-guide.md)
+
+---
+
+## Quick Start
+
+```bash
+# Clone and build
+git clone https://github.com/parqtel/parqtel-oss.git
+cd parqtel-oss
+cargo build --release
+
+# Start the server
+./target/release/parqtel serve
+
+# Or with configuration
+./target/release/parqtel --config config/default.toml serve
+```
+
+### Run with Docker
+
+```bash
+docker build -t parqtel:local .
+docker run -p 8080:8080 -v parqtel_data:/var/lib/parqtel parqtel:local
+```
+
+### Install with Homebrew (Linux & macOS)
+
+```bash
+brew tap parqtel/tap
+brew install parqtel-oss
+parqtel serve
+```
+
+The formula downloads the compiled release binary for your platform (linux-amd64/arm64, darwin-amd64/arm64) from [GitHub releases](https://github.com/parqtel/parqtel-oss/releases) — no Rust toolchain required. The tap is updated automatically on every release.
+
+### Run with Docker Compose (full stack)
+
+```bash
+# First-time setup: copies .env.example → .env and starts everything
+make dev-setup
+
+# Or manually
+cp .env.example .env
+docker compose -f deploy/compose/docker-compose.yml up -d
+```
+
+This starts Parqtel (port 9090), Grafana (port 3000), Prometheus (port 9091), and a load generator. MCP servers are defined in `deploy/compose/docker-compose.yml` but commented out — uncomment the ones you need after adding the corresponding tokens to `.env`.
+
+### Verify
+
+```bash
+# Health check (compose stack runs on port 9090; raw docker run uses 8080)
+curl http://localhost:9090/health
+
+# Send a metric via OTLP JSON (stamp it "now" — instant queries look back 5 minutes)
+TS=$(date +%s)000000000
+curl -X POST http://localhost:9090/v1/metrics/json \
+  -H "Content-Type: application/json" \
+  -d '{"resourceMetrics":[{"resource":{"attributes":[{"key":"service.name","value":{"stringValue":"demo"}}]},"scopeMetrics":[{"metrics":[{"name":"http_requests_total","gauge":{"dataPoints":[{"asDouble":42,"timeUnixNano":"'$TS'","attributes":[{"key":"method","value":{"stringValue":"GET"}}]}]}}]}]}]}'
+
+# Query it back (Prometheus API)
+curl "http://localhost:9090/api/v1/query?query=http_requests_total"
+```
+
+Instant queries look back 5 minutes (`query.lookback_delta_ns`); older points become queryable via `/api/v1/query_range` after the block flush (default 2h blocks, checked every 5s). See [docs/getting-started/getting-started.md](docs/getting-started/getting-started.md) for the full walkthrough.
 
 ## API Reference
 
-The full endpoint list lives in [docs/reference/api.md](docs/reference/api.md),
-and the machine-readable OpenAPI 3.0 description is served by any running
-instance at **`/oas`** (source: [docs/api/openapi.yaml](docs/api/openapi.yaml)).
+### Ingestion (OTLP)
 
-| Surface | Endpoints | Notes |
-|---------|-----------|-------|
-| **OTLP ingest** | `POST /v1/{metrics,logs,traces}` (protobuf), `POST /v1/{metrics,logs,traces}/json` | Plus OTLP gRPC on `:4317` |
-| **Prometheus query** | `GET /api/v1/query`, `/api/v1/query_range`, `/api/v1/labels`, `/api/v1/label/:name/values` | Drop-in for Grafana's Prometheus datasource |
-| **Logs & traces** | `GET /api/v1/logs`, `/v1/logs/{count,fields,field_values}`, `/v1/traces/search`, `/v1/correlate` | |
-| **Grafana SimpleJSON** | `POST /search`, `/query`, `/annotations`, `/tag-keys`, `/tag-values` | |
-| **Operations** | `/health`, `/ready`, `/metrics`, `/api/v1/stats`, `/ui`, `/oas` | |
+OTel SDKs can export directly via **gRPC** at `:4317` (all three collector services, no collector sidecar needed), or via HTTP:
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/v1/metrics` | POST | Ingest metrics (protobuf) |
+| `/v1/metrics/json` | POST | Ingest metrics (JSON) |
+| `/v1/logs` | POST | Ingest logs (protobuf) |
+| `/v1/logs/json` | POST | Ingest logs (JSON) |
+| `/v1/traces` | POST | Ingest traces (protobuf) |
+| `/v1/traces/json` | POST | Ingest traces (JSON) |
+
+### Query (Prometheus-compatible)
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/v1/query` | GET | Instant query |
+| `/api/v1/query_range` | GET | Range query |
+| `/api/v1/labels` | GET | List all label names |
+| `/api/v1/label/__name__/values` | GET | List metric names |
+| `/api/v1/label/:name/values` | GET | List values for a label |
+
+### Logs
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/v1/logs` | GET | Query logs with filters |
+| `/v1/logs/count` | GET | Count matching logs |
+| `/v1/logs/fields` | GET | List available log fields |
+| `/v1/logs/field_values` | GET | List values for a log field |
+| `/v1/traces/search` | GET | Search spans (per-span `trace_id` for client-side grouping) |
+| `/v1/correlate` | GET | Cross-signal correlation for a time window |
+
+### Alerts
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/v1/alerts` | GET | List all alerts |
+| `/api/v1/alerts/:id` | GET | Get alert details |
+| `/api/v1/alerts/:id/acknowledge` | POST | Acknowledge an alert |
+| `/api/v1/alerts/:id/resolve` | POST | Resolve an alert |
+| `/api/v1/alerts/routes` | GET | List notification routes |
+| `/api/v1/alerts/silences` | GET/POST | List or create silences |
+| `/api/v1/alerts/silences/:name` | DELETE | Delete a silence |
+| `/api/v1/saved_searches` | GET/POST | List or save a search |
+| `/api/v1/saved_searches/:id` | DELETE | Delete a saved search |
+| `/api/v1/rules` | GET/POST | List or create alert rules |
+| `/api/v1/rules/:id` | PUT/DELETE | Update or delete a rule |
+
+### Pipelines & Recording Rules
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/v1/recording_rules` | GET/POST | List or create recording rule groups |
+| `/api/v1/recording_rules/:name` | DELETE | Delete a recording rule group |
+| `/api/v1/pipelines` | GET/POST | List or create pipeline definitions |
+| `/api/v1/pipelines/:name` | DELETE | Delete a pipeline |
+
+### Grafana SimpleJSON
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/search` | POST | List available metrics |
+| `/query` | POST | Execute time-series query |
+| `/annotations` | POST | Query annotations |
+| `/tag-keys` | POST | List tag keys |
+| `/tag-values` | POST | List tag values |
+
+### Operations
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/health` | GET | Health check |
+| `/metrics` | GET | Prometheus metrics (self-monitoring) |
+| `/api/v1/stats` | GET | Storage/buffer/config snapshot |
+| `/api/v1/ingest_rates` | GET | Live per-signal rates (current + 60s/5m/15m averages, `gap_secs`, sparkline via `history_secs`) |
+| `/debug/pprof/{profile,summary,memory}` | GET | CPU/memory profiles (404 unless `telemetry.profiling_enabled`) |
+| `/oas` | GET | OpenAPI 3.0 specification |
+| `/ui` | GET | Built-in web UI |
 
 ## CLI Commands
 
@@ -328,13 +322,9 @@ parqtel export             # Export metric data to CSV
 
 ### Environment Variables
 
-Configuration is layered: built-in defaults → optional TOML file → environment
-→ CLI flags (highest priority). The `PARQTEL_SECTION__KEY` and
-`PARQTEL__SECTION__KEY` spellings are both accepted.
-
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `PARQTEL_CONFIG` | Path to TOML config file | none — `config/default.toml` is loaded only if present |
+| `PARQTEL_CONFIG` | Path to TOML config file | `config/default.toml` |
 | `PARQTEL_BIND` | TCP bind address | `0.0.0.0:8080` |
 | `PARQTEL__SERVER__GRPC_BIND_ADDRESS` | OTLP gRPC bind address (`""` disables) | `0.0.0.0:4317` |
 | `PARQTEL__INGEST__TAIL_SAMPLING__SAMPLING_RATIO` | Fraction of traces kept after error/slow rules | `1.0` |
@@ -342,70 +332,81 @@ Configuration is layered: built-in defaults → optional TOML file → environme
 | `PARQTEL_DATA_DIR` | Data directory | `data` |
 | `RUST_LOG` | Log level | `info` |
 | `PARQTEL__STORAGE__COMPRESSION` | Compression codec | `zstd` |
-| `PARQTEL__STORAGE__RETENTION_DAYS` | Retention period (days) | `7` |
-| `PARQTEL__INGEST__LABEL_INTERNER_CAPACITY` | Distinct label sets the interner holds | `1048576` |
-| `PARQTEL__STORAGE__COMPACTION_INTERVAL_SECS` | Interval between compaction passes | `300` |
+| `PARQTEL__STORAGE__RETENTION_DAYS` | Retention period | `7` |
 
-Full reference: [docs/operations/configuration.md](docs/operations/configuration.md).
+## MCP Integrations
 
-## MCP Integration
+Parqtel ships with 7 Model Context Protocol (MCP) servers that enable LLM-driven incident response:
 
-Parqtel ships with **`parqtel-mcp-parqtel`** (port `3007` in Compose), a Model
-Context Protocol server that lets LLM agents query your metrics, logs, alerts,
-ingestion rates, and observed service topology over Streamable HTTP (`/mcp`).
+| Server | Port | Purpose |
+|--------|------|---------|
+| `parqtel-mcp-slack` | 3001 | Post alerts, RCA updates, and postmortems to Slack |
+| `parqtel-mcp-pagerduty` | 3002 | Create/manage incidents, escalate, add notes |
+| `parqtel-mcp-jira` | 3003 | Create issues, update tickets, link incidents |
+| `parqtel-mcp-notion` | 3004 | Create/update postmortem pages, knowledge base |
+| `parqtel-mcp-discord` | 3005 | Post alerts and updates to Discord channels |
+| `parqtel-mcp-gdocs` | 3006 | Create/update Google Docs for postmortems |
+| `parqtel-mcp-parqtel` | 3007 | Query Parqtel metrics/logs via MCP tools |
 
-See [docs/guides/mcp.md](docs/guides/mcp.md) for connection setup and tool
-schemas.
-
----
-
-## ⚠️ Before You Deploy
-
-Parqtel is in **public beta**. Three things bite in production:
-
-1. **Authentication is optional and off by default.** `[auth]` provides
-   scoped HTTP bearer tokens (`read`/`write`/`admin`), but the OTLP gRPC listener
-   has no token layer and auth is disabled unless configured. Do not expose
-   `8080` or `4317` without auth plus a TLS terminator or a network boundary.
-2. **The in-memory buffer is bounded and can drop pre-flush rows.** Points stay
-   buffered until a block is flushed. `ingest.buffer_max_points` (5M) and
-   `buffer_max_bytes` (2 GiB estimated) cap it; `drop_oldest` evicts the oldest
-   buffered rows and `reject_new` refuses new batches. The writer and WAL keep
-   the acknowledged rows, so this affects the pre-flush query window, not
-   durability. Tune with
-   [Performance & Memory Sizing](docs/operations/performance-sizing.md).
-3. **Instant queries see only the last 5 minutes.** Data older than
-   `query.lookback_delta_ns` is answered by `/api/v1/query_range` after the
-   block flush, not by `/api/v1/query`.
-
-See [Known Issues](docs/operations/known-issues.md) for the full list.
+See [docs/guides/mcp.md](docs/guides/mcp.md) for detailed configuration and tool schemas.
 
 ## Deployment
 
 | Method | Guide |
 |--------|-------|
 | Docker | Single container with volume mount |
-| Docker Compose | Full stack (Parqtel + Grafana + Prometheus + MCP) — `make dev-setup` |
-| Kubernetes (Helm) | Production-grade with HPA, PDB, NetworkPolicy — chart at `deploy/helm/parqtel/`, image `ghcr.io/parqtel/parqtel-oss` |
+| Docker Compose | Full stack (Parqtel + Grafana + Prometheus + MCP) — `make local-up` |
+| Kubernetes (Helm) | Production-grade with HPA, PDB, NetworkPolicy — chart at `deploy/helm/parqtel/` |
 | systemd | Bare-metal Linux service — unit at `deploy/systemd/parqtel.service` |
 
-See [docs/operations/deployment.md](docs/operations/deployment.md) for details.
+See [docs/operations/deployment.md](docs/operations/deployment.md) for detailed instructions.
+
+## Storage Design
+
+Parqtel uses a **block-based storage model**:
+
+- **Metrics blocks**: 2-hour duration, up to 1M rows, Zstd compressed
+- **Log blocks**: 30-minute duration, up to 200K rows, Zstd compressed
+- **Compaction**: Merges small blocks automatically (hourly)
+- **Retention**: Configurable per-signal (default: 7 days metrics, 3 days logs)
+- **Index**: In-memory block index with persistence, supports time-range and metric-name filtering
+
+Each block is a self-contained Parquet file with row groups optimized for columnar scans.
+
+## Configuration
+
+Parqtel uses layered configuration via [Figment](https://github.com/SergioBenitez/Figment):
+
+1. Built-in defaults
+2. TOML config file (`config/default.toml`)
+3. Environment variables (`PARQTEL__` prefix, `__` as separator)
+4. CLI flags (highest priority)
+
+See [docs/operations/configuration.md](docs/operations/configuration.md) for the full reference.
 
 ## Development
 
-Contributor workflow, `make` targets, benchmark harnesses and the compiler/clippy
-conventions are in [CONTRIBUTING.md](CONTRIBUTING.md) and the
-[Developer Guide](docs/development/developer-guide.md). The short version:
-
 ```bash
-make test      # cargo test --workspace
-make lint      # cargo fmt --check && cargo clippy --workspace -- -D warnings
-make dev-setup # first-time local stack (copies .env, starts Compose)
+make dev-setup      # First-time local setup (copies .env, starts compose stack)
+make build          # Debug build
+make release        # Optimized release build
+make test           # Run all tests
+make lint           # rustfmt + clippy
+make docker         # Build Docker image
+make run            # Start server locally (from source)
+make local-up       # Start compose stack
+make local-rebuild  # Rebuild images and restart (after source changes)
+make load           # Send synthetic data
+make perf-audit     # Full performance audit
 ```
 
-Conventions: `unsafe` is forbidden workspace-wide, `unwrap`/`expect`/`panic` are
-denied by clippy, `thiserror` for library errors and `anyhow` at the binary
-level, Tokio for async. MSRV is **1.88**.
+### Project Conventions
+
+- **No unsafe code** — `#[forbid(unsafe_code)]`
+- **No panics** — `unwrap`, `expect`, and `panic` are denied by clippy
+- **Error handling** — `thiserror` for library errors, `anyhow` at the binary level
+- **Async runtime** — Tokio with full features
+- **Release binary** — LTO, single codegen unit, symbols stripped, abort on panic
 
 ## License
 
@@ -416,7 +417,21 @@ Apache License 2.0 — see [LICENSE](LICENSE).
 Contributions are welcome. Please read [CONTRIBUTING.md](CONTRIBUTING.md) and
 [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) first.
 
+1. Fork the repository
+2. Create a branch (`git checkout -b feat/my-change`)
+3. Run `make lint && make test`
+4. Open a pull request using the [PR template](.github/PULL_REQUEST_TEMPLATE.md)
+
 Performance changes need a measurement — the number, the command that produced
-it, and the dataset. See
-[CONTRIBUTING.md](CONTRIBUTING.md#performance-changes) and
-[docs/performance/README.md](docs/performance/README.md).
+it, and the dataset. See [CONTRIBUTING.md](CONTRIBUTING.md#performance-changes)
+and [docs/performance/README.md](docs/performance/README.md).
+
+## Status
+
+`0.2.0` is the initial **public beta**. It has **no authentication or
+authorization** — do not expose the HTTP (`8080`) or OTLP gRPC (`4317`) ports
+publicly without a reverse proxy that provides it.
+
+Start at [docs/operations/known-issues.md](docs/operations/known-issues.md): the unbounded in-memory
+buffer, the 5-minute instant-query lookback, and the range-query final step are
+the three that surprise people most.

@@ -8,7 +8,7 @@ self-contained SVG rendered from a Mermaid source.
 
 - **Motion stops automatically** under `prefers-reduced-motion: reduce`, and the
   diagrams stay fully legible as still images.
-- **Sources** are Mermaid files in [`docs/assets/diagrams/src/`](../assets/diagrams/src/)
+- **Sources** are Mermaid files in [`docs/assets/diagrams/src/system-context.mmd`](../assets/diagrams/src/system-context.mmd)
   — that is the editable truth.
 - **Regenerate** after editing a source (or the palette/motion stylesheets):
 
