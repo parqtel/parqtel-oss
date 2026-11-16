@@ -273,7 +273,7 @@ flowchart TB
 
     subgraph rotate["Rotate"]
         R1["BlockRotator<br/>sharded writers (metrics)"]
-        R2["SerialRotator<br/>logs + traces"]
+        R2["SerialRotator per signal<br/>(logs + traces, one instance each)"]
     end
 
     subgraph flush["Flush (spawn_blocking)"]
