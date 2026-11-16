@@ -123,8 +123,16 @@ while measuring. Measurements and method are in
 - The OpenAPI description now covers every registered route, including the
   pipeline search endpoint, saved searches, alert routes and silences.
 - `make docs-check` validates relative links and anchors, the repository paths
-  quoted in the docs, and that the OpenAPI spec and the Axum router describe
-  the same endpoints. It runs as a CI job.
+  quoted in the docs, the images the docs embed, and that the OpenAPI spec and
+  the Axum router describe the same endpoints. It runs as a CI job.
+- **Animated architecture diagrams.** The diagram page and the README now embed
+  self-contained SVG with the motion system in `docs/assets/diagrams/`: dashes
+  travel along every edge, nodes breathe in a wave, subgraph frames lift, and
+  sequence lifelines pulse. Declarative only (no JavaScript, no external
+  assets), it animates inside an `<img>` on GitHub and stops under
+  `prefers-reduced-motion: reduce`. Mermaid sources stay in
+  `docs/assets/diagrams/src/` and `scripts/diagrams/build.sh` regenerates the
+  SVGs.
 
 ## [0.3.1]
 
