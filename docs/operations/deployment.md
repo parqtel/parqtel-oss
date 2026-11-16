@@ -228,9 +228,22 @@ sudo chown -R parqtel:parqtel /var/lib/parqtel
 
 ### Configuration
 
+Parqtel runs with built-in defaults if no config file is supplied. For a
+systemd deployment, write the config file referenced by `parqtel.service`
+(see [Configuration](configuration.md) for all keys):
+
 ```bash
-sudo cp config/default.toml /etc/parqtel/parqtel.toml
-# Edit /etc/parqtel/parqtel.toml as needed
+sudo tee /etc/parqtel/parqtel.toml >/dev/null <<'EOF'
+[server]
+bind_address = "0.0.0.0:8080"
+grpc_bind_address = "0.0.0.0:4317"
+
+[storage]
+data_dir = "/var/lib/parqtel/data"
+
+[logs]
+data_dir = "/var/lib/parqtel/logs"
+EOF
 ```
 
 ### Service File

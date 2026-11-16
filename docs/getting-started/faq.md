@@ -62,5 +62,5 @@ Three built-in mechanisms:
 
 For CPU/memory profiling during tuning, set `telemetry.profiling_enabled = true` (with `profiling_frequency`) and scrape the `/debug/pprof/{profile,summary,memory}` endpoints — they 404 while profiling is disabled.
 
-#### How do the MCP servers work?
-MCP servers are lightweight proxies that translate LLM requests into Parqtel queries or actions (like posting to Slack). They allow your AI agents to "see" your metrics and logs during an incident.
+#### How does the MCP server work?
+`parqtel-mcp-parqtel` is a lightweight Streamable HTTP (`/mcp`) server built on `parqtel-mcp-core` that translates LLM tool calls into Parqtel HTTP API queries (`/api/v1/query`, `/api/v1/logs`, `/api/v1/alerts`, `/api/v1/ingest_rates`, `/api/v1/stats`). It gives AI agents read access to your metrics, logs, alerts, and observed topology during an incident. See [MCP Integration](../guides/mcp.md).

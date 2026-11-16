@@ -344,7 +344,7 @@ Parqtel uses [Figment](https://github.com/SergioBenitez/Figment) for layered con
 
 1. CLI flags (`--config`, `--bind`, `--data-dir`, `--log-level`)
 2. Environment variables (`PARQTEL__STORAGE__COMPRESSION`)
-3. TOML config file (`config/default.toml`, or the path given by `--config`/`PARQTEL_CONFIG`)
+3. TOML config file (optional `config/default.toml` if present, or the path given by `--config`/`PARQTEL_CONFIG`)
 4. Built-in defaults
 
 All configuration is validated at startup via `Config::validate()`.

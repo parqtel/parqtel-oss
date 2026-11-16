@@ -1,7 +1,7 @@
 flowchart LR
     subgraph producers["Telemetry producers"]
         SDK["OpenTelemetry SDKs<br/>metrics · logs · traces"]
-        PROM["Prometheus<br/>remote-write"]
+        COL["OTel Collector<br/>scrape · batch · forward"]
         APP["Applications<br/>OTLP exporters"]
     end
 
@@ -26,7 +26,7 @@ flowchart LR
     SDK -->|"OTLP gRPC :4317"| ING
     SDK -->|"OTLP HTTP /v1/*"| ING
     APP --> ING
-    PROM --> ING
+    COL -->|"OTLP gRPC / HTTP"| ING
 
     ING --> BLOCKS
     ING --> IDX
@@ -36,7 +36,6 @@ flowchart LR
     SRV --> GRAF
     SRV --> PROMAPI
     SRV --> OPS
+    SRV --> LLM
     ALERT --> OPS
-    ALERT --> LLM
-    ING -->|"span-metrics RED bridge"| ALERT
     SRV -.->|"query"| ALERT

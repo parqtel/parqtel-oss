@@ -156,7 +156,7 @@ For production dashboards, we recommend Grafana.
 - **Configure Alerting:** Learn how to set up YAML-based rules in [Alerting Guide](../operations/configuration.md#alerts).
 - **Architecture Deep Dive:** Understand how Parquet blocks work in the [Architecture Doc](../development/architecture.md).
 - **Deployment:** Move to production with [Kubernetes/Helm](../operations/deployment.md#kubernetes-helm).
-- **MCP Integrations:** Connect Parqtel to Slack, PagerDuty, and more via [MCP](../guides/mcp.md).
+- **MCP Integration:** Connect AI agents (Claude, Cline, etc.) to query your metrics, logs, and alerts via [MCP](../guides/mcp.md).
 
 ## Need Help?
 Check the [Troubleshooting Guide](../operations/troubleshooting.md) or open an issue on GitHub.

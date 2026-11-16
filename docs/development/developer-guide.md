@@ -16,7 +16,7 @@ Every crate is a directory under `crates/`, one per concern.
 - **`parqtel-alert`**: Alert rules, the evaluation loop, the state machine and the built-in preset packs.
 - **`parqtel-pipeline`**: Recording rules and stream-processing pipelines.
 - **`parqtel-server`**: The Axum-based HTTP entry point — routes, middleware, telemetry, and the embedded console. The binary is named `parqtel`, not `parqtel-server`.
-- **`parqtel-mcp-core`** and the seven **`parqtel-mcp-*`** tool servers: the Model Context Protocol framework and its integrations.
+- **`parqtel-mcp-core`** and **`parqtel-mcp-parqtel`**: the Model Context Protocol framework and the Parqtel query/observability MCP server.
 
 See [Diagrams](diagrams.md#2-crate-dependency-graph) for the dependency graph.
 
@@ -108,7 +108,7 @@ Parqtel's AI-native capabilities come from its MCP servers. To add a new tool (e
 
 - **Unit Tests**: Small test modules sit inline at the bottom of the file they cover. Larger suites live next to the module as `<module>/tests.rs` (for a file module `foo.rs`, create `foo/tests.rs` and declare `#[cfg(test)] mod tests;`), or as a `tests/` directory when they split by topic. Test code may use `unwrap`/`expect`; production code may not.
 - **Integration Tests**: Found in the `tests/` directory of each crate.
-- **E2E Tests**: The Kubernetes suite in the root `tests/e2e/` directory requires a running cluster and is built with the `e2e` build tag (`cd e2e && go test -tags e2e ./...`; Go + client-go). The PromQL functional suite needs no cluster — `make e2e-promql` runs it against the local compose stack.
+- **E2E Tests**: The Kubernetes suite in `tests/e2e/` requires a running cluster and is built with the `e2e` build tag (`cd tests/e2e && go test -tags e2e ./...`; Go + client-go). The PromQL functional suite needs no cluster — `make e2e-promql` runs it against the local compose stack.
 
 ## 8. Performance Profiling
 

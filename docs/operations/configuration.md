@@ -4,7 +4,7 @@ Parqtel uses [Figment](https://github.com/SergioBenitez/Figment) for layered con
 
 1. **CLI flags** — `--bind`, `--data-dir`, `--config`, `--log-level`
 2. **Environment variables** — prefixed with `PARQTEL__`, using `__` as section separator
-3. **TOML config file** — specified via `--config` or auto-detected at `config/default.toml`
+3. **TOML config file** — optional; specified via `--config` / `PARQTEL_CONFIG`, or auto-detected at `config/default.toml` if present (not shipped by default)
 4. **Built-in defaults** — hardcoded in the source
 
 ## TOML Configuration File
