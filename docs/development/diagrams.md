@@ -1,9 +1,24 @@
 # Architecture diagrams
 
-Visual reference for Parqtel's internal structure. Every diagram is
-[Mermaid](https://mermaid.js.org/), so it renders on GitHub, in the docs site and
-in any Mermaid-aware Markdown viewer. The prose around each diagram carries the
-detail; the diagram carries the shape.
+Visual reference for Parqtel's internal structure. The diagrams are **animated
+SVG** — the motion carries the data flow (dashes travel along every edge, nodes
+breathe in a wave, subgraph frames lift) so direction and throughput read at a
+glance. There is no JavaScript and no external asset: each file is a
+self-contained SVG rendered from a Mermaid source.
+
+- **Motion stops automatically** under `prefers-reduced-motion: reduce`, and the
+  diagrams stay fully legible as still images.
+- **Sources** are Mermaid files in [`docs/assets/diagrams/src/`](../assets/diagrams/src/)
+  — that is the editable truth.
+- **Regenerate** after editing a source (or the palette/motion stylesheets):
+
+  ```bash
+  npm install -g @mermaid-js/mermaid-cli   # once
+  ./scripts/diagrams/build.sh
+  ```
+
+  The palette lives in [`parqtel-mermaid-config.json`](../assets/diagrams/parqtel-mermaid-config.json)
+  and the animation vocabulary in [`parqtel-motion.css`](../assets/diagrams/parqtel-motion.css).
 
 Related reading:
 
@@ -15,50 +30,7 @@ Related reading:
 
 What talks to Parqtel, and what Parqtel talks to.
 
-```mermaid
-flowchart LR
-    subgraph producers["Telemetry producers"]
-        SDK["OpenTelemetry SDKs<br/>metrics · logs · traces"]
-        PROM["Prometheus<br/>remote-write"]
-        APP["Applications<br/>OTLP exporters"]
-    end
-
-    subgraph parqtel["Parqtel (single binary)"]
-        ING["Ingest<br/>gRPC :4317 · HTTP :8080"]
-        SRV["Query + console<br/>/api/v1/* · /ui"]
-        ALERT["Alert engine"]
-    end
-
-    subgraph storage["Storage"]
-        BLOCKS["Parquet blocks<br/>zstd · columnar"]
-        IDX["Block index sidecars<br/>index.json"]
-    end
-
-    subgraph consumers["Consumers"]
-        GRAF["Grafana<br/>SimpleJSON datasource"]
-        PROMAPI["Prometheus<br/>HTTP API"]
-        OPS["Operators<br/>curl · kubectl"]
-        LLM["LLM agents<br/>MCP servers"]
-    end
-
-    SDK -->|"OTLP gRPC :4317"| ING
-    SDK -->|"OTLP HTTP /v1/*"| ING
-    APP --> ING
-    PROM --> ING
-
-    ING --> BLOCKS
-    ING --> IDX
-    IDX --> SRV
-    BLOCKS --> SRV
-
-    SRV --> GRAF
-    SRV --> PROMAPI
-    SRV --> OPS
-    ALERT --> OPS
-    ALERT --> LLM
-    ING -->|"span-metrics RED bridge"| ALERT
-    SRV -.->|"query"| ALERT
-```
+![System context: telemetry producers feed Parqtel's ingest over OTLP gRPC and HTTP; Parqtel writes Parquet blocks and block-index sidecars; Grafana, Prometheus, operators and LLM agents read from the query and alert surfaces](../assets/diagrams/system-context.svg)
 
 **Facts behind the picture.** Ingest is unauthenticated in the OSS build — put
 a proxy in front of `:8080` and `:4317` (see
@@ -69,44 +41,7 @@ binaries that query Parqtel over HTTP; they are not in the ingest path.
 
 Fifteen workspace members; every signal crate depends only on `parqtel-core`.
 
-```mermaid
-flowchart TD
-    SRV["parqtel-server<br/>binary: parqtel"]
-    ING["parqtel-ingest"]
-    QRY["parqtel-query"]
-    ALR["parqtel-alert"]
-    PIPE["parqtel-pipeline"]
-    CORE["parqtel-core<br/>models · storage · engine · config · wal"]
-    MCPC["parqtel-mcp-core<br/>JSON-RPC · rate limit · tool registry"]
-
-    SRV --> ING
-    SRV --> QRY
-    SRV --> ALR
-    SRV --> PIPE
-    ING --> CORE
-    QRY --> CORE
-    ALR --> CORE
-    PIPE --> CORE
-    SRV --> CORE
-
-    subgraph mcp["MCP tool servers"]
-        S1["mcp-slack"]
-        S2["mcp-pagerduty"]
-        S3["mcp-jira"]
-        S4["mcp-notion"]
-        S5["mcp-discord"]
-        S6["mcp-gdocs"]
-        S7["mcp-parqtel"]
-    end
-
-    S1 --> MCPC
-    S2 --> MCPC
-    S3 --> MCPC
-    S4 --> MCPC
-    S5 --> MCPC
-    S6 --> MCPC
-    S7 --> MCPC
-```
+![Crate dependency graph: parqtel-server depends on ingest, query, alert, pipeline and core; each signal crate depends on core; the seven MCP tool servers depend on parqtel-mcp-core](../assets/diagrams/crate-graph.svg)
 
 Crates are one directory per concern under `crates/`. `parqtel-core` holds the
 data models, the storage engine, the write-ahead log and the layered
@@ -116,34 +51,7 @@ configuration; it depends on no other workspace crate.
 
 One request, end to end. The same shape applies to logs and traces.
 
-```mermaid
-sequenceDiagram
-    autonumber
-    participant C as OTel SDK
-    participant H as Axum handler
-    participant D as parqtel-ingest::decode
-    participant B as MemoryBuffer
-    participant W as BlockRotator<br/>(4 writer shards)
-    participant L as Write-Ahead Log
-    participant P as Parquet block file
-    participant I as BlockIndex
-
-    C->>H: POST /v1/metrics (protobuf or JSON)
-    H->>H: gunzip body · size check
-    H->>D: OTLP payload
-    D->>D: decode · intern label sets
-    D->>B: push points (+ service.name label)
-    Note over B: immediately queryable
-    D->>W: push points (sharded)
-
-    W->>L: append records, frame WAL span
-    Note over W,L: commit position taken<br/>while every shard is locked
-    W->>P: encode + zstd on spawn_blocking
-    P->>I: BlockMetadata (mpsc)
-    Note over P: block is durable here
-    W->>B: drop sealed epochs
-    Note over B: no double-counting
-```
+![Ingest sequence: the OTel SDK posts to the Axum handler, which gunzips and size-checks the body, decodes it, pushes to the memory buffer and the sharded rotator, frames the WAL records, encodes the Parquet block on the blocking pool and updates the block index, then drops the sealed buffer epochs](../assets/diagrams/ingest-path.svg)
 
 **Ordering guarantee.** A block's WAL commit position is the WAL's end taken
 while every writer shard is locked, and buffer drops are released in flush
@@ -156,23 +64,7 @@ point and skip records already in a block.
 Trace ingestion does two things before a span reaches storage: it derives RED
 metrics, then it samples the trace.
 
-```mermaid
-flowchart TD
-    IN["Spans decoded<br/>(resource attrs merged into span attrs)"]
-    RED["RED bridge<br/>traces_service_requests_total<br/>traces_service_errors_total<br/>traces_service_duration_ms_total"]
-    METRICS["Metrics ingest path<br/>(unsampled, full rate)"]
-    TS["Tail sampling policy<br/>keep_errors → slow_trace_ms → sampling_ratio"]
-    KEEP["Trace survives"]
-    DROP["Trace dropped<br/>(counted in dropped_spans)"]
-    STORE["Traces ingest path<br/>→ memory buffer → blocks"]
-
-    IN --> RED
-    RED --> METRICS
-    IN --> TS
-    TS -->|any rule votes keep| KEEP
-    TS --> DROP
-    KEEP --> STORE
-```
+![Trace ingest flow: spans are decoded with resource attributes merged in; the RED bridge derives traces_service_requests, errors and duration metrics into the metrics path; the tail-sampling policy keeps error and slow traces and samples the rest by trace-id hash; kept traces go to the trace ingest path](../assets/diagrams/trace-red-sampling.svg)
 
 Sampling runs **after** RED derivation, so RED metric rates stay exact while
 storage volume shrinks. Probabilistic decisions hash the `trace_id`, so a whole
@@ -184,29 +76,7 @@ replace the global policy for that service entirely.
 Three surfaces, one storage engine. The pruning cascade is the same for all of
 them.
 
-```mermaid
-flowchart TD
-    Q["Query request<br/>instant · range · log search · trace search · pipeline"]
-    ADM["Scan admission<br/>process-wide 4 slots"]
-    IDX["1. Block index lookup<br/>time range + metric name"]
-    SER["2. Series table<br/>(parqtel.series_index in the footer)"]
-    RG["3. Row-group pruning<br/>timestamp · metric_name · service_name stats"]
-    PROJ["4. Column projection<br/>4 of 14 metric columns"]
-    DEC["Row predicate<br/>(full matcher — always the final judge)"]
-    BUF["Memory buffer rows"]
-    EVAL["Aggregation / evaluation<br/>per step, on the blocking pool"]
-    OUT["Result"]
-
-    Q --> ADM
-    ADM --> IDX
-    IDX --> SER
-    SER --> RG
-    RG --> PROJ
-    PROJ --> DEC
-    DEC --> EVAL
-    BUF --> EVAL
-    EVAL --> OUT
-```
+![Query path: a request takes a scan-admission slot, then walks block-index lookup, series table, row-group pruning and column projection, applies the full row predicate, merges memory-buffer rows and evaluates on the blocking pool](../assets/diagrams/query-pruning.svg)
 
 - The series table only ever **narrows** candidates; the full matcher still
   judges every candidate series, so a block without a valid table falls back to
@@ -226,15 +96,7 @@ flowchart TD
 Metric blocks form two levels. The streaming compactor coalesces canonical
 blocks into 5-minute windows.
 
-```mermaid
-flowchart TD
-    F["Ingest flush"] --> L0["L0 · m_l0_[start]_[end]_[id].parquet<br/>series-sorted by the final query-visible labels"]
-    L0 -->|"legacy block, at most 500K rows<br/>one per pass"| N["L0-normalised · m_n_…<br/>series order agrees with its index"]
-    N -->|"streaming k-way merge<br/>within one 5-minute bucket"| L1["L1 · m_l1_[start]_[end]_[id].parquet<br/>one 5-minute window per block"]
-    L0 -->|"streaming k-way merge<br/>within one 5-minute bucket"| L1
-    L1 -->|"sources deleted after<br/>a 5-minute query grace period"| R["Retired"]
-    R -->|"retention sweep"| X["Removed"]
-```
+![Block lifecycle: an ingest flush writes an L0 block; legacy blocks are normalised into m_n_ files; a streaming k-way merge coalesces L0 and normalised blocks into one L1 block per 5-minute bucket; sources are deleted after a 5-minute query grace period and the block is retired by retention](../assets/diagrams/block-lifecycle.svg)
 
 **How a merge works.** A streaming k-way merge reads one Arrow batch at a time
 from each source, coalesces series by their final query-visible labels, and
@@ -254,23 +116,7 @@ replayed. Mixed or non-contiguous ranges are skipped.
 
 ## 7. Storage layout on disk
 
-```text
-data/
-├── m_l0_<start>_<end>_<id>.parquet   metric blocks (L0 — one per flush)
-├── m_l1_<start>_<end>_<id>.parquet   metric blocks (L1 — one per 5-minute window)
-├── m_n_<start>_<end>_<id>.parquet    metric blocks (normalised legacy layout)
-├── index.json                        metric block index sidecar
-├── logs/
-│   ├── <id>.parquet                  log blocks
-│   └── index.json                    log block index sidecar
-├── traces/
-│   ├── <id>.parquet                  trace blocks
-│   └── index.json                    trace block index sidecar
-└── wal/
-    ├── metrics/                      metrics WAL segments
-    ├── logs/                         logs WAL segments
-    └── traces/                       traces WAL segments
-```
+![Storage layout: the data directory holds metric block files named by level, the metric index sidecar with the shared label-value dictionary, logs and traces directories each with their own blocks and index, and a wal directory with one subdirectory per signal](../assets/diagrams/storage-layout.svg)
 
 Each sidecar is written atomically (temp file + rename) and holds the block
 metadata plus **one shared label-value dictionary** for the whole signal:
@@ -290,17 +136,7 @@ Older binaries cannot parse the new shape.
 
 ## 8. Concurrency and admission control
 
-```mermaid
-flowchart TD
-    REQ["Async request"] --> SEM["spawn_blocking<br/>(semaphore permit acquired first)"]
-    SEM --> POOL["Blocking pool<br/>Parquet encode · scans · OTLP decode"]
-    REQ --> ADM{"Scan budget<br/>4 slots, process-wide"}
-    ADM -->|slot free| POOL
-    ADM -->|full, low priority| SKIP["Skip and count<br/>parqtel_scan_low_priority_skips_total"]
-    ADM -->|full, user query| WAIT["Wait for admission<br/>parqtel_scan_admission_wait_seconds_total"]
-    WAIT --> POOL
-    POOL --> FOOT["Footer / series-index cache<br/>one shared load per block"]
-```
+![Concurrency model: async requests hand blocking work to a bounded pool, a process-wide four-slot budget admits block scans, low-priority background work is skipped while the budget is full, and footer or series-index misses for one block share a single load](../assets/diagrams/admission-control.svg)
 
 - **Metrics rotator shards** (`ingest.rotator_shards`, default 4) let unrelated
   metric ingest proceed while a flush is in flight. The shards are not
@@ -316,39 +152,13 @@ flowchart TD
 
 ## 9. Alert path
 
-```mermaid
-flowchart LR
-    R["YAML rules<br/>rules_dir + built-in presets"] --> REG["AlertRuleRegistry<br/>watched with notify"]
-    REG --> LOOP["Evaluation loop<br/>every server.alert_interval_secs"]
-    LOOP --> Q["Query executor<br/>single selector or aggregation"]
-    Q --> TH["Threshold on the last sample<br/>of every result series"]
-    TH --> SM["State machine<br/>Inactive → Pending → Firing → Resolved"]
-    SM --> STORE["AlertStore<br/>transition history"]
-    SM --> ROUTE["Notification routes<br/>severity + label match"]
-    ROUTE --> HOOK["Webhook"]
-    ROUTE --> MCP["MCP servers<br/>Slack · PagerDuty · Jira · Notion"]
-```
+![Alert path: YAML rules from the rules directory and the built-in presets feed the rule registry, the evaluation loop queries the executor every alert interval, thresholds the last sample of every result series, drives the Inactive to Pending to Firing to Resolved state machine, stores transition history and routes to webhooks or MCP servers](../assets/diagrams/alert-path.svg)
 
 ## 10. Query surfaces
 
 One storage engine, three syntaxes.
 
-```mermaid
-flowchart TD
-    U["Client"] --> PQL["ParQL<br/>PromQL-compatible"]
-    U --> LQL["ParqtelQL<br/>logs + traces"]
-    U --> PIPE["PQL Pipelines<br/>fetch │ filter │ parse │ stats │ correlate"]
-
-    PQL --> E1["Pratt parser → AST<br/>per-step evaluation"]
-    LQL --> E2["Lenient boolean grammar<br/>prepared predicates"]
-    PIPE --> E3["Unified field map<br/>fetch │ filter │ parse │ stats │ correlate"]
-
-    E1 --> EX["QueryExecutor"]
-    E2 --> EX
-    E3 --> EX
-    EX --> SC["Scanner<br/>index → series table → row groups → projection"]
-    SC --> BLK["Parquet blocks + memory buffer"]
-```
+![Query surfaces: ParQL, ParqtelQL and PQL Pipelines parse into the query executor, which scans via index, series table, row groups and column projection over Parquet blocks and the memory buffer](../assets/diagrams/query-surfaces.svg)
 
 - **ParQL** — instant and range queries, aggregations with `by`/`without`,
   binary operators with `on()`/`ignoring()`/`group_left`, subqueries, offset.
