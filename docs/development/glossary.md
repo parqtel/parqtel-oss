@@ -40,7 +40,7 @@ This document defines key terms and concepts used within the Parqtel ecosystem.
 - **Retention Policy**: The logic that determines when old data blocks should be deleted from the filesystem based on age.
 
 ### W
-- **WAL (Write-Ahead Log)**: A crash-recovery mechanism that records incoming data to a persistent log before it is flushed to a Parquet block. On by default for both metrics (`ingest.wal_enabled`) and logs (`ingest.log_wal_enabled`).
+- **WAL (Write-Ahead Log)**: A crash-recovery mechanism that records incoming data to a persistent log before it is flushed to a Parquet block. On by default for both metrics and logs (`ingest.wal_enabled`, `ingest.log_wal_enabled`); turning the metrics WAL off makes the background flush worker refuse to start and fall back to synchronous flush.
 - **WAL Span**: The `(from, to]` range of WAL records a block covers. Stored in the block footer (`parqtel.wal_range`) so startup can advance the commit point and skip records already in a block.
 
 ### L

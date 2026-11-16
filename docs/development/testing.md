@@ -43,7 +43,7 @@ Canonical entry points (see the Makefile):
 ## 4. Resiliency Testing
 
 We perform "Chaos" style testing to ensure Parqtel handles failures gracefully:
-- **Crash Recovery**: We kill the process during high-load ingestion and verify that the WAL (Write-Ahead Log) restores unflushed data. Both WALs are on by default (`ingest.wal_enabled = true`, `ingest.log_wal_enabled = true`), so unflushed rows survive a crash; set `wal_enabled = false` only to measure the no-WAL path.
+- **Crash Recovery**: We kill the process during high-load ingestion and verify that the WAL (Write-Ahead Log) restores unflushed data. Both the metrics and the logs WAL are enabled by default (`ingest.wal_enabled = true`, `ingest.log_wal_enabled = true`); with the metrics WAL off the flush worker refuses to start and falls back to the synchronous path (see [durability](../performance/durability.md)).
 - **Disk Full**: We simulate a full disk and verify that Parqtel stops ingestion without corrupting existing Parquet blocks.
 
 ## 5. Storage-Level Tests
