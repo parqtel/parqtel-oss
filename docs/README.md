@@ -35,17 +35,20 @@ Documentation for Parqtel, an open-source SRE telemetry store.
 | | |
 |---|---|
 | [Architecture](development/architecture.md) | Crates, data flow, storage engine, concurrency model |
+| [Diagrams](development/diagrams.md) | Visual architecture: context, crate graph, data flow, block lifecycle |
 | [Developer guide](development/developer-guide.md) | Local setup, conventions, repository layout |
 | [Testing](development/testing.md) | Test strategy and how to run each layer |
 | [Test plan](development/test-plan.md) | End-to-end scenarios |
 | [CI/CD](development/ci-cd.md) | Pipelines, gates, release process |
 | [Glossary](development/glossary.md) | Terminology |
+| [Efficiency plan](development/efficiency-plan.md) | The measured plan behind the scan budget and the L1 rollup |
+| [Memory backlog](development/memory-backlog.md) | Open memory items and what each one costs |
 
 ## Reference
 
 | | |
 |---|---|
-| [HTTP API](api/openapi.yaml) | OpenAPI 3 description, also served at `/openapi.yaml` |
+| [HTTP API](api/openapi.yaml) | OpenAPI 3 description, also served at `/oas` |
 | [Performance](performance/README.md) | Measured results and how each was obtained |
 
 ## Scope

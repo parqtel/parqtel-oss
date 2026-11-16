@@ -110,6 +110,22 @@ while measuring. Measurements and method are in
   a background task kept the ingestion services alive. Shutdown also bounds its
   waits on the index tasks.
 
+### Documentation
+
+- **Architecture diagrams** (`docs/development/diagrams.md`): ten Mermaid
+  diagrams covering the system context, the crate graph, the ingest and query
+  paths, the block lifecycle, the on-disk layout, admission control, the alert
+  path and the three query surfaces.
+- The architecture, configuration, deployment, troubleshooting, sizing,
+  glossary, FAQ and best-practices documents were brought up to date with the
+  L0/L1 block levels, the process-wide scan budget, the shared label-value
+  dictionary, the jemalloc allocator and the current MSRV (1.88).
+- The OpenAPI description now covers every registered route, including the
+  pipeline search endpoint, saved searches, alert routes and silences.
+- `make docs-check` validates relative links and anchors, the repository paths
+  quoted in the docs, and that the OpenAPI spec and the Axum router describe
+  the same endpoints. It runs as a CI job.
+
 ## [0.3.1]
 
 Chart and release-pipeline release. No binary behaviour changes.

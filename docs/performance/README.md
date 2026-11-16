@@ -15,6 +15,8 @@ measurement showed an optimisation was not worth doing, that is recorded as well
 | [Compaction](compaction.md) | Merging blocks and keeping their indexes |
 | [Durability and recovery](durability.md) | WAL, commit ordering, block-index repair |
 | [Sizing](../operations/performance-sizing.md) | Memory and disk for your ingest rate |
+| [Efficiency plan](../development/efficiency-plan.md) | The measured plan behind the scan budget, the L0/L1 rollup and the index work |
+| [Memory backlog](../development/memory-backlog.md) | The open memory items and what each one costs |
 
 ## End-to-end ingest and query performance
 
@@ -107,7 +109,27 @@ landed between a block becoming durable and its WAL commit and the block's rows
 came back a second time; blocks now record the WAL span they cover and startup
 skips it (covered by a test, since that window is milliseconds wide).
 
-### Tried and not adopted
+### The most recent work: bounding scans and rolling blocks up
+
+The two changes with the largest effect on a real deployment are the
+**process-wide 4-slot scan budget** (Phase 0) and the **5-minute L1 block
+rollup** (Phase 1). Both were driven by the same finding: the cost of a query
+is dominated by how many blocks it touches, not by how many rows it returns.
+
+What was measured, on the UAT cluster:
+
+| Change | Measurement |
+|---|---|
+| Shared label-value dictionary in the sidecar | 73.5 MiB → 12.6 MiB (17 %) on 97 real blocks |
+| jemalloc as the global allocator | Idle RSS 1.5–1.8 GiB → 0.9–1.0 GiB at 578 K series; peak 2.0–2.1 GiB → 1.5–1.7 GiB |
+| Label interner capacity (262 K → 2 M) | Peak heap 4613 MiB → 2876 MiB; steady RSS 5839 MiB → 3011 MiB |
+| Interning replayed WAL labels | RSS after replay 2588 MiB → 650 MiB; live heap 692 MiB → 245 MiB |
+| Segment-at-a-time WAL replay | Peak replay memory bounded by one segment instead of the whole backlog |
+
+The plan, the rollout record and the open items are in
+[the efficiency plan](../development/efficiency-plan.md).
+
+## Tried and not adopted
 
 - **mimalloc as the global allocator** improved single-series selector latency by
   roughly 25% and left total server CPU unchanged, but raised peak RSS from 1.55

@@ -43,23 +43,44 @@ Canonical entry points (see the Makefile):
 ## 4. Resiliency Testing
 
 We perform "Chaos" style testing to ensure Parqtel handles failures gracefully:
-- **Crash Recovery**: We kill the process during high-load ingestion and verify that the WAL (Write-Ahead Log) restores unflushed data. Note the defaults: the metrics WAL is off (`ingest.wal_enabled = false`) and the logs WAL is on (`ingest.log_wal_enabled = true`), so coverage depends on which WAL was enabled for the run.
+- **Crash Recovery**: We kill the process during high-load ingestion and verify that the WAL (Write-Ahead Log) restores unflushed data. Both WALs are on by default (`ingest.wal_enabled = true`, `ingest.log_wal_enabled = true`), so unflushed rows survive a crash; set `wal_enabled = false` only to measure the no-WAL path.
 - **Disk Full**: We simulate a full disk and verify that Parqtel stops ingestion without corrupting existing Parquet blocks.
 
-## 5. Automated Validation (CI)
+## 5. Storage-Level Tests
+
+The storage engine has its own regression net, worth knowing before changing
+the block layout:
+
+- **`indexed_scan_equals_unindexed_scan`** — an indexed scan (series table)
+  must return exactly what an unindexed scan returns. This is the guard on the
+  footer series table.
+- **`SeriesTable::validate`** — the table must describe the block it is
+  written into. Every change to the row layout must keep it passing.
+- **WAL ordering** — the WAL commit position is taken while every writer
+  shard is locked, and each block records the WAL span `(from, to]` it covers.
+  Tests assert that a crash between the block write and the index update
+  neither loses nor double-counts rows.
+- **Streaming compaction** — the L0 → L1 merge preserves series and WAL
+  provenance, and a merge whose sources have mixed or gapped WAL ranges is
+  skipped.
+
+## 6. Automated Validation (CI)
 
 Our GitHub Actions workflows gate every PR:
 - **Detect Changes** — path filtering gates the expensive jobs (docs-only PRs finish in ~10 s)
 - **Lint** — `cargo fmt --check` + `cargo clippy --workspace --all-targets --locked -- -D warnings` (also forbids `unsafe` code workspace-wide)
 - **Test** — `cargo test --workspace` plus doc tests, all `--locked`
-- **MSRV** — checks the pinned minimum Rust version (1.87)
+- **MSRV** — checks the pinned minimum Rust version (1.88)
 - **Security Audit** — `cargo audit --deny warnings` + Trivy filesystem scan
-- **Helm Lint** — validates `deploy/helm/parqtel` against `ci/minimal-values.yaml`, `ci/default-values.yaml`, and `ci/full-values.yaml`
+- **Helm Lint** — validates `deploy/helm/parqtel` against `deploy/helm/parqtel/ci/minimal-values.yaml`, `deploy/helm/parqtel/ci/default-values.yaml`, and `deploy/helm/parqtel/ci/full-values.yaml`
 - **Docker Build & Smoke Test** — builds the image and probes `/health` and `/metrics`
+- **Docs Check** — `make docs-check` validates every relative link and anchor,
+  every repository path quoted in the docs, and that every registered HTTP route
+  is described in the OpenAPI spec (and the other way round)
 
 PR CI runs on Linux (`ubuntu-latest`) only; the multi-platform binaries (linux amd64/arm64, macOS) are built by `release.yml` on tags.
 
-## 6. How to Add a Test
+## 7. How to Add a Test
 
 ### Adding a Unit Test (Rust)
 Add a `#[cfg(test)]` module at the bottom of your file.

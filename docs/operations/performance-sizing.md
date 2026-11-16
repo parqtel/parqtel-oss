@@ -120,26 +120,47 @@ pre-owned, one record = one row); traces are ~2× a metric point.
    samples is about to also stall flushes (encode is CPU-bound); keep the CPU
    request ≥ 0.5 core at 1 k pts/s.
 
-## 3. Required allocator settings (glibc)
+## 3. Allocator and label interning
 
-Ship these in every non-dev deployment (validated on oman-stg, revision 10):
+**The allocator is built in.** The server links `tikv-jemallocator` as its
+global allocator, so the glibc tunables that used to be required are no longer
+needed:
 
 ```yaml
-extraEnv:
-  - name: MALLOC_ARENA_MAX
-    value: "2"
-  - name: MALLOC_TRIM_THRESHOLD_
-    value: "134217728"   # 128 MiB
+# No longer required — jemalloc is linked into the binary.
+# MALLOC_ARENA_MAX / MALLOC_TRIM_THRESHOLD_ only affect glibc builds.
 ```
 
-Effect measured: RSS floor 2309 → 1174 MiB, and RSS now returns after each
-flush instead of pinning at the high-water mark. Without the trim threshold,
-glibc holds freed arena memory indefinitely and the buffer ratio above becomes
-a *ratchet*, not a sawtooth — the single largest source of “Parqtel ate 2.5 GiB
-and never gave it back” reports.
+Measured end to end with the real binaries (578 K series, 2.3 M points over
+HTTP, `label_interner_capacity=2097152`), idle RSS 40 s after ingest:
 
-(A musl-based or jemalloc/mimalloc build would change the constants in §1;
-re-measure if the base image or allocator changes.)
+| Allocator | Idle RSS | Peak RSS |
+|---|---|---|
+| glibc | 1.5–1.8 GiB | 2.0–2.1 GiB |
+| jemalloc (shipped) | 0.9–1.0 GiB | 1.5–1.7 GiB |
+
+**Set the label interner capacity.** The interner lets every point of a series
+share one copy of its labels. Below the working set, that sharing is lost and
+memory grows with *points* instead of *series*:
+
+```yaml
+env:
+  - name: PARQTEL__INGEST__LABEL_INTERNER_CAPACITY
+    value: "2097152"   # at least 2x the active series count
+```
+
+Measured with 578 K series and 2.3 M points through the live ingest path:
+
+| Capacity | Peak heap | Steady RSS |
+|---|---|---|
+| 262 144 (old default) | 4613 MiB | 5839 MiB |
+| 1 048 576 (current default) | 4120 MiB | 5740 MiB |
+| 2 097 152 (2× series, above) | 2876 MiB | 3011 MiB |
+
+Each series is interned twice — once as received, once with `service.name`
+for the memory buffer — so the capacity should be at least twice the active
+series count. The table only holds label sets that were actually seen, so a
+high value costs nothing on a small deployment.
 
 ## 4. Profiling playbook (how these numbers were obtained)
 
@@ -165,10 +186,10 @@ while one runs returns 429.
 * **The memory buffer is unbounded.** `MemoryBuffer` has no cap, no byte
   accounting and no eviction, so resident memory is a function of ingest rate x
   block duration with no ceiling. Size the data directory and the container limit
-  from the formula in §3 and alert on `parqtel_process_rss_bytes`.
+  from the formula in §2 and alert on `parqtel_process_rss_bytes`.
 * **`KiB_PER_POINT` is conservative.** The 6.3 KiB/point slope was measured
-  before label sets were shared behind an `Arc` and before the write-ahead log,
-  so real usage is lower. Measure resident memory at your own ingest rate before
+  before label sets were shared behind an `Arc`, before the label interner was
+  made configurable, and before the write-ahead log, so real usage is lower. Measure resident memory at your own ingest rate before
   tightening a limit; `crates/parqtel-server/examples/perf_bench.rs` reproduces
   the measurement.
 * **`parqtel_flush_duration_seconds` and `parqtel_flush_inflight`** are rendered

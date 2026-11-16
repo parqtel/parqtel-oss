@@ -11,7 +11,7 @@ docker build -t parqtel:local .
 ```
 
 The Dockerfile uses a multi-stage cargo-chef build:
-- **Builder**: `rust:1.87-slim` (chef → planner → builder) with pkg-config, cmake, g++, and protobuf-compiler
+- **Builder**: `rust:1.88-slim` (chef → planner → builder) with pkg-config, cmake, make, g++, and protobuf-compiler
 - **Probe**: a std-only Rust `healthcheck` binary used by the image `HEALTHCHECK`
 - **Runtime**: a `runtime-libs` stage collects only the glibc/libgcc the binary needs, then `FROM scratch` ships that minimal rootfs (~15 MB final image, no shell)
 
@@ -301,6 +301,12 @@ sudo journalctl -u parqtel -f
 - Block index is held in memory — scales with number of blocks
 - Each active block buffer consumes memory proportional to `max_rows_per_block`
 - Recommended: 512 MB minimum, 2 GB for high-cardinality workloads
+- Set `PARQTEL__INGEST__LABEL_INTERNER_CAPACITY` to at least **twice** the
+  active series count (default 1 048 576). Below that, memory grows with
+  points instead of series — see
+  [sizing](performance-sizing.md#3-allocator-and-label-interning)
+- The allocator is jemalloc, linked into the binary. The glibc arena tunables
+  that older deployments set are no longer required
 
 ### Networking
 
@@ -318,6 +324,11 @@ sudo journalctl -u parqtel -f
   - `parqtel_query_errors_total` — query failures
   - `parqtel_storage_blocks` / `parqtel_storage_bytes` — compaction keeping up (unbounded growth = lagging compaction)
   - `parqtel_process_rss_bytes` — memory footprint vs. your request limit
+  - `parqtel_scan_slots_in_use` / `parqtel_scan_slots_limit` — block scans
+    against the process-wide budget (4)
+  - `parqtel_scan_low_priority_skips_total` — alert evaluations and compaction
+    passes deferred because no scan slot was free
+  - `parqtel_index_sidecar_bytes{signal}` — size of the block-index sidecar
 - **Self-telemetry**: set `telemetry.otlp_enabled = true` (with `otlp_endpoint`, `export_interval_secs`, `otlp_trace_level`) and Parqtel exports its own traces and SLI metrics over OTLP/gRPC to your collector, exactly like the services it ingests from — useful when the `/metrics` scrape path isn't wired into your pipeline.
 - **Profiling**: `telemetry.profiling_enabled = true` enables the `/debug/pprof/{profile,summary,memory}` endpoints (404 while disabled) for CPU/memory analysis during tuning. Restrict them with a NetworkPolicy in Kubernetes — they expose runtime internals.
 
@@ -326,3 +337,6 @@ sudo journalctl -u parqtel -f
 - Block files are immutable once written — safe to copy while running
 - Back up the `index.json` sidecars (per signal directory) for fast recovery (otherwise the index rebuilds from Parquet files)
 - Use filesystem snapshots or rsync for consistent backups
+- A sidecar written by this version has the shape
+  `{"blocks": [...], "label_values": {...}}`. An older binary cannot parse it;
+  a newer one reads the legacy bare-array shape and migrates it on first start

@@ -20,9 +20,15 @@ size, no byte accounting and no eviction, so the only bound is time.
 
 - Lower `storage.block_duration_secs` (default **7200**). This is the strongest
   lever: buffered points scale directly with it.
+- Set `ingest.label_interner_capacity` to at least **twice** the active series
+  count (default 1 048 576). Below that, every point keeps its own copy of its
+  labels and memory grows with points instead of series.
 - Watch `parqtel_process_rss_bytes` and alert on it.
 - Size the container from the formula in [PERFORMANCE_SIZING.md](performance-sizing.md)
   rather than from a default.
+
+The allocator is jemalloc, which returns freed memory to the OS instead of
+keeping it resident in glibc arenas.
 
 ---
 
@@ -100,10 +106,37 @@ directory; reconciled` warning at startup.
 not apply to it until compaction rewrites it with a full flush-time index.
 Label-value autocomplete also stays empty for that block until then.
 
-**Rolling back** is safe: blocks are self-describing Parquet and the previous
-binary reads them. Data written by a newer version may not be readable by an
-older one — see the `AGENTS.md` note on the arrow2 → arrow migration, where a
-wipe was required.
+**Rolling back** is not always safe. Blocks are self-describing Parquet, but
+two on-disk shapes changed with the L0/L1 work:
+
+- New metric blocks keep their labels only in the footer series table; the
+  row-level `labels` column is gone. An older binary cannot read them.
+- The block-index sidecar is now `{"blocks": [...], "label_values": {...}}`. An
+  older binary cannot parse it.
+
+Forward migration is automatic — the loader still accepts the old sidecar
+shape and folds its per-block values in. Rolling back is only safe once the
+superseded `m_l0_` sources have been removed. The arrow2 → arrow 60 migration
+is a harder boundary: a wipe was required there.
+
+---
+
+## Alert evaluation can be skipped under load
+
+**Symptom.** An alert that should have fired did not, and
+`parqtel_scan_low_priority_skips_total` is climbing.
+
+**Why.** Block scans share a process-wide budget of 4 slots. Alert evaluation
+reserves a slot **without waiting** and skips its cycle when none is free, so
+background work never starves interactive queries — but it also means a
+busy store can defer alerts.
+
+**Mitigating now.**
+
+- Reduce the query fan-out of the alert rule (narrower window, fewer series).
+- Roll metric blocks up into 5-minute L1 windows more aggressively by lowering
+  `storage.compaction_interval_secs` (default 300).
+- Watch `parqtel_scan_slots_in_use` against `parqtel_scan_slots_limit`.
 
 ---
 

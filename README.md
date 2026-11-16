@@ -9,7 +9,7 @@
   <a href="https://github.com/parqtel/parqtel-oss/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" alt="License"></a>
   <a href="https://ghcr.io/parqtel/parqtel-oss"><img src="https://img.shields.io/badge/docker-ghcr.io-blue?logo=docker" alt="Docker"></a>
   <a href="https://github.com/parqtel/parqtel-oss/pkgs/container/charts%2Fparqtel"><img src="https://img.shields.io/badge/helm-OCI-blue?logo=helm" alt="Helm"></a>
-  <img src="https://img.shields.io/badge/MSRV-1.87-orange?logo=rust" alt="MSRV">
+  <img src="https://img.shields.io/badge/MSRV-1.88-orange?logo=rust" alt="MSRV">
   <img src="https://img.shields.io/badge/unsafe-forbidden-success.svg" alt="Unsafe Forbidden">
   <a href="https://securityscorecards.dev/viewer/?uri=github.com/parqtel/parqtel-oss"><img src="https://api.securityscorecards.dev/projects/github.com/parqtel/parqtel-oss/badge" alt="OpenSSF Scorecard"></a>
   <a href="https://github.com/parqtel/parqtel-oss/security"><img src="https://img.shields.io/badge/trivy-scanned-blueviolet?logo=aqua" alt="Trivy Scanned"></a>
@@ -60,7 +60,7 @@ Parqtel is a single-binary observability backend written in Rust that ingests Op
 | **Onboarding** | [Getting Started](docs/getting-started/getting-started.md) • [Docs index](docs/README.md) • [Glossary](docs/development/glossary.md) • [FAQ](docs/getting-started/faq.md) |
 | **Learning** | [Tutorials](docs/getting-started/tutorials.md) • [Use Cases](#common-use-cases) |
 | **Querying** | [**PQL Guide**](docs/guides/pql-guide.md) — ParQL metrics, ParqtelQL log/trace search, cross-signal pipelines |
-| **Deep Dive** | [Architecture](docs/development/architecture.md) • [Configuration](docs/operations/configuration.md) • [Developer Guide](docs/development/developer-guide.md) • [MCP Integrations](docs/guides/mcp.md) • [Query Functions](docs/guides/query-functions.md) • [Performance](docs/performance/README.md) • [CI/CD](docs/development/ci-cd.md) |
+| **Deep Dive** | [Architecture](docs/development/architecture.md) • [Diagrams](docs/development/diagrams.md) • [Configuration](docs/operations/configuration.md) • [Developer Guide](docs/development/developer-guide.md) • [MCP Integrations](docs/guides/mcp.md) • [Query Functions](docs/guides/query-functions.md) • [Performance](docs/performance/README.md) • [CI/CD](docs/development/ci-cd.md) |
 | **Operations** | [Deployment](docs/operations/deployment.md) • [Known Issues](docs/operations/known-issues.md) • [Troubleshooting](docs/operations/troubleshooting.md) • [Best Practices](docs/guides/best-practices.md) • [Testing & Validation](docs/development/testing.md) |
 | **Community** | [Contributing](CONTRIBUTING.md) • [Support](SUPPORT.md) • [Code of Conduct](CODE_OF_CONDUCT.md) • [Security](SECURITY.md) • [Changelog](CHANGELOG.md) |
 
@@ -157,7 +157,7 @@ What changed, and what was measured rather than assumed, is in [docs/performance
          SERVED:  Prometheus API · Grafana · /ui console · HTTP+gRPC
 ```
 
-**Deep dive:** [Architecture](docs/development/architecture.md) • [PQL Guide](docs/guides/pql-guide.md)
+**Deep dive:** [Architecture](docs/development/architecture.md) • [Diagrams](docs/development/diagrams.md) • [PQL Guide](docs/guides/pql-guide.md)
 
 ---
 
@@ -299,7 +299,8 @@ OTel SDKs can export directly via **gRPC** at `:4317` (all three collector servi
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/health` | GET | Health check |
+| `/health` | GET | Liveness check (static) |
+| `/ready` | GET | Readiness check — reads the block index, 503 when storage is unusable |
 | `/metrics` | GET | Prometheus metrics (self-monitoring) |
 | `/api/v1/stats` | GET | Storage/buffer/config snapshot |
 | `/api/v1/ingest_rates` | GET | Live per-signal rates (current + 60s/5m/15m averages, `gap_secs`, sparkline via `history_secs`) |
@@ -333,6 +334,8 @@ parqtel export             # Export metric data to CSV
 | `RUST_LOG` | Log level | `info` |
 | `PARQTEL__STORAGE__COMPRESSION` | Compression codec | `zstd` |
 | `PARQTEL__STORAGE__RETENTION_DAYS` | Retention period | `7` |
+| `PARQTEL__INGEST__LABEL_INTERNER_CAPACITY` | Distinct label sets the interner holds | `1048576` |
+| `PARQTEL__STORAGE__COMPACTION_INTERVAL_SECS` | Interval between compaction passes | `300` |
 
 ## MCP Integrations
 
@@ -367,9 +370,12 @@ Parqtel uses a **block-based storage model**:
 
 - **Metrics blocks**: 2-hour duration, up to 1M rows, Zstd compressed
 - **Log blocks**: 30-minute duration, up to 200K rows, Zstd compressed
-- **Compaction**: Merges small blocks automatically (hourly)
+- **Compaction**: Runs every 5 minutes — small log blocks are merged and metric
+  blocks are rolled up into 5-minute **L1** windows by a streaming merge
 - **Retention**: Configurable per-signal (default: 7 days metrics, 3 days logs)
 - **Index**: In-memory block index with persistence, supports time-range and metric-name filtering
+- **Labels**: Metric blocks carry a series table in the Parquet footer, so a
+  selective query reads only the rows of the series it selects
 
 Each block is a self-contained Parquet file with row groups optimized for columnar scans.
 
@@ -428,9 +434,9 @@ and [docs/performance/README.md](docs/performance/README.md).
 
 ## Status
 
-`0.2.0` is the initial **public beta**. It has **no authentication or
-authorization** — do not expose the HTTP (`8080`) or OTLP gRPC (`4317`) ports
-publicly without a reverse proxy that provides it.
+Parqtel is in **public beta**. It has **no authentication or authorization**
+— do not expose the HTTP (`8080`) or OTLP gRPC (`4317`) ports publicly
+without a reverse proxy that provides it.
 
 Start at [docs/operations/known-issues.md](docs/operations/known-issues.md): the unbounded in-memory
 buffer, the 5-minute instant-query lookback, and the range-query final step are

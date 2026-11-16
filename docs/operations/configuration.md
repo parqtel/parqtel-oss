@@ -29,8 +29,10 @@ max_rows_per_block = 1000000
 compression = "zstd"              # zstd | snappy | lz4 | none
 compression_level = 1             # optional zstd level (1-22); unset = codec default
 retention_days = 7
-compaction_interval_secs = 3600   # 1 hour
+compaction_interval_secs = 300    # 5 minutes
 row_group_size = 100000
+compaction_max_merge_blocks = 12  # max source blocks merged in one pass
+compaction_max_merges_per_pass = 8 # max merges one cycle performs
 
 [logs]
 data_dir = "data/logs"
@@ -44,8 +46,14 @@ row_group_size = 20000
 
 [ingest]
 max_body_size = 10485760          # 10 MB
-wal_enabled = false
+wal_enabled = true                # metrics WAL; also gates the background flush worker
 log_wal_enabled = true
+wal_sync_mode = "interval"        # none | interval | always
+wal_sync_interval_ms = 1000       # fsync period in "interval" mode
+wal_max_segment_bytes = 67108864  # WAL segment roll size
+max_inflight_flushes = 4          # concurrent block encodes
+rotator_shards = 4                # metrics writer shards (1-256)
+label_interner_capacity = 1048576 # distinct label sets the interner holds
 [ingest.tail_sampling]
 keep_errors = true                   # always keep traces with ERROR spans
 # slow_trace_ms = 1000               # keep traces slower than this (ms)
@@ -154,10 +162,26 @@ tls_secret_name = "parqtel-provider-tls"
 | `compression` | String | `"zstd"` | Parquet compression: `zstd`, `snappy`, `lz4`, `none` |
 | `compression_level` | Integer | unset | Compression level for `zstd` (`1`–`22`). Unset uses the codec default. Lower levels encode faster and compress less; use a low level for frequently rewritten blocks |
 | `retention_days` | Integer | `7` | Days to retain metric data |
-| `compaction_interval_secs` | Integer | `3600` | Interval between compaction passes |
+| `compaction_interval_secs` | Integer | `300` | Interval between compaction passes. Each pass merges small log blocks, rolls metric blocks up into 5-minute L1 windows, and runs the tiered log merge. Lower it to roll up sooner; raise it on a store where each pass is expensive |
 | `row_group_size` | Integer | `100000` | Rows per Parquet row group. Must be ≤ `max_rows_per_block` — this is what row-group pruning depends on, so a too-large value silently costs query time |
 | `compaction_max_merge_blocks` | Integer | `12` | Max source blocks merged into one compacted block. Too few and the small-block population grows faster than compaction removes it |
 | `compaction_max_merges_per_pass` | Integer | `8` | Max merges one compaction cycle performs. Bounds the disk I/O a single cycle can take |
+
+**What a compaction pass does.** Every `compaction_interval_secs` the background
+loop runs three bounded passes: small log blocks are merged, metric blocks are
+rolled up into 5-minute **L1** windows by a streaming merge, and old log blocks
+are merged within a 6-hour tier. Metric block files are named by level, so the
+layout is readable from the filesystem alone:
+
+| Prefix | Meaning |
+|--------|---------|
+| `m_l0_` | One ingest flush, series-sorted by the final query-visible labels |
+| `m_n_` | A legacy block normalised into the same order |
+| `m_l1_` | A coalesced 5-minute window |
+
+The L1 pass is bounded (8 sources, 2 groups, 16 M rows per pass) and reserves
+2 of the 4 process-wide scan slots, so it never monopolises the disk. Run
+`parqtel compact` to trigger the same pass offline.
 
 ### `[logs]`
 
@@ -186,7 +210,6 @@ tls_secret_name = "parqtel-provider-tls"
 | `wal_max_segment_bytes` | Integer | `67108864` | Size at which the WAL rolls to a new segment. Segments are deleted once the commit point passes them, so the on-disk WAL stays bounded |
 | `label_interner_capacity` | Integer | `1048576` | Distinct label sets the process-wide interner holds before it starts emptying shards. Interning lets every point of a series share one copy of its labels; past this capacity sharing is lost and memory grows with points instead of series. Set it to at least **twice the active series count**, because each series is interned twice (as received, and with `service.name` for the memory buffer). The table only holds sets that were actually seen, so a high value costs nothing on a small deployment |
 | `rotator_shards` | Integer | `4` | Writer shards for the metrics ingest rotator. Every ingest request serialises on one lock per signal and a block flush runs while that lock is held, so one flush stalls every metric request for its encode duration. Sharding lets unrelated metrics be ingested concurrently during a flush. **The shards are not independent blocks** — a flush merges them into one file, so block count and query fan-out are unchanged, and durability is unchanged. Clamped to 1–256. Raise only where `parqtel_ingest_lock_wait_seconds` shows real contention; it costs one writer buffer per shard |
-| `wal_enabled` | Boolean | `false` | Enable write-ahead log for metrics |
 | `log_wal_enabled` | Boolean | `true` | Enable write-ahead log for logs |
 
 ### `[ingest.tail_sampling]`
@@ -333,6 +356,7 @@ export PARQTEL__STORAGE__RETENTION_DAYS=14
 export PARQTEL__STORAGE__BLOCK_DURATION_SECS=3600
 # Row-group pruning only works when the row group fits inside a block.
 export PARQTEL__STORAGE__ROW_GROUP_SIZE=50000
+export PARQTEL__STORAGE__COMPACTION_INTERVAL_SECS=300
 
 # Logs
 export PARQTEL__LOGS__DATA_DIR="/var/lib/parqtel/logs"
@@ -344,6 +368,7 @@ export PARQTEL__INGEST__MAX_BODY_SIZE=20971520
 export PARQTEL__INGEST__ROTATOR_SHARDS=8
 export PARQTEL__INGEST__WAL_ENABLED=true
 export PARQTEL__INGEST__LOG_WAL_ENABLED=true
+export PARQTEL__INGEST__LABEL_INTERNER_CAPACITY=2097152
 export PARQTEL__INGEST__TAIL_SAMPLING__KEEP_ERRORS=true
 export PARQTEL__INGEST__TAIL_SAMPLING__SAMPLING_RATIO=0.5
 

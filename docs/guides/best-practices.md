@@ -6,13 +6,24 @@ This guide outlines how to run Parqtel at scale in production environments.
 
 ### Memory Management
 Parqtel's memory usage is primarily driven by:
-1. **The Block Index**: Grows with the number of Parquet files on disk.
-2. **Active Buffers**: Configured by `max_rows_per_block`.
+1. **Active Buffers**: Configured by `max_rows_per_block` and the block duration.
+2. **The Block Index**: Grows with the number of Parquet files on disk.
+3. **The label interner**: Every point of a series shares one copy of its labels
+   while the interner has room. Set `ingest.label_interner_capacity` to at
+   least **twice** the active series count — each series is interned twice,
+   once as received and once with `service.name` for the memory buffer.
 
-**Recommendation:** For high-throughput environments, increase `max_rows_per_block` to 2M or 5M to reduce the number of small Parquet files, but ensure you have at least 2GB of RAM.
+**Recommendation:** leave `max_rows_per_block` at its default (1 M). A bigger
+block is not cheaper: the per-block series table grows with the *series count*
+in the block, not with the row count, so a block that holds more rows also
+holds a bigger index. The 5-minute L1 rollup is what keeps the number of
+blocks a query touches bounded.
 
 ### CPU & I/O
-- **Compaction**: This is a CPU and Disk I/O intensive process. If your queries are slow, check if the compactor is lagging.
+- **Compaction**: This is a CPU and Disk I/O intensive process. It runs every
+  `storage.compaction_interval_secs` (default 300) and every pass is bounded
+  (8 sources, 2 groups, 16 M rows), so it cannot monopolise the disk. If your
+  queries are slow, check whether the compactor is lagging.
 - **Zstd Level**: Parqtel uses Zstd for compression. If CPU usage is too high, you can switch to `lz4`.
 
 ## 2. Storage Strategy
@@ -22,7 +33,8 @@ Parquet is a columnar format that benefits from fast sequential and random reads
 
 ### Retention vs. Compaction
 - Keep `retention_days` realistic for your disk size.
-- Ensure `compaction_interval_secs` is frequent enough to merge small blocks created during low-traffic periods.
+- Ensure `compaction_interval_secs` is frequent enough to merge small blocks created during low-traffic periods. The default (300 s) matches the L1 window; lower it only if the rollup lags.
+- Metric block files are named by level (`m_l0_`, `m_n_`, `m_l1_`), so `ls` on the data directory shows at a glance whether the rollup is keeping up.
 
 ## 3. Security Hardening
 
@@ -49,6 +61,10 @@ Don't let your monitoring tool go unmonitored!
     - `parqtel_query_errors_total > 0`
     - `parqtel_storage_blocks` / `parqtel_storage_bytes` (unbounded growth means compaction is lagging)
     - `parqtel_process_rss_bytes` (memory creep)
+    - `parqtel_scan_slots_in_use` against `parqtel_scan_slots_limit` (4) — the
+      block-scan budget; sustained saturation means queries are queued
+    - `parqtel_scan_low_priority_skips_total` — alert evaluations deferred
+      because no scan slot was free
     - Disk usage > 85%
 
 ## 5. High Availability (HA)

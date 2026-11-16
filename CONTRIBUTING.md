@@ -16,7 +16,7 @@ Thank you for your interest in contributing to Parqtel! We welcome contributions
 ## 3. Pull Request Process
 1. **Fork and Clone**: Create your own fork and clone it locally.
 2. **Branch**: Create a feature branch (`git checkout -b feat/my-awesome-feature`).
-3. **Prerequisites**: Rust **1.87** (MSRV — the workspace `Cargo.toml`, `Dockerfile`, and `ci.yml` move together) and `protoc` for the OTLP schema (`make build`/`make test` auto-fetch it, or `sudo apt-get install protobuf-compiler`).
+3. **Prerequisites**: Rust **1.88** (MSRV — the workspace `Cargo.toml`, `Dockerfile`, and `ci.yml` move together) and `protoc` for the OTLP schema (`make build`/`make test` auto-fetch it, or `sudo apt-get install protobuf-compiler`).
 4. **Develop**: Make your changes. Ensure you follow the [Developer Guide](docs/development/developer-guide.md).
 5. **Test**: Run `make test` (or `cargo test --workspace`) to ensure no regressions.
 6. **Lint**: Run `make lint` — the exact command CI uses: `cargo fmt --check` + `cargo clippy --workspace --all-targets --locked -- -D warnings`. Note `unsafe` code is forbidden workspace-wide.

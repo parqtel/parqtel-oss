@@ -48,7 +48,7 @@ make docker        # Build Docker image
 
 ## Key Facts (verify before documenting)
 
-- **MSRV**: 1.87 (workspace `Cargo.toml`; comfy-table 7.2+ via arrow 59 uses let-chains). Dockerfile `ARG RUST_VERSION=1.87`. CI matrix pins 1.87 — update all three together if bumping.
+- **MSRV**: 1.88 (workspace `Cargo.toml`; arrow 60.1.0 requires rustc 1.88). Dockerfile `ARG RUST_VERSION=1.88`. CI matrix pins 1.88 — update all three together if bumping.
 - **gRPC stack**: tonic 0.13 / prost 0.13 (hyper 1.x + h2 0.4 — RUSTSEC-2026-0258 fixed by the upgrade from tonic 0.11)
 - **Arrow stack**: `arrow`/`parquet` 60.x (migrated from arrow2/parquet2 — RUSTSEC-2025-0038). Old arrow2-era Parquet blocks are unreadable by the current reader; wipe the data dir when upgrading across that boundary.
 - **Binary name**: `parqtel` (not `parqtel-server`) — the crate is `parqtel-server` but `[[bin]] name = "parqtel"`.
@@ -66,6 +66,11 @@ make docker        # Build Docker image
 - **Compressed OTLP**: HTTP request bodies are gunzipped outside the size limits; gRPC accepts gzip.
 - **Tail sampling**: `ingest.tail_sampling` policy (keep_errors, slow_trace_ms, sampling_ratio, per-service overrides) runs AFTER RED derivation — RED metrics see all spans; storage/buffer sees only sampled traces. Decisions are trace-coherent (deterministic trace_id hash); default keeps everything.
 - **Span-metrics RED bridge**: server-kind spans automatically derive `traces_service_{requests,errors,duration_ms}_total` metrics (labels: `service`, `operation`, `service.name`) through the normal metrics path — wired in `server.rs` via the `with_span_metrics` channel.
+- **Metric block levels**: `m_l0_` = one ingest flush (series-sorted by the final query-visible labels), `m_n_` = a normalised legacy block, `m_l1_` = a coalesced 5-minute window. `storage/stream_compactor.rs` merges L0 → L1 with a streaming k-way merge (one Arrow batch at a time), bounded to 8 sources / 2 groups / 16 M rows per pass, and only when every source's WAL range is at or below the WAL commit point. The output footer records its sources (`parqtel.compacted_sources`); reconcile drops superseded sources after a crash, sources are deleted after a 5-minute grace period.
+- **Scan admission**: one process-wide budget of 4 slots gates every block scan (`Scanner::try_reserve_scan_slot` / `try_reserve_scan_slots`). Queries wait; background work (alert evaluation, compaction) reserves without waiting and skips its cycle when none is free. Counters are exported at `/metrics` (`parqtel_scan_*`).
+- **Block index sidecar**: `index.json` is `{"blocks": [...], "label_values": {...}}` — one shared label-value dictionary per signal (10 K values per field), not per-block copies. The loader still accepts the legacy bare-array shape; older binaries cannot parse the new one.
+- **Allocator**: `tikv-jemallocator` is the global allocator on non-MSVC targets (linked statically, so the runtime image is unchanged).
+- **Docs**: `docs/development/diagrams.md` holds the Mermaid architecture diagrams; `make docs-check` (script `scripts/checks/check_docs.py`) validates links, anchors, quoted paths and OpenAPI/router coverage.
 
 ## Code Conventions
 
@@ -115,7 +120,7 @@ Layered via Figment (priority: CLI > env > TOML > defaults):
 
 - **Lint**: fmt + clippy with `-D warnings`
 - **Test**: All workspace tests + doc tests
-- **MSRV**: Checks minimum supported Rust version (1.87 matrix — see Key Facts)
+- **MSRV**: Checks minimum supported Rust version (1.88 matrix — see Key Facts)
 - **Security**: `cargo-audit` (installed via `taiki-e/install-action`, `--deny warnings`) + Trivy filesystem scan
 - **Helm**: Lint chart with multiple value files
 - **Docker**: Build + smoke test (health check + metrics endpoint)
