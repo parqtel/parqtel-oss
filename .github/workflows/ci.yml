@@ -34,6 +34,7 @@ jobs:
       helm: ${{ steps.filter.outputs.helm }}
       docker: ${{ steps.filter.outputs.docker }}
       rust: ${{ steps.filter.outputs.rust }}
+      docs: ${{ steps.filter.outputs.docs }}
     steps:
       - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v3
@@ -60,6 +61,11 @@ jobs:
               - '.github/workflows/ci.yml'
               - 'Makefile'
               - '**/*.rs'
+            docs:
+              - 'docs/**'
+              - '**/*.md'
+              - 'scripts/checks/check_docs.py'
+              - 'crates/parqtel-server/src/router.rs'
 
   # ── Lint ──────────────────────────────────────────────────────────────────
   lint:
@@ -177,6 +183,24 @@ jobs:
           exit-code: 1
           trivy-version: v0.58.1
           cache-dir: /tmp/trivy-cache
+
+  # ── Documentation ──────────────────────────────────────────────────────────
+  docs:
+    name: Docs Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: changes
+    # Always run on pull_request: a required check that is skipped is never
+    # satisfied, so a docs-only PR would be unmergeable. The path filter only
+    # skips work on pushes to main.
+    if: needs.changes.outputs.docs == 'true' || github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Validate links, anchors, quoted paths and API coverage
+        run: python3 scripts/checks/check_docs.py
 
   # ── Helm Lint (only when chart config changes) ────────────────────────────
   helm-lint:

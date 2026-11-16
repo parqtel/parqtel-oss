@@ -18,9 +18,10 @@
 | `msrv` | Rust sources changed | ~4 min |
 | `security` | Rust sources changed, or push to `main` | ~2 min |
 | `helm-lint` | `deploy/helm/**` or `deploy/compose/**` changed | <1 min |
+| `docs` | Documentation, Markdown, the router or the docs checker changed | <1 min |
 | `docker` + smoke test | Dockerfile/sources/deps changed **and** lint+test pass | ~10–15 min |
 
-Typical docs-only PR: ~10 s (changes-detection only — `security` is gated on Rust sources, so it is skipped too).
+Typical docs-only PR: ~20 s (changes detection plus the docs check — `security` is gated on Rust sources, so it is skipped too).
 Typical code PR: ~15–20 min wall clock, ~35–45 worker-minutes.
 
 Key mechanics:
@@ -28,6 +29,7 @@ Key mechanics:
 - **Concurrency**: `cancel-in-progress` kills superseded runs on the same branch — pushing five commits in a row bills once.
 - **Path gating** (`dorny/paths-filter`): Helm lint doesn't run because you edited a README; Docker doesn't build because you touched a chart.
 - **Docker smoke test**: after building the image, the job boots it, waits for `/health`, and checks `/metrics`. A scratch-based image that compiles but doesn't serve fails the PR.
+- **Docs check**: `scripts/checks/check_docs.py` (run locally with `make docs-check`) verifies that every relative link and anchor resolves, that every repository path quoted in the docs exists, and that the OpenAPI spec and the Axum router describe the same set of endpoints.
 - **`--locked` everywhere**: CI builds exactly what's pinned in `Cargo.lock`; dependency drift fails loudly instead of silently changing the tested surface.
 - **`-D warnings` scoped to clippy only**: setting it globally via `RUSTFLAGS` also compiles *dependencies* with warnings-as-errors and breaks spuriously when new rustc lints land upstream.
 - **Least privilege**: workflow-level `permissions: contents: read`; no write tokens in the PR lane.

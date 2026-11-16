@@ -519,6 +519,38 @@ components:
           description: End of the window, as Unix seconds.
 
 paths:
+  /ui:
+    get:
+      tags: [Health]
+      summary: Embedded web console
+      description: >
+        The single-file console (HTML, CSS and JavaScript in one document, no
+        external requests). Served gzipped with a content-hash ETag and a
+        304 on revalidation. Returns 404 when `ui.enabled` is false.
+      operationId: getUi
+      responses:
+        "200":
+          description: The console
+          content:
+            text/html:
+              schema:
+                type: string
+        "404":
+          description: The console is disabled
+
+  /oas:
+    get:
+      tags: [Health]
+      summary: This OpenAPI description
+      operationId: getOpenApi
+      responses:
+        "200":
+          description: The OpenAPI 3 description of this API
+          content:
+            text/yaml:
+              schema:
+                type: string
+
   /health:
     get:
       tags: [Health]

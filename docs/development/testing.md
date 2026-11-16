@@ -74,6 +74,9 @@ Our GitHub Actions workflows gate every PR:
 - **Security Audit** — `cargo audit --deny warnings` + Trivy filesystem scan
 - **Helm Lint** — validates `deploy/helm/parqtel` against `deploy/helm/parqtel/ci/minimal-values.yaml`, `deploy/helm/parqtel/ci/default-values.yaml`, and `deploy/helm/parqtel/ci/full-values.yaml`
 - **Docker Build & Smoke Test** — builds the image and probes `/health` and `/metrics`
+- **Docs Check** — `make docs-check` validates every relative link and anchor,
+  every repository path quoted in the docs, and that every registered HTTP route
+  is described in the OpenAPI spec (and the other way round)
 
 PR CI runs on Linux (`ubuntu-latest`) only; the multi-platform binaries (linux amd64/arm64, macOS) are built by `release.yml` on tags.
 
