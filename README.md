@@ -115,11 +115,7 @@ make dev-setup         # copies .env.example → .env and starts everything
 ```
 
 This starts Parqtel on **port `9090`**, Grafana on `3000`, Prometheus on `9091`
-and a load generator, and publishes the Parqtel MCP server on `3007`. The other
-six MCP servers are commented out in
-`deploy/compose/docker-compose.yml`; they are schema-only previews (see
-[MCP Integrations](#mcp-integrations)), so starting them gains you tool
-discovery, not working integrations.
+and a load generator, and publishes the Parqtel MCP server (`mcp-parqtel`) on `3007`.
 
 > **Why two ports?** The single container and the bare binary use `8080`. The
 > Compose stack uses `9090` (`deploy/compose/parqtel/config/dev.toml`) so it does
@@ -298,7 +294,7 @@ More: [PQL Guide](docs/guides/pql-guide.md) •
 | **Span-metrics (RED)** | Auto-derived `traces_service_{requests,errors,duration_ms}_total` per service/operation from server spans — zero-config RED dashboards in Grafana |
 | **Tail sampling** | Trace-coherent sampling (errors/slow traces always kept, deterministic ratio per service) — controls trace storage volume while RED metrics stay unsampled |
 | **Visualization** | Built-in web UI, Grafana SimpleJSON datasource, Prometheus-compatible `/api/v1/*` |
-| **MCP** | 7 AI tool servers — 1 functional (Parqtel query), 6 schema-only previews (Slack, PagerDuty, Jira, Notion, Discord, Google Docs) |
+| **MCP** | `parqtel-mcp-parqtel` server — exposes metrics, logs, alerts, ingest rates, and topology over Streamable HTTP (`/mcp`) |
 | **Operations** | Health checks, `/metrics` endpoint, graceful shutdown, CLI subcommands |
 
 ## API Reference
@@ -350,27 +346,14 @@ Configuration is layered: built-in defaults → optional TOML file → environme
 
 Full reference: [docs/operations/configuration.md](docs/operations/configuration.md).
 
-## MCP Integrations
+## MCP Integration
 
-Parqtel ships with 7 Model Context Protocol (MCP) servers for LLM-driven
-incident response:
+Parqtel ships with **`parqtel-mcp-parqtel`** (port `3007` in Compose), a Model
+Context Protocol server that lets LLM agents query your metrics, logs, alerts,
+ingestion rates, and observed service topology over Streamable HTTP (`/mcp`).
 
-| Server | Port | Status | Purpose |
-|--------|------|--------|---------|
-| `parqtel-mcp-parqtel` | 3007 | **Functional** | Query Parqtel metrics/logs via MCP tools |
-| `parqtel-mcp-slack` | 3001 | Schema only | Post alerts, RCA updates, and postmortems to Slack |
-| `parqtel-mcp-pagerduty` | 3002 | Schema only | Create/manage incidents, escalate, add notes |
-| `parqtel-mcp-jira` | 3003 | Schema only | Create issues, update tickets, link incidents |
-| `parqtel-mcp-notion` | 3004 | Schema only | Create/update postmortem pages, knowledge base |
-| `parqtel-mcp-discord` | 3005 | Schema only | Post alerts and updates to Discord channels |
-| `parqtel-mcp-gdocs` | 3006 | Schema only | Create/update Google Docs for postmortems |
-
-**Only the Parqtel server is implemented.** The other six register their tool
-schemas but have no handler: a `tools/call` echoes your parameters back and
-nothing reaches Slack, PagerDuty, Jira, Notion, Discord or Google Docs. Treat
-them as an interface preview, and do not rely on them to page a human.
-
-See [docs/guides/mcp.md](docs/guides/mcp.md) for configuration and tool schemas.
+See [docs/guides/mcp.md](docs/guides/mcp.md) for connection setup and tool
+schemas.
 
 ---
 

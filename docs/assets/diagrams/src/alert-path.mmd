@@ -5,6 +5,7 @@ flowchart LR
     Q --> TH["Threshold on the last sample<br/>of every result series"]
     TH --> SM["State machine<br/>Inactive → Pending → Firing → Resolved"]
     SM --> STORE["AlertStore<br/>transition history"]
+    SM --> API["/api/v1/alerts &amp; UI"]
     SM --> ROUTE["Notification routes<br/>severity + label match"]
     ROUTE --> HOOK["Webhook"]
-    ROUTE --> MCP["MCP servers<br/>Slack · PagerDuty · Jira · Notion"]
+    API --> MCP["parqtel-mcp-parqtel<br/>get_alert_history"]

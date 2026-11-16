@@ -115,7 +115,6 @@ It needs `curl`, `jq`, and `python3`.
 ## Tuning checklist
 
 - **Severity** is `warning` (investigate soon) or `critical` (page now).
-  Route them differently with notification rules in `rules/notifications/`.
 - **for_duration_secs** controls flap resistance: short for symptoms that
   self-heal, longer for noisy signals.
 - **Thresholds** are conservative defaults, not universal truths. The

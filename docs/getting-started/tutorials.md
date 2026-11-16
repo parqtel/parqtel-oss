@@ -70,19 +70,11 @@ Go to the Parqtel UI and search for the `nginx_requests_total` metric. You can n
 
 ---
 
-## 2. High-Latency Alerting with Slack Notifications
+## 2. High-Latency Alerting
 
-In this scenario, we will set up an alert for high HTTP latency and receive notifications in Slack via MCP.
+In this scenario, we will set up an alert for high HTTP latency and consume the firing alert via the API and MCP.
 
-### Step 1: Set up the Slack MCP Server
-Ensure your `mcp-slack` server is running and has a valid bot token.
-
-```bash
-# In .env (project root)
-SLACK_BOT_TOKEN=xoxb-your-token
-```
-
-### Step 2: Define the Alert Rule
+### Step 1: Define the Alert Rule
 Create `rules/latency-high.yaml`. The rule schema splits the PromQL selector (`query`) from the threshold (`condition`) — there is no single `expression` field:
 
 ```yaml
@@ -106,25 +98,23 @@ enabled: true
 
 Rules are evaluated by the global 15s loop (there is no per-rule `interval_secs`); `for_duration_secs` is the sustain window before the alert fires.
 
-### Step 3: Route the Notification
-Alert-to-channel routing is defined in separate route files under `rules/notifications/`, not by labels on the rule. A route matches on severity/labels and targets an MCP tool:
+### Step 2: Consume the Alert
+Once latency exceeds 500ms for the sustain window, Parqtel transitions the alert
+to `Firing`. Firing alerts are exposed two ways:
 
-```yaml
-# rules/notifications/latency-slack.yaml
-name: latency-to-slack
-match:
-  severity: critical
-  labels:
-    team: backend
-channels:
-  - type: slack
-    server: parqtel-mcp-slack
-    tool: send_alert_message
-    params:
-      channel: "#ops-alerts"
+```bash
+# The alert stream (also rendered in the UI at /ui)
+curl http://localhost:8080/api/v1/alerts
+
+# An MCP client can pull alert history as a tool call
+curl -X POST http://localhost:3007/mcp -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call",
+       "params":{"name":"get_alert_history","arguments":{"since_hours":1}}}'
 ```
 
-Once latency exceeds 500ms for 2 minutes, Parqtel transitions the alert to `Firing` and the route dispatches it to Slack via the MCP server.
+Parqtel does not dispatch notifications to Slack, PagerDuty or email itself. Use
+the alert stream from your own automation, or have an agent poll it through the
+MCP server above.
 
 ---
 

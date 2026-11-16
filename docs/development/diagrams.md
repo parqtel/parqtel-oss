@@ -34,14 +34,14 @@ What talks to Parqtel, and what Parqtel talks to.
 
 **Facts behind the picture.** Ingest is unauthenticated in the OSS build — put
 a proxy in front of `:8080` and `:4317` (see
-[known issues](../operations/known-issues.md)). The MCP servers are separate
-binaries that query Parqtel over HTTP; they are not in the ingest path.
+[known issues](../operations/known-issues.md)). The MCP server (`parqtel-mcp-parqtel`) is a separate
+binary that queries Parqtel over HTTP; it is not in the ingest path.
 
 ## 2. Crate dependency graph
 
-Fifteen workspace members; every signal crate depends only on `parqtel-core`.
+Eight workspace members; every signal crate depends only on `parqtel-core`.
 
-![Crate dependency graph: parqtel-server depends on ingest, query, alert, pipeline and core; each signal crate depends on core; the seven MCP tool servers depend on parqtel-mcp-core](../assets/diagrams/crate-graph.svg)
+![Crate dependency graph: parqtel-server depends on ingest, query, alert, pipeline and core; each signal crate depends on core; parqtel-mcp-parqtel depends on parqtel-mcp-core](../assets/diagrams/crate-graph.svg)
 
 Crates are one directory per concern under `crates/`. `parqtel-core` holds the
 data models, the storage engine, the write-ahead log and the layered
@@ -152,7 +152,7 @@ Older binaries cannot parse the new shape.
 
 ## 9. Alert path
 
-![Alert path: YAML rules from the rules directory and the built-in presets feed the rule registry, the evaluation loop queries the executor every alert interval, thresholds the last sample of every result series, drives the Inactive to Pending to Firing to Resolved state machine, stores transition history and routes to webhooks or MCP servers](../assets/diagrams/alert-path.svg)
+![Alert path: YAML rules from the rules directory and the built-in presets feed the rule registry, the evaluation loop queries the executor every alert interval, thresholds the last sample of every result series, drives the Inactive to Pending to Firing to Resolved state machine, stores transition history, exposes firing alerts via /api/v1/alerts and parqtel-mcp-parqtel, and routes to webhooks](../assets/diagrams/alert-path.svg)
 
 ## 10. Query surfaces
 

@@ -42,14 +42,13 @@ curl -f http://localhost:8080/health
 
 ## Docker Compose (Full Stack)
 
-The Compose setup includes Parqtel, Grafana, Prometheus, and a load generator. The Parqtel self-MCP server (`mcp-parqtel`, port 3007) is **enabled by default** so AI agents can query the stack out of the box; the third-party MCP servers (Slack, PagerDuty, Jira, Notion, Discord, Google Docs — ports 3001–3006) are commented out — uncomment the ones you need after setting the corresponding env vars in `.env`.
+The Compose setup includes Parqtel, Grafana, Prometheus, a load generator, and the Parqtel MCP server (`mcp-parqtel`, port 3007) enabled by default so AI agents can query the stack out of the box.
 
 ### Setup
 
 ```bash
 # From project root
 cp .env.example .env
-# Optionally add MCP API keys in .env
 docker compose -f deploy/compose/docker-compose.yml up -d
 ```
 
@@ -67,21 +66,15 @@ make dev-setup
 | `grafana` | 3000 | Dashboards (auto-provisioned) |
 | `prometheus` | 9091 | Self-monitoring scraper |
 | `load-generator` | — | Synthetic data generator |
-| `mcp-parqtel` | 3007 | Parqtel self-MCP (enabled by default — queries metrics/logs/alerts/topology) |
-| `mcp-{slack,pagerduty,jira,notion,discord,gdocs}` | 3001–3006 | Third-party MCP servers (opt-in — uncomment in `deploy/compose/docker-compose.yml`) |
+| `mcp-parqtel` | 3007 | Parqtel MCP server (enabled by default — queries metrics/logs/alerts/topology) |
 
 ### Environment Variables (`.env`)
 
 ```bash
-# MCP Integrations (optional)
-SLACK_BOT_TOKEN=xoxb-...
-PAGERDUTY_API_KEY=...
-JIRA_BASE_URL=https://your-org.atlassian.net
-JIRA_USER_EMAIL=...
-JIRA_API_TOKEN=...
-NOTION_API_KEY=secret_...
-DISCORD_BOT_TOKEN=...
-GOOGLE_SERVICE_ACCOUNT_JSON=...
+# MCP
+MCP_PARQTEL_PORT=3007
+MCP_RATE_LIMIT=600
+PARQTEL_API_URL=http://parqtel:9090
 
 # Load Generator
 LOAD_TEST_MODE=false
@@ -94,14 +87,10 @@ GRAFANA_ADMIN_PASSWORD=parqtel-dev
 
 ### Local Overrides
 
-To customise ports, mounts, or enable MCP servers locally without touching the committed file, create `deploy/compose/docker-compose.override.yml` (gitignored):
+To customise ports or mounts locally without touching the committed file, create `deploy/compose/docker-compose.override.yml` (gitignored):
 
 ```bash
 # docker-compose.override.yml is gitignored — safe for local secrets/port changes
-# Example: enable the Slack MCP server
-# services:
-#   mcp-slack:
-#     profiles: []
 ```
 
 ### Teardown
@@ -155,7 +144,7 @@ The chart (`deploy/helm/parqtel`) includes:
 - **Ingress** — optional with TLS support
 - **PersistentVolumeClaim** — for data persistence
 - **RBAC** — ServiceAccount, Role, RoleBinding
-- **MCP Deployments** — each enabled MCP server (`mcp.<name>.enabled`) renders as its own Deployment + Service, not a sidecar
+- **MCP Deployment** — `mcp.parqtel.enabled` renders its own Deployment + Service, not a sidecar
 
 ### Custom Values Example
 
@@ -185,10 +174,10 @@ networkPolicy:
   enabled: true
 
 mcp:
-  slack:
+  parqtel:
     enabled: true
     env:
-      SLACK_BOT_TOKEN: "xoxb-..."
+      PARQTEL_API_URL: "http://parqtel:8080"
 ```
 
 ### Local Development with k3d

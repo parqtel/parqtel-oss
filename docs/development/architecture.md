@@ -78,7 +78,7 @@ Parqtel is a Rust workspace organized into focused crates that communicate throu
 ## Crate Dependency Graph
 
 The workspace lives under `crates/`, one directory per concern. Every signal
-crate depends only on `parqtel-core`; the MCP servers depend only on
+crate depends only on `parqtel-core`; `parqtel-mcp-parqtel` depends only on
 `parqtel-mcp-core`.
 
 ```
@@ -92,12 +92,11 @@ crates/
 ├── parqtel-server/      Axum HTTP + gRPC server, handlers, embedded web console
 │                        (the `parqtel` binary)
 ├── parqtel-mcp-core/    shared MCP framework (JSON-RPC, rate limiting, tool registry)
-└── parqtel-mcp-*/       MCP tool servers (slack, pagerduty, jira, notion,
-                         discord, gdocs, parqtel)
+└── parqtel-mcp-parqtel/ MCP server querying Parqtel metrics, logs, alerts & topology
 
 parqtel-server ──► parqtel-{ingest,query,alert,pipeline,core}
 parqtel-{ingest,query,alert,pipeline} ──► parqtel-core
-parqtel-mcp-* ──► parqtel-mcp-core
+parqtel-mcp-parqtel ──► parqtel-mcp-core
 ```
 
 See [Diagrams](diagrams.md#2-crate-dependency-graph) for the same graph as a
@@ -204,7 +203,7 @@ Parqtel ships **three query surfaces** over one storage engine (see [PQL_GUIDE.m
 2. **Evaluation** → A background loop (15s interval) evaluates enabled rules against current data using the query executor
 3. **State Machine** → Each alert instance transitions through: `Inactive → Pending → Firing → Resolved`
 4. **Storage** → `AlertStore` persists alert instances with full transition history
-5. **Notification** → Firing alerts can trigger MCP server actions (Slack, PagerDuty, etc.)
+5. **Consumption** → Firing alerts are exposed via `/api/v1/alerts`, webhooks, and `parqtel-mcp-parqtel` (`get_alert_history`)
 
 ### Pipeline Path
 
@@ -418,7 +417,7 @@ The console is a single embedded file (`crates/parqtel-server/src/ui.html`), ser
 
 ## MCP Architecture
 
-MCP servers are separate binaries built on `parqtel-mcp-core`:
+`parqtel-mcp-parqtel` is a separate binary built on `parqtel-mcp-core`:
 
 ```rust
 pub struct McpServer {
@@ -428,11 +427,11 @@ pub struct McpServer {
 }
 ```
 
-Each MCP server:
-- Exposes a JSON-RPC API over HTTP
+The MCP server:
+- Exposes Streamable HTTP (`POST /mcp`) and `/health`
 - Registers tools with typed input schemas (JSON Schema)
 - Implements rate limiting (token bucket, configurable per-minute)
-- Runs independently — can be deployed alongside or separately from the main server
+- Runs independently — queries the Parqtel HTTP API via `PARQTEL_API_URL`
 
 ## Build & Release
 

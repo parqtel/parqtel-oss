@@ -1,46 +1,30 @@
-# MCP (Model Context Protocol) Integrations
+# MCP (Model Context Protocol) Integration
 
-Parqtel ships with 7 MCP servers that expose tools for LLM-driven incident response. Each server is a standalone binary built on the shared `parqtel-mcp-core` framework.
+Parqtel ships with **`parqtel-mcp-parqtel`**, a standalone MCP server built on
+`parqtel-mcp-core` that gives AI agents read access to Parqtel's metrics, logs,
+alerts, ingestion rates, and service topology.
 
 ## Overview
 
-> [!IMPORTANT]
-> **Only `parqtel-mcp-parqtel` is implemented.** It performs real queries against
-> Parqtel's API.
->
-> The other six servers (`slack`, `pagerduty`, `jira`, `notion`, `discord`,
-> `gdocs`) currently register their **tool schemas only** — they have no handler
-> and make no outbound HTTP calls. A `tools/call` against any of them returns
-> `{"status": "success", "tool": "<name>", "params": {...}}` — your parameters
-> echoed back — and **nothing is sent to Slack, PagerDuty, Jira, Notion, Discord
-> or Google Docs**. Their token environment variables are not read.
->
-> Treat them as an interface preview: agents can discover the tool shapes, but
-> cannot yet act on external services. Do not rely on them to page a human.
+The Model Context Protocol enables AI agents (Claude, GPT, etc.) to query
+observability data through a standardized JSON-RPC interface:
 
-The Model Context Protocol enables AI agents (Claude, GPT, etc.) to interact with external services through a standardized JSON-RPC interface. Parqtel's MCP servers allow an LLM to:
-
-- Post alerts and RCA updates to communication channels *(schema only — see above)*
-- Create and manage incidents in on-call systems *(schema only — see above)*
-- Generate postmortem documents automatically *(schema only — see above)*
-- Query observability data for root cause analysis
+- Run instant and range PromQL queries
+- Discover metric names and label values
+- Search stored log records with severity and time filters
+- Inspect live per-signal ingestion rates and stall gaps
+- Read alert history, observed service topology, and rule noise statistics
 
 ## Architecture
 
 ```
-┌──────────────────┐     JSON-RPC      ┌──────────────────┐
-│   LLM / Agent    │ ◄──────────────── │  MCP Server      │
-│  (Claude, GPT)   │ ──────────────── ►│  (parqtel-mcp-*) │
-└──────────────────┘                    └────────┬─────────┘
-                                                 │ HTTP/REST
-                                                 ▼
-                                        ┌──────────────────┐
-                                        │ External Service │
-                                        │ (Slack, PD, etc.)│
-                                        └──────────────────┘
+┌──────────────────┐     JSON-RPC      ┌─────────────────────┐     HTTP API     ┌─────────┐
+│   LLM / Agent    │ ◄──────────────── │  parqtel-mcp-parqtel│ ───────────────► │ Parqtel │
+│  (Claude, GPT)   │ ────────────────► │  (:3007 → :3000)    │ ◄─────────────── │ (:8080) │
+└──────────────────┘                    └─────────────────────┘                  └─────────┘
 ```
 
-Each MCP server:
+The MCP server:
 
 - Exposes `POST /mcp` — MCP Streamable HTTP (spec `2025-06-18`), the endpoint
   every agent/SDK speaks (`initialize` → `notifications/initialized` →
@@ -50,7 +34,7 @@ Each MCP server:
 - Exposes `/health` for liveness probes
 - Implements rate limiting (token bucket, configurable per-minute)
 - Registers tools with typed JSON Schema inputs
-- Sanitizes parameters before writing them to the audit log
+- Sanitizes sensitive parameters before writing them to the audit log
 
 ### Connecting from Cline / Claude Desktop / any agent
 
@@ -67,343 +51,20 @@ Each MCP server:
 > `GET /tools/list` / `POST /tools/call` aliases still work but are
 > deprecated — point agents at `/mcp`.
 
-## Shared Configuration
-
-All MCP servers accept these environment variables:
+## Configuration
 
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `MCP_HOST` | Bind address | `0.0.0.0` |
 | `MCP_PORT` | Listen port | `3000` |
 | `MCP_RATE_LIMIT` | Requests per minute | `60` |
+| `PARQTEL_API_URL` | Parqtel server URL (e.g., `http://parqtel:9090` in Compose) | `http://localhost:8080` |
 
-## Servers
+## Tools (`parqtel-mcp-parqtel`)
 
----
+`parqtel-mcp-parqtel` registers **seven** tools:
 
-### parqtel-mcp-slack (Port 3001)
-
-Post alerts, RCA updates, resolution notifications, and create incident channels in Slack.
-
-**Environment Variables:**
-
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `SLACK_BOT_TOKEN` | Yes | Slack Bot OAuth token (`xoxb-...`) |
-
-**Tools:**
-
-#### `send_alert_message`
-Post a formatted incident alert to a Slack channel.
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `channel` | string | ✓ | Channel to post to |
-| `severity` | string | ✓ | Alert severity level |
-| `title` | string | ✓ | Alert title |
-| `summary` | string | ✓ | Alert summary |
-| `runbook_url` | string | | Optional runbook URL |
-| `alert_id` | string | ✓ | Unique alert identifier |
-
-#### `send_rca_update`
-Post a root cause analysis update as a thread reply.
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `channel` | string | ✓ | Channel ID |
-| `thread_ts` | string | ✓ | Thread timestamp |
-| `primary_cause` | string | ✓ | Root cause description |
-| `confidence` | number | ✓ | Confidence score (0-1) |
-| `evidence_summary` | string | ✓ | Evidence summary |
-| `recommended_actions` | string[] | ✓ | List of recommended actions |
-
-#### `resolve_notification`
-Post a resolution notification to the original thread.
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `channel` | string | ✓ | Channel ID |
-| `thread_ts` | string | ✓ | Thread timestamp |
-| `resolution_summary` | string | ✓ | Resolution description |
-| `duration_minutes` | number | ✓ | Incident duration |
-
-#### `create_incident_channel`
-Create a dedicated incident channel for major incidents.
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `incident_id` | string | ✓ | Incident identifier |
-| `severity` | string | ✓ | Severity level |
-| `affected_services` | string[] | ✓ | List of affected services |
-
----
-
-### parqtel-mcp-pagerduty (Port 3002)
-
-Create incidents, add notes, resolve incidents, and query on-call schedules.
-
-**Environment Variables:**
-
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `PAGERDUTY_API_KEY` | Yes | PagerDuty REST API key |
-
-**Tools:**
-
-#### `create_incident`
-Create a PagerDuty incident.
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `title` | string | ✓ | Incident title |
-| `severity` | string | ✓ | Severity level |
-| `body` | string | ✓ | Incident body/description |
-| `service_id` | string | ✓ | PagerDuty service ID |
-| `alert_id` | string | ✓ | Parqtel alert ID |
-| `routing_key` | string | | Optional routing key |
-
-#### `add_note`
-Add a note to an existing incident.
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `incident_id` | string | ✓ | PagerDuty incident ID |
-| `note` | string | ✓ | Note content |
-
-#### `resolve_incident`
-Resolve a PagerDuty incident.
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `incident_id` | string | ✓ | PagerDuty incident ID |
-| `resolution_note` | string | ✓ | Resolution description |
-
-#### `get_oncall`
-Return the current on-call engineer for a service.
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `service_id` | string | ✓ | PagerDuty service ID |
-
-#### `get_recent_incidents`
-Return incidents for a service in the last N hours.
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `service_id` | string | ✓ | PagerDuty service ID |
-| `hours` | number | ✓ | Lookback window in hours |
-
----
-
-### parqtel-mcp-jira (Port 3003)
-
-Create incident issues, add RCA comments, create action items, and transition issues.
-
-**Environment Variables:**
-
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `JIRA_BASE_URL` | Yes | Jira instance URL |
-| `JIRA_USER_EMAIL` | Yes | Jira user email |
-| `JIRA_API_TOKEN` | Yes | Jira API token |
-
-**Tools:**
-
-#### `create_incident_issue`
-Create a Jira issue for an incident.
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `project_key` | string | ✓ | Jira project key |
-| `summary` | string | ✓ | Issue summary |
-| `description` | string | ✓ | Issue description |
-| `priority` | string | ✓ | Priority level |
-| `labels` | string[] | ✓ | Issue labels |
-| `alert_id` | string | ✓ | Parqtel alert ID |
-
-#### `add_rca_comment`
-Add RCA findings as a formatted Jira comment.
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `issue_key` | string | ✓ | Jira issue key (e.g., `OPS-123`) |
-| `root_cause` | string | ✓ | Root cause description |
-| `evidence` | string[] | ✓ | Evidence items |
-| `recommended_actions` | string[] | ✓ | Recommended actions |
-
-#### `create_action_item`
-Create a child issue for a postmortem action item.
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `parent_issue_key` | string | ✓ | Parent issue key |
-| `summary` | string | ✓ | Action item summary |
-| `assignee_email` | string | | Assignee email |
-| `due_date` | string | | Due date (ISO 8601) |
-
-#### `transition_issue`
-Move an issue to a new status.
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `issue_key` | string | ✓ | Jira issue key |
-| `transition_name` | string | ✓ | Target status name |
-
----
-
-### parqtel-mcp-notion (Port 3004)
-
-Create incident pages, update status, append RCA sections, and generate postmortem documents.
-
-**Environment Variables:**
-
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `NOTION_API_KEY` | Yes | Notion integration token (`secret_...`) |
-
-**Tools:**
-
-#### `create_incident_page`
-Create an incident page from a template.
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `database_id` | string | ✓ | Notion database ID |
-| `title` | string | ✓ | Page title |
-| `severity` | string | ✓ | Severity level |
-| `affected_services` | string[] | ✓ | Affected services |
-| `alert_id` | string | ✓ | Parqtel alert ID |
-| `started_at` | string | ✓ | Incident start time |
-
-#### `update_incident_status`
-Update the status property on an incident page.
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `page_id` | string | ✓ | Notion page ID |
-| `status` | string | ✓ | New status value |
-
-#### `append_rca_section`
-Append a root cause analysis section to an existing page.
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `page_id` | string | ✓ | Notion page ID |
-| `root_cause` | string | ✓ | Root cause description |
-| `timeline` | object[] | ✓ | Timeline entries |
-| `recommended_actions` | string[] | ✓ | Recommended actions |
-
-#### `create_postmortem_page`
-Create a full postmortem document from AI-drafted content.
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `database_id` | string | ✓ | Notion database ID |
-| `incident_title` | string | ✓ | Incident title |
-| `postmortem_markdown` | string | ✓ | Postmortem content (markdown) |
-| `action_items` | object[] | ✓ | Action items |
-
----
-
-### parqtel-mcp-discord (Port 3005)
-
-Post alert embeds, RCA updates, and resolution notifications to Discord.
-
-**Environment Variables:**
-
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `DISCORD_BOT_TOKEN` | Yes | Discord bot token |
-
-**Tools:**
-
-#### `send_alert_embed`
-Post an embed message to a Discord channel.
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `channel_id` | string | ✓ | Discord channel ID |
-| `title` | string | ✓ | Embed title |
-| `description` | string | ✓ | Embed description |
-| `severity` | string | ✓ | Severity level |
-| `fields` | object[] | | Additional embed fields |
-| `alert_id` | string | ✓ | Parqtel alert ID |
-
-#### `send_rca_update`
-Post an RCA update to a thread.
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `thread_id` | string | ✓ | Discord thread ID |
-| `root_cause` | string | ✓ | Root cause description |
-| `confidence` | number | ✓ | Confidence score (0-1) |
-| `actions` | string[] | ✓ | Recommended actions |
-
-#### `resolve_alert`
-Update the original embed with resolved status.
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `message_id` | string | ✓ | Original message ID |
-| `channel_id` | string | ✓ | Channel ID |
-| `resolution_summary` | string | ✓ | Resolution description |
-
----
-
-### parqtel-mcp-gdocs (Port 3006)
-
-Create postmortem documents, append timelines, and share documents via Google Docs.
-
-**Environment Variables:**
-
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `GOOGLE_SERVICE_ACCOUNT_JSON` | Yes | Service account credentials JSON |
-
-**Tools:**
-
-#### `create_postmortem_doc`
-Create a Google Doc from the postmortem template.
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `folder_id` | string | ✓ | Google Drive folder ID |
-| `title` | string | ✓ | Document title |
-| `content_markdown` | string | ✓ | Postmortem content (markdown) |
-| `action_items` | object[] | ✓ | Action items |
-
-#### `append_timeline`
-Append a timeline section to an existing doc.
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `doc_id` | string | ✓ | Google Doc ID |
-| `timeline` | object[] | ✓ | Timeline entries |
-
-#### `share_document`
-Share the document with specific emails.
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `doc_id` | string | ✓ | Google Doc ID |
-| `emails` | string[] | ✓ | Email addresses |
-| `role` | string | ✓ | Permission role (reader, writer, commenter) |
-
----
-
-### parqtel-mcp-parqtel (Port 3007)
-
-Query Parqtel's own metrics, logs, alerts, and topology data for AI-driven analysis. It registers **seven** tools.
-
-**Environment Variables:**
-
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `PARQTEL_API_URL` | Yes | Parqtel server URL (e.g., `http://parqtel:9090`) |
-
-**Tools:**
-
-#### `query_metrics`
+### `query_metrics`
 Execute a PromQL expression. Only `query` is required; the mode is chosen by the other parameters:
 
 | Parameter | Type | Required | Description |
@@ -417,14 +78,14 @@ Execute a PromQL expression. Only `query` is required; the mode is chosen by the
 
 With only `query`, the tool evaluates the expression instantly at the current time.
 
-#### `query_metrics_labels`
+### `query_metrics_labels`
 Discover metric/label metadata — call this before `query_metrics` to build selectors.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `label` | string | | Label name (`__name__` for metric names, `service_name`, `service.name`, `host`, …). Dotted names are accepted and URL-encoded automatically. Omit to list all indexed label names. |
 
-#### `query_logs`
+### `query_logs`
 Search stored log records. Defaults to the last hour, newest first; returns matched records plus the true match count and a 60-bucket volume summary.
 
 | Parameter | Type | Required | Description |
@@ -435,87 +96,62 @@ Search stored log records. Defaults to the last hour, newest first; returns matc
 | `order` | string | | `asc` or `desc` by timestamp (default `desc` = newest first) |
 | `severity_min` | string | | Minimum severity: `TRACE`…`FATAL`, or a numeric OTLP severity 1–24 |
 
-#### `ingest_rates`
+### `ingest_rates`
 Live per-signal ingestion rates (metrics/logs/traces): current + 60s/5m/15m averages, wire bytes/sec, seconds since the last ingested item (gap), lifetime totals, and per-second event counts. Use to detect ingestion spikes, stalls, or gaps.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `history_secs` | number | | Length of the per-second history arrays, 1–900 (default 180; the server keeps a 15-minute wheel) |
 
-#### `get_alert_history`
-Return alert history for a service or pod.
+### `get_alert_history`
+Return alert instances fired within a lookback window, optionally filtered by service or pod. Includes state, severity, labels, annotations, and noise score.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `service_name` | string | | Service name filter |
-| `pod_name` | string | | Pod name filter |
-| `since_hours` | number | | Lookback window in hours |
+| `service_name` | string | | Service name filter (`service.name` / `service_name` / `service`) |
+| `pod_name` | string | | Pod name filter (`pod` / `pod_name` / `k8s.pod.name`) |
+| `since_hours` | number | | Lookback window in hours (default 24) |
 
-#### `get_topology`
-Return Kubernetes topology for a namespace.
+### `get_topology`
+Snapshot the observed service landscape: indexed service names, storage stats, and alert rule counts.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `namespace` | string | ✓ | Kubernetes namespace |
+| `namespace` | string | | Optional namespace filter |
 
-#### `get_noise_statistics`
-Return noise scoring statistics for rules.
+### `get_noise_statistics`
+Return per-rule alert noise statistics: total/firing/resolved alert counts and noise scores.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `rule_id` | string | | Specific rule ID (omit for all) |
 
-## Running MCP Servers
+## Running the MCP Server
 
 ### Standalone
 
 ```bash
-# Build all MCP servers
-cargo build --release -p parqtel-mcp-slack -p parqtel-mcp-pagerduty \
-  -p parqtel-mcp-jira -p parqtel-mcp-notion -p parqtel-mcp-discord \
-  -p parqtel-mcp-gdocs -p parqtel-mcp-parqtel
-
-# Run one
-SLACK_BOT_TOKEN=xoxb-... MCP_PORT=3001 ./target/release/parqtel-mcp-slack
+cargo build --release -p parqtel-mcp-parqtel
+PARQTEL_API_URL=http://localhost:8080 MCP_PORT=3007 ./target/release/parqtel-mcp-parqtel
 ```
 
 ### Docker Compose
 
-All MCP servers are included in the Docker Compose stack (commented out by default). Uncomment the ones you need in `deploy/compose/docker-compose.yml`, then start them:
+`mcp-parqtel` is enabled by default in `deploy/compose/docker-compose.yml` on port `3007`:
 
 ```bash
-# From project root
-docker compose -f deploy/compose/docker-compose.yml up -d mcp-slack mcp-pagerduty mcp-jira
+make mcp-up     # Start Parqtel + mcp-parqtel and wait until healthy
+make mcp-smoke  # Verify tools/list responds
 ```
 
 ### Kubernetes (Helm)
 
-Enable MCP servers in your Helm values:
+Enable `mcp.parqtel` in your Helm values:
 
 ```yaml
 mcp:
-  slack:
+  parqtel:
     enabled: true
     env:
-      SLACK_BOT_TOKEN: "xoxb-..."
-  pagerduty:
-    enabled: true
-    env:
-      PAGERDUTY_API_KEY: "..."
+      PARQTEL_API_URL: "http://parqtel:8080"
 ```
-
-## Incident Response Workflow
-
-The tool schemas describe a complete AI-driven incident response flow. **Steps 2,
-4, 5 and 6 are not yet functional** — those tools echo their parameters instead
-of calling Slack, PagerDuty, Jira, Notion or Google Docs.
-
-1. **Alert fires** → Parqtel evaluates rule, transitions to `Firing` ✅
-2. **Notify** → LLM calls `send_alert_message` (Slack) + `create_incident` (PagerDuty) ⚠️ schema only
-3. **Investigate** → LLM calls `query_metrics` + `query_logs` (Parqtel MCP) ✅
-4. **RCA** → LLM calls `send_rca_update` (Slack) + `add_rca_comment` (Jira) ⚠️ schema only
-5. **Resolve** → LLM calls `resolve_incident` (PagerDuty) + `resolve_notification` (Slack) ⚠️ schema only
-6. **Postmortem** → LLM calls `create_postmortem_doc` (Google Docs) or `create_postmortem_page` (Notion) ⚠️ schema only
-
-Today, an agent can investigate with Parqtel and then report its findings back to
-you in the conversation; acting on external systems needs those clients written.

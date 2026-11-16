@@ -16,7 +16,7 @@ Parqtel is an ultra-lightweight SRE observability engine written in Rust. It ing
 │   ├── parqtel-pipeline/    recording rules, stream processing, expression evaluation
 │   ├── parqtel-server/      Axum HTTP + gRPC server, handlers, embedded web console (the `parqtel` binary)
 │   ├── parqtel-mcp-core/    shared MCP framework (JSON-RPC, rate limiting, tool registry)
-│   └── parqtel-mcp-*/       MCP tool servers (slack, pagerduty, jira, notion, discord, gdocs, parqtel)
+│   └── parqtel-mcp-parqtel/ MCP server querying Parqtel metrics, logs, alerts, and topology
 ├── deploy/
 │   ├── compose/             Docker Compose stack (Parqtel, Grafana, Prometheus, load generator, MCP)
 │   ├── helm/parqtel/        Helm chart
