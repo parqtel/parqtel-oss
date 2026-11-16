@@ -107,20 +107,18 @@ extraVolumeMounts:
     readOnly: true
 ```
 
-### MCP Servers
+### MCP Server
 
-Each MCP server can be enabled independently under `mcp.<name>.enabled`. Required secrets should be provided via `mcp.<name>.env` or `mcp.<name>.secretName`.
+The Parqtel MCP server exposes this instance's metrics, logs and alerts to MCP
+clients. Enable it under `mcp.parqtel.enabled` and point
+`mcp.parqtel.env.PARQTEL_API_URL` at the Parqtel service:
 
 ```yaml
 mcp:
-  slack:
+  parqtel:
     enabled: true
     env:
-      SLACK_BOT_TOKEN: "xoxb-..."
-  pagerduty:
-    enabled: true
-    env:
-      PAGERDUTY_API_KEY: "..."
+      PARQTEL_API_URL: "http://parqtel:8080"
 ```
 
 ### Value Overlays

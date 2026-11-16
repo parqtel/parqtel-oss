@@ -7,12 +7,6 @@ members = [
     "crates/parqtel-pipeline",
     "crates/parqtel-server",
     "crates/parqtel-mcp-core",
-    "crates/parqtel-mcp-slack",
-    "crates/parqtel-mcp-pagerduty",
-    "crates/parqtel-mcp-jira",
-    "crates/parqtel-mcp-notion",
-    "crates/parqtel-mcp-discord",
-    "crates/parqtel-mcp-gdocs",
     "crates/parqtel-mcp-parqtel",
 ]
 resolver = "2"

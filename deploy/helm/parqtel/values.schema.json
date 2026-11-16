@@ -1020,24 +1020,6 @@
         "fullnameOverride": {
           "type": "string"
         },
-        "slack": {
-          "$ref": "#/$defs/mcpServer"
-        },
-        "pagerduty": {
-          "$ref": "#/$defs/mcpServer"
-        },
-        "jira": {
-          "$ref": "#/$defs/mcpServer"
-        },
-        "notion": {
-          "$ref": "#/$defs/mcpServer"
-        },
-        "discord": {
-          "$ref": "#/$defs/mcpServer"
-        },
-        "gdocs": {
-          "$ref": "#/$defs/mcpServer"
-        },
         "parqtel": {
           "$ref": "#/$defs/mcpServer"
         }
