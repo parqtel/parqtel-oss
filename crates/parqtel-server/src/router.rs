@@ -100,6 +100,10 @@ pub fn build_router(state: AppState) -> Router {
             get(handlers::alerts::list_routes).post(handlers::alerts::set_routes),
         )
         .route(
+            "/api/v1/alerts/test_route",
+            post(handlers::alerts::test_route),
+        )
+        .route(
             "/api/v1/alerts/silences",
             get(handlers::alerts::list_silences).post(handlers::alerts::create_silence),
         )

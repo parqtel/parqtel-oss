@@ -20,6 +20,8 @@ pub struct ServerMetrics {
     /// Index sidecar stores for metrics, logs and traces, so `/metrics` can
     /// report sidecar size and block counts without reading the files.
     pub index_stores: [Arc<BlockIndexStore>; 3],
+    /// Alertmanager routing and notification delivery metrics.
+    pub routing_metrics: Arc<parqtel_alert::dispatcher::metrics::RoutingMetrics>,
     /// Process RSS in bytes, sampled by the background tick rather than read
     /// from `/proc` on every `/metrics` scrape.
     process_rss_bytes: AtomicU64,
@@ -43,6 +45,7 @@ impl Default for ServerMetrics {
                     "index.json",
                 )))
             }),
+            routing_metrics: Arc::new(parqtel_alert::dispatcher::metrics::RoutingMetrics::new()),
             process_rss_bytes: AtomicU64::new(0),
         }
     }
@@ -56,6 +59,14 @@ impl ServerMetrics {
             contention,
             ..Self::default()
         }
+    }
+
+    pub fn with_routing_metrics(
+        mut self,
+        routing_metrics: Arc<parqtel_alert::dispatcher::metrics::RoutingMetrics>,
+    ) -> Self {
+        self.routing_metrics = routing_metrics;
+        self
     }
 
     /// Attaches the index sidecar stores so `/metrics` can report sidecar
@@ -571,6 +582,9 @@ impl ServerMetrics {
 
         // Lock waits, flush shape and index contention.
         out.push_str(&self.contention.render());
+
+        // Alertmanager routing & notification delivery metrics.
+        out.push_str(&self.routing_metrics.render_prometheus());
 
         out
     }
