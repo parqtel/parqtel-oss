@@ -30,8 +30,8 @@ the user types (`/api/v1/label/<name>/values?limit=10&match=<prefix>`).
 - The flush-time per-field index is capped at 10K values per label at write
   time (`MAX_VALUES_PER_FIELD`), so even cold (buffer-drained) lookups are
   bounded; the API clamps `limit` to 100.
-- Unit tests: `parqtel-core/src/buffer.rs` (`recent_label_values_*`) and
-  `parqtel-query/src/executor.rs` (`test_recent_label_values_*`) cover
+- Unit tests: `crates/parqtel-core/src/buffer.rs` (`recent_label_values_*`) and
+  `crates/parqtel-query/src/executor/` (`test_recent_label_values_*`) cover
   bounded-count, newest-first ordering, prefix filtering, and graceful
   degradation when blocks lack the index.
 - Live validation: `make test-builder` (99 query-shape checks) and

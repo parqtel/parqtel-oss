@@ -7,10 +7,18 @@ This guide provides deep technical insights into Parqtel's internals for develop
 Parqtel is a Rust workspace composed of several specialized crates. This modularity ensures clear boundaries and allows for independent testing.
 
 ### Core Crates
-- **`parqtel-core`**: The heart of the system. Contains the `StorageEngine` trait, the `BlockIndex`, and shared data models (`Metric`, `LogRecord`, `Span`).
+
+Every crate is a directory under `crates/`, one per concern.
+
+- **`parqtel-core`**: The heart of the system. Contains the `StorageEngine` trait, the `BlockIndex`, the write-ahead log, the shared data models (`Metric`, `LogRecord`, `Span`) and the layered configuration. Depends on no other workspace crate.
 - **`parqtel-ingest`**: Handles the heavy lifting of OTLP decoding. It manages the `BlockRotator` and ensures crash-safe writes to Parquet.
 - **`parqtel-query`**: Contains the query execution engine. It handles PromQL parsing and coordinates data retrieval from the storage layer.
-- **`parqtel-server`**: The Axum-based HTTP entry point. This is where routes, middleware, and telemetry are defined.
+- **`parqtel-alert`**: Alert rules, the evaluation loop, the state machine and the built-in preset packs.
+- **`parqtel-pipeline`**: Recording rules and stream-processing pipelines.
+- **`parqtel-server`**: The Axum-based HTTP entry point — routes, middleware, telemetry, and the embedded console. The binary is named `parqtel`, not `parqtel-server`.
+- **`parqtel-mcp-core`** and the seven **`parqtel-mcp-*`** tool servers: the Model Context Protocol framework and its integrations.
+
+See [Diagrams](diagrams.md#2-crate-dependency-graph) for the dependency graph.
 
 ## 2. Extending the Storage Engine
 
@@ -92,7 +100,7 @@ Parqtel's AI-native capabilities come from its MCP servers. To add a new tool (e
 
 - **Lints**: Every crate opts into `[workspace.lints]` (`[lints] workspace = true`): `unsafe_code` is forbidden, and `unwrap`/`expect`/`panic` are denied outside tests. New crates inherit `version`, `edition`, `rust-version`, `license` and `authors` from `[workspace.package]`.
 - **Error Handling**: Always use `Result` and the `thiserror` crate for library errors. Avoid `unwrap()` at all costs.
-- **Concurrency**: Use `tokio` primitives. Prefer `mpsc` channels for communication between services. Run blocking I/O (Parquet encode, file scans) on `spawn_blocking` with a pre-acquired semaphore.
+- **Concurrency**: Use `tokio` primitives. Prefer `mpsc` channels for communication between services. Run blocking I/O (Parquet encode, file scans) on `spawn_blocking` with a pre-acquired semaphore. Block scans additionally share a process-wide 4-slot admission budget — reserve a slot with `Scanner::try_reserve_scan_slot()` for background work and skip the cycle when none is free.
 - **Documentation**: All public functions must have doc comments (`///`).
 - **Module layout**: Split a file once it covers several concerns (roughly 600+ lines of production code). Make it a directory module, keep the public API re-exported from `mod.rs`, mark items shared between sibling files `pub(super)`, and describe the split in the `mod.rs` doc comment.
 
@@ -108,3 +116,13 @@ We use the `perf_bench` example for hot-path micro-benchmarking (hand-rolled tim
 - To run micro-benchmarks: `cargo run --release -p parqtel-server --example perf_bench`
 - To run a system audit: `make perf-audit` (release build + `scripts/bench/run_perf_audit.sh`)
 - To drive synthetic load: `make load` (10k points) or `make load-test LOAD_RATE=... LOAD_TIME=...`
+- To roll metric blocks up into their 5-minute L1 windows offline: `parqtel compact`
+
+### Changing the storage layout
+
+Metric blocks are written series-by-series and carry a series table in the
+Parquet footer (`parqtel.series_index`). Anything that writes a metric block
+must go through `metric_runs_to_block`, and `write_block_file` is the single
+place the footer, bloom filters and page statistics are applied. If you change
+the layout, keep `SeriesTable::validate` and the
+`indexed_scan_equals_unindexed_scan` equivalence test passing.
