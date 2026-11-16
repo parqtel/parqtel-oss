@@ -96,7 +96,7 @@ impl Compactor {
                 tracing::error!("Metrics compaction failed: {}", e);
             }
             // Legacy bounded compaction remains for logs. Metrics use the
-            // series-streaming leveled path above; traces remain Phase 4 work.
+            // series-streaming leveled path above; traces compact separately.
             if let Err(e) = Self::compact_tiered(&index, &store, &config).await {
                 tracing::error!("Tiered compaction failed: {}", e);
             }
@@ -302,8 +302,8 @@ impl Compactor {
                 let paths: Vec<_> = group.iter().map(|b| b.path.clone()).collect();
 
                 if *signal_type == SignalType::Traces {
-                    // For traces, skip read_source_blocks (which only handles metrics/logs)
-                    // and just leave them for now — trace compaction reads spans directly
+                    // read_source_blocks handles only metrics and logs; trace
+                    // compaction reads spans directly.
                     continue;
                 }
 

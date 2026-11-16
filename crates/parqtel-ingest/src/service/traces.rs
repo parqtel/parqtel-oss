@@ -1,4 +1,5 @@
-//! TODO
+//! Trace ingest: decode an OTLP span request, derive RED metrics, apply tail
+//! sampling and rotate the kept spans into blocks.
 
 use super::common::{decode_offloading, lock_rotator, IngestionStats};
 use super::serial::TraceRotator;

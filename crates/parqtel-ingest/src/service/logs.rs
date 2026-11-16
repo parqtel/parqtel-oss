@@ -1,4 +1,5 @@
-//! TODO
+//! Log ingest: decode an OTLP log request, buffer it, WAL it and rotate it into
+//! blocks through the shared serial rotator.
 
 use super::common::{decode_offloading, lock_rotator, IngestionStats};
 use super::serial::LogRotator;

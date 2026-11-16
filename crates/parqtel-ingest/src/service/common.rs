@@ -1,4 +1,6 @@
-//! TODO
+//! Shared ingest plumbing: per-request stats counters and the helpers every
+//! service uses to decode off the async runtime, lock a rotator and stamp
+//! block metadata.
 
 use crate::writer::BlockMetadata;
 use parqtel_core::{ContentionMetrics, Error, Result, SignalType};

@@ -1,4 +1,5 @@
-//! TODO
+//! Metric ingest: decode an OTLP metric request, buffer its points and hand
+//! them to the sharded rotator; also derives the RED series for server spans.
 
 use super::common::{decode_offloading, IngestionStats};
 use super::rotator::BlockRotator;

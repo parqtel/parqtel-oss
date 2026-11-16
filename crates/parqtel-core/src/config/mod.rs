@@ -374,7 +374,7 @@ mod tests {
         assert_eq!(config.rules_dir, "rules");
         assert_eq!(config.noise_window_firings, 30);
         assert!(config.refinement_enabled);
-        // Built-in packs default to auto-activation (plan §8 decision 1).
+        // Built-in packs auto-activate unless the operator narrows them.
         assert_eq!(config.presets.mode, PresetMode::Auto);
         assert!(config.presets.include.is_empty());
         assert!(config.presets.exclude.is_empty());

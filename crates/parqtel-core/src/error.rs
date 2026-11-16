@@ -3,7 +3,6 @@ use thiserror::Error;
 /// Unified error type for the parqtel project.
 #[derive(Debug, Error)]
 pub enum Error {
-    /// I/O error.
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 
@@ -15,16 +14,9 @@ pub enum Error {
     #[error("Arrow error: {0}")]
     Arrow(String),
 
-    /// Schema mismatch error.
     #[error("Schema mismatch: expected {expected}, found {found}")]
-    SchemaMismatch {
-        /// Expected schema description.
-        expected: String,
-        /// Found schema description.
-        found: String,
-    },
+    SchemaMismatch { expected: String, found: String },
 
-    /// Invalid OTLP payload.
     #[error("Invalid OTLP payload: {0}")]
     InvalidOtlp(String),
 
@@ -32,15 +24,12 @@ pub enum Error {
     #[error("Query error: {0}")]
     Query(String),
 
-    /// Configuration error.
     #[error("Configuration error: {0}")]
     Config(String),
 
-    /// Validation error.
     #[error("Validation error: {0}")]
     Validation(String),
 
-    /// Internal error.
     #[error("Internal error: {0}")]
     Internal(String),
 

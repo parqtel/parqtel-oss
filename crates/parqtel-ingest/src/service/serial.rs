@@ -1,4 +1,5 @@
-//! TODO
+//! Single-writer rotator for logs and traces: one flush in flight at a time,
+//! shared by both signals.
 
 use super::common::{record_block_written, INDEX_DURABILITY_TIMEOUT};
 use crate::writer::{BlockMetadata, LogWriter, TraceWriter};

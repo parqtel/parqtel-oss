@@ -1,4 +1,5 @@
-//! TODO
+//! Sharded metric writer: concurrent ingest into per-shard writers, merged into
+//! one block per flush.
 
 use super::common::{record_block_written, shard_for, unix_millis};
 use super::flush::{run_flush_job, FlushJob, FlushOrder};

@@ -101,7 +101,7 @@ pub async fn tag_keys(State(state): State<AppState>) -> Json<Vec<serde_json::Val
 
 /// Handler for POST /tag-values.
 pub async fn tag_values(State(_state): State<AppState>) -> Json<Vec<serde_json::Value>> {
-    // Stub
+    // Grafana accepts an empty list; tag filtering is not implemented.
     Json(vec![])
 }
 

@@ -1,4 +1,6 @@
-//! TODO
+//! Flush ordering: a finished block's index durability, WAL commit and buffer
+//! drop are released in one order so no query ever sees rows twice or misses
+//! them.
 
 use super::common::INDEX_DURABILITY_TIMEOUT;
 use crate::writer::{BlockMetadata, BlockWriter};
