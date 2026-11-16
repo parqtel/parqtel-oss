@@ -4,11 +4,25 @@ Parqtel ships with 7 MCP servers that expose tools for LLM-driven incident respo
 
 ## Overview
 
+> [!IMPORTANT]
+> **Only `parqtel-mcp-parqtel` is implemented.** It performs real queries against
+> Parqtel's API.
+>
+> The other six servers (`slack`, `pagerduty`, `jira`, `notion`, `discord`,
+> `gdocs`) currently register their **tool schemas only** — they have no handler
+> and make no outbound HTTP calls. A `tools/call` against any of them returns
+> `{"status": "success", "tool": "<name>", "params": {...}}` — your parameters
+> echoed back — and **nothing is sent to Slack, PagerDuty, Jira, Notion, Discord
+> or Google Docs**. Their token environment variables are not read.
+>
+> Treat them as an interface preview: agents can discover the tool shapes, but
+> cannot yet act on external services. Do not rely on them to page a human.
+
 The Model Context Protocol enables AI agents (Claude, GPT, etc.) to interact with external services through a standardized JSON-RPC interface. Parqtel's MCP servers allow an LLM to:
 
-- Post alerts and RCA updates to communication channels
-- Create and manage incidents in on-call systems
-- Generate postmortem documents automatically
+- Post alerts and RCA updates to communication channels *(schema only — see above)*
+- Create and manage incidents in on-call systems *(schema only — see above)*
+- Generate postmortem documents automatically *(schema only — see above)*
 - Query observability data for root cause analysis
 
 ## Architecture
@@ -36,7 +50,7 @@ Each MCP server:
 - Exposes `/health` for liveness probes
 - Implements rate limiting (token bucket, configurable per-minute)
 - Registers tools with typed JSON Schema inputs
-- Sanitizes parameters before forwarding to external APIs
+- Sanitizes parameters before writing them to the audit log
 
 ### Connecting from Cline / Claude Desktop / any agent
 
@@ -492,11 +506,16 @@ mcp:
 
 ## Incident Response Workflow
 
-A typical AI-driven incident response flow:
+The tool schemas describe a complete AI-driven incident response flow. **Steps 2,
+4, 5 and 6 are not yet functional** — those tools echo their parameters instead
+of calling Slack, PagerDuty, Jira, Notion or Google Docs.
 
-1. **Alert fires** → Parqtel evaluates rule, transitions to `Firing`
-2. **Notify** → LLM calls `send_alert_message` (Slack) + `create_incident` (PagerDuty)
-3. **Investigate** → LLM calls `query_metrics` + `query_logs` (Parqtel MCP)
-4. **RCA** → LLM calls `send_rca_update` (Slack) + `add_rca_comment` (Jira)
-5. **Resolve** → LLM calls `resolve_incident` (PagerDuty) + `resolve_notification` (Slack)
-6. **Postmortem** → LLM calls `create_postmortem_doc` (Google Docs) or `create_postmortem_page` (Notion)
+1. **Alert fires** → Parqtel evaluates rule, transitions to `Firing` ✅
+2. **Notify** → LLM calls `send_alert_message` (Slack) + `create_incident` (PagerDuty) ⚠️ schema only
+3. **Investigate** → LLM calls `query_metrics` + `query_logs` (Parqtel MCP) ✅
+4. **RCA** → LLM calls `send_rca_update` (Slack) + `add_rca_comment` (Jira) ⚠️ schema only
+5. **Resolve** → LLM calls `resolve_incident` (PagerDuty) + `resolve_notification` (Slack) ⚠️ schema only
+6. **Postmortem** → LLM calls `create_postmortem_doc` (Google Docs) or `create_postmortem_page` (Notion) ⚠️ schema only
+
+Today, an agent can investigate with Parqtel and then report its findings back to
+you in the conversation; acting on external systems needs those clients written.
