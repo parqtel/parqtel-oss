@@ -4,7 +4,7 @@ info:
   description: |
     Ultra-lightweight SRE observability engine — streaming OpenTelemetry metrics, logs, and traces into compressed Parquet.
     Exposes Prometheus-compatible query API, Grafana SimpleJSON datasource, alerting engine, and pipeline management.
-  version: "0.1.0"
+  version: "0.3.1"
   license:
     name: Apache-2.0
     url: https://www.apache.org/licenses/LICENSE-2.0
@@ -428,6 +428,95 @@ components:
                 type: string
               config:
                 type: object
+
+    SavedSearch:
+      type: object
+      description: A stored search (ParQL for metrics, ParqtelQL for logs and traces).
+      required: [id, name, signal, query]
+      properties:
+        id:
+          type: string
+          description: Unique id (ULID at creation).
+        name:
+          type: string
+          description: Human name shown in lists.
+        signal:
+          type: string
+          enum: [metrics, logs, traces]
+        query:
+          type: string
+        range_minutes:
+          type: integer
+          format: int64
+          description: Preferred time-range preset in minutes (0 keeps the current range).
+        created_at:
+          type: integer
+          format: int64
+          description: Creation time in Unix seconds.
+
+    AlertRoute:
+      type: object
+      description: A notification route. An alert matches when its severity is at or above `match_severity` and its labels contain every entry of `match_labels`.
+      required: [name, webhook_url]
+      properties:
+        name:
+          type: string
+        match_severity:
+          type: string
+          enum: [critical, page, warning, info]
+          default: info
+        match_labels:
+          type: object
+          additionalProperties: { type: string }
+        webhook_url:
+          type: string
+          format: uri
+        repeat_minutes:
+          type: integer
+          format: int64
+          default: 240
+          description: Minutes before an unresolved alert is re-sent (0 = no repeat).
+
+    AlertSilence:
+      type: object
+      description: A silence window that suppresses matching alerts.
+      required: [name, match_labels, starts_at, ends_at]
+      properties:
+        name:
+          type: string
+        created_by:
+          type: string
+        match_labels:
+          type: object
+          additionalProperties: { type: string }
+        starts_at:
+          type: integer
+          format: int64
+          description: Unix seconds when the silence starts.
+        ends_at:
+          type: integer
+          format: int64
+          description: Unix seconds when the silence ends.
+
+    PipelineRequest:
+      type: object
+      description: A PQL pipeline query.
+      required: [query, start, end]
+      properties:
+        query:
+          type: string
+          description: >
+            `fetch logs|metrics|traces | filter <pql> | parse "<re>" as f |
+            stats count/avg/min/max/sum/p50/p95/p99 by … interval=… | limit |
+            correlate traces|logs window=…`
+        start:
+          type: number
+          format: double
+          description: Start of the window, as Unix seconds.
+        end:
+          type: number
+          format: double
+          description: End of the window, as Unix seconds.
 
 paths:
   /health:
@@ -1122,6 +1211,230 @@ paths:
       responses:
         "200":
           description: Alert resolved
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiResponse"
+
+  /api/v1/alerts/routes:
+    get:
+      tags: [Alerts]
+      summary: List notification routes
+      operationId: listAlertRoutes
+      responses:
+        "200":
+          description: Routing table
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string }
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/AlertRoute" }
+    post:
+      tags: [Alerts]
+      summary: Replace the notification routes
+      description: Replaces the whole routing table and applies it to the running router.
+      operationId: setAlertRoutes
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              items: { $ref: "#/components/schemas/AlertRoute" }
+      responses:
+        "200":
+          description: Routes replaced
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiResponse"
+
+  /api/v1/alerts/silences:
+    get:
+      tags: [Alerts]
+      summary: List active silences
+      operationId: listSilences
+      responses:
+        "200":
+          description: Silences that have not expired
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string }
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/AlertSilence" }
+    post:
+      tags: [Alerts]
+      summary: Create or replace a silence
+      operationId: createSilence
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AlertSilence" }
+      responses:
+        "200":
+          description: Silence created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiResponse"
+        "400":
+          description: Invalid silence (empty name, or ends_at before starts_at)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiResponse"
+
+  /api/v1/alerts/silences/{name}:
+    delete:
+      tags: [Alerts]
+      summary: Delete a silence
+      operationId: deleteSilence
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Silence deleted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiResponse"
+        "404":
+          description: No such silence
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiResponse"
+
+  /api/v1/saved_searches:
+    get:
+      tags: [Query]
+      summary: List saved searches
+      operationId: listSavedSearches
+      responses:
+        "200":
+          description: Saved searches
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string }
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/SavedSearch" }
+    post:
+      tags: [Query]
+      summary: Create a saved search
+      operationId: createSavedSearch
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SavedSearch" }
+      responses:
+        "200":
+          description: Saved search created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiResponse"
+        "400":
+          description: Invalid saved search
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiResponse"
+
+  /api/v1/saved_searches/{id}:
+    delete:
+      tags: [Query]
+      summary: Delete a saved search
+      operationId: deleteSavedSearch
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Saved search deleted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiResponse"
+        "404":
+          description: No such saved search
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiResponse"
+
+  /v1/search:
+    post:
+      tags: [Pipelines]
+      summary: Run a PQL pipeline
+      description: >
+        Executes a cross-signal pipeline over the given window. The result is
+        either a `rows` payload (unified field maps) or a `table` payload with
+        columns, rows and an optional `timeseries`.
+      operationId: runPipelineSearch
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PipelineRequest" }
+      responses:
+        "200":
+          description: Pipeline result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string }
+                  data:
+                    type: object
+                    properties:
+                      type:
+                        type: string
+                        enum: [rows, table]
+                      columns:
+                        type: array
+                        items: { type: string }
+                      rows:
+                        type: array
+                        items: { type: object }
+                      timeseries:
+                        type: object
+                        properties:
+                          timestamps:
+                            type: array
+                            items: { type: integer, format: int64 }
+                          series:
+                            type: array
+                            items:
+                              type: object
+                              properties:
+                                fields: { type: object }
+                                values:
+                                  type: array
+                                  items: { type: number }
+        "400":
+          description: The pipeline could not be parsed
           content:
             application/json:
               schema:

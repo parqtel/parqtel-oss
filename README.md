@@ -299,7 +299,8 @@ OTel SDKs can export directly via **gRPC** at `:4317` (all three collector servi
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/health` | GET | Health check |
+| `/health` | GET | Liveness check (static) |
+| `/ready` | GET | Readiness check — reads the block index, 503 when storage is unusable |
 | `/metrics` | GET | Prometheus metrics (self-monitoring) |
 | `/api/v1/stats` | GET | Storage/buffer/config snapshot |
 | `/api/v1/ingest_rates` | GET | Live per-signal rates (current + 60s/5m/15m averages, `gap_secs`, sparkline via `history_secs`) |
