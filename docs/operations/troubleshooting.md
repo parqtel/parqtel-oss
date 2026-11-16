@@ -44,6 +44,27 @@ curl http://localhost:8080/api/v1/label/__name__/values
 Queries involving high cardinality (thousands of series) or large time ranges can consume significant memory.
 - **Solution:** Use recording rules to pre-aggregate data for frequently used dashboards.
 
+### Queries are queued behind each other
+Block scans share a process-wide budget of **4 slots**. When all four are
+busy, a query waits for one.
+
+| Metric | What it tells you |
+|--------|-------------------|
+| `parqtel_scan_slots_in_use` | Slots currently held by scans |
+| `parqtel_scan_slots_limit` | The budget (4) |
+| `parqtel_scan_admission_wait_seconds_total` | Total time scans spent waiting for admission |
+| `parqtel_scan_low_priority_skips_total` | Background work skipped because no slot was free |
+| `parqtel_scan_blocks_total` | Blocks scanned across all signals |
+| `parqtel_scan_rows_considered_total` / `parqtel_scan_rows_returned_total` | Rows read vs rows kept — the ratio shows how well the series table and row-group pruning are working |
+| `parqtel_scan_footer_cache_hits_total` / `parqtel_scan_footer_cache_misses_total` | Footer cache effectiveness |
+
+A rising `parqtel_scan_low_priority_skips_total` means alert evaluation (and
+the compaction pass) are being deferred because interactive queries are using
+the budget. That is the intended priority order, but if alerts are skipping
+too often, reduce the query fan-out: narrow the alert rule's window, or roll
+metric blocks up into L1 windows more aggressively by lowering
+`PARQTEL__STORAGE__COMPACTION_INTERVAL_SECS`.
+
 ## 3. Storage & Disk Issues
 
 ### Disk Full
@@ -55,6 +76,22 @@ Parqtel will fail to rotate blocks if the disk is full.
 If the compactor cannot keep up with the ingestion rate, you will have many small Parquet files, slowing down queries.
 - **Diagnostic:** Check `parqtel_storage_blocks` / `parqtel_storage_bytes` / `parqtel_storage_rows` on `/metrics` for block accumulation, and watch server logs for `Compaction failed` errors.
 - **Solution:** Decrease `PARQTEL__STORAGE__COMPACTION_INTERVAL_SECS` (more frequent passes) or provide more CPU/IOPS.
+
+### Many small metric files
+Metric block files are named by level, so the store's shape is visible in `ls`:
+`m_l0_` is one ingest flush, `m_n_` a normalised legacy block, and `m_l1_` a
+coalesced 5-minute window.
+- **A directory full of `m_l0_` files** means the L1 rollup is not keeping up.
+  It runs every `PARQTEL__STORAGE__COMPACTION_INTERVAL_SECS` (default 300) and
+  merges at most 8 sources, 2 groups and 16 M rows per pass. Lower the interval
+  or give the pod more IOPS.
+- **A pass that is skipped** leaves the blocks where they are. A pass skips
+  when it cannot reserve 2 of the 4 process-wide scan slots, or when the
+  sources' WAL ranges are mixed or not contiguous — see
+  `parqtel_scan_low_priority_skips_total` and the `Compaction failed` log
+  line.
+- **`m_n_` files** are legacy blocks being normalised, one per pass. They
+  disappear as the store converges.
 
 ## 4. Ingest latency (contention)
 
@@ -109,7 +146,30 @@ Raise `PARQTEL__SERVER__INDEX_PERSIST_INTERVAL_SECS` to write less often, and
 `PARQTEL__SERVER__RETENTION_INTERVAL_SECS` to sweep less often.
 
 ### "Invalid timestamp column" / arrow2-era blocks
-After the arrow2 → arrow 59 migration, Parquet blocks written by older builds are unreadable: compaction and scans log `Arrow error: Invalid timestamp column`. **Wipe the data directory** (`data/`, `data/logs/`, `data/traces/`) when upgrading across that boundary — old blocks cannot be converted in place.
+After the arrow2 → arrow 60 migration, Parquet blocks written by older builds are unreadable: compaction and scans log `Arrow error: Invalid timestamp column`. **Wipe the data directory** (`data/`, `data/logs/`, `data/traces/`) when upgrading across that boundary — old blocks cannot be converted in place.
+
+### An older binary cannot read the data directory
+Two on-disk shapes changed with the L0/L1 work:
+- New metric blocks store labels only in the footer series table, so the
+  row-level `labels` column is gone. An older binary cannot read them.
+- The block-index sidecar is now `{"blocks": [...], "label_values": {...}}`. An
+  older binary cannot parse it.
+
+Forward migration is automatic (the loader still accepts the old sidecar
+shape). **Rolling back** is only safe once the superseded `m_l0_` sources have
+been removed.
+
+### Memory grows with points instead of series
+The label interner lets every point of a series share one copy of its labels.
+When the working set exceeds `PARQTEL__INGEST__LABEL_INTERNER_CAPACITY`
+(default 1 048 576), the sharing is lost and memory grows with points instead
+of series.
+- **Diagnostic:** compare the active series count with the configured
+  capacity. The label-values and series endpoints return a
+  `total_series_count` alongside the values.
+- **Solution:** raise the capacity to at least **twice** the active series
+  count — each series is interned twice, once as received and once with
+  `service.name` for the memory buffer.
 
 ### Stale Docker image
 If the compose stack behaves oddly after a source change (panics referencing `arrow2`, missing endpoints), the image is stale. Run `make local-rebuild` — `make local-up` alone reuses the previously built image.
