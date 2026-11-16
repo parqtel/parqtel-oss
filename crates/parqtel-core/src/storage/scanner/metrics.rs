@@ -5,7 +5,9 @@ use super::pruning::{
     plan_row_selection, project_present, row_groups_in_range, row_groups_matching_value,
 };
 use super::Scanner;
-use super::{MAX_BLOCKS, MAX_CONCURRENT, SCAN_BATCH_ROWS};
+use super::{
+    acquire_scan_slot, record_scan_block, record_scan_output, MAX_BLOCKS, SCAN_BATCH_ROWS,
+};
 use crate::error::{Error, Result};
 use crate::models::metrics::DataPoint;
 use crate::models::storage::BlockMetadata;
@@ -18,10 +20,8 @@ use std::sync::Arc;
 
 /// Columns the metrics scan decodes, in schema order.
 ///
-/// A metrics block has 15 columns and this path reads 7. The other 8 -
-/// `metric_kind`, the six k8s dictionaries and `resource_attributes` - are
-/// per-row data that a range query never touches, and decoding them costs
-/// bandwidth and CPU on every block the query opens.
+/// Legacy metrics blocks have 15 columns and this fallback reads 7. New indexed
+/// blocks omit `labels` and use `INDEXED_SCAN_COLUMNS` instead.
 ///
 /// Projection is intersected with the file's own schema before being applied,
 /// so a block written by an older build that lacks one of these columns still
@@ -207,18 +207,17 @@ impl Scanner {
             end_ns,
             "scanning blocks"
         );
-        let sem = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT));
         let mut tasks = Vec::new();
+        let mut admission_wait = std::time::Duration::ZERO;
         for block in blocks.into_iter().take(MAX_BLOCKS) {
             let m_name = metric_name.clone();
             let selector = Arc::clone(&selector);
-            let permit = sem
-                .clone()
-                .acquire_owned()
-                .await
-                .map_err(|e| Error::Internal(e.to_string()))?;
+            let waiting = std::time::Instant::now();
+            let permit = acquire_scan_slot().await?;
+            admission_wait += waiting.elapsed();
             tasks.push(tokio::task::spawn_blocking(move || {
                 let _permit = permit;
+                record_scan_block();
                 Self::scan_block_filtered(block, &m_name, start_ns, end_ns, &selector)
             }));
         }
@@ -233,10 +232,13 @@ impl Scanner {
                 out.points.extend(part.points);
             }
         }
+        record_scan_output(out.rows_considered, out.points.len());
         tracing::debug!(
             metric = %metric_name,
             blocks = block_count,
+            rows_considered = out.rows_considered,
             points = out.points.len(),
+            admission_wait_ms = admission_wait.as_millis(),
             duration_ms = start_time.elapsed().as_millis(),
             "scan complete"
         );
@@ -265,17 +267,24 @@ impl Scanner {
         let Some(opened) = open_block(&meta.path)? else {
             return Ok(MetricScan::default());
         };
+        let has_labels_column = opened.meta.schema().index_of("labels").is_ok();
         if let Some(index) = &opened.series {
             match Self::scan_block_indexed(&opened, index, metric_name, start_ns, end_ns, selector)
             {
                 Ok(scan) => return Ok(scan),
                 // A table that disagrees with its file costs speed, not
                 // correctness: the rows are still there to be scanned.
-                Err(e) => tracing::warn!(
+                Err(e) if has_labels_column => tracing::warn!(
                     path = ?meta.path,
                     "indexed block scan failed, scanning without the series table: {e}"
                 ),
+                Err(e) => return Err(e),
             }
+        }
+        if !has_labels_column {
+            return Err(Error::Arrow(
+                "metrics block without a labels column requires a valid series index".into(),
+            ));
         }
         let OpenedBlock { file, meta, .. } = opened;
         let service_name = selector.service.as_deref();

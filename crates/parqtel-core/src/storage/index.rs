@@ -1,8 +1,29 @@
 use crate::error::{Error, Result};
 use crate::models::storage::{BlockMetadata, SignalType};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+
+/// Per-field cap on the global label-value dictionary, matching the flush path.
+const MAX_LABEL_VALUES_PER_FIELD: usize = 10_000;
+
+/// Label name -> distinct values, for autocomplete.
+pub type LabelValueMap = BTreeMap<String, BTreeSet<String>>;
+
+/// On-disk sidecar shape. The legacy shape was a bare array of blocks, each
+/// carrying its own label values; it is still accepted by [`BlockIndex::load`].
+#[derive(serde::Serialize)]
+struct SidecarRef<'a> {
+    blocks: &'a [BlockMetadata],
+    label_values: &'a LabelValueMap,
+}
+
+#[derive(serde::Deserialize)]
+struct Sidecar {
+    blocks: Vec<BlockMetadata>,
+    #[serde(default)]
+    label_values: LabelValueMap,
+}
 
 /// In-memory index of all Parquet blocks on disk.
 ///
@@ -13,10 +34,15 @@ use std::path::{Path, PathBuf};
 /// now mutates in memory only and hands persistence to [`BlockIndexStore`],
 /// which debounces it onto the blocking pool.
 ///
+/// Label values are held once, in one capped dictionary, not per block: per
+/// block they were ~85% of a 611 MB sidecar on uat-oman, re-serialised on every
+/// persist, while readers only ever consulted the newest five blocks.
+///
 /// Ordering invariant: `blocks` is kept sorted by `start_timestamp_ns` after
 /// every mutation, which [`Self::query`]'s binary search relies on.
 pub struct BlockIndex {
     pub blocks: Vec<BlockMetadata>,
+    label_values: LabelValueMap,
     sidecar_path: PathBuf,
 }
 
@@ -25,6 +51,7 @@ impl BlockIndex {
     pub fn new(data_dir: &Path) -> Self {
         Self {
             blocks: Vec::new(),
+            label_values: LabelValueMap::new(),
             sidecar_path: data_dir.join("index.json"),
         }
     }
@@ -33,7 +60,7 @@ impl BlockIndex {
     pub fn load(&mut self) -> Result<()> {
         if self.sidecar_path.exists() {
             let content = fs::read_to_string(&self.sidecar_path)?;
-            self.blocks = serde_json::from_str(&content).map_err(Error::Serde)?;
+            self.load_serialized(&content)?;
         }
         self.blocks.sort_by_key(|b| b.start_timestamp_ns);
         Ok(())
@@ -47,15 +74,63 @@ impl BlockIndex {
     /// Serialises the index payload. Pure CPU, no filesystem access, so it is
     /// safe to call while holding a lock — though a *read* lock is preferred.
     pub fn serialize(&self) -> Result<String> {
-        serde_json::to_string(&self.blocks).map_err(Error::Serde)
+        self.serialize_with_capacity(0)
+    }
+
+    /// As [`Self::serialize`], into a buffer pre-sized to `capacity` bytes, so
+    /// a large index is not reallocated (and briefly held twice) while it grows.
+    pub fn serialize_with_capacity(&self, capacity: usize) -> Result<String> {
+        let mut buf = Vec::with_capacity(capacity);
+        let sidecar = SidecarRef {
+            blocks: &self.blocks,
+            label_values: &self.label_values,
+        };
+        serde_json::to_writer(&mut buf, &sidecar).map_err(Error::Serde)?;
+        String::from_utf8(buf).map_err(|e| Error::Internal(e.to_string()))
     }
 
     /// Restores a previously serialised payload, dropping the in-memory
-    /// index. Used to publish a payload serialised off-lock.
+    /// index. Accepts both the current object form and the legacy bare array,
+    /// whose per-block label values are folded into the dictionary.
     pub fn load_serialized(&mut self, payload: &str) -> Result<()> {
-        self.blocks = serde_json::from_str(payload).map_err(Error::Serde)?;
-        self.blocks.sort_by_key(|b| b.start_timestamp_ns);
+        // Dispatch on the first character rather than an untagged enum: serde
+        // would buffer the whole document to try each variant.
+        let (mut blocks, label_values) = if payload.trim_start().starts_with('[') {
+            let blocks: Vec<BlockMetadata> = serde_json::from_str(payload).map_err(Error::Serde)?;
+            (blocks, LabelValueMap::new())
+        } else {
+            let sidecar: Sidecar = serde_json::from_str(payload).map_err(Error::Serde)?;
+            (sidecar.blocks, sidecar.label_values)
+        };
+        self.label_values = label_values;
+        // Oldest first, so the newest values survive the per-field cap.
+        blocks.sort_by_key(|b| b.start_timestamp_ns);
+        for block in &mut blocks {
+            self.absorb_label_values(block);
+        }
+        self.blocks = blocks;
         Ok(())
+    }
+
+    /// Moves a block's label values into the shared dictionary. A full field
+    /// evicts an existing value so the newest values are always present.
+    fn absorb_label_values(&mut self, meta: &mut BlockMetadata) {
+        for (name, values) in std::mem::take(&mut meta.label_values) {
+            let known = self.label_values.entry(name).or_default();
+            for value in values {
+                if known.len() >= MAX_LABEL_VALUES_PER_FIELD && !known.contains(&value) {
+                    known.pop_first();
+                }
+                known.insert(value);
+            }
+        }
+    }
+
+    /// Known values of `label` across every block ever indexed, if any.
+    // shortcut: values outlive the blocks that held them (bounded by the
+    // per-field cap); rebuild from recent blocks if stale autocomplete matters.
+    pub fn label_values(&self, label: &str) -> Option<&BTreeSet<String>> {
+        self.label_values.get(label)
     }
 
     /// Adds a new block to the index. **Does not persist** — see
@@ -65,7 +140,8 @@ impl BlockIndex {
     /// `partition_point` correct. The sort is O(n log n) on an already sorted
     /// vector for all but the inserted element in practice; a bsearch insert
     /// would be marginal here and is left as a follow-up.
-    pub fn add(&mut self, meta: BlockMetadata) {
+    pub fn add(&mut self, mut meta: BlockMetadata) {
+        self.absorb_label_values(&mut meta);
         self.blocks.push(meta);
         self.blocks.sort_by_key(|b| b.start_timestamp_ns);
     }
@@ -82,7 +158,8 @@ impl BlockIndex {
         if !removed_paths.is_empty() {
             self.blocks.retain(|b| !removed_paths.contains(&b.path));
         }
-        if let Some(meta) = new {
+        if let Some(mut meta) = new {
+            self.absorb_label_values(&mut meta);
             self.blocks.push(meta);
         }
         self.blocks.sort_by_key(|b| b.start_timestamp_ns);
@@ -212,6 +289,14 @@ fn filename_may_hold_signal(path: &Path, signal: SignalType) -> bool {
     }
 }
 
+fn is_levelled_metric_block(path: &Path) -> bool {
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_default();
+    name.starts_with("m_n_") || name.starts_with("m_l1_") || name.starts_with("m_l2_")
+}
+
 /// Identifies which signal a Parquet file holds, from its schema.
 ///
 /// The data directory is shared by the metrics and trace writers, and relying
@@ -274,21 +359,43 @@ pub fn reconcile(index: &mut BlockIndex, signal: SignalType) -> Result<Reconcile
     for entry in entries.flatten() {
         let path = entry.path();
         if path.extension().is_some_and(|e| e == "parquet") {
+            if path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with(".tmp_"))
+            {
+                continue;
+            }
             on_disk.insert(path);
         }
     }
 
-    // Drop entries whose file is gone (deleted by retention or compaction that
-    // crashed before publishing).
+    // Compaction provenance makes a renamed output authoritative even if a
+    // crash left its source files behind or the sidecar still lists them.
+    let mut superseded = std::collections::HashSet::new();
+    if signal == SignalType::Metrics {
+        for path in on_disk.iter().filter(|path| is_levelled_metric_block(path)) {
+            match super::block_file::read_compacted_sources(path) {
+                Ok(sources) => superseded.extend(sources.into_iter().map(|name| dir.join(name))),
+                Err(e) => {
+                    tracing::warn!(path = ?path, error = %e, "cannot read compaction provenance")
+                }
+            }
+        }
+    }
+
+    // Drop entries whose file is gone or was superseded by a complete output.
     let before = index.blocks.len();
-    index.blocks.retain(|b| on_disk.contains(&b.path));
+    index
+        .blocks
+        .retain(|b| on_disk.contains(&b.path) && !superseded.contains(&b.path));
     stats.dropped = before - index.blocks.len();
 
     // Adopt files the index does not know about.
     let known: std::collections::HashSet<PathBuf> =
         index.blocks.iter().map(|b| b.path.clone()).collect();
     for path in on_disk {
-        if known.contains(&path) {
+        if known.contains(&path) || superseded.contains(&path) {
             continue;
         }
         // Cheap pre-filter before touching the file. Without it every startup
@@ -315,14 +422,20 @@ pub fn reconcile(index: &mut BlockIndex, signal: SignalType) -> Result<Reconcile
     Ok(stats)
 }
 
-/// Parses `{start}_{end}_{uuid}.parquet` (the metrics/logs/trace naming), or
-/// the `logs_`/`traces_` prefixed variants.
+/// Parses `{start}_{end}_{uuid}.parquet` and the `m_l0_`, `m_n_`, `m_l1_`,
+/// `m_l2_`, `logs_` and `traces_` prefixed variants.
 ///
 /// A last resort for a block whose timestamp statistics are missing, so a
 /// recovered block is not left claiming a zero-width range.
 fn timestamps_from_filename(path: &Path) -> Option<(i64, i64)> {
     let name = path.file_name()?.to_str()?;
     let stem = name.strip_suffix(".parquet")?;
+    let stem = stem
+        .strip_prefix("m_l0_")
+        .or_else(|| stem.strip_prefix("m_n_"))
+        .or_else(|| stem.strip_prefix("m_l1_"))
+        .or_else(|| stem.strip_prefix("m_l2_"))
+        .unwrap_or(stem);
     let stem = stem
         .strip_prefix("logs_")
         .or_else(|| stem.strip_prefix("traces_"))
@@ -490,9 +603,13 @@ pub struct BlockIndexStore {
     path: PathBuf,
     /// Set when the in-memory index has diverged from the sidecar.
     dirty: std::sync::atomic::AtomicBool,
-    /// Payload captured by the last completed pass, so a no-op pass costs
-    /// nothing and shutdown can tell whether a final write is needed.
-    last_payload: std::sync::Mutex<Option<String>>,
+    /// Whether any pass has completed. Only a flag: keeping the last payload
+    /// itself held a full copy of the sidecar (611 MB on uat-oman) for the
+    /// process lifetime and OOM-killed the pod.
+    persisted: std::sync::atomic::AtomicBool,
+    /// Byte length of the last payload, used to pre-size the next serialisation
+    /// so building it does not reallocate up to twice its final size.
+    last_len: std::sync::atomic::AtomicUsize,
 }
 
 impl BlockIndexStore {
@@ -509,7 +626,8 @@ impl BlockIndexStore {
         Self {
             path,
             dirty: std::sync::atomic::AtomicBool::new(false),
-            last_payload: std::sync::Mutex::new(None),
+            persisted: std::sync::atomic::AtomicBool::new(false),
+            last_len: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -540,20 +658,25 @@ impl BlockIndexStore {
         self.dirty.swap(false, std::sync::atomic::Ordering::AcqRel)
     }
 
-    /// Records a successfully written payload and clears any dirtiness that
-    /// happened while it was in flight.
-    pub fn complete(&self, payload: String) {
-        if let Ok(mut slot) = self.last_payload.lock() {
-            *slot = Some(payload);
-        }
+    /// Records that a payload of `payload_len` bytes was written. Dirtiness set
+    /// while it was in flight is left alone, so another pass follows.
+    pub fn complete(&self, payload_len: usize) {
+        self.last_len
+            .store(payload_len, std::sync::atomic::Ordering::Relaxed);
+        self.persisted
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Capacity to reserve for the next payload: the last size plus headroom
+    /// for blocks added since.
+    pub fn payload_capacity_hint(&self) -> usize {
+        let last = self.last_len.load(std::sync::atomic::Ordering::Relaxed);
+        last.saturating_add(last / 8)
     }
 
     /// Whether the sidecar has ever been written by this store.
     pub fn has_persisted(&self) -> bool {
-        self.last_payload
-            .lock()
-            .map(|s| s.is_some())
-            .unwrap_or(false)
+        self.persisted.load(std::sync::atomic::Ordering::Acquire)
     }
 
     /// Writes `payload` to the sidecar atomically (tmp file + rename).

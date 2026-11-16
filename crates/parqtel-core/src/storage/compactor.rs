@@ -1,4 +1,4 @@
-use super::block_file::{write_block_file, FooterIndex};
+use super::block_file::{sync_parent_dir, BlockFileWriter, FooterIndex};
 use super::index::{BlockIndex, BlockIndexStore};
 use crate::config::BlockConfig;
 use crate::error::{Error, Result};
@@ -7,9 +7,11 @@ use crate::models::logs::LogRecord;
 use crate::models::metrics::{DataPoint, MetricKind};
 use crate::models::storage::{BlockMetadata, MetricRun, SignalType, StorageModel};
 use crate::models::traces::Span;
+use crate::storage::{SeriesIndex, SeriesTable, SERIES_INDEX_FOOTER_KEY};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{self, File};
+use std::path::PathBuf;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -18,7 +20,7 @@ use uuid::Uuid;
 
 /// Points grouped with their metric metadata, plus log records and spans — the
 /// decoded contents of source blocks awaiting compaction.
-type DecodedBlocks = (
+pub(crate) type DecodedBlocks = (
     Vec<(String, MetricKind, LabelSet, DataPoint)>,
     Vec<LogRecord>,
     Vec<Span>,
@@ -33,12 +35,20 @@ const MAX_LABEL_VALUES_PER_FIELD: usize = 10_000;
 /// the flush-time index that `/api/v1/label/:name/values` reads from metadata
 /// instead of decoding blocks. Every compaction pass degraded autocomplete until
 /// the source blocks aged out.
-type LabelValues = BTreeMap<String, std::collections::BTreeSet<String>>;
+pub(crate) type LabelValues = BTreeMap<String, std::collections::BTreeSet<String>>;
+
+struct TempBlockFile(PathBuf);
+
+impl Drop for TempBlockFile {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
+}
 
 /// Union of several blocks' label-value dictionaries, respecting the same
 /// per-field cap the flush path applies so one high-cardinality label cannot
 /// bloat the index.
-fn union_label_values(blocks: &[BlockMetadata], max_per_field: usize) -> LabelValues {
+pub(crate) fn union_label_values(blocks: &[BlockMetadata], max_per_field: usize) -> LabelValues {
     let mut out: LabelValues = BTreeMap::new();
     for b in blocks {
         for (field, values) in &b.label_values {
@@ -54,11 +64,8 @@ fn union_label_values(blocks: &[BlockMetadata], max_per_field: usize) -> LabelVa
     out
 }
 
-/// Background task that merges small adjacent blocks and implements tiered compaction.
-/// Tier strategy:
-///   - Small blocks (< 10K rows): merge up to 8 into one (existing behavior)
-///   - Warm tier (blocks > 6h old, same signal): merge adjacent into ~6h blocks
-///   - Cold tier (blocks > 24h old): merge adjacent into ~24h blocks
+/// Background task for small log-block merges and streaming metrics rollups.
+/// Metrics use the bounded L0/L1 path; legacy warm/cold merging remains for logs.
 pub struct Compactor;
 
 impl Compactor {
@@ -82,10 +89,14 @@ impl Compactor {
             }
             tracing::debug!("compaction cycle starting");
             let cycle_start = std::time::Instant::now();
-            if let Err(e) = Self::compact_once(&index, &store, &config).await {
-                tracing::error!("Compaction failed: {}", e);
+            if let Err(e) = Self::compact_small_logs_once(&index, &store, &config).await {
+                tracing::error!("Log compaction failed: {}", e);
             }
-            // Tiered compaction for warm/cold data
+            if let Err(e) = Self::compact_metrics_levels_once(&index, &store, &config).await {
+                tracing::error!("Metrics compaction failed: {}", e);
+            }
+            // Legacy bounded compaction remains for logs. Metrics use the
+            // series-streaming leveled path above; traces remain Phase 4 work.
             if let Err(e) = Self::compact_tiered(&index, &store, &config).await {
                 tracing::error!("Tiered compaction failed: {}", e);
             }
@@ -96,17 +107,47 @@ impl Compactor {
         }
     }
 
+    /// Performs one bounded metrics compaction pass.
+    pub async fn compact_metrics_levels_once(
+        index: &Arc<RwLock<BlockIndex>>,
+        store: &BlockIndexStore,
+        config: &BlockConfig,
+    ) -> Result<usize> {
+        super::stream_compactor::compact_metrics_levels_once(index, store, config).await
+    }
+
+    #[cfg(test)]
     pub(crate) async fn compact_once(
         index: &Arc<RwLock<BlockIndex>>,
         store: &BlockIndexStore,
         config: &BlockConfig,
+    ) -> Result<()> {
+        Self::compact_small_blocks_once(index, store, config, None).await
+    }
+
+    async fn compact_small_logs_once(
+        index: &Arc<RwLock<BlockIndex>>,
+        store: &BlockIndexStore,
+        config: &BlockConfig,
+    ) -> Result<()> {
+        Self::compact_small_blocks_once(index, store, config, Some(SignalType::Logs)).await
+    }
+
+    async fn compact_small_blocks_once(
+        index: &Arc<RwLock<BlockIndex>>,
+        store: &BlockIndexStore,
+        config: &BlockConfig,
+        signal_filter: Option<SignalType>,
     ) -> Result<()> {
         let (to_compact, original_paths, signal_type) = {
             let idx = index.read().await;
             let mut small_blocks: Vec<_> = idx
                 .blocks
                 .iter()
-                .filter(|b| b.row_count < 10000)
+                .filter(|b| {
+                    b.row_count < 10000
+                        && signal_filter.is_none_or(|signal| b.signal_type == signal)
+                })
                 .cloned()
                 .collect();
             if small_blocks.len() < 2 {
@@ -186,7 +227,7 @@ impl Compactor {
         Ok(())
     }
 
-    /// Tiered compaction: merge adjacent blocks of the same signal type into larger time frames.
+    /// Legacy log compaction: merge older adjacent blocks into larger time frames.
     /// Warm tier (>6h old): target 6h blocks. Cold tier (>24h old): target 24h blocks.
     async fn compact_tiered(
         index: &Arc<RwLock<BlockIndex>>,
@@ -205,8 +246,8 @@ impl Compactor {
         let max_merges = config.compaction_max_merges_per_pass.max(1);
         let mut merges_done = 0usize;
 
-        // Process each signal type
-        for signal_type in &[SignalType::Metrics, SignalType::Logs, SignalType::Traces] {
+        // Metrics use the streaming series merge; this path remains for logs.
+        for signal_type in &[SignalType::Logs] {
             let candidates = {
                 let idx = index.read().await;
                 let mut blocks: Vec<_> = idx
@@ -320,7 +361,7 @@ impl Compactor {
         Ok(())
     }
 
-    fn read_source_blocks(
+    pub(crate) fn read_source_blocks(
         blocks: &[BlockMetadata],
         signal_type: SignalType,
     ) -> Result<DecodedBlocks> {
@@ -340,10 +381,51 @@ impl Compactor {
 
             let reader_builder = ParquetRecordBatchReaderBuilder::try_new(file)
                 .map_err(|e| Error::Parquet(e.to_string()))?;
+            let series_index = if signal_type == SignalType::Metrics
+                && reader_builder.schema().index_of("labels").is_err()
+            {
+                let footer = reader_builder
+                    .metadata()
+                    .file_metadata()
+                    .key_value_metadata()
+                    .and_then(|kv| kv.iter().find(|k| k.key == SERIES_INDEX_FOOTER_KEY))
+                    .and_then(|kv| kv.value.as_deref())
+                    .ok_or_else(|| {
+                        Error::Internal(format!(
+                            "metrics block {:?} has no labels column or series index",
+                            meta.path
+                        ))
+                    })?;
+                let table = SeriesTable::from_footer_value(footer)?;
+                let index = SeriesIndex::from_table(&table)?;
+                let rows = reader_builder.metadata().file_metadata().num_rows().max(0) as u64;
+                let mut next_row = 0u64;
+                for entry in &index.series {
+                    if entry.start != next_row {
+                        return Err(Error::Internal(
+                            "series index row ranges are not contiguous".into(),
+                        ));
+                    }
+                    next_row = entry
+                        .start
+                        .checked_add(u64::from(entry.rows))
+                        .ok_or_else(|| Error::Internal("series index row range overflow".into()))?;
+                }
+                if next_row != rows || index.total_rows() != rows {
+                    return Err(Error::Internal(
+                        "series index row count disagrees with compaction source".into(),
+                    ));
+                }
+                Some(index)
+            } else {
+                None
+            };
 
             let reader = reader_builder
                 .build()
                 .map_err(|e| Error::Parquet(e.to_string()))?;
+            let mut block_row = 0u64;
+            let mut series_cursor = 0usize;
 
             for record_batch in reader {
                 let record_batch = record_batch.map_err(|e| Error::Parquet(e.to_string()))?;
@@ -354,7 +436,44 @@ impl Compactor {
                 for row in 0..record_batch.num_rows() {
                     match signal_type {
                         SignalType::Metrics => {
-                            all_points.push(StorageModel::row_to_point(&record_batch, row)?);
+                            let point = if let Some(index) = &series_index {
+                                let entry = loop {
+                                    let entry =
+                                        index.series.get(series_cursor).ok_or_else(|| {
+                                            Error::Internal(
+                                                "series index ended before compaction source rows"
+                                                    .into(),
+                                            )
+                                        })?;
+                                    let end = entry
+                                        .start
+                                        .checked_add(u64::from(entry.rows))
+                                        .ok_or_else(|| {
+                                            Error::Internal(
+                                                "series index row range overflow".into(),
+                                            )
+                                        })?;
+                                    if block_row < entry.start {
+                                        return Err(Error::Internal(
+                                            "gap in series index row ranges".into(),
+                                        ));
+                                    }
+                                    if block_row >= end {
+                                        series_cursor += 1;
+                                        continue;
+                                    }
+                                    break entry;
+                                };
+                                StorageModel::row_to_point_with_labels(
+                                    &record_batch,
+                                    row,
+                                    entry.labels.clone(),
+                                )?
+                            } else {
+                                StorageModel::row_to_point(&record_batch, row)?
+                            };
+                            all_points.push(point);
+                            block_row += 1;
                         }
                         SignalType::Logs => {
                             all_logs.push(StorageModel::row_to_log(
@@ -373,6 +492,13 @@ impl Compactor {
                     }
                 }
             }
+            if let Some(index) = &series_index {
+                if block_row != index.total_rows() {
+                    return Err(Error::Internal(
+                        "series index did not cover compaction source rows".into(),
+                    ));
+                }
+            }
         }
         Ok((all_points, all_logs, all_spans))
     }
@@ -381,10 +507,35 @@ impl Compactor {
     fn write_merged(
         config: &BlockConfig,
         signal_type: SignalType,
+        all_points: Vec<(String, MetricKind, LabelSet, DataPoint)>,
+        all_logs: Vec<LogRecord>,
+        all_spans: Vec<Span>,
+        label_values: LabelValues,
+    ) -> Result<BlockMetadata> {
+        Self::write_merged_with_provenance(
+            config,
+            signal_type,
+            all_points,
+            all_logs,
+            all_spans,
+            label_values,
+            None,
+            None,
+            &[],
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn write_merged_with_provenance(
+        config: &BlockConfig,
+        signal_type: SignalType,
         mut all_points: Vec<(String, MetricKind, LabelSet, DataPoint)>,
         mut all_logs: Vec<LogRecord>,
         mut all_spans: Vec<Span>,
         label_values: LabelValues,
+        wal_range: Option<(u64, u64)>,
+        filename_prefix: Option<&str>,
+        compacted_sources: &[std::path::PathBuf],
     ) -> Result<BlockMetadata> {
         let mut series = None;
         let mut log_index = None;
@@ -416,12 +567,23 @@ impl Compactor {
                     // Series-contiguous, time-ordered inside each series: the
                     // layout the series table describes.
                     let mut ordered: Vec<_> = groups.into_iter().collect();
-                    for (_, dps) in &mut ordered {
-                        dps.sort_by(|a, b| {
-                            a.labels
-                                .fingerprint()
-                                .cmp(&b.labels.fingerprint())
-                                .then(a.timestamp_ns.cmp(&b.timestamp_ns))
+                    for ((_, _, resource), dps) in &mut ordered {
+                        let service = resource
+                            .get("service.name")
+                            .filter(|value| !value.is_empty());
+                        let mut fingerprints = HashMap::new();
+                        for point in dps.iter() {
+                            fingerprints.entry(point.labels.addr()).or_insert_with(|| {
+                                service.map_or_else(
+                                    || point.labels.fingerprint(),
+                                    |service| {
+                                        point.labels.with("service.name", service).fingerprint()
+                                    },
+                                )
+                            });
+                        }
+                        dps.sort_by_key(|point| {
+                            (fingerprints[&point.labels.addr()], point.timestamp_ns)
                         });
                     }
                     let runs: Vec<MetricRun<'_>> = ordered
@@ -489,27 +651,35 @@ impl Compactor {
             end_ts,
             Uuid::new_v4().simple()
         );
+        let filename = filename_prefix
+            .map(|prefix| format!("{prefix}_{filename}"))
+            .unwrap_or(filename);
         let final_path = config.data_dir.join(&filename);
         let tmp_path = config.data_dir.join(format!(".tmp_{}", filename));
 
         fs::create_dir_all(&config.data_dir)?;
+        let _temp = TempBlockFile(tmp_path.clone());
 
         // The same writer as a flushed block, so a compacted block keeps the
         // bloom filters, page statistics and series table of its sources.
-        write_block_file(
+        let mut writer = BlockFileWriter::create(
             &tmp_path,
-            record_batch,
+            record_batch.schema(),
             &config.compression,
             config.compression_level,
             config.row_group_size,
-            None,
+            wal_range,
             series
                 .as_ref()
                 .map(FooterIndex::Series)
                 .or(log_index.as_ref().map(FooterIndex::Logs)),
+            compacted_sources,
         )?;
+        writer.write(&record_batch)?;
+        writer.close_and_sync()?;
 
         fs::rename(&tmp_path, &final_path)?;
+        sync_parent_dir(&final_path)?;
         let size_bytes = fs::metadata(&final_path)?.len();
         tracing::debug!(
             signal = ?signal_type,
@@ -530,8 +700,7 @@ impl Compactor {
             label_names,
             label_values,
             signal_type,
-            // Cut from existing blocks, not from a WAL range.
-            wal_range: None,
+            wal_range,
         })
     }
 }

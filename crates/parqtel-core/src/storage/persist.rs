@@ -69,7 +69,7 @@ pub async fn persist_once(index: &Arc<RwLock<BlockIndex>>, store: &Arc<BlockInde
         // taking it shared means queries keep running and only other *writers*
         // (the index task, compaction, retention) wait.
         let idx = index.read().await;
-        match idx.serialize() {
+        match idx.serialize_with_capacity(store.payload_capacity_hint()) {
             Ok(p) => p,
             Err(e) => {
                 tracing::error!(error = %e, "failed to serialise block index");
@@ -79,15 +79,15 @@ pub async fn persist_once(index: &Arc<RwLock<BlockIndex>>, store: &Arc<BlockInde
         }
     };
 
-    // The closure must own the store and the payload: they outlive this frame
-    // on the blocking pool. Cloning the `Arc` is a refcount bump; cloning the
-    // payload `String` is one allocation, and lets `complete` record exactly
-    // what was written.
+    // The closure owns the store and the only copy of the payload; it returns
+    // just the length, so the payload is freed as soon as it is written.
     let for_write = Arc::clone(store);
-    let for_completion = payload.clone();
-    let write = tokio::task::spawn_blocking(move || for_write.write_payload(&payload)).await;
+    let write = tokio::task::spawn_blocking(move || {
+        for_write.write_payload(&payload).map(|()| payload.len())
+    })
+    .await;
     match write {
-        Ok(Ok(())) => store.complete(for_completion),
+        Ok(Ok(len)) => store.complete(len),
         Ok(Err(e)) => {
             tracing::error!(error = %e, "failed to persist block index");
             // Retry on the next tick rather than silently dropping the update.
@@ -102,9 +102,9 @@ pub async fn persist_once(index: &Arc<RwLock<BlockIndex>>, store: &Arc<BlockInde
 
 /// Persists synchronously. For startup and shutdown paths only.
 pub fn persist_blocking(index: &BlockIndex, store: &BlockIndexStore) -> Result<()> {
-    let payload = index.serialize()?;
+    let payload = index.serialize_with_capacity(store.payload_capacity_hint())?;
     store.write_payload(&payload)?;
-    store.complete(payload);
+    store.complete(payload.len());
     Ok(())
 }
 

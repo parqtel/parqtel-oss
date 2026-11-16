@@ -6,6 +6,7 @@ pub mod persist;
 pub mod retention;
 pub mod scanner;
 pub mod series_index;
+mod stream_compactor;
 
 pub use block_file::{footer_metadata, write_block_file, FooterIndex};
 pub use compactor::Compactor;
@@ -13,9 +14,9 @@ pub use index::{advance_wal_commit, reconcile, BlockIndex, BlockIndexStore, Pend
 pub use log_index::{LogIndexBuilder, LogIndexTable, LogSkipIndex, LOG_INDEX_FOOTER_KEY};
 pub use persist::{persist_blocking, persist_once, run_index_persist_loop};
 pub use retention::RetentionPolicy;
-pub use scanner::{LogColumnPrefilter, LogRowFilter, LogScanStats, Scanner};
+pub use scanner::{LogColumnPrefilter, LogRowFilter, LogScanStats, ScanMetricsSnapshot, Scanner};
 pub use series_index::{
-    SeriesIndex, SeriesSelector, SeriesTable, SeriesTableBuilder, ValueTest,
+    SeriesIndex, SeriesSelector, SeriesTable, SeriesTableBuilder, SeriesTableRun, ValueTest,
     SERIES_INDEX_FOOTER_KEY,
 };
 

@@ -5,7 +5,7 @@ use parqtel_core::{
     BlockConfig, DataPoint, Error, LabelSet, LogBlockConfig, LogRecord, Metric, MetricKind, Result,
     Span, StorageModel,
 };
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -217,9 +217,9 @@ impl BlockWriter {
         // Rows are written grouped by metric identity and, inside a group, in
         // time order. That layout is what lets the reader prune row groups by
         // `metric_name`/`service_name` statistics. Groups are ordered by
-        // (name, kind, resource); each group sorts a compact
-        // (timestamp, batch, index) key rather than moving points around, and
-        // the key's tail keeps equal timestamps in arrival order.
+        // (name, kind, resource); each group sorts by the final query-visible
+        // series fingerprint, then time and arrival order. The service label
+        // must be merged before sorting, because it is added from the resource.
         type GroupKey<'a> = (&'a str, MetricKind, &'a LabelSet);
         let mut groups: BTreeMap<GroupKey<'_>, Vec<(u64, i64, u32, u32)>> = BTreeMap::new();
         for (bi, batch) in self.batches.iter().enumerate() {
@@ -227,14 +227,20 @@ impl BlockWriter {
                 .entry((&batch.name, batch.kind, &batch.resource))
                 .or_default();
             keys.reserve(batch.points.len());
-            keys.extend(batch.points.iter().enumerate().map(|(pi, dp)| {
-                (
-                    dp.labels.fingerprint(),
-                    dp.timestamp_ns,
-                    bi as u32,
-                    pi as u32,
-                )
-            }));
+            let service = batch
+                .resource
+                .get("service.name")
+                .filter(|value| !value.is_empty());
+            let mut fingerprints = HashMap::new();
+            for (pi, dp) in batch.points.iter().enumerate() {
+                let fingerprint = *fingerprints.entry(dp.labels.addr()).or_insert_with(|| {
+                    service.map_or_else(
+                        || dp.labels.fingerprint(),
+                        |service| dp.labels.with("service.name", service).fingerprint(),
+                    )
+                });
+                keys.push((fingerprint, dp.timestamp_ns, bi as u32, pi as u32));
+            }
         }
         let runs: Vec<MetricRun<'_>> = groups
             .into_iter()
@@ -255,7 +261,7 @@ impl BlockWriter {
         drop(runs);
 
         let filename = format!(
-            "{}_{}_{}.parquet",
+            "m_l0_{}_{}_{}.parquet",
             start_ts,
             end_ts,
             Uuid::new_v4().simple()
@@ -631,32 +637,44 @@ mod tests {
             })
             .and_then(|k| k.value.clone())
             .unwrap();
-        let reader = builder.build().unwrap();
         let mut rows = Vec::new();
-        for batch in reader {
-            let batch = batch.unwrap();
-            for r in 0..batch.num_rows() {
-                let (name, _, _, dp) = StorageModel::row_to_point(&batch, r).unwrap();
+        for name in ["a", "b"] {
+            let scan = parqtel_core::storage::Scanner::scan_block_filtered(
+                meta.clone(),
+                name,
+                0,
+                i64::MAX,
+                &parqtel_core::storage::SeriesSelector::all(),
+            )
+            .unwrap();
+            for dp in scan.points {
                 let MetricValue::Double(v) = dp.value else {
                     panic!("not a double")
                 };
                 let host = dp.labels.get("host").unwrap().to_string();
-                rows.push((name, host, dp.timestamp_ns, v));
+                rows.push((name.to_string(), host, dp.timestamp_ns, v));
             }
         }
         let row = |n: &str, h: &str, t: i64, v: f64| (n.to_string(), h.to_string(), t, v);
         // Groups by (metric, resource): a/s0, a/s1, b/s1. Inside a group each
-        // series is one contiguous, time-ordered run; the order of the series
-        // themselves is by fingerprint, so only the pair is pinned.
+        // series is one contiguous, time-ordered run. Series order uses final
+        // query-visible labels, including `service.name`.
         assert_eq!(rows[0], row("a", "w", 25, 7.0));
-        let mut pair = [rows[1..3].to_vec(), rows[3..5].to_vec()];
-        pair.sort_by(|x, y| x[0].1.cmp(&y[0].1));
+        let host_labels = |host: &str| {
+            LabelSet::try_from_iter(vec![("host", host), ("service.name", "s1")]).unwrap()
+        };
+        let hosts = if host_labels("y").fingerprint() < host_labels("z").fingerprint() {
+            ["y", "z"]
+        } else {
+            ["z", "y"]
+        };
+        let series_rows = |host: &str| match host {
+            "y" => vec![row("a", host, 20, 4.0), row("a", host, 30, 3.0)],
+            _ => vec![row("a", host, 20, 5.0), row("a", host, 40, 6.0)],
+        };
         assert_eq!(
-            pair,
-            [
-                vec![row("a", "y", 20, 4.0), row("a", "y", 30, 3.0)],
-                vec![row("a", "z", 20, 5.0), row("a", "z", 40, 6.0)],
-            ]
+            [rows[1..3].to_vec(), rows[3..5].to_vec()],
+            [series_rows(hosts[0]), series_rows(hosts[1])]
         );
         assert_eq!(rows[5..], [row("b", "x", 10, 2.0), row("b", "x", 50, 1.0)]);
 

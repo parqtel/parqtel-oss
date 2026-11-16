@@ -202,11 +202,12 @@ cargo run --release -p parqtel-core --example bench_bloom
 
 ## Column projection on the metrics scan
 
-A metrics block has 15 columns; the scan decoded all 15 to use 7. The eight
+Legacy metrics blocks have 15 columns; the fallback scan reads 7. The eight
 skipped — `metric_kind`, the six k8s dictionaries and `resource_attributes` —
-are per-row data a range query never touches.
+are per-row data a range query never touches. New indexed blocks have 14 columns,
+omit `labels`, and use the series table to read only four columns.
 
-The scan now projects to `timestamp_ns`, `metric_name`, `service_name`,
+The legacy fallback projects to `timestamp_ns`, `metric_name`, `service_name`,
 `labels`, `value_float`, `value_int`, `value_complex`.
 
 ### Result
@@ -258,14 +259,14 @@ them would have asserted a difference that was already there.
 cargo run --release -p parqtel-core --example bench_bloom
 ```
 
-## Series dictionary for the `labels` column: measured, not worth doing
+## Row-level label storage: historical dictionary experiment
 
 Replacing the per-row JSON `labels` column with a series-ID dictionary was
 proposed on the reasoning that *"zstd must re-compress the same text per row"*.
 It would have been the largest storage change, with an on-disk format change
 behind it.
 
-**It was measured instead of built, and the premise is false.**
+**The Arrow dictionary premise was measured and found false.**
 
 100 000 rows, 200 series, 5 000 rows/row-group:
 
@@ -284,23 +285,24 @@ column**:
 
 **Parquet dictionary-encodes string columns by default.** The Arrow-level field
 type only decides whether *Arrow* does the encoding; Parquet applies the same
-`RLE_DICTIONARY` either way. A series dictionary would therefore add an encoding
-that is already present, and zstd compresses what is left — 9 MB of raw labels
-JSON becomes 810 KB.
+`RLE_DICTIONARY` either way. Changing the column to an Arrow dictionary therefore
+adds no savings, and zstd compresses what is left — 9 MB of raw labels JSON
+becomes 810 KB.
 
-So: no schema version bump, no migration, no v1-read/v2-write reader. The
-expensive, risky work is avoided rather than done for nothing.
+That result did not test removing the column. New indexed metric blocks now omit
+it because their series table already holds every label set. New binaries still
+read old blocks with the column. Old binaries cannot read newly written
+label-less blocks; after rollback, those blocks remain unavailable until the new
+binary returns. Keep a backup before rollout.
 
 The same conclusion applies to `metric_kind`, the other plain-`Utf8` per-row
 column.
 
 ### What does survive
 
-The per-row `labels.to_json()` on the write path and the per-series
-`from_json()` on the read path are real **CPU** costs. The read side is already
-covered by the per-chunk label cache from `perf(storage)`. The write side was
-not measured here; `parqtel_flush_duration_seconds` is the metric to watch if
-anyone wants to quantify it.
+The old per-row `labels.to_json()` write and `from_json()` scan costs no longer
+apply to indexed metric blocks. The series table is still serialized once per
+block; its compression and compaction effects need live measurement.
 
 ### Evidence kept
 

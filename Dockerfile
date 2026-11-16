@@ -42,9 +42,9 @@ ARG DEBIAN_FRONTEND=noninteractive
 ENV CARGO_NET_RETRY=10 \
     CARGO_NET_TIMEOUT=60
 
-# protoc (prost-build), cmake+g++ (ring/zstd -sys crates), pkg-config (-sys probes).
+# protoc (prost-build), cmake+g++ (ring/zstd -sys crates), make (jemalloc-sys), pkg-config (-sys probes).
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        pkg-config cmake g++ protobuf-compiler \
+        pkg-config cmake make g++ protobuf-compiler \
     && rm -rf /var/lib/apt/lists/*
 
 # Build dependencies only (cached unless Cargo.toml/lock change).

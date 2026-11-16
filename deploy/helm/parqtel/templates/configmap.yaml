@@ -44,6 +44,9 @@ data:
       {{- if .Values.parqtel.ingest.walSyncIntervalMs }}
       wal_sync_interval_ms = {{ .Values.parqtel.ingest.walSyncIntervalMs | int }}
       {{- end }}
+      {{- if .Values.parqtel.ingest.labelInternerCapacity }}
+      label_interner_capacity = {{ .Values.parqtel.ingest.labelInternerCapacity | int }}
+      {{- end }}
     [ingest.tail_sampling]
     keep_errors = {{ .Values.ingestion.tailSampling.keepErrors }}
     {{- if .Values.ingestion.tailSampling.slowTraceMs }}

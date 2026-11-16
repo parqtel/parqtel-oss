@@ -2,6 +2,39 @@ use crate::error::{Error, Result};
 use crate::models::labels::LabelSet;
 use serde::{Deserialize, Serialize};
 
+/// serde_json encodes non-finite floats as `null`; restore that value when
+/// persisted metric payloads are read back.
+fn deserialize_float_or_nan<'de, D>(deserializer: D) -> std::result::Result<f64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<f64>::deserialize(deserializer)?.unwrap_or(f64::NAN))
+}
+
+fn deserialize_float_vec_or_nan<'de, D>(deserializer: D) -> std::result::Result<Vec<f64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Vec::<Option<f64>>::deserialize(deserializer)?
+        .into_iter()
+        .map(|value| value.unwrap_or(f64::NAN))
+        .collect())
+}
+
+fn deserialize_quantiles_or_nan<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Vec<(f64, f64)>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(
+        Vec::<(Option<f64>, Option<f64>)>::deserialize(deserializer)?
+            .into_iter()
+            .map(|(quantile, value)| (quantile.unwrap_or(f64::NAN), value.unwrap_or(f64::NAN)))
+            .collect(),
+    )
+}
+
 /// Represents the kind of a metric as defined by OpenTelemetry.
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize, Default)]
 pub enum MetricKind {
@@ -22,12 +55,14 @@ pub struct HistogramValue {
     /// Number of samples.
     pub count: u64,
     /// Sum of all samples.
+    #[serde(deserialize_with = "deserialize_float_or_nan")]
     pub sum: f64,
     /// Optional minimum value in the distribution.
     pub min: Option<f64>,
     /// Optional maximum value in the distribution.
     pub max: Option<f64>,
     /// Explicit bucket boundaries.
+    #[serde(deserialize_with = "deserialize_float_vec_or_nan")]
     pub boundaries: Vec<f64>,
     /// Counts for each bucket defined by boundaries.
     pub counts: Vec<u64>,
@@ -39,8 +74,10 @@ pub struct SummaryValue {
     /// Number of samples.
     pub count: u64,
     /// Sum of all samples.
+    #[serde(deserialize_with = "deserialize_float_or_nan")]
     pub sum: f64,
     /// Quantile values.
+    #[serde(deserialize_with = "deserialize_quantiles_or_nan")]
     pub quantiles: Vec<(f64, f64)>,
 }
 
@@ -53,7 +90,7 @@ pub struct SummaryValue {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum MetricValue {
     /// A single floating point value (Gauge or Sum).
-    Double(f64),
+    Double(#[serde(deserialize_with = "deserialize_float_or_nan")] f64),
     /// A single integer value (Sum).
     Int(i64),
     /// Histogram bucket data.
@@ -183,6 +220,32 @@ mod tests {
             let decoded: MetricValue = serde_json::from_str(&json).unwrap();
             assert_eq!(v, decoded);
         }
+    }
+
+    #[test]
+    fn non_finite_metric_values_round_trip_through_json_null() {
+        let value = MetricValue::Double(f64::NAN);
+        let json = serde_json::to_string(&value).unwrap();
+        let decoded: MetricValue = serde_json::from_str(&json).unwrap();
+        assert!(matches!(decoded, MetricValue::Double(value) if value.is_nan()));
+
+        let summary = MetricValue::summary(1, f64::NAN, vec![(0.5, f64::NAN)]);
+        let json = serde_json::to_string(&summary).unwrap();
+        let decoded: MetricValue = serde_json::from_str(&json).unwrap();
+        let MetricValue::Summary(decoded) = decoded else {
+            panic!("expected summary");
+        };
+        assert!(decoded.sum.is_nan());
+        assert!(decoded.quantiles[0].1.is_nan());
+
+        let histogram = MetricValue::histogram(1, f64::NAN, None, None, vec![f64::NAN], vec![1]);
+        let json = serde_json::to_string(&histogram).unwrap();
+        let decoded: MetricValue = serde_json::from_str(&json).unwrap();
+        let MetricValue::Histogram(decoded) = decoded else {
+            panic!("expected histogram");
+        };
+        assert!(decoded.sum.is_nan());
+        assert!(decoded.boundaries[0].is_nan());
     }
 }
 

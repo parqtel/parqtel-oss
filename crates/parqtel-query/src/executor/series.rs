@@ -26,6 +26,8 @@ pub(super) fn build_series_data(
     max_samples_per_series: usize,
 ) -> BuiltSeries {
     use ahash::AHashMap;
+    let started = std::time::Instant::now();
+    let scanned_points = raw.len();
 
     // Points of one series share a label set, and every point of a block's
     // series shares the same handle, so the handle's address finds the series
@@ -69,6 +71,7 @@ pub(super) fn build_series_data(
     };
     // Series kept so far; a series counts once whether numeric or histogram.
     let mut kept = 0usize;
+    let mut retained_points = 0usize;
     for group in groups {
         // Counted as a matched series regardless of truncation, and before it,
         // so `total_series_count` reports what matched rather than what
@@ -99,6 +102,7 @@ pub(super) fn build_series_data(
         if pts.len() > max_samples_per_series {
             pts.truncate(max_samples_per_series);
         }
+        retained_points += pts.len();
         // Split histogram-valued samples into the structured channel; numeric
         // series keep the plain path.
         let mut hist_pts: Vec<crate::ast::HistSample> = Vec::new();
@@ -130,6 +134,14 @@ pub(super) fn build_series_data(
             out.numeric.push((labels, num_pts));
         }
     }
+    tracing::debug!(
+        scanned_points,
+        matched_series = out.total_series,
+        retained_series = kept,
+        retained_points,
+        grouping_ms = started.elapsed().as_millis(),
+        "metric series grouping complete"
+    );
     out
 }
 

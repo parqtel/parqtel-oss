@@ -22,7 +22,8 @@ pub struct BlockConfig {
     pub compression_level: Option<i32>,
     /// Data retention in days.
     pub retention_days: u64,
-    /// Interval between compaction passes in seconds.
+    /// Interval between compaction passes in seconds; defaults to five minutes
+    /// so closed metric windows do not wait an hour to roll up.
     pub compaction_interval_secs: u64,
     /// Number of rows per row group in Parquet files.
     pub row_group_size: usize,
@@ -63,7 +64,7 @@ impl Default for BlockConfig {
             compression: "zstd".into(),
             compression_level: None,
             retention_days: 7,
-            compaction_interval_secs: 3600,
+            compaction_interval_secs: 300,
             row_group_size: 100_000,
             compaction_max_merge_blocks: default_compaction_max_merge_blocks(),
             compaction_max_merges_per_pass: default_compaction_max_merges_per_pass(),

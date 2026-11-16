@@ -31,14 +31,19 @@
 
 use crate::error::{Error, Result};
 use crate::models::labels::{LabelInterner, LabelSet};
+use base64::engine::general_purpose::STANDARD;
+use base64::Engine;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::io::Read;
 use std::sync::Arc;
 
 /// Parquet footer key under which the series table is stored.
 pub const SERIES_INDEX_FOOTER_KEY: &str = "parqtel.series_index";
 
 const FORMAT_VERSION: u32 = 1;
+const COMPRESSED_FOOTER_PREFIX: &str = "zstd+base64:v1:";
+const MAX_DECOMPRESSED_FOOTER_BYTES: u64 = 512 * 1024 * 1024;
 
 /// The serialised series table, as it appears in the Parquet footer.
 ///
@@ -62,6 +67,15 @@ pub struct SeriesTable {
     /// label name. Includes the `service.name` label merged in from the
     /// resource, exactly as a scan reports it.
     labels: Vec<Vec<u32>>,
+}
+
+/// One contiguous metric/kind/resource run in a stored series table.
+#[derive(Debug, Clone, Copy)]
+pub struct SeriesTableRun<'a> {
+    pub metric_name: &'a str,
+    pub first_series: usize,
+    pub series_count: usize,
+    pub first_row: u64,
 }
 
 /// Accumulates a [`SeriesTable`] while a block's rows are laid out.
@@ -136,14 +150,102 @@ impl SeriesTableBuilder {
 }
 
 impl SeriesTable {
-    /// JSON text for the Parquet footer.
-    pub fn to_footer_value(&self) -> Result<String> {
-        serde_json::to_string(self).map_err(Error::Serde)
+    /// Number of metric runs in table order.
+    pub fn metric_run_count(&self) -> usize {
+        self.metrics.len()
     }
 
-    /// Parses the footer value.
+    /// Metric run at `index`, or `None` when out of bounds or corrupt.
+    pub fn metric_run(&self, index: usize) -> Option<SeriesTableRun<'_>> {
+        let (name, first, count) = *self.metrics.get(index)?;
+        let first_series = first as usize;
+        Some(SeriesTableRun {
+            metric_name: self.strings.get(name as usize)?,
+            first_series,
+            series_count: count as usize,
+            first_row: *self.start.get(first_series)?,
+        })
+    }
+
+    /// Number of series entries in table order.
+    pub fn series_count(&self) -> usize {
+        self.start.len()
+    }
+
+    /// Row range and time bounds for one series, without decoding its labels.
+    pub fn series_bounds(&self, index: usize) -> Option<(u64, u32, i64, i64)> {
+        Some((
+            *self.start.get(index)?,
+            *self.len.get(index)?,
+            *self.min_ts.get(index)?,
+            *self.max_ts.get(index)?,
+        ))
+    }
+
+    /// One series entry, without building postings or populating the global
+    /// label interner. Compaction uses this to keep source-index memory bounded.
+    pub fn series_entry(&self, index: usize) -> Result<SeriesEntry> {
+        let bad = || Error::Internal("corrupt series index: series entry out of range".into());
+        let flat = self.labels.get(index).ok_or_else(bad)?;
+        if flat.len() % 2 != 0 {
+            return Err(Error::Internal(
+                "corrupt series index: odd label id count".into(),
+            ));
+        }
+        let (pairs, _rest) = flat.as_chunks::<2>();
+        let mut labels = Vec::with_capacity(pairs.len());
+        for kv in pairs {
+            let name = self.strings.get(kv[0] as usize).map(String::as_str);
+            let value = self.strings.get(kv[1] as usize).map(String::as_str);
+            labels.push((name.ok_or_else(bad)?, value.ok_or_else(bad)?));
+        }
+        Ok(SeriesEntry {
+            labels: LabelSet::try_from_iter(labels)?,
+            start: *self.start.get(index).ok_or_else(bad)?,
+            rows: *self.len.get(index).ok_or_else(bad)?,
+            min_ts: *self.min_ts.get(index).ok_or_else(bad)?,
+            max_ts: *self.max_ts.get(index).ok_or_else(bad)?,
+        })
+    }
+
+    /// Total rows described by all series entries.
+    pub fn total_rows(&self) -> u64 {
+        self.len.iter().map(|rows| u64::from(*rows)).sum()
+    }
+
+    /// Compressed JSON text for the Parquet footer when it saves space.
+    pub fn to_footer_value(&self) -> Result<String> {
+        let json = serde_json::to_string(self).map_err(Error::Serde)?;
+        let compressed = zstd::bulk::compress(json.as_bytes(), 3)?;
+        let value = format!("{COMPRESSED_FOOTER_PREFIX}{}", STANDARD.encode(compressed));
+        Ok(if value.len() < json.len() {
+            value
+        } else {
+            json
+        })
+    }
+
+    /// Parses compressed footer values and legacy plain-JSON values.
     pub fn from_footer_value(value: &str) -> Result<Self> {
-        let table: SeriesTable = serde_json::from_str(value).map_err(Error::Serde)?;
+        let table: SeriesTable = if let Some(payload) = value.strip_prefix(COMPRESSED_FOOTER_PREFIX)
+        {
+            let compressed = STANDARD.decode(payload).map_err(|e| {
+                Error::Internal(format!("invalid compressed series index encoding: {e}"))
+            })?;
+            let decoder = zstd::stream::read::Decoder::new(compressed.as_slice())?;
+            let mut json = Vec::new();
+            decoder
+                .take(MAX_DECOMPRESSED_FOOTER_BYTES + 1)
+                .read_to_end(&mut json)?;
+            if json.len() as u64 > MAX_DECOMPRESSED_FOOTER_BYTES {
+                return Err(Error::Internal(
+                    "decompressed series index exceeds 512 MiB".into(),
+                ));
+            }
+            serde_json::from_slice(&json).map_err(Error::Serde)?
+        } else {
+            serde_json::from_str(value).map_err(Error::Serde)?
+        };
         table.validate()?;
         Ok(table)
     }

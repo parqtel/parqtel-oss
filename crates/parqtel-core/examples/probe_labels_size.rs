@@ -1,5 +1,5 @@
-//! Measures what a per-row JSON `labels` column costs, and whether
-//! dictionary-encoding it buys anything.
+//! Measures whether Arrow dictionary-encoding a per-row JSON `labels` column
+//! buys anything. New indexed metric blocks no longer store that column.
 //!
 //! **Answer: nothing.** The metrics schema declares `labels` and
 //! `value_complex` as plain `Utf8` while every neighbouring column is
@@ -15,8 +15,8 @@
 //!   the dictionary encoding already saved.
 //! * Write cost is a wash as well, so there is no CPU argument either.
 //!
-//! Kept as the evidence that no schema change is needed: an on-disk format
-//! migration is expensive and risky, and this is what says it would buy nothing.
+//! This only compares two encodings of the legacy row-level column. It does not
+//! measure removing the column and reading labels from the series index.
 //!
 //! Run: cargo run --release -p parqtel-core --example probe_labels_size
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]

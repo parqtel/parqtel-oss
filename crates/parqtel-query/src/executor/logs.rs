@@ -405,39 +405,25 @@ impl QueryExecutor {
 
     /// Returns distinct values for a given log field, sorted by frequency.
     pub async fn get_log_field_values(&self, field: &str, limit: usize) -> Vec<String> {
-        // Label-value index: blocks flushed since the index landed carry
-        // distinct-value dictionaries in metadata — merge those instead of
-        // decoding whole blocks. Old blocks (no entry for the field) fall
-        // back to a scan, still bounded to the most recent 5.
+        // Label-value index: the log index keeps one dictionary of values
+        // filled at flush time; use it instead of decoding blocks. A field it
+        // has never seen falls back to scanning the most recent 5 blocks.
+        // Dictionary values carry no frequency, so they tie and keep their
+        // stable (ascending) order.
         let (blocks, indexed) = {
             let idx = self.log_index.read().await;
-            let len = idx.blocks.len();
-            let start = len.saturating_sub(5);
-            let recent = idx.blocks[start..].to_vec();
-            // Use indexed metadata for every recent block that has an
-            // entry for this field; scan only those that do not.
-            let mut freq_inner = BTreeMap::new();
-            let mut needs_scan = Vec::new();
-            let mut all_indexed = true;
-            for b in recent {
-                match b.label_values.get(field) {
-                    Some(values) => {
-                        for v in values {
-                            *freq_inner.entry(v.clone()).or_insert(0u64) += 1;
-                        }
-                    }
-                    None => {
-                        all_indexed = false;
-                        needs_scan.push(b);
-                    }
+            match idx.label_values(field) {
+                Some(values) => (
+                    Vec::new(),
+                    values
+                        .iter()
+                        .map(|v| (v.clone(), 1u64))
+                        .collect::<BTreeMap<_, _>>(),
+                ),
+                None => {
+                    let start = idx.blocks.len().saturating_sub(5);
+                    (idx.blocks[start..].to_vec(), BTreeMap::new())
                 }
-            }
-            if all_indexed {
-                (Vec::new(), freq_inner)
-            } else {
-                // Partial coverage: fall back to the full scan (correct
-                // counts) — index-only when coverage is complete.
-                (needs_scan, freq_inner)
             }
         };
 

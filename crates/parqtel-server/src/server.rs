@@ -43,6 +43,7 @@ pub(crate) async fn run_server(
     telemetry_guard: telemetry::TelemetryGuard,
 ) -> anyhow::Result<()> {
     let (ui_content, ui_etag) = ui_assets()?;
+    parqtel_core::LabelInterner::set_capacity(config.ingest.label_interner_capacity);
 
     // Metrics pipeline.
     //

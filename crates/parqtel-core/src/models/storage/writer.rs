@@ -108,9 +108,12 @@ pub fn metric_runs_to_chunk(runs: &[MetricRun<'_>]) -> Result<RecordBatch> {
 /// As [`metric_runs_to_chunk`], and also describes the layout: a
 /// [`SeriesTable`] listing every series of every run with the rows it occupies.
 ///
-/// Within a run, consecutive points with equal labels form one series, so a
-/// caller that orders each run by series (then time) gets exactly one entry per
-/// series; an unordered run is still described correctly, only with more entries.
+/// Within a run, consecutive points with equal query-visible labels form one
+/// series, so a caller that orders each run by series (then time) gets exactly
+/// one entry per series; an unordered run is still described correctly, only
+/// with more entries.
+/// The returned block omits the row-level `labels` column; the series table is
+/// the authoritative label source.
 pub fn metric_runs_to_block(runs: &[MetricRun<'_>]) -> Result<(RecordBatch, SeriesTable)> {
     let mut table = SeriesTableBuilder::new();
     let batch = build_metric_batch(runs, Some(&mut table))?;
@@ -122,6 +125,7 @@ fn build_metric_batch(
     mut table: Option<&mut SeriesTableBuilder>,
 ) -> Result<RecordBatch> {
     let total: usize = runs.iter().map(|r| r.points.len()).sum();
+    let include_labels = table.is_none();
     let mut timestamp_ns = TimestampNanosecondBuilder::with_capacity(total);
 
     // Dictionary columns - use DictionaryBuilder
@@ -137,7 +141,7 @@ fn build_metric_batch(
     let mut resource_attributes = StringDictionaryBuilder::<Int32Type>::new();
 
     // Non-dictionary columns
-    let mut labels = StringBuilder::with_capacity(total, total * 48);
+    let mut labels = include_labels.then(|| StringBuilder::with_capacity(total, total * 48));
     let mut value_float = Float64Builder::with_capacity(total);
     let mut value_int = Int64Builder::with_capacity(total);
     let mut value_complex = StringBuilder::new();
@@ -175,7 +179,9 @@ fn build_metric_batch(
 
         for dp in &run.points {
             timestamp_ns.append_value(dp.timestamp_ns);
-            labels.append_value(dp.labels.json_str());
+            if let Some(labels) = &mut labels {
+                labels.append_value(dp.labels.json_str());
+            }
 
             match &dp.value {
                 MetricValue::Double(v) => {
@@ -198,28 +204,34 @@ fn build_metric_batch(
         }
     }
 
-    let schema = metrics_schema();
-    let record_batch = RecordBatch::try_new(
-        schema.into(),
-        vec![
-            Arc::new(timestamp_ns.finish()),
-            Arc::new(metric_name.finish()),
-            Arc::new(metric_kind.finish()),
-            Arc::new(service_name.finish()),
-            Arc::new(service_version.finish()),
-            Arc::new(k8s_namespace.finish()),
-            Arc::new(k8s_pod_name.finish()),
-            Arc::new(k8s_pod_uid.finish()),
-            Arc::new(k8s_container_name.finish()),
-            Arc::new(k8s_node_name.finish()),
-            Arc::new(resource_attributes.finish()),
-            Arc::new(labels.finish()),
-            Arc::new(value_float.finish()),
-            Arc::new(value_int.finish()),
-            Arc::new(value_complex.finish()),
-        ],
-    )
-    .map_err(|e| Error::Arrow(e.to_string()))?;
+    let schema = if include_labels {
+        metrics_schema()
+    } else {
+        super::schema::metrics_block_schema()
+    };
+    let mut columns: Vec<arrow_array::ArrayRef> = vec![
+        Arc::new(timestamp_ns.finish()),
+        Arc::new(metric_name.finish()),
+        Arc::new(metric_kind.finish()),
+        Arc::new(service_name.finish()),
+        Arc::new(service_version.finish()),
+        Arc::new(k8s_namespace.finish()),
+        Arc::new(k8s_pod_name.finish()),
+        Arc::new(k8s_pod_uid.finish()),
+        Arc::new(k8s_container_name.finish()),
+        Arc::new(k8s_node_name.finish()),
+        Arc::new(resource_attributes.finish()),
+    ];
+    if let Some(mut labels) = labels {
+        columns.push(Arc::new(labels.finish()));
+    }
+    columns.extend([
+        Arc::new(value_float.finish()) as arrow_array::ArrayRef,
+        Arc::new(value_int.finish()) as arrow_array::ArrayRef,
+        Arc::new(value_complex.finish()) as arrow_array::ArrayRef,
+    ]);
+    let record_batch =
+        RecordBatch::try_new(schema.into(), columns).map_err(|e| Error::Arrow(e.to_string()))?;
 
     Ok(record_batch)
 }
@@ -237,7 +249,7 @@ fn describe_series(
         let labels = &points[i].labels;
         let (mut min_ts, mut max_ts) = (points[i].timestamp_ns, points[i].timestamp_ns);
         let mut j = i + 1;
-        while j < points.len() && (points[j].labels.ptr_eq(labels) || points[j].labels == *labels) {
+        while j < points.len() && same_series_labels(labels, &points[j].labels, service) {
             min_ts = min_ts.min(points[j].timestamp_ns);
             max_ts = max_ts.max(points[j].timestamp_ns);
             j += 1;
@@ -255,6 +267,17 @@ fn describe_series(
             max_ts,
         );
         i = j;
+    }
+}
+
+fn same_series_labels(a: &LabelSet, b: &LabelSet, service: Option<&str>) -> bool {
+    if a.ptr_eq(b) || a == b {
+        return true;
+    }
+    if service.is_some_and(|value| !value.is_empty()) {
+        a.filtered(|name, _| name != "service.name") == b.filtered(|name, _| name != "service.name")
+    } else {
+        false
     }
 }
 

@@ -1,16 +1,33 @@
 //! One-shot subcommands: `compact`, `inspect` and `export`.
 
-use parqtel_core::{BlockIndex, Config};
+use parqtel_core::{BlockIndex, BlockIndexStore, Config};
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 pub(crate) async fn run_compact(
-    _config: Config,
-    _idx: Arc<tokio::sync::RwLock<BlockIndex>>,
+    config: Config,
+    idx: Arc<tokio::sync::RwLock<BlockIndex>>,
     _lidx: Arc<tokio::sync::RwLock<BlockIndex>>,
 ) -> anyhow::Result<()> {
-    tracing::info!("Running one-off compaction...");
+    tracing::info!("Running one-off metrics compaction; stop serving before running this command");
+    let index_path = idx.read().await.sidecar_path().to_path_buf();
+    let store = Arc::new(BlockIndexStore::at_path(index_path));
+    let mut compacted = 0usize;
+    loop {
+        let count = parqtel_core::storage::Compactor::compact_metrics_levels_once(
+            &idx,
+            &store,
+            &config.storage,
+        )
+        .await?;
+        if count == 0 {
+            break;
+        }
+        compacted += count;
+    }
+    parqtel_core::storage::persist_once(&idx, &store).await;
+    println!("Compacted {compacted} metrics blocks");
     Ok(())
 }
 

@@ -113,18 +113,34 @@ impl QueryExecutor {
         // Exact volume from block metadata — the row_count of every block
         // overlapping the range. Never requires decoding a single span.
         let total_spans_in_range: usize = blocks.iter().map(|b| b.row_count).sum();
+        let trace_id = match trace_id_filter {
+            Some(value) => match parse_trace_id(value) {
+                Some(id) => Some(id),
+                None => {
+                    return Ok(crate::models::TraceQueryResult {
+                        spans: Vec::new(),
+                        execution_time: start_time.elapsed(),
+                        total_spans_in_range,
+                        spans_matched: 0,
+                        truncated: false,
+                    });
+                }
+            },
+            None => None,
+        };
 
         // Scan more when predicates apply (they reduce the result, so a
         // larger scan keeps filtered result sets meaningful).
-        let scan_cap = if filter.is_some() { 10_000 } else { 200 };
-        let scan_cap = scan_cap.max(limit);
+        let base_scan_cap = if filter.is_some() { 10_000 } else { 200 };
+        let cap_for_truncation = limit.saturating_add(if trace_id.is_some() { 1 } else { 0 });
+        let scan_cap = base_scan_cap.max(cap_for_truncation);
         // Reverse so newest blocks are scanned first (more useful for debugging)
         blocks.reverse();
         blocks.truncate(MAX_BLOCKS);
         let mut spans = if blocks.is_empty() {
             Vec::new()
         } else {
-            Scanner::scan_traces(blocks, start_ns, end_ns, scan_cap).await?
+            Scanner::scan_traces_filtered(blocks, start_ns, end_ns, scan_cap, trace_id).await?
         };
 
         // Merge in spans still buffered in memory (not yet flushed to a block).
@@ -135,10 +151,9 @@ impl QueryExecutor {
         // Sort newest-first for deterministic, relevance-ordered results.
         spans.sort_unstable_by_key(|s| std::cmp::Reverse(s.start_time_ns));
 
-        // Filter by trace_id if provided
-        if let Some(tid) = trace_id_filter {
-            let tid_lower = tid.to_lowercase();
-            spans.retain(|s| hex::encode(s.trace_id) == tid_lower);
+        // The disk scan filters first; apply the same predicate to the memory buffer.
+        if let Some(trace_id) = trace_id {
+            spans.retain(|s| s.trace_id == trace_id);
         }
 
         // ParqtelQL span predicates (push-down, before the limit). Prepared
@@ -160,4 +175,8 @@ impl QueryExecutor {
             truncated,
         })
     }
+}
+
+fn parse_trace_id(value: &str) -> Option<[u8; 16]> {
+    hex::decode(value).ok()?.try_into().ok()
 }

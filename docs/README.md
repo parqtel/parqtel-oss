@@ -59,7 +59,7 @@ warehouse. For where it sits relative to other tools, see the
 
 Every performance number in these docs was measured against a running build and
 says so. Where a measurement showed that an optimisation was not worth doing,
-that is recorded too. The clearest example is the
-[series dictionary for the `labels` column](performance/block-pruning.md#series-dictionary-for-the-labels-column-measured-not-worth-doing),
-measured at **0 %** benefit because Parquet already dictionary-encodes string
-columns.
+that is recorded too. The
+[historical labels-column dictionary experiment](performance/block-pruning.md#row-level-label-storage-historical-dictionary-experiment)
+measured **0 %** benefit from Arrow dictionary encoding because Parquet already
+dictionary-encodes string columns. New indexed blocks now omit that column.

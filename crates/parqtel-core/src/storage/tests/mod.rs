@@ -18,6 +18,7 @@ mod projection;
 mod pruning;
 mod retention;
 mod scan;
+mod traces;
 
 /// Helper: write a real parquet metrics file using new parquet/arrow APIs.
 fn write_metrics_parquet(path: &std::path::Path, metrics: &[Metric]) {

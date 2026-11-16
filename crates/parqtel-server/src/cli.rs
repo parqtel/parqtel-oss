@@ -30,7 +30,7 @@ pub(crate) struct Cli {
 pub(crate) enum Commands {
     /// Start the HTTP server (default)
     Serve,
-    /// Run one compaction pass and exit
+    /// Run bounded metrics compaction passes and exit; stop serving first
     Compact,
     /// Load index and print storage summary
     Inspect,

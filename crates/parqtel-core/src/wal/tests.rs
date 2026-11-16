@@ -380,3 +380,34 @@ fn rollover_preserves_every_record() {
         "records must replay in order across segments"
     );
 }
+
+#[test]
+fn replay_segment_stops_at_the_length_taken_before_recovery_appends() {
+    let d = tmp();
+    let mut w = open(d.path());
+    for i in 0..5 {
+        w.append(&Rec {
+            n: format!("r{i}"),
+            v: i,
+        })
+        .unwrap();
+    }
+    let dir = signal_dir(d.path(), "metrics");
+    let lens = segment_lengths(&dir).unwrap();
+    assert_eq!(lens.len(), 1);
+    // Recovery re-appends each replayed record to this same live segment.
+    for i in 5..8 {
+        w.append(&Rec {
+            n: format!("r{i}"),
+            v: i,
+        })
+        .unwrap();
+    }
+    let mut seen = Vec::new();
+    let (seq, len) = lens[0];
+    let stats =
+        replay_segment::<Rec, _>(&dir, seq, WalPosition::START, len, |r| seen.push(r.v)).unwrap();
+    assert_eq!(seen, vec![0, 1, 2, 3, 4]);
+    assert_eq!(stats.records, 5);
+    assert_eq!(stats.truncated_bytes, 0);
+}

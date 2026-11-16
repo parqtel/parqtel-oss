@@ -8,7 +8,7 @@ use parquet::file::metadata::PageIndexPolicy;
 use parquet::file::metadata::ParquetMetaData;
 use std::collections::HashMap;
 use std::fs::File;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 /// What is kept per block file: its parsed footer (with page indexes) and, for
 /// metric blocks, the queryable series table that footer carried.
@@ -27,6 +27,11 @@ struct CachedBlock {
 }
 
 type BlockKey = (std::path::PathBuf, u64, i128);
+type CachedBlockParts = (
+    Arc<ParquetMetaData>,
+    Option<Arc<SeriesIndex>>,
+    Option<Arc<LogSkipIndex>>,
+);
 
 struct FooterCache {
     entries: HashMap<BlockKey, CachedBlock>,
@@ -38,6 +43,7 @@ struct FooterCache {
 /// footer with page indexes and a series table for a hundred thousand series is
 /// orders of magnitude larger than one for a small log block.
 const FOOTER_CACHE_BUDGET: usize = 192 * 1024 * 1024;
+const LOAD_LOCK_CLEANUP_THRESHOLD: usize = 1024;
 
 fn footer_cache() -> &'static std::sync::Mutex<FooterCache> {
     static CACHE: std::sync::OnceLock<std::sync::Mutex<FooterCache>> = std::sync::OnceLock::new();
@@ -48,6 +54,47 @@ fn footer_cache() -> &'static std::sync::Mutex<FooterCache> {
             tick: 0,
         })
     })
+}
+
+fn block_load_locks() -> &'static std::sync::Mutex<HashMap<BlockKey, Weak<std::sync::Mutex<()>>>> {
+    static LOCKS: std::sync::OnceLock<
+        std::sync::Mutex<HashMap<BlockKey, Weak<std::sync::Mutex<()>>>>,
+    > = std::sync::OnceLock::new();
+    LOCKS.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+fn block_load_lock(key: &BlockKey) -> Arc<std::sync::Mutex<()>> {
+    let mut locks = block_load_locks().lock().unwrap_or_else(|e| e.into_inner());
+    if locks.len() >= LOAD_LOCK_CLEANUP_THRESHOLD {
+        locks.retain(|_, lock| lock.strong_count() > 0);
+    }
+    if let Some(lock) = locks.get(key).and_then(Weak::upgrade) {
+        return lock;
+    }
+    let lock = Arc::new(std::sync::Mutex::new(()));
+    locks.insert(key.clone(), Arc::downgrade(&lock));
+    lock
+}
+
+fn cached_block(key: &BlockKey) -> Option<CachedBlockParts> {
+    let mut cache = footer_cache().lock().unwrap_or_else(|e| e.into_inner());
+    cache.tick += 1;
+    let tick = cache.tick;
+    cache.entries.get_mut(key).map(|entry| {
+        entry.used = tick;
+        (
+            Arc::clone(&entry.meta),
+            entry.series.clone(),
+            entry.log_index.clone(),
+        )
+    })
+}
+
+pub(super) fn cached_bytes() -> usize {
+    footer_cache()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .bytes
 }
 
 impl FooterCache {
@@ -196,11 +243,11 @@ fn load_block(file: &File) -> Result<LoadedBlock> {
 
 /// Opens a block and returns its reader metadata, or `None` if the file is gone.
 ///
-/// The `labels` column is requested as a dictionary: every row of a series
+/// A legacy `labels` column is requested as a dictionary: every row of a series
 /// carries the same JSON text, and Parquet already stores it dictionary-encoded,
 /// so this hands the reader's dictionary straight through instead of expanding
-/// one string per row. Falls back to the file's own schema if the override is
-/// not accepted.
+/// one string per row. New indexed blocks omit the column. Falls back to the
+/// file's own schema if the override is not accepted.
 pub(super) fn open_block(path: &std::path::Path) -> Result<Option<OpenedBlock>> {
     let file = match File::open(path) {
         Ok(f) => f,
@@ -227,40 +274,53 @@ pub(super) fn open_block(path: &std::path::Path) -> Result<Option<OpenedBlock>> 
     });
     let key = stamp.map(|(len, mtime)| (path.to_path_buf(), len, mtime));
 
-    let cached = key.as_ref().and_then(|k| {
-        let mut cache = footer_cache().lock().unwrap_or_else(|e| e.into_inner());
-        cache.tick += 1;
-        let tick = cache.tick;
-        cache.entries.get_mut(k).map(|e| {
-            e.used = tick;
-            (Arc::clone(&e.meta), e.series.clone(), e.log_index.clone())
-        })
-    });
+    let cached = key.as_ref().and_then(cached_block);
     let (parsed, series, log_index) = match cached {
-        Some(hit) => hit,
+        Some(hit) => {
+            super::record_footer_cache_hit();
+            hit
+        }
         None => {
-            let LoadedBlock {
-                meta,
-                series,
-                log_index,
-            } = load_block(&file)?;
-            if let Some(k) = key {
-                let bytes = meta.memory_size()
-                    + series.as_ref().map_or(0, |s| s.approx_bytes())
+            let load_lock = key.as_ref().map(block_load_lock);
+            let _load_guard = load_lock
+                .as_ref()
+                .map(|lock| lock.lock().unwrap_or_else(|e| e.into_inner()));
+            if let Some(hit) = key.as_ref().and_then(cached_block) {
+                super::record_footer_cache_hit();
+                hit
+            } else {
+                super::record_footer_cache_miss();
+                let started = std::time::Instant::now();
+                let LoadedBlock {
+                    meta,
+                    series,
+                    log_index,
+                } = load_block(&file)?;
+                let index_bytes = series.as_ref().map_or(0, |s| s.approx_bytes())
                     + log_index.as_ref().map_or(0, |s| s.approx_bytes());
-                let mut cache = footer_cache().lock().unwrap_or_else(|e| e.into_inner());
-                cache.insert(
-                    k,
-                    CachedBlock {
-                        meta: Arc::clone(&meta),
-                        series: series.clone(),
-                        log_index: log_index.clone(),
-                        bytes,
-                        used: 0,
-                    },
+                super::record_footer_load(started.elapsed(), index_bytes);
+                tracing::debug!(
+                    path = ?path,
+                    index_estimated_bytes = index_bytes,
+                    load_ms = started.elapsed().as_millis(),
+                    "block footer cache miss"
                 );
+                if let Some(k) = key.as_ref() {
+                    let bytes = meta.memory_size() + index_bytes;
+                    let mut cache = footer_cache().lock().unwrap_or_else(|e| e.into_inner());
+                    cache.insert(
+                        k.clone(),
+                        CachedBlock {
+                            meta: Arc::clone(&meta),
+                            series: series.clone(),
+                            log_index: log_index.clone(),
+                            bytes,
+                            used: 0,
+                        },
+                    );
+                }
+                (meta, series, log_index)
             }
-            (meta, series, log_index)
         }
     };
     let base = ArrowReaderMetadata::try_new(parsed, options.clone())
@@ -298,4 +358,19 @@ fn dictionary_labels_schema(schema: &arrow_schema::SchemaRef) -> Option<arrow_sc
         fields,
         schema.metadata().clone(),
     )))
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+    use super::*;
+
+    #[test]
+    fn concurrent_misses_for_one_block_share_load_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = (dir.path().join("block.parquet"), 1, 1);
+        let first = block_load_lock(&key);
+        let second = block_load_lock(&key);
+        assert!(Arc::ptr_eq(&first, &second));
+    }
 }

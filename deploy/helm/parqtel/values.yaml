@@ -228,6 +228,10 @@ parqtel:
     # Lower trades write throughput for a smaller loss window on power
     # failure; 0 or null leaves the binary default in place.
     walSyncIntervalMs: 1000
+    # -- Distinct label sets shared across points. Set to at least twice the
+    # active series count (each series is interned twice); below that, memory
+    # grows with points instead of series. 0 or null leaves the binary default.
+    labelInternerCapacity: 1048576
   query:
     # -- Max series returned per query.
     maxSeries: 1000

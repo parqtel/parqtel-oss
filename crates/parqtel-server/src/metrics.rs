@@ -418,6 +418,76 @@ impl ServerMetrics {
             self.process_rss_bytes()
         ));
 
+        let scans = parqtel_core::Scanner::scan_metrics_snapshot();
+        out.push_str("# HELP parqtel_scan_slots_in_use Process-wide block scan slots in use\n");
+        out.push_str("# TYPE parqtel_scan_slots_in_use gauge\n");
+        out.push_str(&format!(
+            "parqtel_scan_slots_in_use {}\n",
+            scans.active_slots
+        ));
+        out.push_str("# HELP parqtel_scan_slots_limit Process-wide block scan slot limit\n");
+        out.push_str("# TYPE parqtel_scan_slots_limit gauge\n");
+        out.push_str(&format!("parqtel_scan_slots_limit {}\n", scans.slot_limit));
+        out.push_str("# HELP parqtel_scan_low_priority_skips_total Background work deferred while the process scan budget was full\n");
+        out.push_str("# TYPE parqtel_scan_low_priority_skips_total counter\n");
+        out.push_str(&format!(
+            "parqtel_scan_low_priority_skips_total {}\n",
+            scans.low_priority_skips
+        ));
+        out.push_str("# HELP parqtel_scan_admission_wait_seconds_total Time block scans waited for admission\n");
+        out.push_str("# TYPE parqtel_scan_admission_wait_seconds_total counter\n");
+        out.push_str(&format!(
+            "parqtel_scan_admission_wait_seconds_total {:.9}\n",
+            scans.admission_wait_ns as f64 / 1_000_000_000.0
+        ));
+        out.push_str("# HELP parqtel_scan_blocks_total Blocks scanned across all signals\n");
+        out.push_str("# TYPE parqtel_scan_blocks_total counter\n");
+        out.push_str(&format!("parqtel_scan_blocks_total {}\n", scans.blocks));
+        out.push_str("# HELP parqtel_scan_footer_cache_hits_total Cached block footers used\n");
+        out.push_str("# TYPE parqtel_scan_footer_cache_hits_total counter\n");
+        out.push_str(&format!(
+            "parqtel_scan_footer_cache_hits_total {}\n",
+            scans.footer_cache_hits
+        ));
+        out.push_str("# HELP parqtel_scan_footer_cache_misses_total Block footer cache misses\n");
+        out.push_str("# TYPE parqtel_scan_footer_cache_misses_total counter\n");
+        out.push_str(&format!(
+            "parqtel_scan_footer_cache_misses_total {}\n",
+            scans.footer_cache_misses
+        ));
+        out.push_str("# HELP parqtel_scan_footer_cache_bytes Estimated bytes held by the block footer cache\n");
+        out.push_str("# TYPE parqtel_scan_footer_cache_bytes gauge\n");
+        out.push_str(&format!(
+            "parqtel_scan_footer_cache_bytes {}\n",
+            scans.footer_cache_bytes
+        ));
+        out.push_str("# HELP parqtel_scan_footer_load_seconds_total Time spent loading block footers and indexes\n");
+        out.push_str("# TYPE parqtel_scan_footer_load_seconds_total counter\n");
+        out.push_str(&format!(
+            "parqtel_scan_footer_load_seconds_total {:.9}\n",
+            scans.footer_load_ns as f64 / 1_000_000_000.0
+        ));
+        out.push_str(
+            "# HELP parqtel_scan_index_estimated_bytes_total Estimated index bytes loaded\n",
+        );
+        out.push_str("# TYPE parqtel_scan_index_estimated_bytes_total counter\n");
+        out.push_str(&format!(
+            "parqtel_scan_index_estimated_bytes_total {}\n",
+            scans.index_estimated_bytes
+        ));
+        out.push_str("# HELP parqtel_scan_rows_considered_total Metric rows read from blocks\n");
+        out.push_str("# TYPE parqtel_scan_rows_considered_total counter\n");
+        out.push_str(&format!(
+            "parqtel_scan_rows_considered_total {}\n",
+            scans.rows_considered
+        ));
+        out.push_str("# HELP parqtel_scan_rows_returned_total Rows retained by block scans\n");
+        out.push_str("# TYPE parqtel_scan_rows_returned_total counter\n");
+        out.push_str(&format!(
+            "parqtel_scan_rows_returned_total {}\n",
+            scans.rows_returned
+        ));
+
         let now = now_secs();
         let [metrics, logs, spans] = self.rates.snapshot(now);
         out.push_str("# HELP parqtel_ingest_rate_per_sec Items ingested per second (last complete 1s bucket)\n");
@@ -567,6 +637,10 @@ mod tests {
         assert!(output.contains("parqtel_batches_received_total 5"));
         assert!(output.contains("parqtel_storage_blocks 0"));
         assert!(output.contains("parqtel_process_rss_bytes"));
+        assert!(output.contains("parqtel_scan_slots_in_use"));
+        assert!(output.contains("parqtel_scan_footer_cache_misses_total"));
+        assert!(output.contains("parqtel_scan_footer_cache_bytes"));
+        assert!(output.contains("parqtel_scan_index_estimated_bytes_total"));
         assert!(output.contains("parqtel_ingest_rate_per_sec{signal=\"metrics\"}"));
         assert!(output.contains("parqtel_ingest_gap_secs{signal=\"traces\"}"));
         assert!(output.contains("parqtel_ingested_items_total{signal=\"logs\"}"));

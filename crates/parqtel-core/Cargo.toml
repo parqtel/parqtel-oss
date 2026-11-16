@@ -27,6 +27,7 @@ bytes = { workspace = true }
 crc32fast = "1"
 memchr = "2"
 base64 = "0.22"
+zstd = { workspace = true }
 
 [lints]
 workspace = true

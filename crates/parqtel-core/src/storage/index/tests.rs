@@ -150,8 +150,34 @@ fn store_dirty_flag_lifecycle() {
         "begin() must take the flag so a pass is not repeated"
     );
 
-    store.complete("[]".to_string());
+    store.complete(2);
     assert!(store.has_persisted());
+    assert_eq!(store.payload_capacity_hint(), 2);
+}
+
+/// Serialising into a buffer sized from the last payload must not reallocate,
+/// and must produce exactly the same bytes. Growing a 611 MB string by doubling
+/// briefly held ~2x its size and pushed uat-oman over its 4 GiB limit.
+#[test]
+fn presized_serialization_matches_and_does_not_grow() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut idx = BlockIndex::new(dir.path());
+    for i in 0..50 {
+        idx.add(meta(
+            dir.path().join(format!("{i}.parquet")),
+            i,
+            i + 1,
+            SignalType::Metrics,
+        ));
+    }
+    let store = BlockIndexStore::new(&idx);
+    let plain = idx.serialize().unwrap();
+    store.complete(plain.len());
+
+    let hint = store.payload_capacity_hint();
+    let presized = idx.serialize_with_capacity(hint).unwrap();
+    assert_eq!(presized, plain);
+    assert_eq!(presized.capacity(), hint, "buffer must not have grown");
 }
 
 /// A mutation that lands *while* a payload is in flight must not be lost:
@@ -166,7 +192,7 @@ fn mutation_during_inflight_pass_is_not_lost() {
     assert!(store.begin());
     // Simulates a flush arriving between begin() and complete().
     store.mark_dirty();
-    store.complete("[]".to_string());
+    store.complete(2);
     assert!(
         store.is_dirty(),
         "a change made during the pass must schedule another one"
@@ -194,4 +220,74 @@ fn write_payload_creates_parent_and_is_readable() {
         !nested.join("index.tmp").exists(),
         "the tmp file must be renamed away, not left behind"
     );
+}
+
+fn with_values(mut m: BlockMetadata, field: &str, values: &[&str]) -> BlockMetadata {
+    m.label_values.insert(
+        field.to_string(),
+        values.iter().map(|v| v.to_string()).collect(),
+    );
+    m
+}
+
+/// A legacy sidecar (bare array, values per block) loads into the shared
+/// dictionary and is rewritten with each value stored once. Per-block copies
+/// made uat-oman's sidecar 611 MB and every persist pass re-serialised them.
+#[test]
+fn legacy_sidecar_migrates_to_one_value_dictionary() {
+    let dir = tempfile::tempdir().unwrap();
+    let blocks: Vec<BlockMetadata> = (0..20)
+        .map(|i| {
+            with_values(
+                meta(
+                    dir.path().join(format!("{i}.parquet")),
+                    i,
+                    i + 1,
+                    SignalType::Metrics,
+                ),
+                "pod",
+                &["api-0", "api-1"],
+            )
+        })
+        .collect();
+    let legacy = serde_json::to_string(&blocks).unwrap();
+    assert_eq!(legacy.matches("api-0").count(), 20);
+
+    let mut idx = BlockIndex::new(dir.path());
+    idx.load_serialized(&legacy).unwrap();
+    assert_eq!(idx.blocks.len(), 20);
+    assert!(idx.blocks.iter().all(|b| b.label_values.is_empty()));
+    assert_eq!(idx.label_values("pod").unwrap().len(), 2);
+
+    let current = idx.serialize().unwrap();
+    assert_eq!(current.matches("api-0").count(), 1, "value stored once");
+
+    let mut reloaded = BlockIndex::new(dir.path());
+    reloaded.load_serialized(&current).unwrap();
+    assert_eq!(reloaded.blocks.len(), 20);
+    assert_eq!(reloaded.label_values("pod"), idx.label_values("pod"));
+}
+
+/// A full field evicts an old value so values from the newest block are
+/// always offered; dropping new values would freeze autocomplete on churny
+/// fields such as container IDs.
+#[test]
+fn full_field_keeps_newest_values() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut idx = BlockIndex::new(dir.path());
+    let old: Vec<String> = (0..10_000).map(|i| format!("a{i:05}")).collect();
+    let old: Vec<&str> = old.iter().map(String::as_str).collect();
+    idx.add(with_values(
+        meta(dir.path().join("old.parquet"), 1, 2, SignalType::Metrics),
+        "container_id",
+        &old,
+    ));
+    idx.add(with_values(
+        meta(dir.path().join("new.parquet"), 3, 4, SignalType::Metrics),
+        "container_id",
+        &["z-fresh"],
+    ));
+    let values = idx.label_values("container_id").unwrap();
+    assert_eq!(values.len(), 10_000, "bounded");
+    assert!(values.contains("z-fresh"), "newest value present");
 }

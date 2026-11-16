@@ -145,12 +145,11 @@ A query resolves in three stages, each with its own pruning mechanism:
    rest. Exact, and free: rows are written grouped by metric, so a row group's
    min and max on those columns are usually the same value. Page statistics and a
    column index are also written and loaded.
-4. **Column projection** — a scan through the series table reads 4 of 15 columns
-   (`timestamp_ns` and the three value columns); labels come from the table. The
-   fallback scan reads 7 (adding `metric_name`, `service_name`, `labels`). The
-   rest are per-row data a range query never touches.
+4. **Column projection** — a scan through the series table reads 4 of 14 block
+   columns (`timestamp_ns` and the three value columns); labels come from the
+   table. Legacy blocks with a row-level `labels` column use a 7-column fallback.
 
-Label matchers are pushed into the block scan: a predicate over the series' label set runs once per distinct series per block (the `labels` column is read as a dictionary, so each distinct JSON is parsed once), and rows of series that cannot match are never turned into points. Parsed Parquet footers (and series tables) are cached per immutable block file, within a byte budget. Log search first asks the block's skip index (`parqtel.log_index` in the footer: per 4 096-row granule, time bounds, highest severity and a bloom filter over body three-byte windows and `name=value` attribute pairs) which granules can hold a match, and reads only those. It then rejects rows from the timestamp, severity and body columns alone before decoding the other columns. The prefilter is derived only from the query's AND conjuncts; unless it is the whole predicate (`exact`), the full predicate still judges every row that passes. When it is the whole predicate, matches are counted from three columns and the remaining columns are decoded only for the rows returned. Unflushed log rows are filtered inside the memory buffer, so only matches are copied out.
+Label matchers are pushed into the block scan: a predicate over the series' label set runs once per distinct series per block. New metric blocks store labels only in the series table; legacy blocks retain their row-level labels column. Rows of series that cannot match are never turned into points. Parsed Parquet footers (and series tables) are cached per immutable block file, within a byte budget. Log search first asks the block's skip index (`parqtel.log_index` in the footer: per 4 096-row granule, time bounds, highest severity and a bloom filter over body three-byte windows and `name=value` attribute pairs) which granules can hold a match, and reads only those. It then rejects rows from the timestamp, severity and body columns alone before decoding the other columns. The prefilter is derived only from the query's AND conjuncts; unless it is the whole predicate (`exact`), the full predicate still judges every row that passes. When it is the whole predicate, matches are counted from three columns and the remaining columns are decoded only for the rows returned. Unflushed log rows are filtered inside the memory buffer, so only matches are copied out.
 
 Evaluation is then handed to the blocking pool. Series labels are shared behind
 an `Arc` (`ast::SharedLabels`), so a series' labels are cloned once per block
@@ -211,7 +210,7 @@ Trace blocks live in `data/traces/` with their own index sidecar, reusing the me
 
 Schemas are defined canonically in `crates/parqtel-core/src/models/storage/schema.rs` and written with the `arrow`/`parquet` 59 stack (WriterProperties: PARQUET_2_0, configured codec).
 
-**Metrics** (15 columns): `timestamp_ns` (Timestamp ns), `metric_name` (Dictionary<Int32, Utf8>), `metric_kind` (Utf8), dedicated correlation columns `service_name`, `service_version`, `k8s_namespace`, `k8s_pod_name`, `k8s_pod_uid`, `k8s_container_name`, `k8s_node_name` (all Dictionary, nullable), `resource_attributes` (Dictionary, JSON), `labels` (Utf8, JSON), and value columns `value_float` (F64), `value_int` (I64), `value_complex` (Utf8, JSON for histograms/summaries).
+**Metrics** (14 block columns): `timestamp_ns` (Timestamp ns), `metric_name` (Dictionary<Int32, Utf8>), `metric_kind` (Utf8), dedicated correlation columns `service_name`, `service_version`, `k8s_namespace`, `k8s_pod_name`, `k8s_pod_uid`, `k8s_container_name`, `k8s_node_name` (all Dictionary, nullable), `resource_attributes` (Dictionary, JSON), and value columns `value_float` (F64), `value_int` (I64), `value_complex` (Utf8, JSON for histograms/summaries). The per-row `labels` column remains readable in legacy blocks but is omitted from new indexed blocks.
 
 At write time `extract_correlation_labels` pulls `service.name`, `service.version`, and `k8s.*` out of resource attributes into their dedicated dictionary columns (fast equality filtering); everything else stays in the `resource_attributes` JSON. At read time the scanner injects `service_name` back as the `service.name` label so PromQL matchers work.
 
@@ -228,6 +227,8 @@ footer, bloom filters and page statistics are applied. An unordered run is still
 described correctly (a series simply appears as several entries). Time-range row
 group pruning is weaker inside a metric than with time-ordered rows, because a
 row group now holds whole series; the table's per-series time bounds take over.
+The table is zstd-compressed in new block footers; readers also accept legacy
+plain-JSON tables. New blocks omit the repeated row-level `labels` column.
 
 ### Block Index
 
