@@ -41,7 +41,9 @@ scripts/bench/bench_results/
 # Agent-local artifacts
 .kiro/
 .rtk/
-data/
+# the runtime data directory at the repository root only (docs/performance/data holds
+# committed benchmark captures and must stay tracked)
+/data/
 server.pid
 
 # buildx state dir redirected by the Makefile (see BUILDX_CONFIG)
