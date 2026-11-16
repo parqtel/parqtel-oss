@@ -1,0 +1,9 @@
+flowchart TD
+    REQ["Async request"] --> SEM["spawn_blocking<br/>(semaphore permit acquired first)"]
+    SEM --> POOL["Blocking pool<br/>Parquet encode · scans · OTLP decode"]
+    REQ --> ADM{"Scan budget<br/>4 slots, process-wide"}
+    ADM -->|slot free| POOL
+    ADM -->|full, low priority| SKIP["Skip and count<br/>parqtel_scan_low_priority_skips_total"]
+    ADM -->|full, user query| WAIT["Wait for admission<br/>parqtel_scan_admission_wait_seconds_total"]
+    WAIT --> POOL
+    POOL --> FOOT["Footer / series-index cache<br/>one shared load per block"]

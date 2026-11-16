@@ -1,0 +1,14 @@
+flowchart TD
+    U["Client"] --> PQL["ParQL<br/>PromQL-compatible"]
+    U --> LQL["ParqtelQL<br/>logs + traces"]
+    U --> PIPE["PQL Pipelines<br/>fetch │ filter │ parse │ stats │ correlate"]
+
+    PQL --> E1["Pratt parser → AST<br/>per-step evaluation"]
+    LQL --> E2["Lenient boolean grammar<br/>prepared predicates"]
+    PIPE --> E3["Unified field map<br/>fetch │ filter │ parse │ stats │ correlate"]
+
+    E1 --> EX["QueryExecutor"]
+    E2 --> EX
+    E3 --> EX
+    EX --> SC["Scanner<br/>index → series table → row groups → projection"]
+    SC --> BLK["Parquet blocks + memory buffer"]

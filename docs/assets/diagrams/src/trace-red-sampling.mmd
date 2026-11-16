@@ -1,0 +1,15 @@
+flowchart TD
+    IN["Spans decoded<br/>(resource attrs merged into span attrs)"]
+    RED["RED bridge<br/>traces_service_requests_total<br/>traces_service_errors_total<br/>traces_service_duration_ms_total"]
+    METRICS["Metrics ingest path<br/>(unsampled, full rate)"]
+    TS["Tail sampling policy<br/>keep_errors → slow_trace_ms → sampling_ratio"]
+    KEEP["Trace survives"]
+    DROP["Trace dropped<br/>(counted in dropped_spans)"]
+    STORE["Traces ingest path<br/>→ memory buffer → blocks"]
+
+    IN --> RED
+    RED --> METRICS
+    IN --> TS
+    TS -->|any rule votes keep| KEEP
+    TS --> DROP
+    KEEP --> STORE

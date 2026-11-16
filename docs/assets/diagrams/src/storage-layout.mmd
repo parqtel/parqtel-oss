@@ -1,0 +1,16 @@
+flowchart TD
+    D["data/"]
+    D --> M["m_l0_… · m_n_… · m_l1_….parquet<br/>metric blocks, one file per block"]
+    D --> I["index.json<br/>metric block index + label-value dictionary"]
+    D --> L["logs/"]
+    D --> T["traces/"]
+    D --> W["wal/"]
+
+    L --> LP["*.parquet<br/>log blocks"]
+    L --> LI["index.json"]
+    T --> TP["*.parquet<br/>trace blocks"]
+    T --> TI["index.json"]
+
+    W --> WM["metrics/<br/>WAL segments"]
+    W --> WL["logs/"]
+    W --> WT["traces/"]

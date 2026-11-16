@@ -1,0 +1,131 @@
+/* Parqtel diagram motion system — declarative only (no JS, no external assets),
+   so the animations run inside an <img>-embedded SVG on GitHub and in any
+   browser. Applied to mermaid-rendered SVGs via `mmdc --cssFile`.
+
+   Motion vocabulary
+   -----------------
+   flow    edges carry a travelling dash, so direction and throughput read at
+           a glance on the ingest, query and alert paths.
+   pulse   each node breathes a teal outline, staggered in waves so the diagram
+           reads left-to-right / top-to-bottom instead of blinking in unison.
+   breathe subgraph frames lift slightly, giving depth without movement.
+
+   Implementation notes (both learned the hard way):
+   - NO CSS custom properties. mermaid rewrites every selector as a descendant
+     of the svg's id (`#my-svg path.flowchart-link`), so a `:root` block becomes
+     `#my-svg :root`, which matches nothing and leaves `var()` unresolved —
+     an invalid `animation` shorthand, i.e. no motion at all.
+   - NO `filter` on nodes. The neo look already sets a drop-shadow on node
+     shapes, and a keyframed `filter` replaces it, so the shadow flickers.
+
+   Everything stops under `prefers-reduced-motion: reduce`. */
+
+/* ── Edge flow ─────────────────────────────────────────────────────────── */
+
+path.flowchart-link,
+.edgePath .path,
+.messageLine0,
+.messageLine1 {
+  stroke-dasharray: 9 6;
+  animation: pl-flow 1.05s linear infinite;
+}
+
+@keyframes pl-flow {
+  to {
+    stroke-dashoffset: -30;
+  }
+}
+
+/* ── Node pulse: a breathing outline, staggered into a wave ────────────── */
+
+@keyframes pl-node-pulse {
+  0%,
+  100% {
+    stroke-width: 1px;
+    stroke-opacity: 0.8;
+  }
+  50% {
+    stroke-width: 2.4px;
+    stroke-opacity: 1;
+  }
+}
+
+g.nodes > g.node > rect,
+g.nodes > g.node > polygon,
+g.nodes > g.node > circle,
+g.nodes > g.node > ellipse,
+g.nodes > g.node > path,
+.actor {
+  animation: pl-node-pulse 3.2s ease-in-out infinite;
+}
+
+g.nodes > g.node:nth-of-type(4n + 2) > rect,
+g.nodes > g.node:nth-of-type(4n + 2) > polygon,
+g.nodes > g.node:nth-of-type(4n + 2) > circle,
+g.nodes > g.node:nth-of-type(4n + 2) > ellipse,
+g.nodes > g.node:nth-of-type(4n + 2) > path {
+  animation-delay: 0.55s;
+}
+
+g.nodes > g.node:nth-of-type(4n + 3) > rect,
+g.nodes > g.node:nth-of-type(4n + 3) > polygon,
+g.nodes > g.node:nth-of-type(4n + 3) > circle,
+g.nodes > g.node:nth-of-type(4n + 3) > ellipse,
+g.nodes > g.node:nth-of-type(4n + 3) > path {
+  animation-delay: 1.1s;
+}
+
+g.nodes > g.node:nth-of-type(4n + 4) > rect,
+g.nodes > g.node:nth-of-type(4n + 4) > polygon,
+g.nodes > g.node:nth-of-type(4n + 4) > circle,
+g.nodes > g.node:nth-of-type(4n + 4) > ellipse,
+g.nodes > g.node:nth-of-type(4n + 4) > path {
+  animation-delay: 1.65s;
+}
+
+/* ── Subgraph breathing ────────────────────────────────────────────────── */
+
+g.cluster > rect {
+  animation: pl-cluster 5s ease-in-out infinite;
+}
+
+@keyframes pl-cluster {
+  0%,
+  100% {
+    stroke-opacity: 0.45;
+  }
+  50% {
+    stroke-opacity: 1;
+  }
+}
+
+/* ── Sequence-diagram lifelines ────────────────────────────────────────── */
+
+@keyframes pl-lifeline {
+  0%,
+  100% {
+    stroke-opacity: 0.35;
+  }
+  50% {
+    stroke-opacity: 0.85;
+  }
+}
+
+.actor-line {
+  animation: pl-lifeline 3.6s ease-in-out infinite;
+}
+
+/* ── Accessibility ─────────────────────────────────────────────────────── */
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation: none !important;
+  }
+
+  path.flowchart-link,
+  .edgePath .path,
+  .messageLine0,
+  .messageLine1 {
+    stroke-dasharray: none;
+  }
+}

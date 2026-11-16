@@ -1,0 +1,21 @@
+flowchart TD
+    Q["Query request<br/>instant · range · log search · trace search · pipeline"]
+    ADM["Scan admission<br/>process-wide 4 slots"]
+    IDX["1. Block index lookup<br/>time range + metric name"]
+    SER["2. Series table<br/>(parqtel.series_index in the footer)"]
+    RG["3. Row-group pruning<br/>timestamp · metric_name · service_name stats"]
+    PROJ["4. Column projection<br/>4 of 14 metric columns"]
+    DEC["Row predicate<br/>(full matcher — always the final judge)"]
+    BUF["Memory buffer rows"]
+    EVAL["Aggregation / evaluation<br/>per step, on the blocking pool"]
+    OUT["Result"]
+
+    Q --> ADM
+    ADM --> IDX
+    IDX --> SER
+    SER --> RG
+    RG --> PROJ
+    PROJ --> DEC
+    DEC --> EVAL
+    BUF --> EVAL
+    EVAL --> OUT

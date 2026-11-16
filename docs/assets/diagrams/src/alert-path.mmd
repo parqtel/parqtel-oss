@@ -1,0 +1,10 @@
+flowchart LR
+    R["YAML rules<br/>rules_dir + built-in presets"] --> REG["AlertRuleRegistry<br/>watched with notify"]
+    REG --> LOOP["Evaluation loop<br/>every server.alert_interval_secs"]
+    LOOP --> Q["Query executor<br/>single selector or aggregation"]
+    Q --> TH["Threshold on the last sample<br/>of every result series"]
+    TH --> SM["State machine<br/>Inactive → Pending → Firing → Resolved"]
+    SM --> STORE["AlertStore<br/>transition history"]
+    SM --> ROUTE["Notification routes<br/>severity + label match"]
+    ROUTE --> HOOK["Webhook"]
+    ROUTE --> MCP["MCP servers<br/>Slack · PagerDuty · Jira · Notion"]

@@ -1,0 +1,26 @@
+sequenceDiagram
+    autonumber
+    participant C as OTel SDK
+    participant H as Axum handler
+    participant D as ingest · decode
+    participant B as MemoryBuffer
+    participant W as BlockRotator<br/>(4 writer shards)
+    participant L as Write-Ahead Log
+    participant P as Parquet block file
+    participant I as BlockIndex
+
+    C->>H: POST /v1/metrics (protobuf or JSON)
+    H->>H: gunzip body · size check
+    H->>D: OTLP payload
+    D->>D: decode · intern label sets
+    D->>B: push points (+ service.name label)
+    Note over B: immediately queryable
+    D->>W: push points (sharded)
+
+    W->>L: append records, frame WAL span
+    Note over W,L: commit position taken<br/>while every shard is locked
+    W->>P: encode + zstd on spawn_blocking
+    P->>I: BlockMetadata (mpsc)
+    Note over P: block is durable here
+    W->>B: drop sealed epochs
+    Note over B: no double-counting

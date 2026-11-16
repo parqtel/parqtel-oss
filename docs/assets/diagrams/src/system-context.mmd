@@ -1,0 +1,42 @@
+flowchart LR
+    subgraph producers["Telemetry producers"]
+        SDK["OpenTelemetry SDKs<br/>metrics · logs · traces"]
+        PROM["Prometheus<br/>remote-write"]
+        APP["Applications<br/>OTLP exporters"]
+    end
+
+    subgraph parqtel["Parqtel (single binary)"]
+        ING["Ingest<br/>gRPC :4317 · HTTP :8080"]
+        SRV["Query + console<br/>/api/v1/* · /ui"]
+        ALERT["Alert engine"]
+    end
+
+    subgraph storage["Storage"]
+        BLOCKS["Parquet blocks<br/>zstd · columnar"]
+        IDX["Block index sidecars<br/>index.json"]
+    end
+
+    subgraph consumers["Consumers"]
+        GRAF["Grafana<br/>SimpleJSON datasource"]
+        PROMAPI["Prometheus<br/>HTTP API"]
+        OPS["Operators<br/>curl · kubectl"]
+        LLM["LLM agents<br/>MCP servers"]
+    end
+
+    SDK -->|"OTLP gRPC :4317"| ING
+    SDK -->|"OTLP HTTP /v1/*"| ING
+    APP --> ING
+    PROM --> ING
+
+    ING --> BLOCKS
+    ING --> IDX
+    IDX --> SRV
+    BLOCKS --> SRV
+
+    SRV --> GRAF
+    SRV --> PROMAPI
+    SRV --> OPS
+    ALERT --> OPS
+    ALERT --> LLM
+    ING -->|"span-metrics RED bridge"| ALERT
+    SRV -.->|"query"| ALERT
