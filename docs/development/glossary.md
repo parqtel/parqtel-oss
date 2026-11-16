@@ -40,7 +40,8 @@ This document defines key terms and concepts used within the Parqtel ecosystem.
 - **Retention Policy**: The logic that determines when old data blocks should be deleted from the filesystem based on age.
 
 ### W
-- **WAL (Write-Ahead Log)**: A crash-recovery mechanism that records incoming data to a persistent log before it is flushed to a Parquet block. Off by default for metrics (`ingest.wal_enabled`), on for logs (`ingest.log_wal_enabled`).
+- **WAL (Write-Ahead Log)**: A crash-recovery mechanism that records incoming data to a persistent log before it is flushed to a Parquet block. On by default for both metrics (`ingest.wal_enabled`) and logs (`ingest.log_wal_enabled`).
+- **WAL Span**: The `(from, to]` range of WAL records a block covers. Stored in the block footer (`parqtel.wal_range`) so startup can advance the commit point and skip records already in a block.
 
 ### L
 - **Lookback Delta** (`query.lookback_delta_ns`): The window an instant query (`/api/v1/query`) scans backward from the query time — 5 minutes by default (the Prometheus default). Points older than that are visible only via `/api/v1/query_range` once flushed to a block.
@@ -56,6 +57,17 @@ This document defines key terms and concepts used within the Parqtel ecosystem.
 
 ### T
 - **Tail Sampling**: An `ingest.tail_sampling` policy (keep_errors, slow_trace_ms, sampling_ratio, per-service overrides) applied after RED derivation — RED metrics see all spans, while storage sees only the sampled traces. Decisions are trace-coherent via a deterministic trace_id hash; the default keeps everything.
+
+### L (levels)
+- **L0 Block**: A metric block written by one ingest flush (`m_l0_*`). Series are sorted by the final query-visible labels, so the footer series table agrees with the row order.
+- **L1 Block**: A metric block produced by the streaming compactor (`m_l1_*`), covering one 5-minute window. L1 blocks are what keeps a query's block fan-out bounded.
+
+### I (interning and admission)
+- **Label Interner**: A process-wide table of distinct label sets (`ingest.label_interner_capacity`, default 1 048 576). Points of one series share a single copy of their labels; below the working set, memory grows with points instead of series.
+- **Scan Admission / Scan Budget**: The process-wide budget of 4 concurrent block scans. Queries wait for a slot; background work (alert evaluation, compaction) reserves one without waiting and skips its cycle when none is free.
+
+### P (provenance)
+- **Provenance Footer**: The list of source blocks an output block was merged from (`parqtel.compacted_sources`). Reconcile drops superseded sources after a crash; sources are deleted after a 5-minute grace period.
 
 ### Z
 - **Zstd**: A high-performance compression algorithm used by Parqtel to reduce disk usage by up to 90%.
