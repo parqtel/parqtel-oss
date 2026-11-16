@@ -49,6 +49,7 @@ Documentation for Parqtel, an open-source SRE telemetry store.
 | | |
 |---|---|
 | [HTTP API](api/openapi.yaml) | OpenAPI 3 description, also served at `/oas` |
+| [HTTP API reference](reference/api.md) | Every endpoint, verified against the router |
 | [Performance](performance/README.md) | Measured results and how each was obtained |
 
 ## Scope
