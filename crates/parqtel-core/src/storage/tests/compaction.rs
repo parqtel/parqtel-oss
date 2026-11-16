@@ -141,13 +141,19 @@ async fn test_compaction_preserves_label_values() {
 
     let after = index.read().await;
     assert_eq!(after.total_blocks(), 1, "blocks should have merged");
-    let hosts = &after.blocks[0].label_values["host"];
+    let hosts = after
+        .label_values("host")
+        .expect("label values must survive compaction");
     assert_eq!(
         hosts.len(),
         2,
-        "the merged block must carry both hosts' values, not an empty dictionary"
+        "the index must still know both hosts' values after the merge"
     );
     assert!(hosts.contains("h0") && hosts.contains("h1"));
+    assert!(
+        after.blocks[0].label_values.is_empty(),
+        "values live in the index dictionary, not per block"
+    );
 }
 
 #[tokio::test]

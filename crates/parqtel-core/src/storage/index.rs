@@ -1,8 +1,29 @@
 use crate::error::{Error, Result};
 use crate::models::storage::{BlockMetadata, SignalType};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+
+/// Per-field cap on the global label-value dictionary, matching the flush path.
+const MAX_LABEL_VALUES_PER_FIELD: usize = 10_000;
+
+/// Label name -> distinct values, for autocomplete.
+pub type LabelValueMap = BTreeMap<String, BTreeSet<String>>;
+
+/// On-disk sidecar shape. The legacy shape was a bare array of blocks, each
+/// carrying its own label values; it is still accepted by [`BlockIndex::load`].
+#[derive(serde::Serialize)]
+struct SidecarRef<'a> {
+    blocks: &'a [BlockMetadata],
+    label_values: &'a LabelValueMap,
+}
+
+#[derive(serde::Deserialize)]
+struct Sidecar {
+    blocks: Vec<BlockMetadata>,
+    #[serde(default)]
+    label_values: LabelValueMap,
+}
 
 /// In-memory index of all Parquet blocks on disk.
 ///
@@ -13,10 +34,15 @@ use std::path::{Path, PathBuf};
 /// now mutates in memory only and hands persistence to [`BlockIndexStore`],
 /// which debounces it onto the blocking pool.
 ///
+/// Label values are held once, in one capped dictionary, not per block: per
+/// block they were ~85% of a 611 MB sidecar on uat-oman, re-serialised on every
+/// persist, while readers only ever consulted the newest five blocks.
+///
 /// Ordering invariant: `blocks` is kept sorted by `start_timestamp_ns` after
 /// every mutation, which [`Self::query`]'s binary search relies on.
 pub struct BlockIndex {
     pub blocks: Vec<BlockMetadata>,
+    label_values: LabelValueMap,
     sidecar_path: PathBuf,
 }
 
@@ -25,6 +51,7 @@ impl BlockIndex {
     pub fn new(data_dir: &Path) -> Self {
         Self {
             blocks: Vec::new(),
+            label_values: LabelValueMap::new(),
             sidecar_path: data_dir.join("index.json"),
         }
     }
@@ -33,7 +60,7 @@ impl BlockIndex {
     pub fn load(&mut self) -> Result<()> {
         if self.sidecar_path.exists() {
             let content = fs::read_to_string(&self.sidecar_path)?;
-            self.blocks = serde_json::from_str(&content).map_err(Error::Serde)?;
+            self.load_serialized(&content)?;
         }
         self.blocks.sort_by_key(|b| b.start_timestamp_ns);
         Ok(())
@@ -54,16 +81,56 @@ impl BlockIndex {
     /// a large index is not reallocated (and briefly held twice) while it grows.
     pub fn serialize_with_capacity(&self, capacity: usize) -> Result<String> {
         let mut buf = Vec::with_capacity(capacity);
-        serde_json::to_writer(&mut buf, &self.blocks).map_err(Error::Serde)?;
+        let sidecar = SidecarRef {
+            blocks: &self.blocks,
+            label_values: &self.label_values,
+        };
+        serde_json::to_writer(&mut buf, &sidecar).map_err(Error::Serde)?;
         String::from_utf8(buf).map_err(|e| Error::Internal(e.to_string()))
     }
 
     /// Restores a previously serialised payload, dropping the in-memory
-    /// index. Used to publish a payload serialised off-lock.
+    /// index. Accepts both the current object form and the legacy bare array,
+    /// whose per-block label values are folded into the dictionary.
     pub fn load_serialized(&mut self, payload: &str) -> Result<()> {
-        self.blocks = serde_json::from_str(payload).map_err(Error::Serde)?;
-        self.blocks.sort_by_key(|b| b.start_timestamp_ns);
+        // Dispatch on the first character rather than an untagged enum: serde
+        // would buffer the whole document to try each variant.
+        let (mut blocks, label_values) = if payload.trim_start().starts_with('[') {
+            let blocks: Vec<BlockMetadata> = serde_json::from_str(payload).map_err(Error::Serde)?;
+            (blocks, LabelValueMap::new())
+        } else {
+            let sidecar: Sidecar = serde_json::from_str(payload).map_err(Error::Serde)?;
+            (sidecar.blocks, sidecar.label_values)
+        };
+        self.label_values = label_values;
+        // Oldest first, so the newest values survive the per-field cap.
+        blocks.sort_by_key(|b| b.start_timestamp_ns);
+        for block in &mut blocks {
+            self.absorb_label_values(block);
+        }
+        self.blocks = blocks;
         Ok(())
+    }
+
+    /// Moves a block's label values into the shared dictionary. A full field
+    /// evicts an existing value so the newest values are always present.
+    fn absorb_label_values(&mut self, meta: &mut BlockMetadata) {
+        for (name, values) in std::mem::take(&mut meta.label_values) {
+            let known = self.label_values.entry(name).or_default();
+            for value in values {
+                if known.len() >= MAX_LABEL_VALUES_PER_FIELD && !known.contains(&value) {
+                    known.pop_first();
+                }
+                known.insert(value);
+            }
+        }
+    }
+
+    /// Known values of `label` across every block ever indexed, if any.
+    // shortcut: values outlive the blocks that held them (bounded by the
+    // per-field cap); rebuild from recent blocks if stale autocomplete matters.
+    pub fn label_values(&self, label: &str) -> Option<&BTreeSet<String>> {
+        self.label_values.get(label)
     }
 
     /// Adds a new block to the index. **Does not persist** — see
@@ -73,7 +140,8 @@ impl BlockIndex {
     /// `partition_point` correct. The sort is O(n log n) on an already sorted
     /// vector for all but the inserted element in practice; a bsearch insert
     /// would be marginal here and is left as a follow-up.
-    pub fn add(&mut self, meta: BlockMetadata) {
+    pub fn add(&mut self, mut meta: BlockMetadata) {
+        self.absorb_label_values(&mut meta);
         self.blocks.push(meta);
         self.blocks.sort_by_key(|b| b.start_timestamp_ns);
     }
@@ -90,7 +158,8 @@ impl BlockIndex {
         if !removed_paths.is_empty() {
             self.blocks.retain(|b| !removed_paths.contains(&b.path));
         }
-        if let Some(meta) = new {
+        if let Some(mut meta) = new {
+            self.absorb_label_values(&mut meta);
             self.blocks.push(meta);
         }
         self.blocks.sort_by_key(|b| b.start_timestamp_ns);

@@ -221,3 +221,73 @@ fn write_payload_creates_parent_and_is_readable() {
         "the tmp file must be renamed away, not left behind"
     );
 }
+
+fn with_values(mut m: BlockMetadata, field: &str, values: &[&str]) -> BlockMetadata {
+    m.label_values.insert(
+        field.to_string(),
+        values.iter().map(|v| v.to_string()).collect(),
+    );
+    m
+}
+
+/// A legacy sidecar (bare array, values per block) loads into the shared
+/// dictionary and is rewritten with each value stored once. Per-block copies
+/// made uat-oman's sidecar 611 MB and every persist pass re-serialised them.
+#[test]
+fn legacy_sidecar_migrates_to_one_value_dictionary() {
+    let dir = tempfile::tempdir().unwrap();
+    let blocks: Vec<BlockMetadata> = (0..20)
+        .map(|i| {
+            with_values(
+                meta(
+                    dir.path().join(format!("{i}.parquet")),
+                    i,
+                    i + 1,
+                    SignalType::Metrics,
+                ),
+                "pod",
+                &["api-0", "api-1"],
+            )
+        })
+        .collect();
+    let legacy = serde_json::to_string(&blocks).unwrap();
+    assert_eq!(legacy.matches("api-0").count(), 20);
+
+    let mut idx = BlockIndex::new(dir.path());
+    idx.load_serialized(&legacy).unwrap();
+    assert_eq!(idx.blocks.len(), 20);
+    assert!(idx.blocks.iter().all(|b| b.label_values.is_empty()));
+    assert_eq!(idx.label_values("pod").unwrap().len(), 2);
+
+    let current = idx.serialize().unwrap();
+    assert_eq!(current.matches("api-0").count(), 1, "value stored once");
+
+    let mut reloaded = BlockIndex::new(dir.path());
+    reloaded.load_serialized(&current).unwrap();
+    assert_eq!(reloaded.blocks.len(), 20);
+    assert_eq!(reloaded.label_values("pod"), idx.label_values("pod"));
+}
+
+/// A full field evicts an old value so values from the newest block are
+/// always offered; dropping new values would freeze autocomplete on churny
+/// fields such as container IDs.
+#[test]
+fn full_field_keeps_newest_values() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut idx = BlockIndex::new(dir.path());
+    let old: Vec<String> = (0..10_000).map(|i| format!("a{i:05}")).collect();
+    let old: Vec<&str> = old.iter().map(String::as_str).collect();
+    idx.add(with_values(
+        meta(dir.path().join("old.parquet"), 1, 2, SignalType::Metrics),
+        "container_id",
+        &old,
+    ));
+    idx.add(with_values(
+        meta(dir.path().join("new.parquet"), 3, 4, SignalType::Metrics),
+        "container_id",
+        &["z-fresh"],
+    ));
+    let values = idx.label_values("container_id").unwrap();
+    assert_eq!(values.len(), 10_000, "bounded");
+    assert!(values.contains("z-fresh"), "newest value present");
+}
