@@ -69,8 +69,9 @@ final partial step is not evaluated — the same as Prometheus.
 | GET | `/api/v1/alerts/:id` | Get alert details |
 | POST | `/api/v1/alerts/:id/acknowledge` | Acknowledge an alert |
 | POST | `/api/v1/alerts/:id/resolve` | Resolve an alert |
-| GET | `/api/v1/alerts/routes` | List notification routes |
+| GET | `/api/v1/alerts/routes` | List notification routes (plus the redacted `[alerting.routing]` tree) |
 | POST | `/api/v1/alerts/routes` | Replace notification routes |
+| POST | `/api/v1/alerts/test_route` | Dry-run route/group/silence/inhibition evaluation for a label set |
 | GET | `/api/v1/alerts/silences` | List silences |
 | POST | `/api/v1/alerts/silences` | Create a silence |
 | DELETE | `/api/v1/alerts/silences/:name` | Delete a silence |
