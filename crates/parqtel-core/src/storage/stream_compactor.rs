@@ -1733,7 +1733,7 @@ mod tests {
         without_range.wal_range = None;
         let gapped = write_metrics_block(dir.path(), "c.parquet", 300, (9, 12), true);
 
-        // Commit below the ranges: still unsafe, still rejected.
+        // Commit below the ranges: still not mergeable, still rejected.
         crate::wal::commit_position(dir.path(), "metrics", crate::wal::WalPosition(3)).unwrap();
         let mixed = [with_range.clone(), without_range.clone()];
         assert!(compact_metric_blocks(&mixed, &config, 1).is_err());

@@ -87,7 +87,9 @@ jobs:
       - name: Check unsafe code
         run: |
           if grep -rn "unsafe" --include="*.rs" crates/parqtel-*/src/ \
-             | grep -v "forbid(unsafe_code)" | grep -v "^\s*//" | grep -v "unsafe_"; then
+             | grep -v "forbid(unsafe_code)" \
+             | grep -vE "^[^:]+:[0-9]+:[[:space:]]*//" \
+             | grep -v "unsafe_"; then
             echo "::error::Unsafe code detected"
             exit 1
           fi
