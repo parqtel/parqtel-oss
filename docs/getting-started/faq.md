@@ -9,7 +9,7 @@ Prometheus is a Time-Series Database (TSDB) optimized for high-frequency scrapin
 For observability use cases, **yes**. While ClickHouse is a general-purpose OLAP database, Parqtel is purpose-built for OTLP data. It is easier to deploy (single binary vs. complex cluster) and requires zero schema management—just send your OTLP data and it works.
 
 #### Why Rust?
-Rust provides the memory safety and performance required for high-throughput ingestion while maintaining a tiny resource footprint. A full Parqtel instance typically uses < 100MB of RAM at idle.
+Rust provides the memory safety and performance required for high-throughput ingestion while maintaining a tiny resource footprint. A full Parqtel instance starts in tens of megabytes; resident memory then follows the ingest rate, the number of active series and the buffered point count — see [sizing](../operations/performance-sizing.md).
 
 ### Storage
 
@@ -31,12 +31,19 @@ No. Parqtel is a **push-based** backend. We recommend using the **OpenTelemetry 
 Yes — resource attributes like `service.name` are stored in dedicated Parquet columns and injected back as labels, so PromQL matchers like `http_requests_total{service.name="api"}` work for both freshly-buffered and flushed data.
 
 #### What happens if the server crashes?
-If WAL (Write-Ahead Log) is enabled (`ingest.wal_enabled` — off by default for metrics, on for logs via `ingest.log_wal_enabled`), Parqtel will recover any data that wasn't yet written to a Parquet block upon restart.
+Both write-ahead logs are on by default (`ingest.wal_enabled` for metrics,
+`ingest.log_wal_enabled` for logs), so Parqtel recovers any data that wasn't
+yet written to a Parquet block upon restart. Turning the metrics WAL off also
+disables the background flush worker and makes flushes synchronous.
 
 ### Performance
 
 #### How many metrics can a single instance handle?
-A single Parqtel instance sustains ~1,000 samples/sec (metrics + logs + traces) on modest hardware — see [the performance notes](../performance/README.md) for the sustained 15-minute numbers (ingest p99 63ms, zero errors). Scaling is primarily limited by Disk I/O.
+Measured end to end on 8 cores with a 2.4 M-point dataset: **1.85 M metric
+points/s** (p99 16.8 ms), **1.59 M log records/s** (p99 10.8 ms) and 1.66 M
+spans/s. The method and the raw outputs are in
+[the performance notes](../performance/README.md). Scaling is primarily limited
+by disk I/O and by how many blocks a query has to touch.
 
 #### How does high cardinality affect performance?
 Unlike traditional TSDBs, Parqtel handles high cardinality (e.g., `user_id`, `container_id`) exceptionally well because of its columnar format. Adding more labels increases the file size slightly but does not "explode" memory usage in the same way it does in Prometheus.
