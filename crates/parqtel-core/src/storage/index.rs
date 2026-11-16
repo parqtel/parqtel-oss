@@ -47,7 +47,15 @@ impl BlockIndex {
     /// Serialises the index payload. Pure CPU, no filesystem access, so it is
     /// safe to call while holding a lock — though a *read* lock is preferred.
     pub fn serialize(&self) -> Result<String> {
-        serde_json::to_string(&self.blocks).map_err(Error::Serde)
+        self.serialize_with_capacity(0)
+    }
+
+    /// As [`Self::serialize`], into a buffer pre-sized to `capacity` bytes, so
+    /// a large index is not reallocated (and briefly held twice) while it grows.
+    pub fn serialize_with_capacity(&self, capacity: usize) -> Result<String> {
+        let mut buf = Vec::with_capacity(capacity);
+        serde_json::to_writer(&mut buf, &self.blocks).map_err(Error::Serde)?;
+        String::from_utf8(buf).map_err(|e| Error::Internal(e.to_string()))
     }
 
     /// Restores a previously serialised payload, dropping the in-memory
@@ -526,9 +534,13 @@ pub struct BlockIndexStore {
     path: PathBuf,
     /// Set when the in-memory index has diverged from the sidecar.
     dirty: std::sync::atomic::AtomicBool,
-    /// Payload captured by the last completed pass, so a no-op pass costs
-    /// nothing and shutdown can tell whether a final write is needed.
-    last_payload: std::sync::Mutex<Option<String>>,
+    /// Whether any pass has completed. Only a flag: keeping the last payload
+    /// itself held a full copy of the sidecar (611 MB on uat-oman) for the
+    /// process lifetime and OOM-killed the pod.
+    persisted: std::sync::atomic::AtomicBool,
+    /// Byte length of the last payload, used to pre-size the next serialisation
+    /// so building it does not reallocate up to twice its final size.
+    last_len: std::sync::atomic::AtomicUsize,
 }
 
 impl BlockIndexStore {
@@ -545,7 +557,8 @@ impl BlockIndexStore {
         Self {
             path,
             dirty: std::sync::atomic::AtomicBool::new(false),
-            last_payload: std::sync::Mutex::new(None),
+            persisted: std::sync::atomic::AtomicBool::new(false),
+            last_len: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -576,20 +589,25 @@ impl BlockIndexStore {
         self.dirty.swap(false, std::sync::atomic::Ordering::AcqRel)
     }
 
-    /// Records a successfully written payload and clears any dirtiness that
-    /// happened while it was in flight.
-    pub fn complete(&self, payload: String) {
-        if let Ok(mut slot) = self.last_payload.lock() {
-            *slot = Some(payload);
-        }
+    /// Records that a payload of `payload_len` bytes was written. Dirtiness set
+    /// while it was in flight is left alone, so another pass follows.
+    pub fn complete(&self, payload_len: usize) {
+        self.last_len
+            .store(payload_len, std::sync::atomic::Ordering::Relaxed);
+        self.persisted
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Capacity to reserve for the next payload: the last size plus headroom
+    /// for blocks added since.
+    pub fn payload_capacity_hint(&self) -> usize {
+        let last = self.last_len.load(std::sync::atomic::Ordering::Relaxed);
+        last.saturating_add(last / 8)
     }
 
     /// Whether the sidecar has ever been written by this store.
     pub fn has_persisted(&self) -> bool {
-        self.last_payload
-            .lock()
-            .map(|s| s.is_some())
-            .unwrap_or(false)
+        self.persisted.load(std::sync::atomic::Ordering::Acquire)
     }
 
     /// Writes `payload` to the sidecar atomically (tmp file + rename).

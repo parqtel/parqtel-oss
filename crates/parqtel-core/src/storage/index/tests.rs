@@ -150,8 +150,34 @@ fn store_dirty_flag_lifecycle() {
         "begin() must take the flag so a pass is not repeated"
     );
 
-    store.complete("[]".to_string());
+    store.complete(2);
     assert!(store.has_persisted());
+    assert_eq!(store.payload_capacity_hint(), 2);
+}
+
+/// Serialising into a buffer sized from the last payload must not reallocate,
+/// and must produce exactly the same bytes. Growing a 611 MB string by doubling
+/// briefly held ~2x its size and pushed uat-oman over its 4 GiB limit.
+#[test]
+fn presized_serialization_matches_and_does_not_grow() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut idx = BlockIndex::new(dir.path());
+    for i in 0..50 {
+        idx.add(meta(
+            dir.path().join(format!("{i}.parquet")),
+            i,
+            i + 1,
+            SignalType::Metrics,
+        ));
+    }
+    let store = BlockIndexStore::new(&idx);
+    let plain = idx.serialize().unwrap();
+    store.complete(plain.len());
+
+    let hint = store.payload_capacity_hint();
+    let presized = idx.serialize_with_capacity(hint).unwrap();
+    assert_eq!(presized, plain);
+    assert_eq!(presized.capacity(), hint, "buffer must not have grown");
 }
 
 /// A mutation that lands *while* a payload is in flight must not be lost:
@@ -166,7 +192,7 @@ fn mutation_during_inflight_pass_is_not_lost() {
     assert!(store.begin());
     // Simulates a flush arriving between begin() and complete().
     store.mark_dirty();
-    store.complete("[]".to_string());
+    store.complete(2);
     assert!(
         store.is_dirty(),
         "a change made during the pass must schedule another one"
