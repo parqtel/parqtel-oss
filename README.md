@@ -121,41 +121,30 @@ What changed, and what was measured rather than assumed, is in [docs/performance
 
 **The telemetry flow** — OTLP in, Parquet down, three query surfaces up:
 
-```
-                          ┌─────────────────────────────────┐
-                          │      OpenTelemetry SDKs          │
-                          │   metrics · logs · traces       │
-                          └───────┬─────────────────┬───────┘
-                     OTLP gRPC :4317   OTLP HTTP /v1/*
-                          └───────┴────────┬────────┘
-                                            ▼
-        ┌───────────────────────────────────────────────────────────────┐
-        │                      parqtel (single binary)                   │
-        │                                                                │
-        │  INGEST          QUERY                 ANALYZE                 │
-        │  ───────         ─────                 ───────                 │
-        │  OTLP decode     ParQL (PromQL)        Alert engine            │
-        │  Span-metrics    ├ instant + range      ├ rules + eval         │
-        │    RED bridge    ├ binary ops/on()      ├ webhook routes       │
-        │  Tail sampling   ParqtelQL search       ├ silences             │
-        │  Memory buffer   ├ logs + traces        └ MCP servers          │
-        │  (all signals)   └ predicate pushdown     (Slack·PagerDuty·     │
-        │                  PQL Pipelines            Jira·Notion·…)       │
-        │                  fetch│filter│parse│                          │
-        │                  stats│correlate          ── signals:          │
-        │                                          metrics·logs·        │
-        │  ── shared engine ──────────────────      traces·alerts        │
-        │  BlockIndex · Scanner · label-value index · compaction         │
-        └───────────────────────────┬───────────────────────────────────┘
-                                    ▼
-                    ┌───────────────────────────────┐
-                    │   Compressed Parquet blocks    │
-                    │   zstd · open format · query   │
-                    │   with DuckDB/Spark/Athena     │
-                    └───────────────────────────────┘
+```mermaid
+flowchart TB
+    SDK["OpenTelemetry SDKs<br/>metrics · logs · traces"]
+    COLL["Collector / agent<br/>OTLP fan-out"]
+    SCRAPE["Prometheus<br/>remote write"]
+    PARQ["parqtel — single binary"]
+    CORE["Shared engine<br/>MemoryBuffer · BlockIndex · Scanner"]
+    STORE["Compressed Parquet blocks<br/>zstd · series table · log index"]
+    GRAF["Prometheus API · Grafana"]
+    UI["/ui console"]
 
-         SERVED:  Prometheus API · Grafana · /ui console · HTTP+gRPC
+    SDK -->|"OTLP/gRPC :4317"| PARQ
+    COLL -->|"OTLP/HTTP /v1/*"| PARQ
+    SCRAPE -->|"Prometheus API"| PARQ
+    PARQ --> CORE
+    CORE --> STORE
+    STORE --> GRAF
+    STORE --> UI
+    PARQ --> UI
 ```
+
+The same flow with the full component set (ingest handlers, query engine, alert
+engine, pipelines) is drawn in the
+[architecture doc](docs/development/architecture.md).
 
 **Deep dive:** [Architecture](docs/development/architecture.md) • [PQL Guide](docs/guides/pql-guide.md)
 
