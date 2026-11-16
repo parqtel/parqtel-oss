@@ -77,21 +77,31 @@ Parqtel is a Rust workspace organized into focused crates that communicate throu
 
 ## Crate Dependency Graph
 
-```
-parqtel-server
-├── parqtel-core
-├── parqtel-ingest
-│   └── parqtel-core
-├── parqtel-query
-│   └── parqtel-core
-├── parqtel-alert
-│   └── parqtel-core
-└── parqtel-pipeline
-    └── parqtel-core
+The workspace lives under `crates/`, one directory per concern. Every signal
+crate depends only on `parqtel-core`; the MCP servers depend only on
+`parqtel-mcp-core`.
 
-parqtel-mcp-{slack,pagerduty,jira,notion,discord,gdocs,parqtel}
-└── parqtel-mcp-core
 ```
+crates/
+├── parqtel-core/        data models, storage engine, block index, scanner,
+│                        compaction, WAL, config           (no workspace deps)
+├── parqtel-ingest/      OTLP decoding, block rotation, crash-safe Parquet writes
+├── parqtel-query/       PromQL / LogQL execution, label matching, aggregation
+├── parqtel-alert/       alert rules, evaluation, state machine, preset packs
+├── parqtel-pipeline/    recording rules, stream processing, expression evaluation
+├── parqtel-server/      Axum HTTP + gRPC server, handlers, embedded web console
+│                        (the `parqtel` binary)
+├── parqtel-mcp-core/    shared MCP framework (JSON-RPC, rate limiting, tool registry)
+└── parqtel-mcp-*/       MCP tool servers (slack, pagerduty, jira, notion,
+                         discord, gdocs, parqtel)
+
+parqtel-server ──► parqtel-{ingest,query,alert,pipeline,core}
+parqtel-{ingest,query,alert,pipeline} ──► parqtel-core
+parqtel-mcp-* ──► parqtel-mcp-core
+```
+
+See [Diagrams](diagrams.md#2-crate-dependency-graph) for the same graph as a
+diagram.
 
 ## Module Map
 
@@ -101,8 +111,9 @@ Large modules are directories with a `mod.rs` that documents the split and re-ex
 |-------|--------|----------|
 | `parqtel-core` | `storage/scanner/` | Block scans: block reading, predicate and series pruning, metrics, logs and traces scans |
 | | `storage/index.rs`, `series_index.rs`, `log_index.rs` | Block index, per-block series table, log skip index |
-| | `storage/` | Block file writer, compactor, retention, index persistence |
+| | `storage/` | Block file writer, compactor, **stream compactor (L0 → L1)**, retention, index persistence |
 | | `wal.rs` | Write-ahead log |
+| | `buffer.rs` | In-memory buffer for immediately queryable rows |
 | `parqtel-ingest` | `service/` | Block rotation and flush ordering (`rotator`, `flush`, `serial`) and the per-signal ingestion services |
 | | `decode/` | OTLP protobuf and JSON decoding |
 | `parqtel-query` | `parser.rs`, `ast.rs` | PromQL-compatible parser and AST |
@@ -124,7 +135,7 @@ Large modules are directories with a `mod.rs` that documents the split and re-ex
 4. **Rotate** → `IngestionService` accumulates data points in memory via `BlockRotator`
 4a. **Span-metrics RED bridge** → trace ingestion derives `traces_service_{requests,errors,duration_ms}_total` metrics from `SPAN_KIND_SERVER` spans (grouped by service/operation) and feeds them back through the metrics path — services get out-of-the-box RED metrics without hand-written rules. Trace decode merges resource attributes (service.name, k8s.*) into span attributes, span attrs winning on conflict.
 4b. **Tail sampling** → after RED derivation (which sees the full span set, keeping metric rates accurate), traces are evaluated per trace against the `ingest.tail_sampling` policy: `keep_errors` (ERROR-status spans), `slow_trace_ms` (server spans above threshold), then a deterministic trace_id-hash probabilistic `sampling_ratio` (trace-coherent — whole traces live or die together). Per-service overrides replace the global policy. Dropped spans count in `dropped_spans` stats; default policy keeps everything at zero cost.
-5. **Flush** → When block duration expires or row limit is reached, `BlockWriter` serializes to Parquet with configured compression. Blocking work (encode/compress/IO) runs on `spawn_blocking`; the rotator swaps out its writer so ingest continues during flushes. Metrics flush across writer shards (all shards are held for the swap so the WAL position the block commits is exact); logs and traces share one `SerialRotator` that frames a request's WAL records before taking its lock, writes them with one `write`, and encodes each block on a detached task with one flush in flight.
+5. **Flush** → When block duration expires or row limit is reached, `BlockWriter` serializes to Parquet with configured compression. Blocking work (encode/compress/IO) runs on `spawn_blocking`; the rotator swaps out its writer so ingest continues during flushes. Metrics flush across writer shards (all shards are held for the swap so the WAL position the block commits is exact); the flush sorts series by the final query-visible labels (`service.name` merged) so the block's series table agrees with its row order, and names the file `m_l0_…`. Logs and traces share one `SerialRotator` that frames a request's WAL records before taking its lock, writes them with one `write`, and encodes each block on a detached task with one flush in flight.
 5a. **Buffer lifetime** → rows stay in the `MemoryBuffer` until the block holding them is durable, then exactly those rows are removed: metrics by writer epoch, logs and spans by count. Rows that arrived during the encode stay queryable.
 6. **Index** → `BlockMetadata` is sent via `mpsc::unbounded_channel` to the index task, which updates the in-memory `BlockIndex`
 7. **Background** → A periodic flush task (5s interval) calls `check_and_flush()` on all three services
@@ -153,6 +164,12 @@ A query resolves in three stages, each with its own pruning mechanism:
    columns (`timestamp_ns` and the three value columns); labels come from the
    table. Legacy blocks with a row-level `labels` column use a 7-column fallback.
 
+**Bounding the fan-out.** The first stage decides how many blocks a query has
+to open at all. Coalescing metric blocks into 5-minute L1 windows (see
+[Compaction](#compaction)) keeps that number bounded on a busy store, and the
+process-wide 4-slot scan budget stops concurrent queries from turning the
+block count into a memory spike.
+
 Label matchers are pushed into the block scan: a predicate over the series' label set runs once per distinct series per block. New metric blocks store labels only in the series table; legacy blocks retain their row-level labels column. Rows of series that cannot match are never turned into points. Parsed Parquet footers (and series tables) are cached per immutable block file, within a byte budget. Log search first asks the block's skip index (`parqtel.log_index` in the footer: per 4 096-row granule, time bounds, highest severity and a bloom filter over body three-byte windows and `name=value` attribute pairs) which granules can hold a match, and reads only those. It then rejects rows from the timestamp, severity and body columns alone before decoding the other columns. The prefilter is derived only from the query's AND conjuncts; unless it is the whole predicate (`exact`), the full predicate still judges every row that passes. When it is the whole predicate, matches are counted from three columns and the remaining columns are decoded only for the rows returned. Unflushed log rows are filtered inside the memory buffer, so only matches are copied out.
 
 Evaluation is then handed to the blocking pool. Series labels are shared behind
@@ -173,8 +190,8 @@ memory is one step's vector rather than every step's.
 
 Parqtel ships **three query surfaces** over one storage engine (see [PQL_GUIDE.md](../guides/pql-guide.md)):
 
-1. **ParQL (PromQL-compatible, metrics)** — a Pratt parser builds an expression AST (selectors, calls, aggregations with `by/without`, binary ops with `on()/ignoring()/group_left`, subqueries, `offset`). The evaluator runs **per step** over pre-loaded series data: instant selectors use the 5-minute lookback (`query.lookback_delta_ns`); range functions (`rate/increase/irate/delta`, the `_over_time` family, `predict_linear`, `double_exponential_smoothing`) evaluate windows `[t-range, t+step)` with per-segment counter-reset accumulation. Simple single-function shapes keep the legacy plan path (`needs_ast` dispatch); an 88→98-case **conformance corpus** (`crates/parqtel-query/src/conformance.rs`) gates semantic changes.
-2. **ParqtelQL (logs/traces)** — a lenient boolean grammar (terms, phrases, wildcards, `-exclusion`, `OR/AND/NOT`, field ops `=/!=/=~/>=/</:`, ranges `a-b`, `field:*` exists, `body:` contains, severity thresholds). Trace predicates are **pushed down into the scan** (before result caps). Log queries scan blocks + buffer and apply clauses post-scan; `label_values` merges flush-time dictionaries from block metadata (index first, scan only pre-index blocks).
+1. **ParQL (PromQL-compatible, metrics)** — a Pratt parser builds an expression AST (selectors, calls, aggregations with `by/without`, binary ops with `on()/ignoring()/group_left`, subqueries, `offset`). The evaluator runs **per step** over pre-loaded series data: instant selectors use the 5-minute lookback (`query.lookback_delta_ns`); range functions (`rate/increase/irate/delta`, the `_over_time` family, `predict_linear`, `double_exponential_smoothing`) evaluate windows `[t-range, t+step)` with per-segment counter-reset accumulation. Simple single-function shapes keep the legacy plan path (`needs_ast` dispatch); a 132-case **conformance corpus** (`crates/parqtel-query/src/conformance.rs`) gates semantic changes.
+2. **ParqtelQL (logs/traces)** — a lenient boolean grammar (terms, phrases, wildcards, `-exclusion`, `OR/AND/NOT`, field ops `=/!=/=~/>=/</:`, ranges `a-b`, `field:*` exists, `body:` contains, severity thresholds). Trace predicates are **pushed down into the scan** (before result caps). Log queries scan blocks + buffer and apply clauses post-scan; `label_values` reads the index's shared label-value dictionary first and only scans the blocks it has never seen a value for.
 3. **PQL Pipelines (`POST /v1/search`)** — `fetch logs|metrics|traces | filter <pql> | parse "<re>" as f | stats count/avg/min/max/sum/p50/p95/p99 by … interval=… | limit | correlate traces|logs window=…`. Rows are a unified field map; correlate joins by `trace_id` with service+window fallback.
 
 **Scan layer (shared)**: `Scanner` reads Parquet on the blocking pool (pre-acquired semaphore), applies time/metric pruning via row-group statistics, merges the dedicated `service_name` column back as `service.name`. In-memory buffer results merge with block results (drained on flush — no double-counting). Trace scans cap at 256 blocks; filtered scans raise the span cap 200→10,000.
@@ -210,9 +227,18 @@ Parqtel stores data in time-bounded blocks. Each block is a self-contained Parqu
 
 Trace blocks live in `data/traces/` with their own index sidecar, reusing the metrics `BlockConfig`.
 
+Metric blocks are named by level, which makes their provenance readable from
+the filesystem alone:
+
+| Prefix | Meaning |
+|--------|---------|
+| `m_l0_` | An ingest flush. Series-sorted by the final query-visible labels. |
+| `m_n_` | A legacy block normalised into the same order (one per pass, ≤500 K rows). |
+| `m_l1_` | A coalesced 5-minute window produced by the streaming compactor. |
+
 ### Parquet Schemas
 
-Schemas are defined canonically in `crates/parqtel-core/src/models/storage/schema.rs` and written with the `arrow`/`parquet` 59 stack (WriterProperties: PARQUET_2_0, configured codec).
+Schemas are defined canonically in `crates/parqtel-core/src/models/storage/schema.rs` and written with the `arrow`/`parquet` 60 stack (WriterProperties: PARQUET_2_0, configured codec).
 
 **Metrics** (14 block columns): `timestamp_ns` (Timestamp ns), `metric_name` (Dictionary<Int32, Utf8>), `metric_kind` (Utf8), dedicated correlation columns `service_name`, `service_version`, `k8s_namespace`, `k8s_pod_name`, `k8s_pod_uid`, `k8s_container_name`, `k8s_node_name` (all Dictionary, nullable), `resource_attributes` (Dictionary, JSON), and value columns `value_float` (F64), `value_int` (I64), `value_complex` (Utf8, JSON for histograms/summaries). The per-row `labels` column remains readable in legacy blocks but is omitted from new indexed blocks.
 
@@ -241,16 +267,50 @@ The `BlockIndex` is an in-memory structure that tracks all blocks per signal:
 - **Persistence**: Serialized to `index.json` (JSON sidecar, atomic tmp+rename) in each signal's data directory — one index for metrics, one for logs, one for traces
 - **Queries**: Supports time-range filtering and metric-name filtering
 - **Statistics**: Tracks total blocks, rows, bytes, metric names, and label names
-- **Label-value dictionaries**: flush-time per-field distinct-value sets (capped 10K values/field) live in `BlockMetadata`; `label_values` endpoints merge these instead of decoding blocks (~3000× faster). Compaction merges the dictionaries into the compacted block's metadata.
+- **Label-value dictionaries**: one shared dictionary per signal, capped at 10 K values per field, lives beside the blocks in the sidecar — `{"blocks": [...], "label_values": {...}}`. `label_values` endpoints and the console's autocomplete read it instead of decoding blocks (~3000× faster). The loader still accepts the legacy bare-array sidecar and folds its per-block values in, so existing sidecars migrate on the first start. Values do not expire with retention (they are bounded by the cap); older binaries cannot parse the new sidecar shape.
+- **Write path**: a mutation marks the index dirty and hands persistence to the index task, which serialises the sidecar at most every `server.index_persist_interval_secs` (2 s). The serialisation buffer is pre-sized from the last payload length, and no payload copy is retained in memory — an earlier version kept a clone alive for the process lifetime and pinned the sidecar's size permanently.
 
 ### Compaction
 
-The `Compactor` runs on a configurable interval (default: 1 hour):
+One background loop drives compaction. It runs every
+`storage.compaction_interval_secs` (default: **5 minutes**, so a closed window
+rolls up promptly rather than waiting an hour), and each cycle runs three
+passes:
 
-1. Identifies small adjacent blocks with overlapping time ranges
-2. Reads all data points from candidate blocks
-3. Writes a single merged Parquet file
-4. Atomically updates the index and removes old files
+1. **Small log blocks** — adjacent log blocks under 10 000 rows are merged into
+   one file. Bounded by `storage.compaction_max_merge_blocks` (default 12).
+2. **Metric levels** — the bounded streaming L0 → L1 pass described below.
+3. **Tiered log compaction** — log blocks older than 6 hours under 500 000 rows
+   are merged within a 6-hour window. Bounded by
+   `storage.compaction_max_merges_per_pass` (default 8) so one cycle cannot
+   monopolise the disk.
+
+Metrics do **not** use the classic small-block merge: they use the leveled
+streaming path, so the row layout stays series-ordered.
+
+**`stream_compactor` — the leveled path that produces the 5-minute L1
+blocks:**
+
+1. **Validate first.** A group is only merged when every source's WAL range is
+   at or below the metrics WAL commit point — those records can no longer be
+   replayed. Mixed or non-contiguous ranges are skipped, so the merge never
+   races the WAL.
+2. **Streaming merge.** A k-way merge reads one Arrow batch (8 192 rows) at a
+   time from each source, coalesces series by their final query-visible labels,
+   and writes a single output block. Memory does not grow with block size.
+3. **Provenance.** The output footer records its source files under
+   `parqtel.compacted_sources`. After a crash, reconcile drops the superseded
+   sources; the sources are deleted only after a 5-minute grace period, so a
+   query already running against them still finds them.
+4. **Bounds.** One pass merges at most 8 sources, coalesces at most 2 groups,
+   normalises at most 1 legacy block, and moves at most 16 M rows. It reserves
+   2 of the 4 process-wide scan slots and skips the pass when they are not
+   free.
+
+`parqtel compact` runs the same bounded metrics pass offline, for operators who
+want the rollup done without waiting for the background task.
+
+See [Diagrams](diagrams.md#6-block-lifecycle) for the level transitions.
 
 ### Retention
 
@@ -334,6 +394,20 @@ The console is a single embedded file (`crates/parqtel-server/src/ui.html`), ser
   becomes **durable**, never when a flush is merely scheduled. Draining early
   would leave rows in neither the buffer nor any block, and they would be
   invisible to every query until the encode landed.
+- **Scan admission**: one process-wide budget of 4 slots gates every block scan.
+  A query waits for a slot; low-priority work (alert evaluation, the compaction
+  pass) reserves a slot without waiting and skips its cycle when none is free,
+  so background work can never starve interactive queries. Concurrent footer or
+  series-index misses for the same block share a single load. The budget and
+  its counters are exported at `/metrics` as `parqtel_scan_slots_in_use`,
+  `parqtel_scan_slots_limit`, `parqtel_scan_low_priority_skips_total` and
+  `parqtel_scan_admission_wait_seconds_total`.
+- **Allocator**: the server links `tikv-jemallocator` as the global allocator on
+  non-MSVC targets. glibc kept freed memory resident after a large block encode
+  and the label churn around it; jemalloc returned it, halving idle RSS
+  (1.5–1.8 GiB → 0.9–1.0 GiB at 578 K series). It is statically linked, so the
+  runtime image's library set is unchanged.
+
 
 ## Error Handling
 
@@ -370,8 +444,18 @@ Each MCP server:
 | `panic` | `"abort"` | No unwinding overhead |
 | `opt-level` | `3` | Maximum runtime performance |
 
-The Docker image uses a multi-stage build: Rust builder → minimal glibc rootfs assembled in a `runtime-libs` stage → `FROM scratch` runtime (~15 MB final image). Requires Rust 1.87+ (`ARG RUST_VERSION=1.87`).
+The Docker image uses a multi-stage build: Rust builder → minimal glibc rootfs assembled in a `runtime-libs` stage → `FROM scratch` runtime (~15 MB final image). Requires Rust 1.88+ (`ARG RUST_VERSION=1.88`).
 
 ## Data Compatibility
 
-The arrow2→arrow 59 migration (RUSTSEC-2025-0038) changed the on-disk encoding: **Parquet blocks written by arrow2-era builds are unreadable by the current reader**. When upgrading across that boundary, wipe the data directory (or accept that old blocks will be skipped with scan warnings).
+Three on-disk shapes changed recently. Each has a different upgrade rule.
+
+| Change | Effect | Upgrade rule |
+|--------|--------|--------------|
+| arrow2 → arrow 60 (RUSTSEC-2025-0038) | The Parquet encoding changed. **Blocks written by arrow2-era builds are unreadable by the current reader.** | Wipe the data directory, or accept that old blocks are skipped with scan warnings |
+| Label-less indexed blocks | New metric blocks store labels only in the footer series table; the row-level `labels` column is gone. Legacy blocks are still read. | Forward-compatible; **rollback is not** — an older binary cannot read a label-less block |
+| Shared label-value dictionary in the sidecar | `index.json` is now `{"blocks": [...], "label_values": {...}}`. The loader still accepts the legacy bare-array sidecar. | Forward-compatible and migrates on first start; **rollback is not** — an older binary cannot parse the new shape |
+
+**Rolling back.** Roll back only after the superseded L0 sources have been
+removed. Until then the old binary would find blocks it cannot read.
+
