@@ -124,6 +124,7 @@ def check_links(files: list[str]) -> list[str]:
     anchors = {path: headings(path) for path in files}
     problems = []
     link_re = re.compile(r"\[[^\]]*\]\(([^)\s]+)\)")
+    img_re = re.compile(r'<img\s+[^>]*src="([^"]+)"')
     for path in files:
         base = os.path.dirname(path)
         text = open(path, encoding="utf-8").read()
@@ -143,6 +144,13 @@ def check_links(files: list[str]) -> list[str]:
                 target = path
             if fragment and fragment not in anchors.get(target, set()):
                 problems.append(f"{os.path.relpath(path, ROOT)}: missing anchor {link}")
+        # Images the docs embed (the animated diagrams live here).
+        for match in img_re.finditer(text):
+            src = match.group(1)
+            if src.startswith(("http", "mailto:", "data:")):
+                continue
+            if not os.path.exists(os.path.normpath(os.path.join(base, src.split("#")[0]))):
+                problems.append(f"{os.path.relpath(path, ROOT)}: missing image {src}")
     return problems
 
 
