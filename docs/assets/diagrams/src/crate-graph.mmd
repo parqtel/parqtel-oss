@@ -5,32 +5,22 @@ flowchart TD
     ALR["parqtel-alert"]
     PIPE["parqtel-pipeline"]
     CORE["parqtel-core<br/>models · storage · engine · config · wal"]
-    MCPC["parqtel-mcp-core<br/>JSON-RPC · rate limit · tool registry"]
+
+    TOOLS["7 MCP tool servers<br/>slack · pagerduty · jira · notion<br/>discord · gdocs · parqtel"]
+    MCPC["parqtel-mcp-core<br/>JSON-RPC · rate limiting · tool registry"]
 
     SRV --> ING
     SRV --> QRY
     SRV --> ALR
     SRV --> PIPE
+    SRV --> CORE
     ING --> CORE
     QRY --> CORE
     ALR --> CORE
     PIPE --> CORE
-    SRV --> CORE
 
-    subgraph mcp["MCP tool servers"]
-        S1["mcp-slack"]
-        S2["mcp-pagerduty"]
-        S3["mcp-jira"]
-        S4["mcp-notion"]
-        S5["mcp-discord"]
-        S6["mcp-gdocs"]
-        S7["mcp-parqtel"]
-    end
+    TOOLS --> MCPC
 
-    S1 --> MCPC
-    S2 --> MCPC
-    S3 --> MCPC
-    S4 --> MCPC
-    S5 --> MCPC
-    S6 --> MCPC
-    S7 --> MCPC
+    classDef core fill:#ccfbf1,stroke:#0f766e,stroke-width:2px
+    class CORE,MCPC core
+    linkStyle default stroke:#64748b
