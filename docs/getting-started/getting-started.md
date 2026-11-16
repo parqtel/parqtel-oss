@@ -12,7 +12,7 @@ docker run -d \
   -p 8080:8080 \
   -p 4317:4317 \
   -v parqtel_data:/var/lib/parqtel \
-  ghcr.io/parqtel/parqtel-oss:latest
+  ghcr.io/parqtel/parqtel-oss:0.3.1
 ```
 
 Or install the compiled release binary via Homebrew (Linux & macOS; no Rust toolchain needed):
@@ -30,7 +30,7 @@ curl http://localhost:8080/health
 
 ## 2. Your First Metric
 
-Parqtel speaks the OpenTelemetry (OTLP) protocol over both **gRPC** (`:4317` — the OTel SDK default, no collector needed) and **HTTP** (protobuf or JSON). The examples below use `curl` against the HTTP JSON endpoints for quick testing; point your OTel SDK exporter at `http://localhost:8080` (gRPC) or `http://localhost:8080/v1/{metrics,logs,traces}` to send production traffic.
+Parqtel speaks the OpenTelemetry (OTLP) protocol over both **gRPC** (`:4317` — the OTel SDK default, no collector needed) and **HTTP** (protobuf or JSON). The examples below use `curl` against the HTTP JSON endpoints for quick testing; point your OTel SDK exporter at `http://localhost:4317` (gRPC) or `http://localhost:8080/v1/{metrics,logs,traces}` to send production traffic.
 
 > **Note on OTLP JSON format**: `attributes` must be arrays of `{key, value}` objects (as shown below), not plain objects. This follows the OTLP JSON protobuf mapping.
 

@@ -13,7 +13,60 @@ Thank you for your interest in contributing to Parqtel! We welcome contributions
 - **Features**: Use the [Feature Request](.github/ISSUE_TEMPLATE/feature_request.md) template to propose new ideas.
 - **Security**: Please report security vulnerabilities privately according to our [Security Policy](SECURITY.md).
 
-## 3. Pull Request Process
+## 3. Building and Running from Source
+
+Prerequisites: Rust **1.88** (MSRV) and `protoc` for the OTLP schema
+(`make build`/`make test` auto-fetch a pinned `protoc` into `.tools/`, or install
+`protobuf-compiler` from your package manager).
+
+```bash
+git clone https://github.com/parqtel/parqtel-oss.git
+cd parqtel-oss
+cargo build --release
+
+./target/release/parqtel serve                          # http://localhost:8080/ui
+./target/release/parqtel --config <file.toml> serve     # with an explicit config
+```
+
+To build the container image locally instead of pulling a release:
+
+```bash
+docker build -t parqtel:local .
+docker run -p 8080:8080 -p 4317:4317 -v parqtel_data:/var/lib/parqtel parqtel:local
+```
+
+For the full local stack with Grafana, Prometheus and a load generator, use
+`make dev-setup` — that publishes Parqtel on `9090`, not `8080`.
+
+### Common `make` targets
+
+```bash
+make help          # list every target
+make dev-setup     # first-time local stack: copies .env, starts Compose
+make build         # debug build (auto-fetches protoc into .tools/)
+make release       # optimised build (LTO, stripped)
+make test          # cargo test --workspace
+make lint          # rustfmt check + clippy -D warnings
+make run           # start the server from source
+make docker        # build the production image and report its size
+make local-up      # start the Compose stack and wait until healthy
+make local-rebuild # rebuild images and restart (required after source changes)
+make load          # send synthetic data to localhost:9090
+make perf-audit    # release build + full performance audit
+make docs-check    # validate links, anchors, quoted paths, OpenAPI coverage
+```
+
+Run `make` with no target for the annotated list.
+
+### Project conventions
+
+- **No unsafe code** — `#[forbid(unsafe_code)]` workspace-wide.
+- **No panics** — `unwrap`, `expect` and `panic` are denied by clippy.
+- **Errors** — `thiserror` in libraries, `anyhow` at the binary boundary.
+- **Async** — Tokio; blocking Parquet work runs on `spawn_blocking`.
+- **Release profile** — LTO, single codegen unit, symbols stripped, abort on panic.
+
+## 4. Pull Request Process
 1. **Fork and Clone**: Create your own fork and clone it locally.
 2. **Branch**: Create a feature branch (`git checkout -b feat/my-awesome-feature`).
 3. **Prerequisites**: Rust **1.88** (MSRV — the workspace `Cargo.toml`, `Dockerfile`, and `ci.yml` move together) and `protoc` for the OTLP schema (`make build`/`make test` auto-fetch it, or `sudo apt-get install protobuf-compiler`).
@@ -56,14 +109,14 @@ Every PR is reviewed by at least one maintainer. Changes to storage, the write-a
 log, ingest durability, configuration schema, CI or packaging have explicit owners
 in [.github/CODEOWNERS](.github/CODEOWNERS).
 
-## 4. Code Review Criteria
+## 5. Code Review Criteria
 Every PR will be reviewed by at least one maintainer. We look for:
 - **Correctness**: Does the code solve the problem?
 - **Performance**: Does it introduce unnecessary overhead?
 - **Tests**: Are there unit/integration tests for the new logic?
 - **Documentation**: Are new features or configuration flags documented?
 
-## 5. Community
+## 6. Community
 
 - **Discussion**: [GitHub Discussions](https://github.com/parqtel/parqtel-oss/discussions) is where questions and proposals live.
 - **Support**: see [SUPPORT.md](SUPPORT.md). Parqtel is maintained by volunteers; there is no guaranteed response time.

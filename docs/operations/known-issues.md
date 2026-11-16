@@ -24,7 +24,7 @@ size, no byte accounting and no eviction, so the only bound is time.
   count (default 1 048 576). Below that, every point keeps its own copy of its
   labels and memory grows with points instead of series.
 - Watch `parqtel_process_rss_bytes` and alert on it.
-- Size the container from the formula in [PERFORMANCE_SIZING.md](performance-sizing.md)
+- Size the container from the formula in [performance-sizing.md](performance-sizing.md)
   rather than from a default.
 
 The allocator is jemalloc, which returns freed memory to the OS instead of
