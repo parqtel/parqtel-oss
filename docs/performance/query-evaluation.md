@@ -30,8 +30,10 @@ the user types (`/api/v1/label/<name>/values?limit=10&match=<prefix>`).
 - The flush-time per-field index is capped at 10K values per label at write
   time (`MAX_VALUES_PER_FIELD`), so even cold (buffer-drained) lookups are
   bounded; the API clamps `limit` to 100.
-- Unit tests: `crates/parqtel-core/src/buffer.rs` (`recent_label_values_*`) and
-  `crates/parqtel-query/src/executor/` (`test_recent_label_values_*`) cover
+- Unit tests: `parqtel-core/src/buffer.rs` (`recent_label_values_*`) and
+  `parqtel-query/src/executor/` (`test_recent_label_values_*`) cover
+  bounded-count, newest-first ordering, prefix filtering, and graceful
+  degradation when blocks lack the index.
   bounded-count, newest-first ordering, prefix filtering, and graceful
   degradation when blocks lack the index.
 - Live validation: `make test-builder` (99 query-shape checks) and
@@ -64,7 +66,7 @@ needed at all (`(?i)` wildcard regexes already match the raw body).
 The old `log_matches` / `log_matches_predicate` / `span_matches` /
 `row_matches_pred` entry points remain as thin wrappers that prepare and match
 in one call, so embedders and existing tests are unaffected; the row loops in
-`executor.rs` prepare once.
+`parqtel-query/src/executor/` prepares once.
 
 ### Result
 

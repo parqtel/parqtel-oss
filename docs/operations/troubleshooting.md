@@ -172,7 +172,7 @@ of series.
   `service.name` for the memory buffer.
 
 ### Stale Docker image
-If the compose stack behaves oddly after a source change (panics referencing `arrow2`, missing endpoints), the image is stale. Run `make local-rebuild` — `make local-up` alone reuses the previously built image.
+If the compose stack behaves oddly after a source change (panics referencing the pre-arrow-60 reader, missing endpoints), the image is stale. Run `make local-rebuild` — `make local-up` alone reuses the previously built image.
 
 ## 5. Self-Observability
 
