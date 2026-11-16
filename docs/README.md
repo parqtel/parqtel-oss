@@ -43,6 +43,8 @@ Documentation for Parqtel, an open-source SRE telemetry store.
 | [Testing](development/testing.md) | Test strategy and how to run each layer |
 | [Test plan](development/test-plan.md) | End-to-end scenarios |
 | [CI/CD](development/ci-cd.md) | Pipelines, gates, release process |
+| [Efficiency plan](development/efficiency-plan.md) | Measured engine performance and optimisation backlog |
+| [Memory backlog](development/memory-backlog.md) | Measured query and ingest memory findings |
 | [Glossary](development/glossary.md) | Terminology |
 | [Efficiency plan](development/efficiency-plan.md) | The measured plan behind the scan budget and the L1 rollup |
 | [Memory backlog](development/memory-backlog.md) | Open memory items and what each one costs |
@@ -54,6 +56,9 @@ Documentation for Parqtel, an open-source SRE telemetry store.
 | [HTTP API](api/openapi.yaml) | OpenAPI 3 description, also served at `/oas` |
 | [HTTP API reference](reference/api.md) | Every endpoint, verified against the router |
 | [Performance](performance/README.md) | Measured results and how each was obtained |
+| [Durability](performance/durability.md) | WAL, flush ordering, crash recovery |
+| [Hot path](performance/hot-path.md) | Measured hot-path optimisations |
+| [Compaction](performance/compaction.md) | Compaction behaviour and tuning |
 
 ## Scope
 
