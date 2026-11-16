@@ -112,6 +112,10 @@ components:
         status:
           type: string
           example: error
+        errorType:
+          type: string
+          description: Machine-readable error class.
+          example: bad_data
         error:
           type: string
           example: "Validation error: Missing resource_metrics"
@@ -268,6 +272,44 @@ components:
           items:
             $ref: "#/components/schemas/KeyValue"
 
+    LogEntry:
+      type: object
+      description: A log record as returned by the log query endpoints.
+      properties:
+        timestamp_ns:
+          type: integer
+          format: int64
+        observed_timestamp_ns:
+          type: integer
+          format: int64
+        severity_number:
+          type: integer
+        severity_text:
+          type: string
+        body:
+          type: string
+        attributes:
+          type: object
+          additionalProperties:
+            type: string
+        resource_attributes:
+          type: object
+          additionalProperties:
+            type: string
+        trace_id:
+          type: string
+          description: Hex-encoded trace id (empty when the record has none).
+        span_id:
+          type: string
+          description: Hex-encoded span id (empty when the record has none).
+        flags:
+          type: integer
+          format: int64
+        scope_name:
+          type: string
+        scope_version:
+          type: string
+
     PrometheusQueryResult:
       type: object
       properties:
@@ -275,17 +317,29 @@ components:
           type: string
           enum: [success, error]
         data:
-          type: object
-          properties:
-            resultType:
-              type: string
-              enum: [vector, matrix]
-            result:
-              type: array
-              items:
-                $ref: "#/components/schemas/TimeSeries"
-            totalSeriesCount:
-              type: integer
+          $ref: "#/components/schemas/PrometheusData"
+
+    PrometheusData:
+      type: object
+      description: >
+        Prometheus-style query payload. `resultType` and `result` follow the
+        Prometheus HTTP API; `totalSeriesCount` and `volumeSummary` are
+        Parqtel extensions.
+      properties:
+        resultType:
+          type: string
+          enum: [vector, matrix]
+        result:
+          type: array
+          items:
+            $ref: "#/components/schemas/TimeSeries"
+        totalSeriesCount:
+          type: integer
+        volumeSummary:
+          type: array
+          description: Bucketed ingestion volume for the query range (60 buckets).
+          items:
+            type: integer
 
     TimeSeries:
       type: object
@@ -294,6 +348,17 @@ components:
           type: object
           additionalProperties:
             type: string
+        value:
+          type: array
+          description: >
+            Single sample `[timestamp, "value"]`. Present for instant queries
+            (resultType=vector); omitted for range queries.
+          items:
+            type: array
+            items:
+              oneOf:
+                - type: number
+                - type: string
         values:
           type: array
           items:
@@ -336,6 +401,17 @@ components:
           type: number
           default: 0.7
           description: Unacknowledged firings that resolved, derived from the alert transition history (0..1).
+        source:
+          type: object
+          description: >
+            Where the rule came from. Serialised as a tagged object with a
+            `type` discriminator: `static`, `ai_derived` or `learned_anomaly`.
+            The tagged variants carry their own extra fields and are omitted
+            entirely when the rule has no source.
+          properties:
+            type:
+              type: string
+              enum: [static, ai_derived, learned_anomaly]
 
     AlertCondition:
       type: object
@@ -362,6 +438,10 @@ components:
           type: string
         rule_name:
           type: string
+        fingerprint:
+          type: integer
+          format: int64
+          description: Stable fingerprint of rule_id + sorted labels.
         state:
           type: string
           enum: [pending, firing, acknowledged, resolved, suppressed, noise_flagged]
@@ -369,7 +449,13 @@ components:
           type: string
         value:
           type: number
+          nullable: true
+          description: Evaluated value that triggered the alert; null when not evaluable.
         labels:
+          type: object
+          additionalProperties:
+            type: string
+        annotations:
           type: object
           additionalProperties:
             type: string
@@ -379,6 +465,39 @@ components:
         updated_at:
           type: string
           format: date-time
+        resolved_at:
+          type: string
+          format: date-time
+          nullable: true
+        acknowledged_by:
+          type: string
+          nullable: true
+        noise_score:
+          type: number
+          format: float
+          description: Noise score assigned by the noise-suppression scorer.
+        transition_log:
+          type: array
+          items:
+            $ref: "#/components/schemas/StateTransition"
+        notification_sent:
+          type: boolean
+        source_rule_type:
+          type: string
+          enum: [static, ai_derived, learned_anomaly]
+
+    StateTransition:
+      type: object
+      properties:
+        from:
+          type: string
+        to:
+          type: string
+        at:
+          type: string
+          format: date-time
+        reason:
+          type: string
 
     RecordingRuleGroup:
       type: object
@@ -403,6 +522,8 @@ components:
                 type: object
                 additionalProperties:
                   type: string
+              description:
+                type: string
 
     PipelineDefinition:
       type: object
@@ -417,18 +538,137 @@ components:
           properties:
             signal:
               type: string
+            conditions:
+              type: array
+              items:
+                $ref: "#/components/schemas/StageCondition"
         stages:
           type: array
           items:
             type: object
-            required: [type, name]
+            required: [type]
             properties:
               type:
                 type: string
+                enum: [preprocessor, processor, metric_extract, masker, router]
               name:
                 type: string
-              config:
+              processor:
+                type: string
+              source_field:
+                type: string
+              pattern:
+                type: string
+              target_fields:
                 type: object
+                additionalProperties:
+                  type: string
+              on_parse_failure:
+                type: string
+              fields:
+                type: object
+                additionalProperties: true
+              conditions:
+                type: array
+                items:
+                  $ref: "#/components/schemas/StageCondition"
+              metric_name:
+                type: string
+              metric_type:
+                type: string
+              value_field:
+                type: string
+
+    StageCondition:
+      type: object
+      required: [field, op]
+      properties:
+        field:
+          type: string
+        op:
+          type: string
+        value:
+          nullable: true
+
+    SavedSearch:
+      type: object
+      required: [name, signal, query]
+      properties:
+        id:
+          type: string
+          description: Server-assigned ULID.
+        name:
+          type: string
+        signal:
+          type: string
+          enum: [metrics, logs, traces]
+        query:
+          type: string
+        range_minutes:
+          type: integer
+          format: int64
+          default: 0
+        created_at:
+          type: integer
+          format: int64
+          description: Unix seconds when the search was created.
+
+    AlertRoute:
+      type: object
+      required: [name, webhook_url]
+      properties:
+        name:
+          type: string
+        match_severity:
+          type: string
+          default: info
+        match_labels:
+          type: object
+          additionalProperties:
+            type: string
+        webhook_url:
+          type: string
+        repeat_minutes:
+          type: integer
+          format: int64
+          default: 60
+
+    AlertSilence:
+      type: object
+      required: [name, starts_at, ends_at]
+      properties:
+        name:
+          type: string
+        created_by:
+          type: string
+        match_labels:
+          type: object
+          additionalProperties:
+            type: string
+        starts_at:
+          type: integer
+          format: int64
+          description: Unix seconds when the silence starts.
+        ends_at:
+          type: integer
+          format: int64
+          description: Unix seconds when the silence ends.
+
+    PipelineSearchRequest:
+      type: object
+      required: [query, start, end]
+      properties:
+        query:
+          type: string
+          description: >
+            ParqtelQL pipeline, e.g.
+            `fetch logs | filter level:ERROR | stats count() by service`.
+        start:
+          type: number
+          description: Start timestamp (Unix seconds).
+        end:
+          type: number
+          description: End timestamp (Unix seconds).
 
     SavedSearch:
       type: object
@@ -684,6 +924,238 @@ paths:
               schema:
                 type: string
 
+  /:
+    get:
+      tags: [Health]
+      summary: Redirect to the embedded console
+      operationId: rootRedirect
+      responses:
+        "302":
+          description: Redirect to /ui
+          headers:
+            Location:
+              description: Target of the redirect.
+              schema:
+                type: string
+                example: /ui
+
+  /ui:
+    get:
+      tags: [Health]
+      summary: Embedded web console
+      description: >
+        Serves the single-file embedded console (gzipped HTML) with ETag
+        caching. Answers 304 when the client's If-None-Match matches.
+      operationId: getUi
+      responses:
+        "200":
+          description: The embedded console
+          content:
+            text/html:
+              schema:
+                type: string
+        "304":
+          description: Not modified (If-None-Match matched)
+
+  /oas:
+    get:
+      tags: [Health]
+      summary: OpenAPI document for this server
+      operationId: getOpenApiSpec
+      responses:
+        "200":
+          description: This OpenAPI document
+          content:
+            text/yaml:
+              schema:
+                type: string
+
+  /debug/pprof/profile:
+    get:
+      tags: [Health]
+      summary: CPU profile (pprof protobuf)
+      description: >
+        Captures a CPU profile over the requested window and returns it in the
+        Google pprof protobuf format, consumable by `go tool pprof`. Returns
+        404 when profiling is disabled, 429 when a capture is already
+        running.
+      operationId: pprofProfile
+      parameters:
+        - name: seconds
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 30
+            minimum: 1
+            maximum: 120
+          description: Capture window in seconds (clamped to 1..120).
+      responses:
+        "200":
+          description: pprof protobuf profile
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        "404":
+          description: Profiling is disabled (`telemetry.profiling_enabled = false`)
+          content:
+            text/plain:
+              schema:
+                type: string
+        "429":
+          description: A CPU capture is already running
+          content:
+            text/plain:
+              schema:
+                type: string
+        "500":
+          description: Profiler failed to start or encode the report
+          content:
+            text/plain:
+              schema:
+                type: string
+
+  /debug/pprof/summary:
+    get:
+      tags: [Health]
+      summary: Top CPU consumers (JSON)
+      description: >
+        Captures a CPU profile over the requested window and returns the top
+        CPU consumers as JSON. Returns 404 when profiling is disabled, 429
+        when a capture is already running.
+      operationId: pprofSummary
+      parameters:
+        - name: seconds
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 30
+            minimum: 1
+            maximum: 120
+          description: Capture window in seconds (clamped to 1..120).
+        - name: top
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 25
+            minimum: 1
+            maximum: 500
+          description: Number of functions reported.
+      responses:
+        "200":
+          description: CPU summary
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  window_secs:
+                    type: integer
+                  sampling_frequency_hz:
+                    type: integer
+                  threads_sampled:
+                    type: integer
+                  total_samples:
+                    type: integer
+                  sampled_cpu_seconds:
+                    type: number
+                  top_self_percent:
+                    type: number
+                  functions:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        function:
+                          type: string
+                        self_samples:
+                          type: integer
+                        cumulative_samples:
+                          type: integer
+                        self_cpu_seconds:
+                          type: number
+                        self_percent:
+                          type: number
+        "404":
+          description: Profiling is disabled (`telemetry.profiling_enabled = false`)
+          content:
+            text/plain:
+              schema:
+                type: string
+        "429":
+          description: A CPU capture is already running
+          content:
+            text/plain:
+              schema:
+                type: string
+        "500":
+          description: Profiler failed to start or build the report
+          content:
+            text/plain:
+              schema:
+                type: string
+
+  /debug/pprof/memory:
+    get:
+      tags: [Health]
+      summary: Memory-bottleneck snapshot (JSON)
+      description: >
+        Reports the process RSS high-water mark and the live in-memory buffer
+        occupancy. Always available — unlike the CPU endpoints it does not
+        consult `telemetry.profiling_enabled` and never takes a capture lock.
+      operationId: pprofMemory
+      responses:
+        "200":
+          description: Memory snapshot
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  rss_bytes:
+                    type: integer
+                    format: int64
+                    nullable: true
+                  rss_hwm_bytes:
+                    type: integer
+                    format: int64
+                    nullable: true
+                  buffer:
+                    type: object
+                    properties:
+                      metrics_points:
+                        type: integer
+                      log_records:
+                        type: integer
+                      spans:
+                        type: integer
+                      total:
+                        type: integer
+                  note:
+                    type: string
+        "404":
+          description: Profiling is disabled (`telemetry.profiling_enabled = false`)
+          content:
+            text/plain:
+              schema:
+                type: string
+        "429":
+          description: A CPU capture is already running
+          content:
+            text/plain:
+              schema:
+                type: string
+        "500":
+          description: Memory snapshot could not be produced
+          content:
+            text/plain:
+              schema:
+                type: string
+
   /api/v1/stats:
     get:
       tags: [Health]
@@ -732,6 +1204,51 @@ paths:
                       config:
                         type: object
                         description: Effective config (data dirs, retention, block duration, compression, limits).
+                        properties:
+                          storage:
+                            type: object
+                            properties:
+                              data_dir:
+                                type: string
+                              block_duration_secs:
+                                type: integer
+                              max_rows_per_block:
+                                type: integer
+                              compression:
+                                type: string
+                              retention_days:
+                                type: integer
+                          logs:
+                            type: object
+                            properties:
+                              data_dir:
+                                type: string
+                              block_duration_secs:
+                                type: integer
+                              max_rows_per_block:
+                                type: integer
+                              compression:
+                                type: string
+                              retention_days:
+                                type: integer
+                          ingest:
+                            type: object
+                            properties:
+                              max_body_size:
+                                type: integer
+                                format: int64
+                              tail_sampling:
+                                type: object
+                                additionalProperties: true
+                          query:
+                            type: object
+                            properties:
+                              max_series:
+                                type: integer
+                              max_samples_per_series:
+                                type: integer
+                              timeout_secs:
+                                type: integer
 
   /api/v1/ingest_rates:
     get:
@@ -809,6 +1326,18 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
+        "413":
+          description: Payload too large (exceeds `ingest.max_body_size`)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "415":
+          description: Unsupported content encoding (only gzip is accepted)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
 
   /v1/metrics/json:
     post:
@@ -830,6 +1359,18 @@ paths:
                 $ref: "#/components/schemas/IngestResponse"
         "400":
           description: Invalid payload
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "413":
+          description: Payload too large (exceeds `ingest.max_body_size`)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "415":
+          description: Unsupported content encoding (only gzip is accepted)
           content:
             application/json:
               schema:
@@ -860,6 +1401,18 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
+        "413":
+          description: Payload too large (exceeds `ingest.max_body_size`)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "415":
+          description: Unsupported content encoding (only gzip is accepted)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
 
   /v1/logs/json:
     post:
@@ -881,6 +1434,18 @@ paths:
                 $ref: "#/components/schemas/IngestResponse"
         "400":
           description: Invalid payload
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "413":
+          description: Payload too large (exceeds `ingest.max_body_size`)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "415":
+          description: Unsupported content encoding (only gzip is accepted)
           content:
             application/json:
               schema:
@@ -911,6 +1476,18 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
+        "413":
+          description: Payload too large (exceeds `ingest.max_body_size`)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "415":
+          description: Unsupported content encoding (only gzip is accepted)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
 
   /v1/traces/json:
     post:
@@ -932,6 +1509,18 @@ paths:
                 $ref: "#/components/schemas/IngestResponse"
         "400":
           description: Invalid payload
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "413":
+          description: Payload too large (exceeds `ingest.max_body_size`)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "415":
+          description: Unsupported content encoding (only gzip is accepted)
           content:
             application/json:
               schema:
@@ -1072,6 +1661,21 @@ paths:
           schema:
             type: string
           description: Label name
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+          description: >
+            Cap the number of values returned. When set, the server switches
+            to the recency-bounded path (in-memory buffer first, then the
+            newest blocks' flush-time label-value index).
+        - name: match
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Prefix filter applied server-side to the returned values.
       responses:
         "200":
           description: Label values
@@ -1086,6 +1690,12 @@ paths:
                     type: array
                     items:
                       type: string
+        "400":
+          description: Invalid parameters
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
 
   /api/v1/logs:
     get:
@@ -1115,7 +1725,8 @@ paths:
           in: query
           schema:
             type: integer
-            default: 100
+            default: 1000
+            maximum: 10000
         - name: order
           in: query
           schema:
@@ -1148,22 +1759,26 @@ paths:
                       logs:
                         type: array
                         items:
-                          type: object
-                          properties:
-                            timestamp_ns:
-                              type: integer
-                            severity_text:
-                              type: string
-                            body:
-                              type: string
-                            service_name:
-                              type: string
-                            attributes:
-                              type: object
+                          $ref: "#/components/schemas/LogEntry"
                       total_matched:
                         type: integer
                       truncated:
                         type: boolean
+                      volume_summary:
+                        type: array
+                        description: Bucketed ingestion volume for the query range (60 buckets).
+                        items:
+                          type: integer
+                      language:
+                        type: string
+                        description: Query language that served the request.
+                        example: parqtelql
+        "400":
+          description: Invalid parameters
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
 
   /v1/logs/count:
     get:
@@ -1207,6 +1822,12 @@ paths:
                           type: integer
                         count:
                           type: integer
+        "400":
+          description: Invalid parameters
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
 
   /v1/logs/fields:
     get:
@@ -1241,11 +1862,21 @@ paths:
       summary: List values for a log field
       operationId: listLogFieldValues
       parameters:
-        - name: field
+        - name: field_name
           in: query
-          required: true
+          required: false
           schema:
             type: string
+          description: >
+            Field name to enumerate values for. When omitted the server
+            enumerates the empty field, which yields no values.
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 50
+          description: Maximum number of values returned.
       responses:
         "200":
           description: Field values
@@ -1260,11 +1891,278 @@ paths:
                     type: array
                     items:
                       type: string
+        "400":
+          description: Invalid parameters
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /v1/search:
+    post:
+      tags: [Query]
+      summary: Execute a ParqtelQL pipeline
+      description: >
+        Runs a ParqtelQL pipeline (for example
+        `fetch logs | filter level:ERROR | stats count() by service`) over the
+        given time range.
+      operationId: runPipelineSearch
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PipelineSearchRequest"
+      responses:
+        "200":
+          description: Pipeline result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                  data:
+                    type: object
+                    properties:
+                      type:
+                        type: string
+                        enum: [rows, table]
+                      rows:
+                        type: array
+                        items:
+                          type: object
+                          additionalProperties: true
+                      columns:
+                        type: array
+                        items:
+                          type: string
+                      timeseries:
+                        type: object
+                        properties:
+                          timestamps:
+                            type: array
+                            items:
+                              type: integer
+                          series:
+                            type: array
+                            items:
+                              type: object
+        "400":
+          description: Invalid pipeline expression
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/v1/saved_searches:
+    get:
+      tags: [Query]
+      summary: List saved searches
+      operationId: listSavedSearches
+      responses:
+        "200":
+          description: Saved searches
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/SavedSearch"
+    post:
+      tags: [Query]
+      summary: Create a saved search
+      operationId: createSavedSearch
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SavedSearch"
+      responses:
+        "200":
+          description: Saved search created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                  data:
+                    $ref: "#/components/schemas/SavedSearch"
+        "400":
+          description: Invalid saved search
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/v1/saved_searches/{id}:
+    delete:
+      tags: [Query]
+      summary: Delete a saved search
+      operationId: deleteSavedSearch
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Saved search id (ULID).
+      responses:
+        "200":
+          description: Saved search deleted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiResponse"
+        "404":
+          description: Saved search not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/v1/alerts/routes:
+    get:
+      tags: [Alerts]
+      summary: List notification routes
+      operationId: listAlertRoutes
+      responses:
+        "200":
+          description: Notification routes
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/AlertRoute"
+    post:
+      tags: [Alerts]
+      summary: Replace the notification routing table
+      description: >
+        Replaces the whole routing table with the supplied routes and applies
+        it to the running router.
+      operationId: setAlertRoutes
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              items:
+                $ref: "#/components/schemas/AlertRoute"
+      responses:
+        "200":
+          description: Routing table replaced
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiResponse"
+        "400":
+          description: Invalid routing table
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "422":
+          description: Unprocessable routing table
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/v1/alerts/silences:
+    get:
+      tags: [Alerts]
+      summary: List active silences
+      operationId: listAlertSilences
+      responses:
+        "200":
+          description: Active silences
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/AlertSilence"
+    post:
+      tags: [Alerts]
+      summary: Create or replace a silence
+      operationId: createAlertSilence
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AlertSilence"
+      responses:
+        "200":
+          description: Silence created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiResponse"
+        "400":
+          description: Invalid silence (missing name, or ends_at not after starts_at)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "422":
+          description: Unprocessable silence
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/v1/alerts/silences/{name}:
+    delete:
+      tags: [Alerts]
+      summary: Delete a silence by name
+      operationId: deleteAlertSilence
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Silence name.
+      responses:
+        "200":
+          description: Silence deleted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiResponse"
+        "404":
+          description: Silence not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
 
   /api/v1/alerts:
     get:
       tags: [Alerts]
-      summary: List all alert instances
+      summary: List active alert instances (pending, firing, acknowledged)
       operationId: listAlerts
       responses:
         "200":
@@ -1304,8 +2202,18 @@ paths:
                     type: string
                   data:
                     $ref: "#/components/schemas/AlertInstance"
+        "400":
+          description: Invalid alert id
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
         "404":
           description: Alert not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
 
   /api/v1/alerts/{id}/acknowledge:
     post:
@@ -1318,6 +2226,17 @@ paths:
           required: true
           schema:
             type: string
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                by:
+                  type: string
+                  default: anonymous
+                  description: Who acknowledged the alert.
       responses:
         "200":
           description: Alert acknowledged
@@ -1325,6 +2244,24 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ApiResponse"
+        "400":
+          description: Invalid alert id
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Alert not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: Invalid state transition for the current alert state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
 
   /api/v1/alerts/{id}/resolve:
     post:
@@ -1344,6 +2281,24 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ApiResponse"
+        "400":
+          description: Invalid alert id
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Alert not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: Invalid state transition for the current alert state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
 
   /api/v1/alerts/routes:
     get:
@@ -1941,9 +2896,21 @@ paths:
       requestBody:
         required: true
         content:
-          application/json:
+          text/yaml:
             schema:
-              $ref: "#/components/schemas/AlertRule"
+              type: string
+              description: A single alert rule in YAML form.
+              example: |
+                id: http-error-rate-high
+                name: HTTP Error Rate High
+                signal: metrics
+                query: 'http_requests_total{status=~"5.."}'
+                condition:
+                  type: threshold
+                  operator: ">"
+                  value: 0.05
+                  for_duration_secs: 300
+                severity: warning
       responses:
         "201":
           description: Rule created
@@ -1956,6 +2923,12 @@ paths:
                     type: string
                   data:
                     $ref: "#/components/schemas/AlertRule"
+        "400":
+          description: Invalid YAML or rule definition
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
 
   /api/v1/rules/status:
     get:
@@ -2003,18 +2976,23 @@ paths:
       tags: [Alerts]
       summary: Update alert rule
       operationId: updateRule
+      description: >
+        The path `id` is ignored by the handler — the effective rule id comes
+        from the `id` field of the YAML request body.
       parameters:
         - name: id
           in: path
           required: true
           schema:
             type: string
+          description: Ignored; the rule id is taken from the request body.
       requestBody:
         required: true
         content:
-          application/json:
+          text/yaml:
             schema:
-              $ref: "#/components/schemas/AlertRule"
+              type: string
+              description: A single alert rule in YAML form.
       responses:
         "200":
           description: Rule updated
@@ -2027,6 +3005,18 @@ paths:
                     type: string
                   data:
                     $ref: "#/components/schemas/AlertRule"
+        "400":
+          description: Invalid YAML or rule definition
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Rule not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
     delete:
       tags: [Alerts]
       summary: Delete (disable) alert rule
@@ -2043,7 +3033,22 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/ApiResponse"
+                type: object
+                properties:
+                  status:
+                    type: string
+                  data:
+                    type: object
+                    properties:
+                      disabled:
+                        type: boolean
+                        example: true
+        "404":
+          description: Rule not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
 
   /api/v1/recording_rules:
     get:
@@ -2086,6 +3091,12 @@ paths:
                     type: string
                   data:
                     $ref: "#/components/schemas/RecordingRuleGroup"
+        "422":
+          description: Invalid recording rule group
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
 
   /api/v1/recording_rules/{name}:
     delete:
@@ -2147,6 +3158,12 @@ paths:
                     type: string
                   data:
                     $ref: "#/components/schemas/PipelineDefinition"
+        "422":
+          description: Invalid pipeline definition
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
 
   /api/v1/pipelines/{name}:
     delete:
@@ -2221,9 +3238,9 @@ paths:
                     to:
                       type: string
                       format: date-time
-                intervalMs:
+                interval_ms:
                   type: integer
-                maxDataPoints:
+                max_data_points:
                   type: integer
       responses:
         "200":
@@ -2239,10 +3256,17 @@ paths:
                       type: string
                     datapoints:
                       type: array
+                      description: >
+                        Samples as `[value, timestamp_ms]` pairs — the value
+                        first, the timestamp in milliseconds.
                       items:
                         type: array
+                        minItems: 2
+                        maxItems: 2
                         items:
-                          type: number
+                          oneOf:
+                            - type: number
+                            - type: integer
 
   /annotations:
     post:
@@ -2345,8 +3369,14 @@ paths:
           schema:
             type: integer
             format: int64
-            default: 300000000000
-          description: Correlation window in nanoseconds (default 5min)
+            default: 5000000000
+          description: Correlation window in nanoseconds (default 5s)
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 50
+          description: Maximum number of correlated events returned.
       responses:
         "200":
           description: Correlated events
@@ -2359,6 +3389,18 @@ paths:
                     type: string
                   data:
                     type: object
+        "400":
+          description: Invalid parameters
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Correlation failed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
 
   /v1/traces/search:
     get:
@@ -2366,22 +3408,16 @@ paths:
       summary: Search traces
       operationId: searchTraces
       parameters:
-        - name: service
+        - name: trace_id
           in: query
           schema:
             type: string
-        - name: operation
+          description: Restrict the search to a single trace id.
+        - name: q
           in: query
           schema:
             type: string
-        - name: min_duration_ms
-          in: query
-          schema:
-            type: integer
-        - name: max_duration_ms
-          in: query
-          schema:
-            type: integer
+          description: ParqtelQL span predicate, pushed down into the scan.
         - name: start
           in: query
           schema:
@@ -2424,3 +3460,18 @@ paths:
                         description: Matches found by the bounded scan pass.
                       truncated:
                         type: boolean
+                      limit:
+                        type: integer
+                        description: Effective result cap applied to the scan.
+        "400":
+          description: Invalid parameters
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Trace search failed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
