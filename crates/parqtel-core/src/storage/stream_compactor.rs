@@ -1113,6 +1113,355 @@ fn completed_bucket(timestamp_ns: i64, window_ns: i64, now_ns: i64) -> Option<i6
     (end <= now_ns).then_some(start)
 }
 
+fn candidate_groups(
+    index: &BlockIndex,
+    now_ns: i64,
+    window_ns: i64,
+    target_level: u8,
+    fan_in: usize,
+    skipped: &BTreeSet<i64>,
+) -> Vec<(i64, Vec<BlockMetadata>)> {
+    let mut by_bucket: BTreeMap<i64, Vec<BlockMetadata>> = BTreeMap::new();
+    for block in &index.blocks {
+        if block.signal_type != SignalType::Metrics
+            || !is_normalized_metric_path(&block.path)
+            || metric_compaction_level(&block.path) > target_level
+            || block.end_timestamp_ns > now_ns
+        {
+            continue;
+        }
+        let Some(bucket) = completed_bucket(block.start_timestamp_ns, window_ns, now_ns) else {
+            continue;
+        };
+        if !skipped.contains(&bucket) {
+            by_bucket.entry(bucket).or_default().push(block.clone());
+        }
+    }
+    by_bucket
+        .into_iter()
+        .filter_map(|(bucket, mut blocks)| {
+            if blocks.len() < 2 {
+                return None;
+            }
+            blocks.sort_by_key(|block| block.start_timestamp_ns);
+            blocks.truncate(fan_in);
+            Some((bucket, blocks))
+        })
+        .collect()
+}
+
+/// Runs a bounded L0-to-L1 metrics compaction pass.
+pub(crate) async fn compact_metrics_levels_once(
+    index: &Arc<RwLock<BlockIndex>>,
+    store: &BlockIndexStore,
+    config: &BlockConfig,
+) -> Result<usize> {
+    let has_metrics = index
+        .read()
+        .await
+        .blocks
+        .iter()
+        .any(|block| block.signal_type == SignalType::Metrics);
+    if !has_metrics {
+        return Ok(0);
+    }
+    let Some(_scan_slots) = Scanner::try_reserve_scan_slots(2) else {
+        tracing::debug!("metrics compaction deferred while scan budget is busy");
+        return Ok(0);
+    };
+    let now_ns = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
+    let fan_in = config
+        .compaction_max_merge_blocks
+        .clamp(2, MAX_MERGE_FAN_IN);
+    let normalization_limit = config
+        .compaction_max_merges_per_pass
+        .clamp(1, MAX_NORMALIZATIONS_PER_PASS);
+    let (normalized, mut rows_processed) = normalize_legacy_metrics_once(
+        index,
+        store,
+        config,
+        normalization_limit,
+        MAX_COMPACTION_ROWS_PER_PASS,
+    )
+    .await?;
+    let max_merges = config
+        .compaction_max_merges_per_pass
+        .clamp(1, MAX_LEVEL_MERGES_PER_PASS);
+    let mut completed = 0usize;
+
+    let mut skipped_buckets = BTreeSet::new();
+    let mut attempted_merges = 0usize;
+    while attempted_merges < max_merges {
+        let candidates = {
+            let idx = index.read().await;
+            candidate_groups(
+                &idx,
+                now_ns,
+                LEVEL_ONE_WINDOW_NS,
+                1,
+                fan_in,
+                &skipped_buckets,
+            )
+        };
+        let Some((bucket, blocks)) = candidates.into_iter().next() else {
+            break;
+        };
+        attempted_merges += 1;
+        let group_rows = blocks
+            .iter()
+            .try_fold(0u64, |sum, block| sum.checked_add(block.row_count as u64))
+            .ok_or_else(|| Error::Internal("compaction row count overflow".into()))?;
+        if rows_processed.saturating_add(group_rows) > MAX_COMPACTION_ROWS_PER_PASS {
+            skipped_buckets.insert(bucket);
+            continue;
+        }
+        let paths: Vec<_> = blocks.iter().map(|block| block.path.clone()).collect();
+        let config = config.clone();
+        let merged =
+            tokio::task::spawn_blocking(move || compact_metric_blocks(&blocks, &config, 1))
+                .await
+                .map_err(|e| Error::Internal(format!("metrics compaction task panicked: {e}")))?;
+        let new_meta = match merged {
+            Ok(meta) => meta,
+            Err(error) => {
+                tracing::warn!(
+                    target_level = 1,
+                    bucket_start_ns = bucket,
+                    error = %error,
+                    "metrics compaction group skipped"
+                );
+                skipped_buckets.insert(bucket);
+                continue;
+            }
+        };
+        {
+            let mut idx = index.write().await;
+            idx.replace(&paths, Some(new_meta.clone()));
+            store.mark_dirty();
+        }
+        completed += 1;
+        rows_processed += group_rows;
+        tracing::info!(
+            target_level = 1,
+            source_blocks = paths.len(),
+            rows = new_meta.row_count,
+            bytes = new_meta.size_bytes,
+            "metrics blocks compacted"
+        );
+    }
+
+    let data_dir = config.data_dir.clone();
+    tokio::task::spawn_blocking(move || prune_compacted_sources(&data_dir))
+        .await
+        .map_err(|e| Error::Internal(format!("compaction cleanup task panicked: {e}")))??;
+    Ok(normalized + completed)
+}
+
+async fn normalize_legacy_metrics_once(
+    index: &Arc<RwLock<BlockIndex>>,
+    store: &BlockIndexStore,
+    config: &BlockConfig,
+    max_blocks: usize,
+    row_budget: u64,
+) -> Result<(usize, u64)> {
+    let mut candidates = {
+        let idx = index.read().await;
+        idx.blocks
+            .iter()
+            .filter(|block| {
+                block.signal_type == SignalType::Metrics
+                    && !is_normalized_metric_path(&block.path)
+                    && block.row_count > 0
+                    && block.row_count <= MAX_NORMALIZE_ROWS
+            })
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    candidates.sort_by_key(|block| block.start_timestamp_ns);
+
+    let mut normalized = 0usize;
+    let mut rows_processed = 0u64;
+    for (attempted, source) in candidates.into_iter().enumerate() {
+        if attempted >= max_blocks
+            || rows_processed.saturating_add(source.row_count as u64) > row_budget
+        {
+            break;
+        }
+        rows_processed += source.row_count as u64;
+        let config = config.clone();
+        let source_for_rewrite = source.clone();
+        let rewritten = tokio::task::spawn_blocking(move || {
+            normalize_legacy_metric_block(&source_for_rewrite, &config)
+        })
+        .await
+        .map_err(|e| Error::Internal(format!("metric normalization task panicked: {e}")))?;
+        let rewritten = match rewritten {
+            Ok(meta) => meta,
+            Err(error) => {
+                tracing::warn!(
+                    path = ?source.path,
+                    rows = source.row_count,
+                    error = %error,
+                    "legacy metrics block normalization skipped"
+                );
+                continue;
+            }
+        };
+        {
+            let mut idx = index.write().await;
+            idx.replace(std::slice::from_ref(&source.path), Some(rewritten.clone()));
+            store.mark_dirty();
+        }
+        normalized += 1;
+        tracing::info!(
+            rows = source.row_count,
+            bytes = rewritten.size_bytes,
+            path = ?source.path,
+            "legacy metrics block normalized"
+        );
+    }
+    Ok((normalized, rows_processed))
+}
+
+fn normalize_legacy_metric_block(
+    source: &BlockMetadata,
+    config: &BlockConfig,
+) -> Result<BlockMetadata> {
+    if source.row_count > MAX_NORMALIZE_ROWS {
+        return Err(Error::Internal(format!(
+            "legacy block exceeds normalization bound of {MAX_NORMALIZE_ROWS} rows"
+        )));
+    }
+    // shortcut: buffers one <=500K-row legacy block; leave larger blocks untouched until normalization streams.
+    let points = read_normalization_points(source)?;
+    if points.len() != source.row_count {
+        return Err(Error::Internal(
+            "legacy metrics normalization row count mismatch".into(),
+        ));
+    }
+    let sources = collect_superseded_paths(std::slice::from_ref(source))?;
+    let mut catalog = LabelCatalog::default();
+    catalog.merge_metadata(source);
+    for (_, _, resource, point) in &points {
+        catalog.observe(resource);
+        catalog.observe(&point.labels);
+    }
+    super::Compactor::write_merged_with_provenance(
+        config,
+        SignalType::Metrics,
+        points,
+        Vec::new(),
+        Vec::new(),
+        catalog.values,
+        source.wal_range,
+        Some("m_n"),
+        &sources,
+    )
+}
+
+fn read_normalization_points(
+    source: &BlockMetadata,
+) -> Result<Vec<(String, MetricKind, LabelSet, DataPoint)>> {
+    let source_table = match SourceTable::load(source.clone()) {
+        Ok(table) => table,
+        Err(index_error) => {
+            let file = File::open(&source.path)?;
+            let builder = ParquetRecordBatchReaderBuilder::try_new(file)
+                .map_err(|e| Error::Parquet(e.to_string()))?;
+            if builder.schema().index_of("labels").is_err() {
+                return Err(index_error);
+            }
+            let (points, logs, spans) = super::Compactor::read_source_blocks(
+                std::slice::from_ref(source),
+                SignalType::Metrics,
+            )?;
+            if points.len() != source.row_count || !logs.is_empty() || !spans.is_empty() {
+                return Err(Error::Internal(
+                    "legacy metrics normalization row count mismatch".into(),
+                ));
+            }
+            return Ok(points);
+        }
+    };
+    let mut cursor = MetricDataCursor::new(&source_table)?;
+    let mut points = Vec::new();
+    for series_id in 0..source_table.table.series_count() {
+        let group_index = source_table
+            .group_for_series(series_id)
+            .ok_or_else(|| Error::Internal("normalization source group missing".into()))?;
+        let group = &source_table.groups[group_index].key;
+        let entry = source_table.table.series_entry(series_id)?;
+        cursor.begin_series(series_id)?;
+        for _ in 0..entry.rows {
+            let (timestamp_ns, value) = cursor.next_sample()?.ok_or_else(|| {
+                Error::Internal("normalization source ended before its series index".into())
+            })?;
+            points.push((
+                group.name.clone(),
+                group.kind,
+                group.resource.clone(),
+                DataPoint::new(timestamp_ns, value, entry.labels.clone())?,
+            ));
+        }
+        cursor.finish_series(series_id)?;
+    }
+    cursor.finish()?;
+    Ok(points)
+}
+
+fn prune_compacted_sources(data_dir: &Path) -> Result<usize> {
+    let now = std::time::SystemTime::now();
+    let mut deleted = 0usize;
+    for entry in fs::read_dir(data_dir)? {
+        let path = entry?.path();
+        if !is_levelled_metric_path(&path) {
+            continue;
+        }
+        let modified = match fs::metadata(&path).and_then(|metadata| metadata.modified()) {
+            Ok(modified) => modified,
+            Err(error) => {
+                tracing::debug!(path = ?path, error = %error, "cannot age compacted block");
+                continue;
+            }
+        };
+        if now.duration_since(modified).unwrap_or_default() < SOURCE_DELETE_GRACE {
+            continue;
+        }
+        for source in read_compacted_sources(&path)? {
+            match fs::remove_file(data_dir.join(source)) {
+                Ok(()) => deleted += 1,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    tracing::warn!(path = ?path, error = %error, "cannot remove superseded source block")
+                }
+            }
+        }
+    }
+    if deleted > 0 {
+        tracing::info!(
+            deleted_sources = deleted,
+            "removed superseded metrics blocks"
+        );
+    }
+    Ok(deleted)
+}
+
+fn is_levelled_metric_path(path: &Path) -> bool {
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    name.starts_with("m_n_") || matches!(metric_compaction_level(path), 1 | 2)
+}
+
+fn is_normalized_metric_path(path: &Path) -> bool {
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    name.starts_with("m_l0_") || is_levelled_metric_path(path)
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -1504,353 +1853,4 @@ mod tests {
         assert_eq!(stats.adopted, 1);
         assert_eq!(recovered.total_blocks(), 1);
     }
-}
-
-fn candidate_groups(
-    index: &BlockIndex,
-    now_ns: i64,
-    window_ns: i64,
-    target_level: u8,
-    fan_in: usize,
-    skipped: &BTreeSet<i64>,
-) -> Vec<(i64, Vec<BlockMetadata>)> {
-    let mut by_bucket: BTreeMap<i64, Vec<BlockMetadata>> = BTreeMap::new();
-    for block in &index.blocks {
-        if block.signal_type != SignalType::Metrics
-            || !is_normalized_metric_path(&block.path)
-            || metric_compaction_level(&block.path) > target_level
-            || block.end_timestamp_ns > now_ns
-        {
-            continue;
-        }
-        let Some(bucket) = completed_bucket(block.start_timestamp_ns, window_ns, now_ns) else {
-            continue;
-        };
-        if !skipped.contains(&bucket) {
-            by_bucket.entry(bucket).or_default().push(block.clone());
-        }
-    }
-    by_bucket
-        .into_iter()
-        .filter_map(|(bucket, mut blocks)| {
-            if blocks.len() < 2 {
-                return None;
-            }
-            blocks.sort_by_key(|block| block.start_timestamp_ns);
-            blocks.truncate(fan_in);
-            Some((bucket, blocks))
-        })
-        .collect()
-}
-
-/// Runs a bounded L0-to-L1 metrics compaction pass.
-pub(crate) async fn compact_metrics_levels_once(
-    index: &Arc<RwLock<BlockIndex>>,
-    store: &BlockIndexStore,
-    config: &BlockConfig,
-) -> Result<usize> {
-    let has_metrics = index
-        .read()
-        .await
-        .blocks
-        .iter()
-        .any(|block| block.signal_type == SignalType::Metrics);
-    if !has_metrics {
-        return Ok(0);
-    }
-    let Some(_scan_slots) = Scanner::try_reserve_scan_slots(2) else {
-        tracing::debug!("metrics compaction deferred while scan budget is busy");
-        return Ok(0);
-    };
-    let now_ns = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
-    let fan_in = config
-        .compaction_max_merge_blocks
-        .clamp(2, MAX_MERGE_FAN_IN);
-    let normalization_limit = config
-        .compaction_max_merges_per_pass
-        .clamp(1, MAX_NORMALIZATIONS_PER_PASS);
-    let (normalized, mut rows_processed) = normalize_legacy_metrics_once(
-        index,
-        store,
-        config,
-        normalization_limit,
-        MAX_COMPACTION_ROWS_PER_PASS,
-    )
-    .await?;
-    let max_merges = config
-        .compaction_max_merges_per_pass
-        .clamp(1, MAX_LEVEL_MERGES_PER_PASS);
-    let mut completed = 0usize;
-
-    let mut skipped_buckets = BTreeSet::new();
-    let mut attempted_merges = 0usize;
-    while attempted_merges < max_merges {
-        let candidates = {
-            let idx = index.read().await;
-            candidate_groups(
-                &idx,
-                now_ns,
-                LEVEL_ONE_WINDOW_NS,
-                1,
-                fan_in,
-                &skipped_buckets,
-            )
-        };
-        let Some((bucket, blocks)) = candidates.into_iter().next() else {
-            break;
-        };
-        attempted_merges += 1;
-        let group_rows = blocks
-            .iter()
-            .try_fold(0u64, |sum, block| sum.checked_add(block.row_count as u64))
-            .ok_or_else(|| Error::Internal("compaction row count overflow".into()))?;
-        if rows_processed.saturating_add(group_rows) > MAX_COMPACTION_ROWS_PER_PASS {
-            skipped_buckets.insert(bucket);
-            continue;
-        }
-        let paths: Vec<_> = blocks.iter().map(|block| block.path.clone()).collect();
-        let config = config.clone();
-        let merged =
-            tokio::task::spawn_blocking(move || compact_metric_blocks(&blocks, &config, 1))
-                .await
-                .map_err(|e| Error::Internal(format!("metrics compaction task panicked: {e}")))?;
-        let new_meta = match merged {
-            Ok(meta) => meta,
-            Err(error) => {
-                tracing::warn!(
-                    target_level = 1,
-                    bucket_start_ns = bucket,
-                    error = %error,
-                    "metrics compaction group skipped"
-                );
-                skipped_buckets.insert(bucket);
-                continue;
-            }
-        };
-        {
-            let mut idx = index.write().await;
-            idx.replace(&paths, Some(new_meta.clone()));
-            store.mark_dirty();
-        }
-        completed += 1;
-        rows_processed += group_rows;
-        tracing::info!(
-            target_level = 1,
-            source_blocks = paths.len(),
-            rows = new_meta.row_count,
-            bytes = new_meta.size_bytes,
-            "metrics blocks compacted"
-        );
-    }
-
-    let data_dir = config.data_dir.clone();
-    tokio::task::spawn_blocking(move || prune_compacted_sources(&data_dir))
-        .await
-        .map_err(|e| Error::Internal(format!("compaction cleanup task panicked: {e}")))??;
-    Ok(normalized + completed)
-}
-
-async fn normalize_legacy_metrics_once(
-    index: &Arc<RwLock<BlockIndex>>,
-    store: &BlockIndexStore,
-    config: &BlockConfig,
-    max_blocks: usize,
-    row_budget: u64,
-) -> Result<(usize, u64)> {
-    let mut candidates = {
-        let idx = index.read().await;
-        idx.blocks
-            .iter()
-            .filter(|block| {
-                block.signal_type == SignalType::Metrics
-                    && !is_normalized_metric_path(&block.path)
-                    && block.row_count > 0
-                    && block.row_count <= MAX_NORMALIZE_ROWS
-            })
-            .cloned()
-            .collect::<Vec<_>>()
-    };
-    candidates.sort_by_key(|block| block.start_timestamp_ns);
-
-    let mut normalized = 0usize;
-    let mut rows_processed = 0u64;
-    for (attempted, source) in candidates.into_iter().enumerate() {
-        if attempted >= max_blocks
-            || rows_processed.saturating_add(source.row_count as u64) > row_budget
-        {
-            break;
-        }
-        rows_processed += source.row_count as u64;
-        let config = config.clone();
-        let source_for_rewrite = source.clone();
-        let rewritten = tokio::task::spawn_blocking(move || {
-            normalize_legacy_metric_block(&source_for_rewrite, &config)
-        })
-        .await
-        .map_err(|e| Error::Internal(format!("metric normalization task panicked: {e}")))?;
-        let rewritten = match rewritten {
-            Ok(meta) => meta,
-            Err(error) => {
-                tracing::warn!(
-                    path = ?source.path,
-                    rows = source.row_count,
-                    error = %error,
-                    "legacy metrics block normalization skipped"
-                );
-                continue;
-            }
-        };
-        {
-            let mut idx = index.write().await;
-            idx.replace(std::slice::from_ref(&source.path), Some(rewritten.clone()));
-            store.mark_dirty();
-        }
-        normalized += 1;
-        tracing::info!(
-            rows = source.row_count,
-            bytes = rewritten.size_bytes,
-            path = ?source.path,
-            "legacy metrics block normalized"
-        );
-    }
-    Ok((normalized, rows_processed))
-}
-
-fn normalize_legacy_metric_block(
-    source: &BlockMetadata,
-    config: &BlockConfig,
-) -> Result<BlockMetadata> {
-    if source.row_count > MAX_NORMALIZE_ROWS {
-        return Err(Error::Internal(format!(
-            "legacy block exceeds normalization bound of {MAX_NORMALIZE_ROWS} rows"
-        )));
-    }
-    // shortcut: buffers one <=500K-row legacy block; leave larger blocks untouched until normalization streams.
-    let points = read_normalization_points(source)?;
-    if points.len() != source.row_count {
-        return Err(Error::Internal(
-            "legacy metrics normalization row count mismatch".into(),
-        ));
-    }
-    let sources = collect_superseded_paths(std::slice::from_ref(source))?;
-    let mut catalog = LabelCatalog::default();
-    catalog.merge_metadata(source);
-    for (_, _, resource, point) in &points {
-        catalog.observe(resource);
-        catalog.observe(&point.labels);
-    }
-    super::Compactor::write_merged_with_provenance(
-        config,
-        SignalType::Metrics,
-        points,
-        Vec::new(),
-        Vec::new(),
-        catalog.values,
-        source.wal_range,
-        Some("m_n"),
-        &sources,
-    )
-}
-
-fn read_normalization_points(
-    source: &BlockMetadata,
-) -> Result<Vec<(String, MetricKind, LabelSet, DataPoint)>> {
-    let source_table = match SourceTable::load(source.clone()) {
-        Ok(table) => table,
-        Err(index_error) => {
-            let file = File::open(&source.path)?;
-            let builder = ParquetRecordBatchReaderBuilder::try_new(file)
-                .map_err(|e| Error::Parquet(e.to_string()))?;
-            if builder.schema().index_of("labels").is_err() {
-                return Err(index_error);
-            }
-            let (points, logs, spans) = super::Compactor::read_source_blocks(
-                std::slice::from_ref(source),
-                SignalType::Metrics,
-            )?;
-            if points.len() != source.row_count || !logs.is_empty() || !spans.is_empty() {
-                return Err(Error::Internal(
-                    "legacy metrics normalization row count mismatch".into(),
-                ));
-            }
-            return Ok(points);
-        }
-    };
-    let mut cursor = MetricDataCursor::new(&source_table)?;
-    let mut points = Vec::new();
-    for series_id in 0..source_table.table.series_count() {
-        let group_index = source_table
-            .group_for_series(series_id)
-            .ok_or_else(|| Error::Internal("normalization source group missing".into()))?;
-        let group = &source_table.groups[group_index].key;
-        let entry = source_table.table.series_entry(series_id)?;
-        cursor.begin_series(series_id)?;
-        for _ in 0..entry.rows {
-            let (timestamp_ns, value) = cursor.next_sample()?.ok_or_else(|| {
-                Error::Internal("normalization source ended before its series index".into())
-            })?;
-            points.push((
-                group.name.clone(),
-                group.kind,
-                group.resource.clone(),
-                DataPoint::new(timestamp_ns, value, entry.labels.clone())?,
-            ));
-        }
-        cursor.finish_series(series_id)?;
-    }
-    cursor.finish()?;
-    Ok(points)
-}
-
-fn prune_compacted_sources(data_dir: &Path) -> Result<usize> {
-    let now = std::time::SystemTime::now();
-    let mut deleted = 0usize;
-    for entry in fs::read_dir(data_dir)? {
-        let path = entry?.path();
-        if !is_levelled_metric_path(&path) {
-            continue;
-        }
-        let modified = match fs::metadata(&path).and_then(|metadata| metadata.modified()) {
-            Ok(modified) => modified,
-            Err(error) => {
-                tracing::debug!(path = ?path, error = %error, "cannot age compacted block");
-                continue;
-            }
-        };
-        if now.duration_since(modified).unwrap_or_default() < SOURCE_DELETE_GRACE {
-            continue;
-        }
-        for source in read_compacted_sources(&path)? {
-            match fs::remove_file(data_dir.join(source)) {
-                Ok(()) => deleted += 1,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => {
-                    tracing::warn!(path = ?path, error = %error, "cannot remove superseded source block")
-                }
-            }
-        }
-    }
-    if deleted > 0 {
-        tracing::info!(
-            deleted_sources = deleted,
-            "removed superseded metrics blocks"
-        );
-    }
-    Ok(deleted)
-}
-
-fn is_levelled_metric_path(path: &Path) -> bool {
-    let name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or_default();
-    name.starts_with("m_n_") || matches!(metric_compaction_level(path), 1 | 2)
-}
-
-fn is_normalized_metric_path(path: &Path) -> bool {
-    let name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or_default();
-    name.starts_with("m_l0_") || is_levelled_metric_path(path)
 }

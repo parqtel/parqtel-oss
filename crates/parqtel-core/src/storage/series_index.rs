@@ -192,14 +192,11 @@ impl SeriesTable {
                 "corrupt series index: odd label id count".into(),
             ));
         }
-        let pairs = flat.chunks_exact(2).map(|kv| {
-            (
-                self.strings.get(kv[0] as usize).map(String::as_str),
-                self.strings.get(kv[1] as usize).map(String::as_str),
-            )
-        });
-        let mut labels = Vec::with_capacity(flat.len() / 2);
-        for (name, value) in pairs {
+        let (pairs, _rest) = flat.as_chunks::<2>();
+        let mut labels = Vec::with_capacity(pairs.len());
+        for kv in pairs {
+            let name = self.strings.get(kv[0] as usize).map(String::as_str);
+            let value = self.strings.get(kv[1] as usize).map(String::as_str);
             labels.push((name.ok_or_else(bad)?, value.ok_or_else(bad)?));
         }
         Ok(SeriesEntry {
