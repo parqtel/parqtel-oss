@@ -54,12 +54,12 @@ make docker        # Build Docker image
 - **Binary name**: `parqtel` (not `parqtel-server`) — the crate is `parqtel-server` but `[[bin]] name = "parqtel"`.
 - **Block index**: persisted as `index.json` (JSON sidecar, atomic tmp+rename), not bincode/`index.bin`.
 - **Instant queries** (`/api/v1/query`) use a **5-minute lookback window** (`query.lookback_delta_ns`, default 300000000000 — the Prometheus default) — data older than that won't appear until flushed to a block and queried via `query_range`.
-- **In-memory buffer**: metrics, logs, and traces are all queryable immediately after ingest via `MemoryBuffer`; the buffer is drained on every flush so buffered + flushed data never double-counts.
+- **In-memory buffer**: metrics, logs, and traces are all queryable immediately after ingest via `MemoryBuffer`; the buffer is drained only when the holding block is durable, so buffered + flushed data never double-counts.
 - **service.name label**: the scanner and ingest buffer both inject the dedicated `service_name` Parquet column back as the `service.name` label, so PromQL matchers like `http_requests_total{service.name="api"}` work for both buffered and flushed data. Trace decode merges resource attributes into span attributes (span attrs win).
 - **OTLP gRPC**: `:4317` by default (`ServerConfig.grpc_bind_address`; empty string disables). tonic server implements all three collector services and routes through the same `ingest_proto` path as HTTP protobuf.
 - **Label sets** (`parqtel_core::LabelSet`) are immutable and `Arc`-shared; the fingerprint and compact JSON are cached on the shared value. OTLP decode resolves attributes through `LabelInterner` (bounded, a pure cache). Build them with `try_from_iter`/`with`/`merge`; never assume two equal sets are the same allocation.
 - **Memory buffer epochs**: every writer shard has an epoch, buffered metric points carry `(shard, epoch)`, and a finished block removes exactly the sealed epochs (`drop_sealed_metrics`); logs and spans drop the oldest `row_count` rows. The buffer must be fed under the same lock as the writer so both hold one order.
-- **WAL ordering**: a block's commit position is the WAL's end taken while every shard is locked; commits and buffer drops are released in flush order (`FlushOrder`). Each block records the WAL span `(from, to]` it covers (Parquet footer key `parqtel.wal_range` + `BlockMetadata.wal_range`); startup runs `advance_wal_commit` after reconcile and before replay, following the chain of spans so rows already in a block are not replayed. Records are numbered by their **end** offset, the same number `append` returns. Logs and traces share one generic `SerialRotator` (one flush in flight, WAL records framed before the lock).
+- **WAL ordering**: a block's commit position is the WAL's end taken while every shard is locked; commits and buffer drops are released in flush order (`FlushOrder`). Each block records the WAL span `(from, to]` it covers (Parquet footer key `parqtel.wal_range` + `BlockMetadata.wal_range`); startup runs `advance_wal_commit` after reconcile and before replay, following the chain of spans so rows already in a block are not replayed. Records are numbered by their **end** offset, the same number `append` returns. Logs and traces each own a generic `SerialRotator` instance (one flush in flight, WAL records framed before the lock).
 - **Series table**: metric blocks are written series-by-series (then time) and carry `parqtel.series_index` in the Parquet footer (`storage/series_index.rs`; built by `metric_runs_to_block`, written by `write_block_file` for ingest, compaction and the engine). `open_block` parses it once into a `SeriesIndex` (cached, byte-budgeted) and strips the text from the cached footer. `SeriesSelector.equals`/`value_tests` only narrow; `filter` is the full matcher and always decides. Anything that writes a metric block must go through `metric_runs_to_block`; anything that changes the layout must keep `SeriesTable::validate` and the equivalence test (`indexed_scan_equals_unindexed_scan`) passing. Label-set fingerprints must stay process-independent (series limits are applied in fingerprint order).
 - **Log skip index**: log blocks carry `parqtel.log_index` (`storage/log_index.rs`, built by `logs_to_block`, per 4096-row granule: time bounds, max severity, bloom over lower-cased body trigrams and attribute/resource `name=value` pairs). `LogColumnPrefilter` conditions (`body_contains_lower`, `attr_equals`, `min_severity`) must be *necessary* conditions of the row predicate; set `exact` only when the predicate is nothing more than severity + body-contains, because the scan then counts and ranks from three columns without calling the row filter. Filters may only skip granules, never decide rows.
 - **Scans** (`Scanner::scan_filtered`, `scan_logs_counted_prefiltered`) take pushed-down predicates: a series filter evaluated once per distinct series per block, and a log column prefilter (severity/body) derived only from AND conjuncts. Callers that add a pushdown must keep the full row predicate as the final judge.
@@ -106,15 +106,15 @@ Layered via Figment (priority: CLI > env > TOML > defaults):
 
 ## API Endpoints
 
-- **Ingestion**: gRPC `:4317` (OTLP default; all three collector services) + HTTP `/v1/metrics`, `/v1/logs`, `/v1/traces` (content negotiation: protobuf + JSON) + `/json` variants
-- **Query**: `/api/v1/query`, `/api/v1/query_range`, `/api/v1/labels`, `/api/v1/label/:name/values`
-- **Logs**: `/api/v1/logs`, `/v1/logs/count`, `/v1/logs/fields`, `/v1/logs/field_values`
-- **Traces**: `/v1/traces/search` (per-span `trace_id` included for client-side grouping)
-- **Alerts**: `/api/v1/alerts`, `/api/v1/rules`, `/api/v1/alerts/:id/{acknowledge,resolve,noise,signal}`
+- **Ingestion**: gRPC `:4317` (OTLP default; all three collector services) + HTTP `/v1/metrics`, `/v1/logs`, `/v1/traces` (content negotiation: protobuf + JSON) + the `/json` ingest handlers (`/v1/metrics/json`, `/v1/logs/json`, `/v1/traces/json`)
+- **Query**: `/api/v1/query`, `/api/v1/query_range`, `/api/v1/labels`, `/api/v1/label/__name__/values`, `/api/v1/label/:name/values`, `/api/v1/logs`, `/v1/logs/count`, `/v1/logs/fields`, `/v1/logs/field_values`, `/v1/correlate`, `/v1/traces/search`
+- **Alerts**: `/api/v1/alerts`, `/api/v1/rules`, `/api/v1/alerts/:id/{acknowledge,resolve}`, `/api/v1/alerts/routes`, `/api/v1/alerts/silences`
+- **Alert rules**: `/api/v1/rules`, `/api/v1/recording_rules`, `/api/v1/pipelines`
+- **Saved searches**: `/api/v1/saved_searches`, `/api/v1/saved_searches/:id`
+- **PQL pipelines**: `/v1/search`, `/api/v1/pipelines`
 - **Correlation**: `/v1/correlate`
-- **Pipelines**: `/api/v1/recording_rules`, `/api/v1/pipelines`
 - **Grafana SimpleJSON**: `/search`, `/query`, `/annotations`, `/tag-keys`, `/tag-values`
-- **Ops**: `/health`, `/metrics`, `/oas`, `/ui`, `/api/v1/stats` (storage/buffer/config snapshot), `/api/v1/ingest_rates` (live per-signal rates: current + 60s/5m/15m averages, gap_secs spike/gap detection, per-second sparkline history via `history_secs` param — default 180s, max 900s in-memory wheel)
+- **Ops**: `/health`, `/ready`, `/metrics`, `/oas`, `/ui`, `/debug/pprof/{profile,summary,memory}`, `/api/v1/stats` (storage/buffer/config snapshot), `/api/v1/ingest_rates` (live per-signal rates: current + 60s/5m/15m averages, gap_secs spike/gap detection, per-second sparkline history via `history_secs` param — default 180s, max 900s in-memory wheel)
 
 ## CI Pipeline
 

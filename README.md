@@ -232,11 +232,11 @@ OTel SDKs can export directly via **gRPC** at `:4317` (all three collector servi
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/v1/metrics` | POST | Ingest metrics (protobuf) |
+| `/v1/metrics` | POST | Ingest metrics (protobuf, or JSON via `Content-Type`) |
 | `/v1/metrics/json` | POST | Ingest metrics (JSON) |
-| `/v1/logs` | POST | Ingest logs (protobuf) |
+| `/v1/logs` | POST | Ingest logs (protobuf, or JSON via `Content-Type`) |
 | `/v1/logs/json` | POST | Ingest logs (JSON) |
-| `/v1/traces` | POST | Ingest traces (protobuf) |
+| `/v1/traces` | POST | Ingest traces (protobuf, or JSON via `Content-Type`) |
 | `/v1/traces/json` | POST | Ingest traces (JSON) |
 
 ### Query (Prometheus-compatible)
@@ -268,7 +268,7 @@ OTel SDKs can export directly via **gRPC** at `:4317` (all three collector servi
 | `/api/v1/alerts/:id` | GET | Get alert details |
 | `/api/v1/alerts/:id/acknowledge` | POST | Acknowledge an alert |
 | `/api/v1/alerts/:id/resolve` | POST | Resolve an alert |
-| `/api/v1/alerts/routes` | GET | List notification routes |
+| `/api/v1/alerts/routes` | GET/POST | List or replace notification routes |
 | `/api/v1/alerts/silences` | GET/POST | List or create silences |
 | `/api/v1/alerts/silences/:name` | DELETE | Delete a silence |
 | `/api/v1/saved_searches` | GET/POST | List or save a search |
@@ -280,6 +280,7 @@ OTel SDKs can export directly via **gRPC** at `:4317` (all three collector servi
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
+| `/v1/search` | POST | Run a PQL pipeline (`fetch │ filter │ parse │ stats │ correlate`) |
 | `/api/v1/recording_rules` | GET/POST | List or create recording rule groups |
 | `/api/v1/recording_rules/:name` | DELETE | Delete a recording rule group |
 | `/api/v1/pipelines` | GET/POST | List or create pipeline definitions |
@@ -302,8 +303,11 @@ OTel SDKs can export directly via **gRPC** at `:4317` (all three collector servi
 | `/health` | GET | Health check |
 | `/metrics` | GET | Prometheus metrics (self-monitoring) |
 | `/api/v1/stats` | GET | Storage/buffer/config snapshot |
+| `/ready` | GET | Readiness probe — 503 when the storage path is unreadable |
 | `/api/v1/ingest_rates` | GET | Live per-signal rates (current + 60s/5m/15m averages, `gap_secs`, sparkline via `history_secs`) |
-| `/debug/pprof/{profile,summary,memory}` | GET | CPU/memory profiles (404 unless `telemetry.profiling_enabled`) |
+| `/debug/pprof/profile` | GET | CPU profile (404 unless `telemetry.profiling_enabled`) |
+| `/debug/pprof/summary` | GET | CPU summary (404 unless `telemetry.profiling_enabled`) |
+| `/debug/pprof/memory` | GET | Memory snapshot: process RSS high-water mark + in-memory buffer occupancy (always available) |
 | `/oas` | GET | OpenAPI 3.0 specification |
 | `/ui` | GET | Built-in web UI |
 
