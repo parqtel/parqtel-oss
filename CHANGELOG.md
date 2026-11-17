@@ -250,6 +250,9 @@ while measuring. Measurements and method are in
 
 ### Documentation
 
+- **Edge/single-node mode documented as a product shape.** Topology,
+  recommended buffer/series settings, operating checks, and explicit non-goals
+  (no replication, object storage, tenants, SQL, or dashboard builder).
 - **Architecture decisions recorded.** ADR 0001 defines the `BlockStore` seam
   and versioned manifest needed for object storage (explicitly not
   `StorageEngine`); ADR 0002 makes the SQL choice a measured DataFusion-vs-

@@ -27,6 +27,7 @@ Documentation for Parqtel, an open-source SRE telemetry store.
 |---|---|
 | [Configuration](operations/configuration.md) | Every knob, environment variable and TOML key |
 | [Deployment](operations/deployment.md) | Docker, Kubernetes, Helm |
+| [Edge mode](operations/edge-mode.md) | Single-node topology, sizing, and deliberate non-goals |
 | [Performance and sizing](operations/performance-sizing.md) | How to reason about memory and disk for your ingest rate |
 | [Troubleshooting](operations/troubleshooting.md) | Symptoms, metrics to check, fixes |
 | [Known issues](operations/known-issues.md) | Caveats worth knowing before you deploy |
