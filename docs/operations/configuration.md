@@ -275,6 +275,10 @@ The query timeout (`query.timeout_secs`) applies only to scan endpoints
 (`/api/v1/query*`, labels, log/trace search, correlate, pipeline search, and
 Grafana `/query`/`/search`). Ingest is never wrapped in the query timeout.
 
+The query timeout (`query.timeout_secs`) applies only to scan endpoints
+(`/api/v1/query*`, labels, log/trace search, correlate, pipeline search, and
+Grafana `/query`/`/search`). Ingest is never wrapped in the query timeout.
+
 ### `[ingest.tail_sampling]`
 
 | Key | Type | Default | Description |
