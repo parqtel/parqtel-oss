@@ -159,6 +159,10 @@ impl Notifier for TeamsNotifier {
         self.send_resolved
     }
 
+    fn target_url(&self) -> Option<&str> {
+        Some(&self.webhook_url)
+    }
+
     async fn send(&self, batch: &NotificationBatch) -> Result<(), NotificationError> {
         let msg = self.build_message(batch);
         let resp = self

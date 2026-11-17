@@ -10,6 +10,7 @@
 //! - Delivery: POST JSON payload to `webhook_url`; retries are the sink's
 //!   responsibility (Alertmanager-style at-least-once per repeat window).
 
+use crate::egress::EgressPolicy;
 use crate::{AlertFiringEvent, AlertState, Severity};
 use parqtel_core::config::{NotificationConfig, RouteConfig, SilenceConfig};
 use std::collections::HashMap;
@@ -42,6 +43,7 @@ pub struct AlertRouter {
     /// Last delivery time per (route name, fingerprint).
     last_sent: Mutex<HashMap<(String, u64), Instant>>,
     client: reqwest::Client,
+    egress: EgressPolicy,
     /// Directory for silence persistence (None = in-memory only).
     silence_dir: Option<std::path::PathBuf>,
 }
@@ -49,16 +51,26 @@ pub struct AlertRouter {
 impl AlertRouter {
     pub fn new(config: NotificationConfig) -> Self {
         let timeout_secs = config.send_timeout_secs;
+        let egress = EgressPolicy::from_config(&config.egress);
         Self {
             config: RwLock::new(config),
             silences: RwLock::new(Vec::new()),
             last_sent: Mutex::new(HashMap::new()),
             client: reqwest::Client::builder()
                 .timeout(Duration::from_secs(timeout_secs.max(1)))
+                // A redirect to a private address would bypass the egress
+                // check performed before the request.
+                .redirect(reqwest::redirect::Policy::none())
                 .build()
                 .unwrap_or_default(),
+            egress,
             silence_dir: None,
         }
+    }
+
+    /// Replace the egress policy, e.g. after a configuration reload.
+    pub fn set_egress_policy(&mut self, config: &parqtel_core::config::EgressConfig) {
+        self.egress = EgressPolicy::from_config(config);
     }
 
     /// Enable silence persistence in the given directory (loads existing
@@ -238,6 +250,10 @@ impl AlertRouter {
         });
 
         let url = route.webhook_url.clone();
+        if let Err(e) = self.egress.check_url(&url).await {
+            tracing::warn!(route = %route_name, url = %url, error = %e, "alert delivery blocked by egress policy");
+            return None;
+        }
         let result: Result<(), String> = match self.client.post(&url).json(&payload).send().await {
             Ok(resp) if resp.status().is_success() => Ok(()),
             Ok(resp) => Err(format!("sink returned {}", resp.status())),
@@ -397,6 +413,30 @@ mod tests {
         let router = AlertRouter::new(NotificationConfig::default());
         let event = make_event(Severity::Critical, BTreeMap::new());
         assert_eq!(router.handle_event(event).await, None);
+    }
+
+    #[tokio::test]
+    async fn egress_policy_blocks_loopback_webhook_before_connecting() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let url = format!("http://{addr}/hook");
+
+        let config = NotificationConfig {
+            routes: vec![route("local", "info", &url)],
+            ..NotificationConfig::default()
+        };
+        let router = AlertRouter::new(config);
+
+        let result = router
+            .handle_event(make_event(Severity::Critical, BTreeMap::new()))
+            .await;
+        assert_eq!(result, None, "blocked route must not report delivery");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), listener.accept())
+                .await
+                .is_err(),
+            "egress policy must reject the destination before the TCP connect"
+        );
     }
 }
 

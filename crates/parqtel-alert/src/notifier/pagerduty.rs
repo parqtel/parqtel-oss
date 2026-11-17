@@ -135,6 +135,10 @@ impl Notifier for PagerDutyNotifier {
         self.send_resolved
     }
 
+    fn target_url(&self) -> Option<&str> {
+        Some(&self.url)
+    }
+
     async fn send(&self, batch: &NotificationBatch) -> Result<(), NotificationError> {
         let event = self.build_event(batch);
         let resp = self

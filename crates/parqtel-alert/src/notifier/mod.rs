@@ -52,6 +52,11 @@ pub trait Notifier: Send + Sync {
     fn name(&self) -> &str;
     fn channel_type(&self) -> &'static str;
     fn send_resolved(&self) -> bool;
+    /// Destination the notifier will POST to, used by the egress policy.
+    /// `None` means the notifier has no single validated HTTP destination.
+    fn target_url(&self) -> Option<&str> {
+        None
+    }
     async fn send(&self, batch: &NotificationBatch) -> Result<(), NotificationError>;
 }
 
@@ -125,6 +130,7 @@ pub fn build_notifiers(
 ) -> Result<HashMap<String, Vec<Arc<dyn Notifier>>>, NotificationError> {
     let mut map: HashMap<String, Vec<Arc<dyn Notifier>>> =
         HashMap::with_capacity(cfg.receivers.len());
+    let egress = crate::egress::EgressPolicy::from_config(&cfg.egress);
 
     for receiver in &cfg.receivers {
         let mut notifiers: Vec<Arc<dyn Notifier>> = Vec::new();
@@ -132,14 +138,17 @@ pub fn build_notifiers(
         for slack_cfg in &receiver.slack_configs {
             let webhook_url =
                 resolve_secret(&slack_cfg.webhook_url).map_err(NotificationError::Config)?;
-            notifiers.push(Arc::new(SlackNotifier::new(
-                receiver.name.clone(),
-                webhook_url,
-                slack_cfg.channel.clone(),
-                slack_cfg.username.clone(),
-                slack_cfg.icon_emoji.clone(),
-                slack_cfg.send_resolved,
-                client.clone(),
+            notifiers.push(Arc::new(crate::egress::EgressCheckedNotifier::new(
+                Arc::new(SlackNotifier::new(
+                    receiver.name.clone(),
+                    webhook_url,
+                    slack_cfg.channel.clone(),
+                    slack_cfg.username.clone(),
+                    slack_cfg.icon_emoji.clone(),
+                    slack_cfg.send_resolved,
+                    client.clone(),
+                )),
+                egress.clone(),
             )));
         }
 
@@ -152,25 +161,31 @@ pub fn build_notifiers(
                 .map(resolve_secret)
                 .transpose()
                 .map_err(NotificationError::Config)?;
-            notifiers.push(Arc::new(PagerDutyNotifier::new(
-                receiver.name.clone(),
-                routing_key,
-                url,
-                pd_cfg.severity.clone(),
-                pd_cfg.send_resolved,
-                client.clone(),
+            notifiers.push(Arc::new(crate::egress::EgressCheckedNotifier::new(
+                Arc::new(PagerDutyNotifier::new(
+                    receiver.name.clone(),
+                    routing_key,
+                    url,
+                    pd_cfg.severity.clone(),
+                    pd_cfg.send_resolved,
+                    client.clone(),
+                )),
+                egress.clone(),
             )));
         }
 
         for teams_cfg in &receiver.teams_configs {
             let webhook_url =
                 resolve_secret(&teams_cfg.webhook_url).map_err(NotificationError::Config)?;
-            notifiers.push(Arc::new(TeamsNotifier::new(
-                receiver.name.clone(),
-                webhook_url,
-                teams_cfg.title.clone(),
-                teams_cfg.send_resolved,
-                client.clone(),
+            notifiers.push(Arc::new(crate::egress::EgressCheckedNotifier::new(
+                Arc::new(TeamsNotifier::new(
+                    receiver.name.clone(),
+                    webhook_url,
+                    teams_cfg.title.clone(),
+                    teams_cfg.send_resolved,
+                    client.clone(),
+                )),
+                egress.clone(),
             )));
         }
 
@@ -181,13 +196,16 @@ pub fn build_notifiers(
                 let resolved_v = resolve_secret(v).map_err(NotificationError::Config)?;
                 headers.insert(k.clone(), resolved_v);
             }
-            notifiers.push(Arc::new(WebhookNotifier::new(
-                receiver.name.clone(),
-                url,
-                wh_cfg.send_resolved,
-                headers,
-                client.clone(),
-            )?));
+            notifiers.push(Arc::new(crate::egress::EgressCheckedNotifier::new(
+                Arc::new(WebhookNotifier::new(
+                    receiver.name.clone(),
+                    url,
+                    wh_cfg.send_resolved,
+                    headers,
+                    client.clone(),
+                )?),
+                egress.clone(),
+            )));
         }
 
         map.insert(receiver.name.clone(), notifiers);

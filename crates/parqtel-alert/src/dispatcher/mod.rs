@@ -37,6 +37,9 @@ impl AlertDispatcher {
             parse_duration(&cfg.global.http_timeout).map_err(NotificationError::Config)?;
         let client = reqwest::Client::builder()
             .timeout(http_timeout)
+            // Redirects would let an allowed URL forward the POST to a
+            // destination the egress policy rejected.
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|e| NotificationError::Config(format!("failed to build HTTP client: {e}")))?;
 
@@ -199,6 +202,8 @@ mod tests {
 
     fn test_config(url: String) -> AlertmanagerRoutingConfig {
         let mut cfg = AlertmanagerRoutingConfig::default();
+        // Mock receivers bind to loopback; production defaults stay closed.
+        cfg.egress.allow_private = true;
         cfg.global.retry_initial_backoff = "10ms".to_string();
         cfg.global.retry_max_backoff = "50ms".to_string();
         cfg.receivers.push(ReceiverConfig {

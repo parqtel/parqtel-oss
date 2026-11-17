@@ -20,6 +20,11 @@ pub enum NotificationError {
     #[error("routing configuration error: {0}")]
     Config(String),
 
+    /// Destination rejected by the outbound egress policy. Never retried:
+    /// retrying the same URL cannot change the policy decision.
+    #[error("egress policy rejected destination: {0}")]
+    Egress(String),
+
     /// Payload serialization error.
     #[error("notification serialization error: {0}")]
     Serialization(String),

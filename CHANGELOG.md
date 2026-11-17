@@ -42,6 +42,15 @@ while measuring. Measurements and method are in
 
 ### Added
 
+- **Outbound egress policy for alert delivery.** Every webhook destination —
+  legacy `[alerts.notifications.routes]` and Alertmanager receivers — is
+  checked immediately before the POST. The default rejects loopback, private,
+  link-local, CGNAT, ULA, multicast and reserved addresses, and disables HTTP
+  redirects, closing the unauthenticated SSRF path through
+  `POST /api/v1/alerts/routes`. Operators with a receiver on a private network
+  opt in with `[alerts.notifications.egress]` / `[alerting.routing.egress]`
+  (`allow_private`, `allow_hosts`). See
+  [configuration](docs/operations/configuration.md).
 - **Skip index in each log block.** The Parquet footer (`parqtel.log_index`)
   holds, per granule of 4 096 rows, the time bounds, the highest severity and a
   bloom filter over the body's three-byte windows and the records' `name=value`

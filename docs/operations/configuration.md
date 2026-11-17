@@ -119,6 +119,10 @@ dedup_flush_interval_secs = 300
 max_concurrent_sends = 10
 send_timeout_secs = 30
 self_monitoring_failure_threshold = 0.5
+
+[alerts.notifications.egress]
+allow_private = false
+allow_hosts = ["*.internal.example"]
 # [[alerts.notifications.routes]]
 # name = "slack-critical"
 # match_severity = "critical"
@@ -137,6 +141,9 @@ retry_max_attempts = 3
 
 [alerting.routing]
 max_active_groups = 10000
+
+[alerting.routing.egress]
+allow_private = false
 
 [alerting.routing.route]
 receiver = "slack-default"
@@ -354,6 +361,25 @@ PARQTEL__ALERTS__PRESETS__EXCLUDE=service-red          # exclude
 | `send_timeout_secs` | Integer | `30` | Webhook send timeout |
 | `self_monitoring_failure_threshold` | Float | `0.5` | Self-monitoring failure threshold |
 | `routes` | Array | `[]` | Alert routing rules (see RouteConfig) |
+| `egress` | Table | fail-closed | Outbound destination policy (see below) |
+
+### `[alerts.notifications.egress]`
+
+Every webhook destination — legacy routes and the Alertmanager receivers — is
+checked immediately before delivery. The default rejects loopback, private,
+link-local, CGNAT, ULA, multicast, and reserved addresses, and disables HTTP
+redirects. A receiver that needs a private address must opt in explicitly.
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `allow_private` | Boolean | `false` | Permit loopback/private/link-local/CGNAT/ULA destinations |
+| `allow_hosts` | Array | `[]` | Exact hosts or `*.suffix` patterns that bypass the address check |
+
+```toml
+[alerts.notifications.egress]
+allow_private = false
+allow_hosts = ["*.internal.example"]
+```
 
 ### `[alerts.notifications.routes]` (array of tables)
 
@@ -380,6 +406,11 @@ receiver fail validation at startup.
 | `route` | Table | none | Root route (see below) |
 | `inhibit_rules` | Array | `[]` | `source_matchers`, `target_matchers`, `equal` |
 | `receivers` | Array | `[]` | Named receivers with `slack_configs`, `pagerduty_configs`, `teams_configs`, `webhook_configs` |
+| `egress` | Table | fail-closed | Same `allow_private` / `allow_hosts` policy as `[alerts.notifications.egress]` |
+
+`[alerting.routing.egress]` applies to every receiver built by this dispatcher.
+The legacy route table and the dispatcher each carry their own policy; set both
+when both are configured.
 
 Durations accept `ms`, `s`, `m`, `h`, `d`, `w` and compound forms (`1h30m`).
 Matchers use `=`, `!=`, `=~` (anchored regex), `!~`; a missing label compares as

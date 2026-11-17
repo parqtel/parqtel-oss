@@ -127,6 +127,21 @@ pub struct NotificationConfig {
     /// Routes are evaluated in order; first match wins.
     #[serde(default)]
     pub routes: Vec<RouteConfig>,
+    /// Outbound destination policy for every webhook receiver.
+    #[serde(default)]
+    pub egress: EgressConfig,
+}
+
+/// Outbound URL policy shared by the legacy router and the Alertmanager
+/// dispatcher. Defaults are fail-closed; see `parqtel_alert::egress`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EgressConfig {
+    /// Permit loopback, private, link-local, CGNAT, and ULA destinations.
+    #[serde(default)]
+    pub allow_private: bool,
+    /// Exact host names or `*.suffix` patterns that bypass the address check.
+    #[serde(default)]
+    pub allow_hosts: Vec<String>,
 }
 
 /// One alert routing rule: match firing alerts and deliver to a webhook.

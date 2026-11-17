@@ -59,6 +59,10 @@ impl Notifier for WebhookNotifier {
         self.send_resolved
     }
 
+    fn target_url(&self) -> Option<&str> {
+        Some(&self.url)
+    }
+
     async fn send(&self, batch: &NotificationBatch) -> Result<(), NotificationError> {
         let mut req = self.client.post(&self.url).json(batch);
         if !self.headers.is_empty() {

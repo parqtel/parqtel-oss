@@ -1,3 +1,4 @@
+use super::alert::EgressConfig;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
@@ -31,6 +32,9 @@ pub struct AlertmanagerRoutingConfig {
     /// Named receiver definitions (Slack, PagerDuty, Teams, generic webhook).
     #[serde(default)]
     pub receivers: Vec<ReceiverConfig>,
+    /// Outbound destination policy for every receiver.
+    #[serde(default)]
+    pub egress: EgressConfig,
 }
 
 impl Default for AlertmanagerRoutingConfig {
@@ -41,6 +45,7 @@ impl Default for AlertmanagerRoutingConfig {
             route: None,
             inhibit_rules: Vec::new(),
             receivers: Vec::new(),
+            egress: EgressConfig::default(),
         }
     }
 }

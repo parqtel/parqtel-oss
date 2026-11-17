@@ -7,8 +7,8 @@ mod storage;
 mod telemetry;
 
 pub use alert::{
-    AlertConfig, NotificationConfig, PostmortemConfig, PresetConfig, PresetMode, RouteConfig,
-    SilenceConfig,
+    AlertConfig, EgressConfig, NotificationConfig, PostmortemConfig, PresetConfig, PresetMode,
+    RouteConfig, SilenceConfig,
 };
 pub use ingest::{IngestConfig, TailSamplingConfig};
 pub use query::{QueryConfig, UIConfig};

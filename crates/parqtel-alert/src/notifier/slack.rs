@@ -171,6 +171,10 @@ impl Notifier for SlackNotifier {
         self.send_resolved
     }
 
+    fn target_url(&self) -> Option<&str> {
+        Some(&self.webhook_url)
+    }
+
     async fn send(&self, batch: &NotificationBatch) -> Result<(), NotificationError> {
         let payload = self.build_payload(batch);
         let resp = self

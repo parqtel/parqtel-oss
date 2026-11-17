@@ -2,6 +2,7 @@
 
 pub mod builtin;
 pub mod dispatcher;
+pub mod egress;
 pub mod error;
 pub mod evaluator;
 pub mod notifier;
