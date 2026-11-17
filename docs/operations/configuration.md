@@ -549,6 +549,29 @@ export PARQTEL__SERVER__FLUSH_INTERVAL_SECS=10
 export PARQTEL__SERVER__RETENTION_INTERVAL_SECS=1800
 export PARQTEL__SERVER__INDEX_PERSIST_INTERVAL_SECS=5
 
+# Object storage (optional)
+
+Blocks can be uploaded to an S3-compatible bucket while local disk remains the
+WAL staging area and read cache. Query nodes need the bucket and the shared
+catalog (P2-04) before they can serve each other's blocks.
+
+```toml
+[object_store]
+enabled = false
+bucket = "parqtel-blocks"
+region = "us-east-1"
+endpoint = "http://127.0.0.1:9000"   # MinIO; omit for AWS
+access_key = "${AWS_ACCESS_KEY_ID}"
+secret_key = "${AWS_SECRET_ACCESS_KEY}"
+prefix = "parqtel"
+cache_dir = "/var/lib/parqtel/cache" # defaults to <storage.data_dir>/cache
+cache_bytes = 1073741824             # 1 GiB LRU cache
+```
+
+When enabled, every closed block is uploaded after the local file is durable.
+`open` materialises a cache file for Parquet seeking; the cache evicts the
+oldest files when `cache_bytes` is exceeded.
+
 # Storage
 export PARQTEL__STORAGE__DATA_DIR="/var/lib/parqtel/data"
 export PARQTEL__STORAGE__COMPRESSION="zstd"

@@ -174,3 +174,234 @@ mod tests {
         assert!(store.open(key).is_ok());
     }
 }
+
+/// Object-storage store backed by `object_store`, with a bounded local read
+/// cache. `open` materialises a cache file because Parquet reading needs
+/// `Seek`; `publish` uploads a locally closed block.
+#[derive(Debug)]
+pub struct ObjectBlockStore {
+    store: Arc<dyn object_store::ObjectStore>,
+    prefix: object_store::path::Path,
+    cache_dir: PathBuf,
+    cache_bytes: u64,
+    handle: tokio::runtime::Handle,
+}
+
+impl ObjectBlockStore {
+    pub fn new(
+        store: Arc<dyn object_store::ObjectStore>,
+        prefix: &str,
+        cache_dir: PathBuf,
+        cache_bytes: u64,
+        handle: tokio::runtime::Handle,
+    ) -> Result<Self> {
+        fs::create_dir_all(&cache_dir)?;
+        Ok(Self {
+            store,
+            prefix: object_store::path::Path::from(prefix),
+            cache_dir,
+            cache_bytes,
+            handle,
+        })
+    }
+
+    /// Builds an S3 client from explicit configuration.
+    #[allow(clippy::too_many_arguments)]
+    pub fn s3(
+        bucket: &str,
+        region: &str,
+        endpoint: Option<&str>,
+        access_key: Option<&str>,
+        secret_key: Option<&str>,
+        prefix: &str,
+        cache_dir: PathBuf,
+        cache_bytes: u64,
+        handle: tokio::runtime::Handle,
+    ) -> Result<Self> {
+        let mut builder = object_store::aws::AmazonS3Builder::from_env()
+            .with_bucket_name(bucket)
+            .with_region(region);
+        if let Some(endpoint) = endpoint {
+            builder = builder
+                .with_endpoint(endpoint)
+                .with_allow_http(endpoint.starts_with("http://"));
+        }
+        if let (Some(access), Some(secret)) = (access_key, secret_key) {
+            builder = builder
+                .with_access_key_id(access)
+                .with_secret_access_key(secret);
+        }
+        let store = builder
+            .build()
+            .map_err(|e| Error::Internal(format!("S3 client: {e}")))?;
+        Self::new(Arc::new(store), prefix, cache_dir, cache_bytes, handle)
+    }
+
+    fn key(&self, key: &Path) -> object_store::path::Path {
+        let name = key
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| key.to_string_lossy().into_owned());
+        self.prefix.child(name)
+    }
+
+    fn cache_path(&self, key: &Path) -> PathBuf {
+        let name = key
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "block.parquet".into());
+        self.cache_dir.join(name)
+    }
+
+    fn block_on<F: std::future::Future>(&self, future: F) -> Result<F::Output> {
+        if tokio::runtime::Handle::try_current().is_ok() {
+            // Only legal on a multi-thread runtime; the server and scans are.
+            Ok(tokio::task::block_in_place(|| self.handle.block_on(future)))
+        } else {
+            Ok(self.handle.block_on(future))
+        }
+    }
+
+    fn evict(&self) {
+        let mut entries: Vec<(PathBuf, u64, std::time::SystemTime)> = Vec::new();
+        let Ok(dir) = fs::read_dir(&self.cache_dir) else {
+            return;
+        };
+        for entry in dir.flatten() {
+            let Ok(meta) = entry.metadata() else { continue };
+            if !meta.is_file() {
+                continue;
+            }
+            let used = meta.modified().unwrap_or(std::time::UNIX_EPOCH);
+            entries.push((entry.path(), meta.len(), used));
+        }
+        let mut total: u64 = entries.iter().map(|(_, size, _)| *size).sum();
+        if total <= self.cache_bytes {
+            return;
+        }
+        entries.sort_by_key(|(_, _, used)| *used);
+        for (path, size, _) in entries {
+            if total <= self.cache_bytes {
+                break;
+            }
+            if fs::remove_file(&path).is_ok() {
+                total = total.saturating_sub(size);
+            }
+        }
+    }
+}
+
+impl BlockStore for ObjectBlockStore {
+    fn open(&self, key: &Path) -> Result<File> {
+        let cached = self.cache_path(key);
+        if cached.exists() {
+            return File::open(cached).map_err(Error::Io);
+        }
+        let object_key = self.key(key);
+        let bytes = self
+            .block_on(async { self.store.get(&object_key).await?.bytes().await })?
+            .map_err(|e| Error::Io(std::io::Error::other(e.to_string())))?;
+        let tmp = cached.with_extension("tmp");
+        fs::write(&tmp, &bytes)?;
+        fs::rename(tmp, &cached)?;
+        self.evict();
+        File::open(cached).map_err(Error::Io)
+    }
+
+    fn delete(&self, key: &Path) -> Result<bool> {
+        let _ = fs::remove_file(self.cache_path(key));
+        let object_key = self.key(key);
+        match self.block_on(async { self.store.delete(&object_key).await })? {
+            Ok(()) => Ok(true),
+            Err(object_store::Error::NotFound { .. }) => Ok(false),
+            Err(e) => Err(Error::Io(std::io::Error::other(e.to_string()))),
+        }
+    }
+
+    fn head(&self, key: &Path) -> Result<Option<BlockObject>> {
+        let object_key = self.key(key);
+        match self.block_on(async { self.store.head(&object_key).await })? {
+            Ok(meta) => Ok(Some(BlockObject {
+                key: key.to_path_buf(),
+                size_bytes: meta.size as u64,
+            })),
+            Err(object_store::Error::NotFound { .. }) => Ok(None),
+            Err(e) => Err(Error::Io(std::io::Error::other(e.to_string()))),
+        }
+    }
+
+    fn list(&self, prefix: &Path) -> Result<Vec<BlockObject>> {
+        let list_prefix = if prefix.as_os_str().is_empty() {
+            self.prefix.clone()
+        } else {
+            self.prefix.child(prefix.to_string_lossy().into_owned())
+        };
+        let listed = self.block_on(async {
+            use futures::StreamExt;
+            let mut stream = self.store.list(Some(&list_prefix));
+            let mut out = Vec::new();
+            while let Some(item) = stream.next().await {
+                out.push(item);
+            }
+            out
+        })?;
+        let mut out = Vec::new();
+        for item in listed {
+            let item = item.map_err(|e| Error::Io(std::io::Error::other(e.to_string())))?;
+            let name = item.location.filename().unwrap_or_default();
+            out.push(BlockObject {
+                key: PathBuf::from(name),
+                size_bytes: item.size as u64,
+            });
+        }
+        out.sort_by(|a, b| a.key.cmp(&b.key));
+        Ok(out)
+    }
+
+    fn publish(&self, key: &Path) -> Result<()> {
+        let bytes = fs::read(key)?;
+        let object_key = self.key(key);
+        self.block_on(async {
+            self.store
+                .put(&object_key, bytes::Bytes::from(bytes).into())
+                .await
+        })?
+        .map_err(|e| Error::Io(std::io::Error::other(e.to_string())))?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod object_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use super::*;
+    use std::io::{Read, Write};
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn object_store_roundtrip_and_bounded_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(object_store::memory::InMemory::new());
+        let local = ObjectBlockStore::new(
+            store,
+            "blocks",
+            dir.path().join("cache"),
+            8,
+            tokio::runtime::Handle::current(),
+        )
+        .unwrap();
+        let src = dir.path().join("block.parquet");
+        let mut file = File::create(&src).unwrap();
+        file.write_all(b"parquet").unwrap();
+        local.publish(&src).unwrap();
+        assert!(local.head(&src).unwrap().is_some());
+
+        fs::remove_file(&src).unwrap();
+        let mut opened = local.open(&src).unwrap();
+        let mut got = String::new();
+        opened.read_to_string(&mut got).unwrap();
+        assert_eq!(got, "parquet");
+        assert_eq!(local.list(Path::new("")).unwrap().len(), 1);
+        assert!(local.delete(&src).unwrap());
+        assert!(local.head(&src).unwrap().is_none());
+    }
+}

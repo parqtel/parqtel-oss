@@ -28,6 +28,7 @@ crc32fast = "1"
 memchr = "2"
 base64 = "0.22"
 zstd = { workspace = true }
+object_store = { workspace = true }
 regex = { workspace = true }
 
 [lints]

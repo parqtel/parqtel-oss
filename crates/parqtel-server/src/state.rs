@@ -60,9 +60,40 @@ impl AppState {
         let data_dir = config.storage.data_dir.clone();
         // The server owns block I/O for the process. Absolute block paths are
         // unchanged; the store is the seam an object-store backend replaces.
-        let _ = parqtel_core::storage::block_store::install(std::sync::Arc::new(
-            parqtel_core::storage::LocalBlockStore::new(data_dir.clone()),
-        ));
+        let object_store: std::sync::Arc<dyn parqtel_core::storage::BlockStore> = if config
+            .object_store
+            .enabled
+        {
+            let cache_dir = config
+                .object_store
+                .cache_dir
+                .clone()
+                .unwrap_or_else(|| data_dir.join("cache"));
+            match parqtel_core::storage::block_store::ObjectBlockStore::s3(
+                &config.object_store.bucket,
+                &config.object_store.region,
+                config.object_store.endpoint.as_deref(),
+                config.object_store.access_key.as_deref(),
+                config.object_store.secret_key.as_deref(),
+                &config.object_store.prefix,
+                cache_dir,
+                config.object_store.cache_bytes,
+                tokio::runtime::Handle::current(),
+            ) {
+                Ok(store) => std::sync::Arc::new(store),
+                Err(e) => {
+                    tracing::error!(error = %e, "failed to build object store; using local disk");
+                    std::sync::Arc::new(parqtel_core::storage::LocalBlockStore::new(
+                        data_dir.clone(),
+                    ))
+                }
+            }
+        } else {
+            std::sync::Arc::new(parqtel_core::storage::LocalBlockStore::new(
+                data_dir.clone(),
+            ))
+        };
+        let _ = parqtel_core::storage::block_store::install(object_store);
         let saved_search_dir = config.storage.data_dir.clone();
         let dashboard_dir = config.storage.data_dir.clone();
         let audit = Arc::new(crate::audit::AuditLog::new(

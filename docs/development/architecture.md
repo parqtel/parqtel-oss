@@ -286,7 +286,9 @@ The `BlockIndex` is an in-memory structure that tracks all blocks per signal:
   `storage::block_store::BlockStore`. Local mode installs `LocalBlockStore`
   rooted at the data directory; absolute block paths behave exactly as before.
   An object-store backend implements `open` (materialising a cache file) and
-  `publish`, without changing scanner code.
+  `publish`, without changing scanner code. `ObjectBlockStore` uses the
+  `object_store` crate's S3 client, uploads blocks on close, and keeps a
+  bounded LRU read cache (`object_store.cache_bytes`).
 - **Persistence**: Serialized to `index.json` (zstd-compressed JSON, `PQZ1` magic, atomic tmp+rename) in each signal's data directory — one index for metrics, one for logs, one for traces. Plain-JSON sidecars from older builds still load and are rewritten compressed on the next persist.
 - **Queries**: Supports time-range filtering and metric-name filtering
 - **Statistics**: Tracks total blocks, rows, bytes, metric names, and label names

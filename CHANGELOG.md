@@ -42,6 +42,10 @@ while measuring. Measurements and method are in
 
 ### Added
 
+- **S3-compatible block upload with a bounded read cache.** `[object_store]`
+  enables upload on block close and materialises cache files for Parquet seeks;
+  the cache is LRU-evicted under `cache_bytes`. Local disk remains the WAL
+  staging area and the default backend.
 - **`BlockStore` seam with a local backend.** Scanner reads, trace reads, and
   retention deletes now go through a process-wide store; absolute block paths
   keep the previous local behavior. The server installs `LocalBlockStore` at

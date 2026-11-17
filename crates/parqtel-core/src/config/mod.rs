@@ -2,6 +2,7 @@ mod alert;
 mod audit;
 mod auth;
 mod ingest;
+mod object_storage;
 mod query;
 mod routing;
 mod server;
@@ -15,6 +16,7 @@ pub use alert::{
 pub use audit::AuditConfig;
 pub use auth::{AuthConfig, AuthScope, AuthTokenConfig};
 pub use ingest::{BufferOverflowPolicy, IngestConfig, TailSamplingConfig};
+pub use object_storage::ObjectStoreConfig;
 pub use query::{QueryConfig, UIConfig};
 pub use routing::{
     parse_duration, parse_matcher_str, resolve_secret, resolve_secret_with, AlertRouteConfig,
@@ -37,6 +39,8 @@ pub struct Config {
     pub storage: BlockConfig,
     pub logs: LogBlockConfig,
     pub ingest: IngestConfig,
+    #[serde(default)]
+    pub object_store: ObjectStoreConfig,
     #[serde(default)]
     pub auth: AuthConfig,
     #[serde(default)]
@@ -68,6 +72,7 @@ impl Config {
         // covered there.
         self.storage.validate_into("storage", &mut errors);
         self.logs.validate_into("logs", &mut errors);
+        self.object_store.validate_into(&mut errors);
 
         let valid_formats = ["text", "json"];
         if !valid_formats.contains(&self.telemetry.log_format.as_str()) {
