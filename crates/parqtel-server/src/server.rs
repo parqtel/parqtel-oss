@@ -443,9 +443,15 @@ pub(crate) async fn run_server(
         }
     });
 
-    axum::serve(listener, router)
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    if let Some(tls_config) = config.server.tls.as_ref() {
+        let tls = crate::tls::load(tls_config)?;
+        tracing::info!("HTTP listener using TLS");
+        crate::tls::serve(listener, router, tls, shutdown_signal()).await?;
+    } else {
+        axum::serve(listener, router)
+            .with_graceful_shutdown(shutdown_signal())
+            .await?;
+    }
 
     tracing::info!("Shutting down gracefully...");
     flush_task.abort();

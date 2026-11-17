@@ -29,7 +29,7 @@ tower-http = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 prost = { workspace = true }
-tonic = { workspace = true }
+tonic = { workspace = true, features = ["tls-ring"] }
 bytes = { workspace = true }
 anyhow = { workspace = true }
 flate2 = { workspace = true }
@@ -37,6 +37,9 @@ sha2 = { workspace = true }
 hex = { workspace = true }
 chrono = { workspace = true }
 ulid = { workspace = true }
+hyper-util = { workspace = true }
+tokio-rustls = { workspace = true }
+rustls-pemfile = { workspace = true }
 clap = { workspace = true }
 figment = { workspace = true }
 regex = { workspace = true }
@@ -53,6 +56,9 @@ tempfile = "3"
 urlencoding = "2"
 http-body-util = "0.1"
 hyper = { workspace = true }
+hyper-util = { workspace = true }
+tokio-rustls = { workspace = true }
+rustls-pemfile = { workspace = true }
 http = "1"
 reqwest = { workspace = true }
 

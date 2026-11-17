@@ -36,6 +36,16 @@ pub struct ServerConfig {
     /// it to reduce filesystem writes on a write-heavy ingest.
     #[serde(default = "default_index_persist_interval_secs")]
     pub index_persist_interval_secs: u64,
+    /// Serve HTTPS and OTLP gRPC over TLS. Both listeners use the same pair.
+    #[serde(default)]
+    pub tls: Option<TlsConfig>,
+}
+
+/// PEM certificate and private key paths for in-process TLS.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TlsConfig {
+    pub cert_path: String,
+    pub key_path: String,
 }
 
 fn default_grpc_bind_address() -> String {
@@ -74,6 +84,7 @@ impl Default for ServerConfig {
             retention_interval_secs: default_retention_interval_secs(),
             grpc_concurrency_limit: default_grpc_concurrency_limit(),
             index_persist_interval_secs: default_index_persist_interval_secs(),
+            tls: None,
         }
     }
 }

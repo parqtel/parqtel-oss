@@ -39,18 +39,27 @@ impl OtlpGrpcService {
     /// HTTP path uses, so a batch that is accepted over HTTP is not rejected
     /// over gRPC with an opaque `ResourceExhausted` — tonic's own defaults
     /// (4 MiB decode) previously disagreed with `ingest.max_body_size`.
-    pub async fn serve(
-        state: AppState,
-        addr: std::net::SocketAddr,
-    ) -> Result<(), tonic::transport::Error> {
+    pub async fn serve(state: AppState, addr: std::net::SocketAddr) -> anyhow::Result<()> {
         use parqtel_ingest::otel::collector::logs::v1::logs_service_server::LogsServiceServer;
         use parqtel_ingest::otel::collector::metrics::v1::metrics_service_server::MetricsServiceServer;
         use parqtel_ingest::otel::collector::trace::v1::trace_service_server::TraceServiceServer;
 
         let limits = GrpcLimits::from_config(&state.inner.config);
+        let tls = state.inner.config.server.tls.clone();
         let svc = Self::new(state);
-        tonic::transport::Server::builder()
-            .concurrency_limit_per_connection(limits.concurrency_limit)
+        let mut builder = tonic::transport::Server::builder()
+            .concurrency_limit_per_connection(limits.concurrency_limit);
+        if let Some(tls) = tls {
+            let cert = std::fs::read(&tls.cert_path)
+                .map_err(|e| anyhow::anyhow!("failed to read {}: {e}", tls.cert_path))?;
+            let key = std::fs::read(&tls.key_path)
+                .map_err(|e| anyhow::anyhow!("failed to read {}: {e}", tls.key_path))?;
+            let identity = tonic::transport::Identity::from_pem(cert, key);
+            builder =
+                builder.tls_config(tonic::transport::ServerTlsConfig::new().identity(identity))?;
+            tracing::info!("OTLP gRPC listener using TLS");
+        }
+        builder
             // tonic 0.13 carries the message-size limits on the generated
             // service rather than the transport builder.
             .add_service(
@@ -73,6 +82,7 @@ impl OtlpGrpcService {
             )
             .serve(addr)
             .await
+            .map_err(anyhow::Error::from)
     }
 }
 

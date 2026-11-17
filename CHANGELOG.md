@@ -42,6 +42,10 @@ while measuring. Measurements and method are in
 
 ### Added
 
+- **In-process TLS.** `[server.tls]` takes a PEM certificate/key pair and serves
+  the HTTP API/console over HTTPS (no plaintext listener) and OTLP gRPC over
+  TLS with the same identity. Verified with a self-signed certificate; plaintext
+  requests to the TLS port are rejected during the handshake.
 - **Scoped bearer tokens.** Optional `[auth]` config with hashed `read`,
   `write`, and `admin` tokens. Health/readiness and the static console shell
   stay public; data routes require a matching token, ingest requires `write`,

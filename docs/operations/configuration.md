@@ -198,6 +198,24 @@ tls_secret_name = "parqtel-provider-tls"
 | `retention_interval_secs` | Integer | `3600` | Seconds between retention sweeps. Lower it if the sweep visibly stalls endpoints; raise it on very large indexes |
 | `grpc_concurrency_limit` | Integer | `64` | Maximum concurrent OTLP exports per gRPC connection. Without it a single client can monopolise the ingest mutex that HTTP exporters also queue on |
 | `index_persist_interval_secs` | Integer | `2` | How often the block-index sidecar is written. Mutations mark the index dirty and are batched into one write per interval, so this bounds how long a block can sit in memory before the sidecar catches up. Lower it if you restart often; raise it to cut filesystem writes on write-heavy ingest |
+| `tls` | Table | unset | PEM certificate/key pair; enables HTTPS and TLS on the OTLP gRPC listener |
+
+### `[server.tls]`
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `cert_path` | String | required | PEM certificate chain |
+| `key_path` | String | required | PEM private key (PKCS#8, PKCS#1, or SEC1) |
+
+When set, the HTTP listener serves TLS only — there is no plaintext port — and
+the OTLP gRPC listener uses the same identity. There is no hot reload; restart
+to pick up a renewed certificate.
+
+```toml
+[server.tls]
+cert_path = "/etc/parqtel/tls.crt"
+key_path = "/etc/parqtel/tls.key"
+```
 
 ### `[storage]`
 

@@ -17,6 +17,7 @@ mod tasks;
 mod telemetry;
 #[cfg(test)]
 mod tests;
+mod tls;
 
 // glibc malloc keeps the freed memory of a block encode and a WAL replay
 // resident (the process held ~4.6 GiB it no longer used after ingesting at
@@ -37,6 +38,9 @@ use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Both tonic and tokio-rustls are linked; install one process-wide
+    // CryptoProvider explicitly instead of relying on feature auto-detection.
+    let _ = tokio_rustls::rustls::crypto::ring::default_provider().install_default();
     let cli = Cli::parse();
 
     // 1. Load Configuration

@@ -20,7 +20,7 @@ pub use routing::{
     PagerDutyReceiverConfig, ReceiverConfig, RoutingGlobalConfig, SlackReceiverConfig,
     TeamsReceiverConfig, WebhookReceiverConfig,
 };
-pub use server::ServerConfig;
+pub use server::{ServerConfig, TlsConfig};
 pub use storage::{BlockConfig, LogBlockConfig, RetentionConfig};
 pub use telemetry::{K8sProviderConfig, TelemetryConfig};
 
@@ -53,6 +53,11 @@ impl Config {
 
         if self.server.bind_address.is_empty() {
             errors.push("server.bind_address cannot be empty".to_string());
+        }
+        if let Some(tls) = &self.server.tls {
+            if tls.cert_path.trim().is_empty() || tls.key_path.trim().is_empty() {
+                errors.push("server.tls.cert_path and key_path must both be set".into());
+            }
         }
         // Storage and logs share one rule set (see BlockConfig::validate_into);
         // data_dir, compression, compression_level and row_group_size are all
