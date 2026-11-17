@@ -7,7 +7,7 @@
 
 use crate::error::{Error, Result};
 use crate::models::storage::{BlockMetadata, SignalType};
-use object_store::{ObjectStore, PutMode, PutOptions, UpdateVersion};
+use object_store::{ObjectStore, ObjectStoreExt, PutMode, PutOptions, UpdateVersion};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
@@ -94,7 +94,7 @@ impl std::fmt::Debug for ObjectCatalog {
 
 impl ObjectCatalog {
     pub fn new(store: Arc<dyn ObjectStore>, prefix: &str) -> Self {
-        let key = object_store::path::Path::from(prefix).child("_catalog/manifest.json");
+        let key = object_store::path::Path::from(prefix).join("_catalog/manifest.json");
         Self { store, key }
     }
 

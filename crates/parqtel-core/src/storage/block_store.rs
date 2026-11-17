@@ -6,6 +6,7 @@
 //! every key as a filesystem path and is byte-for-byte the previous behavior.
 
 use crate::error::{Error, Result};
+use object_store::ObjectStoreExt;
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
@@ -247,7 +248,7 @@ impl ObjectBlockStore {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| key.to_string_lossy().into_owned());
-        self.prefix.child(name)
+        self.prefix.clone().join(name)
     }
 
     fn cache_path(&self, key: &Path) -> PathBuf {
@@ -328,7 +329,7 @@ impl BlockStore for ObjectBlockStore {
         match self.block_on(async { self.store.head(&object_key).await })? {
             Ok(meta) => Ok(Some(BlockObject {
                 key: key.to_path_buf(),
-                size_bytes: meta.size as u64,
+                size_bytes: meta.size,
             })),
             Err(object_store::Error::NotFound { .. }) => Ok(None),
             Err(e) => Err(Error::Io(std::io::Error::other(e.to_string()))),
@@ -339,7 +340,9 @@ impl BlockStore for ObjectBlockStore {
         let list_prefix = if prefix.as_os_str().is_empty() {
             self.prefix.clone()
         } else {
-            self.prefix.child(prefix.to_string_lossy().into_owned())
+            self.prefix
+                .clone()
+                .join(prefix.to_string_lossy().into_owned())
         };
         let listed = self.block_on(async {
             use futures::StreamExt;
@@ -356,7 +359,7 @@ impl BlockStore for ObjectBlockStore {
             let name = item.location.filename().unwrap_or_default();
             out.push(BlockObject {
                 key: PathBuf::from(name),
-                size_bytes: item.size as u64,
+                size_bytes: item.size,
             });
         }
         out.sort_by(|a, b| a.key.cmp(&b.key));

@@ -53,7 +53,7 @@ chrono = { version = "0.4", features = ["serde"] }
 ulid = { version = "1", features = ["serde"] }
 notify = { version = "6", features = ["macos_fsevent"] }
 async-trait = "0.1"
-object_store = { version = "0.11", features = ["aws"] }
+object_store = { version = "0.14", features = ["aws"] }
 jsonwebtoken = "9"
 rdkafka = { version = "0.38", features = ["cmake-build"] }
 # OpenTelemetry SDK for self-instrumentation (traces + SLI metrics over OTLP/gRPC).
