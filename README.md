@@ -363,11 +363,10 @@ schemas.
 
 Parqtel is in **public beta**. Three things bite in production:
 
-1. **No built-in authentication or authorization.** Every endpoint — including
-   ingest and the OTLP gRPC port — is unauthenticated. Do not expose `8080` or
-   `4317` publicly; put them behind a reverse proxy or service mesh that
-   terminates TLS and authenticates. The web console has the same privileges as
-   the API.
+1. **Authentication is optional and off by default.** `[auth]` provides
+   scoped HTTP bearer tokens (`read`/`write`/`admin`), but the OTLP gRPC listener
+   has no token layer and auth is disabled unless configured. Do not expose
+   `8080` or `4317` without auth plus a TLS terminator or a network boundary.
 2. **The in-memory buffer is bounded and can drop pre-flush rows.** Points stay
    buffered until a block is flushed. `ingest.buffer_max_points` (5M) and
    `buffer_max_bytes` (2 GiB estimated) cap it; `drop_oldest` evicts the oldest

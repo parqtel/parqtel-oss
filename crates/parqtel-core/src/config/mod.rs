@@ -1,4 +1,5 @@
 mod alert;
+mod auth;
 mod ingest;
 mod query;
 mod routing;
@@ -10,6 +11,7 @@ pub use alert::{
     AlertConfig, EgressConfig, NotificationConfig, PostmortemConfig, PresetConfig, PresetMode,
     RouteConfig, SilenceConfig,
 };
+pub use auth::{AuthConfig, AuthScope, AuthTokenConfig};
 pub use ingest::{BufferOverflowPolicy, IngestConfig, TailSamplingConfig};
 pub use query::{QueryConfig, UIConfig};
 pub use routing::{
@@ -33,6 +35,8 @@ pub struct Config {
     pub storage: BlockConfig,
     pub logs: LogBlockConfig,
     pub ingest: IngestConfig,
+    #[serde(default)]
+    pub auth: AuthConfig,
     pub query: QueryConfig,
     pub ui: UIConfig,
     pub telemetry: TelemetryConfig,
@@ -69,6 +73,9 @@ impl Config {
 
         if let Some(ref routing) = self.alerting.routing {
             routing.validate_into("alerting.routing", &mut errors);
+        }
+        if let Err(e) = self.auth.validate() {
+            errors.push(e);
         }
 
         if errors.is_empty() {

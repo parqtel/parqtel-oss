@@ -40,15 +40,15 @@ keeping it resident in glibc arenas.
 
 ---
 
-## No authentication or authorization
+## Authentication is optional
 
-**Symptom.** Every endpoint, including ingest and the OTLP gRPC port, is
-unauthenticated.
+**Symptom.** With the default `auth.enabled = false`, every HTTP endpoint is
+open; the OTLP gRPC listener has no token layer even when HTTP auth is enabled.
 
-**Mitigating now.** Do not expose port `8080` (HTTP) or `4317` (OTLP gRPC)
-publicly. Put them behind a reverse proxy or service mesh that terminates TLS
-and authenticates. The embedded console reads and writes data with the same
-privileges as the API.
+**Mitigating now.** Enable `[auth]` with `read`/`write`/`admin` bearer tokens
+for HTTP, and keep gRPC behind a proxy or mesh. Auth is disabled by default so
+the single-user/edge topology keeps working; do not expose `8080` or `4317`
+without either auth or a network boundary.
 
 ---
 

@@ -19,7 +19,7 @@ use tower_http::{
 
 /// Paths that execute scans and therefore honor `query.timeout_secs`. Ingest
 /// is deliberately excluded: a slow ingest is backpressure, not a query error.
-fn is_query_path(path: &str) -> bool {
+pub(crate) fn is_query_path(path: &str) -> bool {
     path.starts_with("/api/v1/query")
         || path.starts_with("/api/v1/label")
         || path == "/api/v1/labels"
@@ -36,7 +36,7 @@ fn is_query_path(path: &str) -> bool {
 }
 
 /// OTLP/HTTP ingest paths guarded by the concurrency limit.
-fn is_ingest_path(path: &str) -> bool {
+pub(crate) fn is_ingest_path(path: &str) -> bool {
     matches!(
         path,
         "/v1/metrics"
@@ -109,6 +109,13 @@ pub fn build_router(state: AppState) -> Router {
 
     let query_config = state.inner.config.query.clone();
     let ingest_config = state.inner.config.ingest.clone();
+    let auth = match crate::auth::AuthState::from_config(&state.inner.config.auth) {
+        Ok(auth) => auth,
+        Err(e) => {
+            tracing::error!(error = %e, "invalid auth configuration; rejecting all requests");
+            crate::auth::AuthState::deny_all()
+        }
+    };
     let ingest_guard = IngestGuard {
         permits: Arc::new(Semaphore::new(ingest_config.max_concurrent_requests.max(1))),
         state: state.clone(),
@@ -272,6 +279,12 @@ pub fn build_router(state: AppState) -> Router {
         // histogram) for the whole request, including any inner middleware.
         .layer(axum::middleware::from_fn(
             crate::otel_sli::http_sli_middleware,
+        ))
+        // Outermost: reject unauthenticated requests before any scan or body
+        // work. Disabled by default for the single-user deployment.
+        .layer(axum::middleware::from_fn_with_state(
+            std::sync::Arc::new(auth),
+            crate::auth::require_auth,
         ))
         .with_state(state)
 }

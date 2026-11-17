@@ -42,6 +42,11 @@ while measuring. Measurements and method are in
 
 ### Added
 
+- **Scoped bearer tokens.** Optional `[auth]` config with hashed `read`,
+  `write`, and `admin` tokens. Health/readiness and the static console shell
+  stay public; data routes require a matching token, ingest requires `write`,
+  and mutations require `admin`. Disabled by default. The OTLP gRPC listener
+  still needs a proxy/mesh boundary.
 - **Rule definitions are validated and observable.** API-created recording
   rules and pipelines are validated/compiled before storage (`400` on failure),
   watcher deletes now remove the definition, and `GET /api/v1/rules/status`

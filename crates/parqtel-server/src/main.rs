@@ -1,5 +1,6 @@
 //! `parqtel` server binary: configuration, startup and subcommand dispatch.
 
+mod auth;
 mod cli;
 mod commands;
 mod grpc;

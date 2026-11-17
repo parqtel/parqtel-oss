@@ -275,10 +275,6 @@ The query timeout (`query.timeout_secs`) applies only to scan endpoints
 (`/api/v1/query*`, labels, log/trace search, correlate, pipeline search, and
 Grafana `/query`/`/search`). Ingest is never wrapped in the query timeout.
 
-The query timeout (`query.timeout_secs`) applies only to scan endpoints
-(`/api/v1/query*`, labels, log/trace search, correlate, pipeline search, and
-Grafana `/query`/`/search`). Ingest is never wrapped in the query timeout.
-
 ### `[ingest.tail_sampling]`
 
 | Key | Type | Default | Description |
@@ -320,6 +316,45 @@ Per-service overrides; each entry fully replaces the global policy for that serv
 | `profiling_frequency` | Integer | `99` | CPU sampling frequency in Hz (1–1000) |
 
 > **Operational note**: when `otlp_enabled = true` but the OTLP SDK fails to initialise (e.g. an unreachable collector), the server logs a warning and continues with console logs only — ingestion is never blocked by self-telemetry.
+
+### `[auth]`
+
+Optional scoped bearer-token authentication. Disabled by default; the
+single-user/edge deployment is unchanged. When enabled, `/health`, `/ready`,
+`/ui`, `/oas`, `/`, and CORS preflight stay public; every data route needs a
+token. Scope mapping: `read` covers GET queries/metadata, `write` adds ingest,
+and `admin` adds rule/route/pipeline/silence mutations. Token names are used as
+the actor in audit records.
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `enabled` | Boolean | `false` | Require a token on non-public routes |
+| `header` | String | `"authorization"` | Request header carrying the token; `Bearer <token>` and a raw value are both accepted |
+| `tokens` | Array | `[]` | Token entries: `name`, `token` (or `${ENV}`), optional `token_sha256`, `actions: [read|write|admin]` (empty = read) |
+
+```toml
+[auth]
+enabled = true
+
+[[auth.tokens]]
+name = "grafana"
+token = "${PARQTEL_READ_TOKEN}"
+actions = ["read"]
+
+[[auth.tokens]]
+name = "otel-collector"
+token = "${PARQTEL_WRITE_TOKEN}"
+actions = ["write"]
+
+[[auth.tokens]]
+name = "operator"
+token_sha256 = "…64 lowercase hex characters…"
+actions = ["admin"]
+```
+
+Generate a hash with `printf %s "$TOKEN" | sha256sum`. Plaintext `token` values
+are hashed at startup and never stored. Enabling auth does not add TLS; pair it
+with a TLS terminator or in-process TLS when the network is not trusted.
 
 ### `[alerts]`
 
