@@ -116,6 +116,10 @@ pub struct IngestConfig {
     /// Generic JSON ingest: field carrying the severity/level.
     #[serde(default = "default_json_severity_field")]
     pub json_severity_field: String,
+    /// Maximum distinct series admitted per metric. Existing series keep
+    /// ingesting; new ones past the cap are dropped and counted. `0` disables.
+    #[serde(default = "default_series_limit_per_metric")]
+    pub series_limit_per_metric: usize,
 }
 
 /// Overload behaviour for the in-memory query buffer.
@@ -155,6 +159,10 @@ fn default_json_body_field() -> String {
 
 fn default_json_severity_field() -> String {
     "level".to_string()
+}
+
+fn default_series_limit_per_metric() -> usize {
+    1_000_000
 }
 
 fn default_label_interner_capacity() -> usize {
@@ -234,6 +242,7 @@ impl Default for IngestConfig {
             json_timestamp_field: default_json_timestamp_field(),
             json_body_field: default_json_body_field(),
             json_severity_field: default_json_severity_field(),
+            series_limit_per_metric: default_series_limit_per_metric(),
         }
     }
 }

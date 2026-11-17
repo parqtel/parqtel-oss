@@ -285,6 +285,7 @@ The L1 pass is bounded (8 sources, 2 groups, 16 M rows per pass) and reserves
 | `json_timestamp_field` | String | `"timestamp"` | Generic JSON ingest timestamp field (RFC3339, or integer seconds/ms/µs/ns) |
 | `json_body_field` | String | `"message"` | Generic JSON ingest body field; absent falls back to the whole object |
 | `json_severity_field` | String | `"level"` | Generic JSON ingest severity field; maps trace/debug/info/warn/error/fatal |
+| `series_limit_per_metric` | Integer | `1000000` | Max distinct series admitted per metric; existing series keep ingesting, new ones are dropped and counted. `0` disables |
 
 Buffer occupancy and drops are exported at `/metrics` as
 `parqtel_buffer_points{signal}`, `parqtel_buffer_bytes`,

@@ -154,6 +154,7 @@ pub async fn ingest_rates(
 pub async fn metrics(State(state): State<AppState>) -> (StatusCode, String) {
     let mut body = state.inner.metrics.render(&state.inner.index).await;
     body.push_str(&state.inner.query_executor.memory_buffer().render_metrics());
+    body.push_str(&state.inner.ingestion_service.render_series_metrics());
     (StatusCode::OK, body)
 }
 

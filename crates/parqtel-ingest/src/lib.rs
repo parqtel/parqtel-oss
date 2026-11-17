@@ -3,6 +3,7 @@
 //! Handles OTLP decoding, validation, and crash-safe Parquet block writing for metrics, logs, and traces.
 
 pub mod decode;
+pub mod series_limit;
 pub mod service;
 pub mod span_metrics;
 pub mod tail_sampling;
@@ -78,3 +79,5 @@ pub mod otel {
 
 pub use service::{IngestionService, LogIngestionService, TraceIngestionService};
 pub use writer::{BlockMetadata, BlockWriter, LogWriter, TraceWriter};
+
+pub use series_limit::SeriesLimiter;

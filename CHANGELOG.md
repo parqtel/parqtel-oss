@@ -42,6 +42,10 @@ while measuring. Measurements and method are in
 
 ### Added
 
+- **Per-metric series cap.** `ingest.series_limit_per_metric` (default 1M)
+  refuses new label sets past the cap while existing series keep ingesting,
+  and exports `parqtel_series_rejected_total{metric}`. One label explosion no
+  longer degrades every metric on the node.
 - **Live tail over SSE.** `GET /api/v1/logs/tail` streams buffered log rows as
   server-sent events with optional `service_name` and `body_contains` filters.
   It polls the existing memory buffer (250 ms) and requires the read scope.

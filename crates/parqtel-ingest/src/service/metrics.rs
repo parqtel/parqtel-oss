@@ -5,6 +5,7 @@ use super::common::{decode_offloading, IngestionStats};
 use super::rotator::BlockRotator;
 use crate::decode::OtlpDecoder;
 use crate::otel::collector::metrics::v1::ExportMetricsServiceRequest;
+use crate::series_limit::SeriesLimiter;
 use bytes::Bytes;
 use parqtel_core::storage::PendingIndex;
 use parqtel_core::wal::WalWriter;
@@ -21,6 +22,7 @@ pub struct IngestionService {
     stats: Arc<IngestionStats>,
     memory_buffer: Option<MemoryBuffer>,
     contention: Option<Arc<ContentionMetrics>>,
+    series_limiter: Arc<SeriesLimiter>,
 }
 
 /// The points of `metric` as the memory buffer should hold them: each carrying
@@ -88,6 +90,7 @@ impl IngestionService {
             stats: Arc::new(IngestionStats::default()),
             memory_buffer: None,
             contention: None,
+            series_limiter: Arc::new(SeriesLimiter::new(0)),
         }
     }
 
@@ -111,6 +114,17 @@ impl IngestionService {
     pub fn with_contention(mut self, contention: Arc<ContentionMetrics>) -> Self {
         self.contention = Some(contention);
         self
+    }
+
+    /// Cap distinct series per metric. `0` disables the cap.
+    pub fn with_series_limit(mut self, limit: usize) -> Self {
+        self.series_limiter = Arc::new(SeriesLimiter::new(limit));
+        self
+    }
+
+    /// Prometheus text for per-metric series rejections.
+    pub fn render_series_metrics(&self) -> String {
+        self.series_limiter.render_metrics()
     }
 
     /// Starts the background flush worker.
@@ -180,7 +194,15 @@ impl IngestionService {
     async fn process_metrics(&self, metrics: Vec<Metric>) -> Result<u64> {
         let mut count = 0;
         let contention = self.contention.clone();
-        for m in metrics {
+        for mut m in metrics {
+            let (admitted, rejected) = self.series_limiter.admit(&m);
+            if rejected > 0 {
+                tracing::warn!(metric = %m.name, rejected, "series cap reached");
+            }
+            m.data_points = admitted;
+            if m.data_points.is_empty() {
+                continue;
+            }
             count += m.data_points.len() as u64;
             // The memory buffer copy carries `service.name` from the resource
             // attributes, so label matchers behave the same before and after a

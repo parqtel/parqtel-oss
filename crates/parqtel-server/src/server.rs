@@ -104,7 +104,8 @@ pub(crate) async fn run_server(
         metrics_wal,
     )
     .with_memory_buffer(memory_buffer.clone())
-    .with_contention(contention.clone());
+    .with_contention(contention.clone())
+    .with_series_limit(config.ingest.series_limit_per_metric);
     // Background flush: a request that crosses the block cap is acknowledged
     // once the WAL has its rows rather than after the Parquet encode. Measured
     // on a 7 MiB batch the encode is ~125 ms of a ~300 ms request, and it
