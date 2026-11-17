@@ -29,32 +29,33 @@ hundred of them and one or two label names.
 
 ## Target design (2a)
 
-`SeriesIndex` keeps the parsed `SeriesTable` and builds the rest on demand:
+`SeriesIndex` keeps the parsed `SeriesTable`, a small metric/name directory and
+per-series lazy label cells. It does **not** cache a full postings map, even lazily
+per label name: `pod` is high-cardinality, so the first `pod="one-value"` query
+would otherwise build hundreds of thousands of map entries. Instead, selectors
+build query-local candidate-id lists by scanning only the chosen metric's compact
+label-id rows. `intersect_all` combines those lists; they die with the query.
 
 ```text
 SeriesIndex
   table: SeriesTable                       # ids + strings, as parsed (already compact)
   metric_ranges: HashMap<String, Vec<(u32, u32)>>   # ~3.4K metrics: kept eager
   label_name_ids: HashMap<String, u32>     # label names only (~560): eager, small
-  postings: Mutex<HashMap<u32, Arc<LabelPostings>>>  # built per label name on first use
   labels: Vec<OnceLock<LabelSet>>          # interned on first use, per series
   total_rows, approx_bytes
-
-LabelPostings
-  by_value: HashMap<String, Vec<u32>>      # ascending series ids for one label name
 ```
 
 Rules every task must keep:
 
-1. **Postings only narrow.** `selector.filter` stays the final judge of every series.
-   A missing posting may cost speed, never correctness.
+1. **Candidate ids only narrow.** Each equality or value-test scan produces an
+   ascending query-local id list. `selector.filter` stays the final judge of every
+   series; a candidate-list bug must not hide a possible match.
 2. `select()` keeps its signature and returns ascending ids in row order.
 3. Any metric block writer still goes through `metric_runs_to_block`; the footer
    format, `FORMAT_VERSION` and `SERIES_INDEX_FOOTER_KEY` do not change in 2a.
-4. `approx_bytes()` must be a **conservative upper bound** fixed at construction:
-   table bytes + `series * 16` (label cache) + `total label pairs * 4` (all postings
-   ids) + string bytes (posting keys). The footer cache charges it once at insert,
-   so lazy growth must already be counted.
+4. `approx_bytes()` accounts for the long-lived table, metric/name directory and
+   `OnceLock<LabelSet>` slots. Candidate-id vectors are query-local and are not
+   retained in the footer cache. Use saturating arithmetic.
 5. Label sets stay shared across blocks: the same series in two blocks yields
    `ptr_eq` label sets once both are materialised.
 6. Workspace lints apply: no `unsafe`, no `unwrap`/`expect`/`panic` outside tests,
@@ -136,6 +137,7 @@ breaks `parqtel-core` itself. Do not leave a broken intermediate commit.
 
 Files: `crates/parqtel-core/src/storage/series_index.rs`,
 `crates/parqtel-core/src/storage/series_index/tests.rs`,
+`crates/parqtel-core/examples/bench_series_index.rs`,
 `crates/parqtel-core/src/storage/scanner/block.rs`,
 `crates/parqtel-core/src/storage/scanner/metrics.rs`,
 `crates/parqtel-core/src/storage/compactor.rs`,
@@ -161,15 +163,18 @@ in the files above to `series_count`, `bounds`, or `labels`; preserve row-count
 and contiguity checks. For this buildable transition, the legacy tiered compactor
 may iterate via `bounds` and `labels`; T4 removes that unnecessary query index.
 The existing streaming compactor already reads `SeriesTable::series_entry` and
-should not be refactored in this task.
+should not be refactored in this task. Update T0's `open`, `select`, and
+`select-broad` modes to consume the parsed table via `from_owned_table`; `parse`
+continues to retain the parsed table.
 
 `select()`:
 
 1. resolve metric ranges as today;
-2. for each `equals` / `value_tests` label: look up the name id; if absent → empty
-   result (same as today); else get-or-build that label's `LabelPostings` under the
-   mutex (build by scanning `table.labels` once, pushing ids in ascending order), then
-   `restrict` to the metric ranges;
+2. for each `equals` / `value_tests` matcher: look up the label-name id; if absent,
+   return empty. Resolve equality values with a linear lookup in the compact symbol
+   table; do not build a global value-to-id map. Scan the selected metric ranges' flat
+   label-id pairs, compare the value id or apply the value test to its string, and
+   collect matching series ids in row order. Keep these lists local to this query;
 3. intersect with `intersect_all`;
 4. time-window check from the table arrays, then `filter` on `labels(id)` only for
    survivors.
@@ -181,11 +186,11 @@ Lock poisoning: recover with `unwrap_or_else(|e| e.into_inner())`, as
 Tests (add, keep all existing ones passing after mechanical updates from `idx.series[i]`
 to `idx.labels(i)` / `idx.bounds(i)`):
 
-- `postings_are_built_only_for_queried_labels` — after `select` with `equals host=…`,
-  a `#[cfg(test)] fn built_posting_labels(&self) -> Vec<String>` returns exactly `["host"]`;
-- `labels_are_materialised_lazily` — a `#[cfg(test)]` counter of initialised
-  `OnceLock`s is 0 after `from_table`, and equals the number of filtered survivors after
-  a `filter`-only select;
+- `select` with multiple equality/value-test matchers returns the same ids as the full
+  matcher across all labels; unknown labels and empty values return no ids;
+- `labels_are_materialised_lazily` — a `#[cfg(test)]` counter of initialized
+  `OnceLock`s is 0 after construction and after a selector-only `select`; a subsequent
+  full-filter select materializes only its narrowed candidates;
 - `the_same_series_in_two_blocks_shares_one_label_set` — rewritten via `labels(0)`;
 - `approx_bytes_is_an_upper_bound` — after selecting every label of `sample()`,
   measured postings + label-cache bytes ≤ `approx_bytes()`.
@@ -193,8 +198,8 @@ to `idx.labels(i)` / `idx.bounds(i)`):
 Gate: `cargo test -p parqtel-core storage::series_index -- --test-threads=1`,
 `cargo test -p parqtel-core indexed_scan_equals_unindexed_scan`,
 `cargo check -p parqtel-ingest --tests`, and
-`cargo clippy -p parqtel-core -- -D warnings`. Every call site must compile at the
-end of T3.
+`cargo clippy -p parqtel-core --all-targets -- -D warnings`. Every call site and the
+T0 example must compile at the end of T3.
 
 ### T4 — Keep compaction out of the query index
 
