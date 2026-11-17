@@ -47,3 +47,35 @@ async fn trace_id_filter_runs_before_span_limit() {
     assert_eq!(newest.len(), 1);
     assert_eq!(newest[0].start_time_ns, 1_500);
 }
+
+#[tokio::test]
+async fn narrow_trace_window_matches_full_scan_filter() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("traces-window.parquet");
+    let spans: Vec<_> = (1..=200).map(test_span).collect();
+    write_traces_parquet(&path, &spans);
+    let meta = BlockMetadata {
+        path,
+        start_timestamp_ns: 1,
+        end_timestamp_ns: 200,
+        row_count: spans.len(),
+        size_bytes: 0,
+        metric_names: HashSet::new(),
+        label_names: HashSet::new(),
+        label_values: BTreeMap::new(),
+        signal_type: SignalType::Traces,
+        wal_range: None,
+    };
+    let window = Scanner::scan_traces(vec![meta], 50, 75, 1000)
+        .await
+        .unwrap();
+    let expected: Vec<_> = spans
+        .iter()
+        .filter(|s| (50..=75).contains(&s.start_time_ns))
+        .map(|s| s.name.clone())
+        .collect();
+    assert_eq!(
+        window.iter().map(|s| s.name.clone()).collect::<Vec<_>>(),
+        expected
+    );
+}

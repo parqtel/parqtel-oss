@@ -1,16 +1,31 @@
 //! Trace scans.
 
-use super::pruning::{page_ranges_in_time, restrict_to_ranges, row_groups_in_range};
+use super::pruning::{
+    page_ranges_in_time, project_present, restrict_to_ranges, row_groups_in_range,
+};
 use super::Scanner;
 use super::{acquire_scan_slot, record_scan_block, record_scan_output, MAX_CONCURRENT_BLOCK_SCANS};
 use crate::error::{Error, Result};
 use crate::models::storage::{BlockMetadata, StorageModel};
 use crate::models::traces::Span;
 use arrow_array::{Array, BinaryArray, FixedSizeBinaryArray, TimestampNanosecondArray};
-use parquet::arrow::arrow_reader::{ArrowReaderOptions, ParquetRecordBatchReaderBuilder};
+use parquet::arrow::arrow_reader::{
+    ArrowReaderMetadata, ArrowReaderOptions, ParquetRecordBatchReaderBuilder,
+};
 use parquet::file::metadata::PageIndexPolicy;
-use std::collections::BTreeMap;
 use std::fs::File;
+
+/// Coalesces sorted file-row indices into ascending, non-overlapping ranges.
+fn row_ranges(rows: &[(i64, u64)]) -> Vec<(u64, u64)> {
+    let mut out: Vec<(u64, u64)> = Vec::new();
+    for (_, row) in rows {
+        match out.last_mut() {
+            Some(last) if last.1 == *row => last.1 = *row + 1,
+            _ => out.push((*row, *row + 1)),
+        }
+    }
+    out
+}
 
 impl Scanner {
     /// Scans a set of blocks for spans matching a time range.
@@ -101,37 +116,77 @@ impl Scanner {
         };
 
         let options = ArrowReaderOptions::new().with_page_index_policy(PageIndexPolicy::Optional);
-        let reader_builder = ParquetRecordBatchReaderBuilder::try_new_with_options(file, options)
-            .map_err(|e| Error::Parquet(e.to_string()))?;
+        let base = ParquetRecordBatchReaderBuilder::try_new_with_options(
+            file.try_clone().map_err(Error::Io)?,
+            options.clone(),
+        )
+        .map_err(|e| Error::Parquet(e.to_string()))?;
+        let metadata = base.metadata().clone();
+        let parquet_schema = base.parquet_schema().clone();
 
-        // Prune by the column the caller filters on (`start_time_ns`, index 4 of
-        // traces_schema) rather than the block's own timestamp column.
-        let reader_builder =
-            match row_groups_in_range(reader_builder.metadata(), "start_time_ns", start_ns, end_ns)
-            {
-                Some(groups) if groups.is_empty() => return Ok(Vec::new()),
-                Some(groups) => match page_ranges_in_time(
-                    reader_builder.metadata(),
-                    "start_time_ns",
-                    start_ns,
-                    end_ns,
-                    &groups,
-                ) {
-                    Some(ranges) if ranges.is_empty() => return Ok(Vec::new()),
-                    Some(ranges) => restrict_to_ranges(reader_builder, &ranges),
-                    None => reader_builder.with_row_groups(groups),
-                },
-                None => reader_builder,
-            };
+        // Row groups and pages that can hold a row in the window.
+        let groups = match row_groups_in_range(&metadata, "start_time_ns", start_ns, end_ns) {
+            Some(groups) if groups.is_empty() => return Ok(Vec::new()),
+            Some(groups) => Some(groups),
+            None => None,
+        };
+        let page_ranges = groups.as_ref().and_then(|groups| {
+            page_ranges_in_time(&metadata, "start_time_ns", start_ns, end_ns, groups)
+        });
+        if matches!(&page_ranges, Some(ranges) if ranges.is_empty()) {
+            return Ok(Vec::new());
+        }
 
-        let reader = reader_builder
+        // File-row ranges the reader will yield, used to turn a batch row back
+        // into a file row for the second pass.
+        let source_ranges: Vec<(u64, u64)> = if let Some(ranges) = &page_ranges {
+            ranges.clone()
+        } else if let Some(groups) = &groups {
+            let mut starts = Vec::with_capacity(metadata.num_row_groups());
+            let mut at = 0u64;
+            for rg in metadata.row_groups() {
+                starts.push(at);
+                at += rg.num_rows().max(0) as u64;
+            }
+            groups
+                .iter()
+                .map(|g| {
+                    let start = starts[*g];
+                    (
+                        start,
+                        start + metadata.row_group(*g).num_rows().max(0) as u64,
+                    )
+                })
+                .collect()
+        } else {
+            let rows = metadata.file_metadata().num_rows().max(0) as u64;
+            vec![(0, rows)]
+        };
+
+        // Phase one: timestamp and trace id only. Attributes, events and links
+        // stay encoded for rows that cannot match.
+        let columns = project_present(&parquet_schema, &["start_time_ns", "trace_id"]);
+        if columns.len() != 2 {
+            return Err(Error::Arrow(
+                "trace block is missing start_time_ns or trace_id".into(),
+            ));
+        }
+        let mask = parquet::arrow::ProjectionMask::leaves(&parquet_schema, columns);
+        let phase_one = if let Some(ranges) = &page_ranges {
+            restrict_to_ranges(base, ranges)
+        } else if let Some(groups) = &groups {
+            base.with_row_groups(groups.clone())
+        } else {
+            base
+        };
+        let reader = phase_one
+            .with_projection(mask)
             .build()
             .map_err(|e| Error::Parquet(e.to_string()))?;
 
-        let mut spans = Vec::new();
-        let mut newest_matches = BTreeMap::new();
-        let mut sequence = 0u64;
-
+        let mut selected: Vec<(i64, u64)> = Vec::new();
+        let mut source_idx = 0usize;
+        let mut next_row = source_ranges.first().map_or(0, |r| r.0);
         for record_batch in reader {
             let record_batch = match record_batch {
                 Ok(c) => c,
@@ -140,11 +195,12 @@ impl Scanner {
                     continue;
                 }
             };
-
-            // Cheap reject first: `row_to_span` parses JSON attributes, events
-            // and links, so rows outside the window must never reach it.
+            let ts_idx = record_batch
+                .schema()
+                .index_of("start_time_ns")
+                .map_err(|_| Error::Arrow("Missing start_time_ns column".into()))?;
             let ts_arr = record_batch
-                .column(4)
+                .column(ts_idx)
                 .as_any()
                 .downcast_ref::<TimestampNanosecondArray>()
                 .ok_or_else(|| Error::Arrow("Invalid start_time_ns column".into()))?;
@@ -158,8 +214,15 @@ impl Scanner {
                 }
                 None => None,
             };
-
             for row in 0..record_batch.num_rows() {
+                while source_idx + 1 < source_ranges.len()
+                    && next_row >= source_ranges[source_idx].1
+                {
+                    source_idx += 1;
+                    next_row = source_ranges[source_idx].0;
+                }
+                let file_row = next_row;
+                next_row += 1;
                 let start_time_ns = ts_arr.value(row);
                 if start_time_ns < start_ns || start_time_ns > end_ns {
                     continue;
@@ -177,31 +240,58 @@ impl Scanner {
                         continue;
                     }
                 }
+                selected.push((start_time_ns, file_row));
+                if trace_id_filter.is_none() && selected.len() >= limit {
+                    break;
+                }
+            }
+            if trace_id_filter.is_none() && selected.len() >= limit {
+                break;
+            }
+        }
+        if selected.is_empty() {
+            return Ok(Vec::new());
+        }
+        if trace_id_filter.is_some() && selected.len() > limit {
+            selected.sort_by_key(|(ts, row)| (std::cmp::Reverse(*ts), *row));
+            selected.truncate(limit);
+        }
+        selected.sort_by_key(|(_, row)| *row);
+        let selected_ranges = row_ranges(&selected);
+
+        // Phase two: all columns, but only the rows phase one selected.
+        let arrow_meta = ArrowReaderMetadata::try_new(metadata, options)
+            .map_err(|e| Error::Parquet(e.to_string()))?;
+        let builder = ParquetRecordBatchReaderBuilder::new_with_metadata(file, arrow_meta);
+        let builder = if !selected_ranges.is_empty() {
+            restrict_to_ranges(builder, &selected_ranges)
+        } else {
+            builder
+        };
+        let reader = builder.build().map_err(|e| Error::Parquet(e.to_string()))?;
+
+        let mut spans = Vec::new();
+        for record_batch in reader {
+            let record_batch = match record_batch {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::warn!("Error reading chunk from {:?}: {} — skipping", meta.path, e);
+                    continue;
+                }
+            };
+            for row in 0..record_batch.num_rows() {
                 match StorageModel::row_to_span(&record_batch, row) {
-                    Ok(span) => {
-                        if trace_id_filter.is_some() {
-                            sequence += 1;
-                            newest_matches.insert((span.start_time_ns, sequence), span);
-                            if newest_matches.len() > limit {
-                                let _ = newest_matches.pop_first();
-                            }
-                        } else {
-                            spans.push(span);
-                            if spans.len() >= limit {
-                                return Ok(spans);
-                            }
-                        }
-                    }
+                    Ok(span) => spans.push(span),
                     Err(e) => {
                         tracing::debug!("Skipping malformed span row in {:?}: {}", meta.path, e);
                     }
                 }
             }
         }
-        if trace_id_filter.is_some() {
-            Ok(newest_matches.into_values().collect())
-        } else {
-            Ok(spans)
+        spans.sort_by_key(|s| s.start_time_ns);
+        if trace_id_filter.is_some() && spans.len() > limit {
+            spans.truncate(limit);
         }
+        Ok(spans)
     }
 }

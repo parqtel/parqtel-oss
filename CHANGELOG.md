@@ -42,6 +42,10 @@ while measuring. Measurements and method are in
 
 ### Added
 
+- **Two-phase trace scans.** Trace searches now read only `start_time_ns`
+  and `trace_id` first, then decode attributes, events, and links for selected
+  rows. This is the trace half of P1-05; log scans already used the same
+  late-materialisation pattern.
 - **Persisted dashboards.** `GET/POST /api/v1/dashboards`,
   `PUT/DELETE /api/v1/dashboards/{id}`, and
   `GET /api/v1/dashboards/{id}/render?start=&end=` store named panels over
