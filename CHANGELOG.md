@@ -156,6 +156,12 @@ while measuring. Measurements and method are in
 
 ### Fixed
 
+- **Helm chart refuses a multi-writer deployment.** `replicaCount` is capped at
+  1 in `values.schema.json` and the Deployment template fails if `replicaCount`
+  or `autoscaling.maxReplicas` would create more than one pod. Each replica owns
+  a disjoint local data directory; shared storage is not implemented. CI values
+  and deployment docs now use a single replica.
+
 - **One alert delivery path.** When `[alerting.routing]` is configured it now
   wins; the legacy `[alerts.notifications.routes]` table is a fallback only.
   Configuring both logs a warning and disables the legacy routes, so an event
