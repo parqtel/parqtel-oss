@@ -60,7 +60,7 @@ impl BlockIndex {
     /// Loads the index from the JSON sidecar file.
     pub fn load(&mut self) -> Result<()> {
         if self.sidecar_path.exists() {
-            let content = fs::read_to_string(&self.sidecar_path)?;
+            let content = decode_sidecar(&fs::read(&self.sidecar_path)?)?;
             let legacy = content.trim_start().starts_with('[');
             self.load_serialized(&content)?;
             // The current format keeps the autocomplete dictionary in a
@@ -617,6 +617,27 @@ impl From<BlockMetadata> for PendingIndex {
     }
 }
 
+/// Magic prefix for the zstd-compressed sidecar. Plain JSON (written by older
+/// builds) has no prefix and is still accepted by [`decode_sidecar`].
+const SIDECAR_MAGIC: &[u8; 4] = b"PQZ1";
+
+fn encode_sidecar(payload: &str) -> Result<Vec<u8>> {
+    let mut out = Vec::with_capacity(4 + payload.len() / 4);
+    out.extend_from_slice(SIDECAR_MAGIC);
+    let compressed = zstd::encode_all(payload.as_bytes(), 3).map_err(Error::Io)?;
+    out.extend_from_slice(&compressed);
+    Ok(out)
+}
+
+fn decode_sidecar(bytes: &[u8]) -> Result<String> {
+    if let Some(compressed) = bytes.strip_prefix(SIDECAR_MAGIC) {
+        let decoded = zstd::decode_all(compressed).map_err(Error::Io)?;
+        String::from_utf8(decoded).map_err(|e| Error::Internal(e.to_string()))
+    } else {
+        String::from_utf8(bytes.to_vec()).map_err(|e| Error::Internal(e.to_string()))
+    }
+}
+
 /// Owns persistence of a [`BlockIndex`] sidecar.
 ///
 /// Mutations mark the store dirty; a background pass serialises under a
@@ -735,7 +756,8 @@ impl BlockIndexStore {
             fs::create_dir_all(parent)?;
         }
         let tmp_path = self.path.with_extension("tmp");
-        fs::write(&tmp_path, payload)?;
+        let compressed = encode_sidecar(payload)?;
+        fs::write(&tmp_path, compressed)?;
         fs::rename(tmp_path, &self.path)?;
         Ok(())
     }

@@ -42,6 +42,9 @@ while measuring. Measurements and method are in
 
 ### Added
 
+- **Compressed block-index sidecar.** `index.json` is now a `PQZ1` zstd frame
+  instead of plain JSON; plain JSON sidecars still load. On the local 130-block
+  corpus the sidecar fell from 42 KB to 2.8 KB, 0.4% of Parquet bytes.
 - **Two-phase trace scans.** Trace searches now read only `start_time_ns`
   and `trace_id` first, then decode attributes, events, and links for selected
   rows. This is the trace half of P1-05; log scans already used the same

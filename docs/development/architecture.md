@@ -282,11 +282,11 @@ plain-JSON tables. New blocks omit the repeated row-level `labels` column.
 
 The `BlockIndex` is an in-memory structure that tracks all blocks per signal:
 
-- **Persistence**: Serialized to `index.json` (JSON sidecar, atomic tmp+rename) in each signal's data directory — one index for metrics, one for logs, one for traces
+- **Persistence**: Serialized to `index.json` (zstd-compressed JSON, `PQZ1` magic, atomic tmp+rename) in each signal's data directory — one index for metrics, one for logs, one for traces. Plain-JSON sidecars from older builds still load and are rewritten compressed on the next persist.
 - **Queries**: Supports time-range filtering and metric-name filtering
 - **Statistics**: Tracks total blocks, rows, bytes, metric names, and label names
 - **Label-value dictionaries**: one shared dictionary per signal, capped at 10 K values per field, is written to a sibling `label_values.json` so the block sidecar (`index.json`, `{"blocks": [...]}`) stays small. `label_values` endpoints and the console's autocomplete read it instead of decoding blocks. The loader accepts the legacy bare-array sidecar and folds its per-block values in; forward migration happens on first start. Values do not expire with retention (they are bounded by the cap). An older binary can still read the block sidecar but will not see the sibling dictionary.
-- **Write path**: a mutation marks the index dirty and hands persistence to the index task, which serialises the sidecar at most every `server.index_persist_interval_secs` (2 s). The serialisation buffer is pre-sized from the last payload length, and no payload copy is retained in memory — an earlier version kept a clone alive for the process lifetime and pinned the sidecar's size permanently.
+- **Write path**: a mutation marks the index dirty and hands persistence to the index task, which serialises the sidecar at most every `server.index_persist_interval_secs` (2 s). The payload is zstd-compressed at level 3 before the atomic write; the serialisation buffer is pre-sized from the last uncompressed payload length, and no payload copy is retained in memory — an earlier version kept a clone alive for the process lifetime and pinned the sidecar's size permanently.
 
 ### Compaction
 

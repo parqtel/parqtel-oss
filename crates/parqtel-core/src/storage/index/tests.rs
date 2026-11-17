@@ -211,7 +211,10 @@ fn write_payload_creates_parent_and_is_readable() {
     assert_eq!(store.size_bytes(), 0, "absent sidecar reports zero");
     store.write_payload(&payload).unwrap();
     assert!(nested.join("index.json").exists());
-    assert_eq!(store.size_bytes() as usize, payload.len());
+    assert!(
+        (store.size_bytes() as usize) < payload.len(),
+        "the sidecar is zstd-compressed"
+    );
 
     let mut reloaded = BlockIndex::new(&nested);
     reloaded.load().unwrap();
