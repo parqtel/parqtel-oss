@@ -1539,6 +1539,50 @@ paths:
               schema:
                 $ref: "#/components/schemas/ApiResponse"
 
+  /api/v1/logs/stream:
+    get:
+      tags: [Logs]
+      summary: Chunked NDJSON log results
+      description: >
+        Streams the same log search as /api/v1/logs as newline-delimited JSON.
+        The range is split into 5-minute slices (each capped by `limit`), so
+        the server's working set is bounded by a slice rather than the full
+        result set.
+      operationId: streamLogs
+      parameters:
+        - name: query
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: start
+          in: query
+          required: true
+          schema:
+            type: number
+        - name: end
+          in: query
+          required: true
+          schema:
+            type: number
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 1000
+        - name: order
+          in: query
+          schema:
+            type: string
+            enum: [asc, desc]
+      responses:
+        "200":
+          description: NDJSON log records
+          content:
+            application/x-ndjson:
+              schema:
+                type: string
+
   /api/v1/logs/tail:
     get:
       tags: [Logs]

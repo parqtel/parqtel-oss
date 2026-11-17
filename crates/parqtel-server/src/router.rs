@@ -161,6 +161,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/v1/query", get(handlers::query::query_instant))
         .route("/api/v1/query_range", get(handlers::query::query_range))
         .route("/api/v1/logs", get(handlers::query::query_logs))
+        .route("/api/v1/logs/stream", get(handlers::query::stream_logs))
         .route("/api/v1/logs/tail", get(handlers::tail::tail_logs))
         .route(
             "/api/v1/label/__name__/values",

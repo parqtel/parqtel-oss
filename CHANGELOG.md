@@ -42,6 +42,9 @@ while measuring. Measurements and method are in
 
 ### Added
 
+- **Chunked NDJSON log streaming.** `GET /api/v1/logs/stream` runs the normal
+  log search in 5-minute slices and streams each record as a JSON line, so a
+  large range is bounded by one slice instead of the full result set.
 - **Per-service stats.** `GET /api/v1/stats?dataset=<service.name>` reports
   matching block count, rows, bytes, metric count, global sidecar bytes, and
   compaction lag; the global snapshot is unchanged.

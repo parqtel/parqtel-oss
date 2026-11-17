@@ -14,6 +14,7 @@ mod logs;
 mod metrics;
 mod pipeline_search;
 mod searches;
+mod stream;
 mod traces;
 
 pub use labels::{list_label_names, list_label_values, list_metric_names};
@@ -21,4 +22,5 @@ pub use logs::{list_log_field_values, list_log_fields, query_logs, query_logs_co
 pub use metrics::{query_instant, query_range};
 pub use pipeline_search::run_pipeline_search;
 pub use searches::{create_saved_search, delete_saved_search, list_saved_searches};
+pub use stream::stream_logs;
 pub use traces::{correlate, search_traces};
