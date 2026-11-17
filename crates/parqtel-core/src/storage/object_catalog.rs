@@ -71,22 +71,12 @@ impl CatalogBlock {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct CatalogManifest {
     pub generation: u64,
     #[serde(default)]
     pub writer_lease: Option<String>,
     pub blocks: Vec<CatalogBlock>,
-}
-
-impl Default for CatalogManifest {
-    fn default() -> Self {
-        Self {
-            generation: 0,
-            writer_lease: None,
-            blocks: Vec::new(),
-        }
-    }
 }
 
 pub struct ObjectCatalog {

@@ -199,10 +199,6 @@ pub fn row_groups_in_range(
     Some(keep)
 }
 
-/// Restricts a reader to the given file row ranges: only the row groups that
-/// hold them are visited, and a selection skips the rest inside those groups.
-/// When the ranges are whole groups no selection is needed.
-
 /// Row ranges selected by the timestamp column's page index.
 ///
 /// A row group's statistics bound the whole group; the column index bounds each
@@ -266,6 +262,9 @@ pub(super) fn page_ranges_in_time(
     Some(out)
 }
 
+/// Restricts a reader to the given file row ranges: only the row groups that
+/// hold them are visited, and a selection skips the rest inside those groups.
+/// When the ranges are whole groups no selection is needed.
 pub(super) fn restrict_to_ranges<T>(
     builder: ParquetRecordBatchReaderBuilder<T>,
     ranges: &[(u64, u64)],
