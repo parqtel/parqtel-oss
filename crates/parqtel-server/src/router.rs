@@ -205,6 +205,19 @@ pub fn build_router(state: AppState) -> Router {
             delete(handlers::query::delete_saved_search),
         )
         .route(
+            "/api/v1/dashboards",
+            get(handlers::dashboards::list_dashboards).post(handlers::dashboards::create_dashboard),
+        )
+        .route(
+            "/api/v1/dashboards/:id",
+            put(handlers::dashboards::update_dashboard)
+                .delete(handlers::dashboards::delete_dashboard),
+        )
+        .route(
+            "/api/v1/dashboards/:id/render",
+            get(handlers::dashboards::render_dashboard),
+        )
+        .route(
             "/api/v1/alerts/routes",
             get(handlers::alerts::list_routes).post(handlers::alerts::set_routes),
         )

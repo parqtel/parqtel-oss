@@ -38,6 +38,7 @@ pub struct AppStateInner {
     >,
     pub pipeline_registry: PipelineRegistry,
     pub saved_searches: crate::saved_searches::SavedSearchStore,
+    pub dashboards: crate::dashboards::DashboardStore,
     pub audit: Arc<crate::audit::AuditLog>,
 }
 
@@ -58,6 +59,7 @@ impl AppState {
     ) -> Self {
         let data_dir = config.storage.data_dir.clone();
         let saved_search_dir = config.storage.data_dir.clone();
+        let dashboard_dir = config.storage.data_dir.clone();
         let audit = Arc::new(crate::audit::AuditLog::new(
             &config.audit,
             &config.storage.data_dir,
@@ -103,6 +105,7 @@ impl AppState {
                 alert_event_rx: tokio::sync::Mutex::new(Some(alert_event_rx)),
                 pipeline_registry,
                 saved_searches: crate::saved_searches::SavedSearchStore::new(saved_search_dir),
+                dashboards: crate::dashboards::DashboardStore::new(dashboard_dir),
                 audit,
             }),
         }

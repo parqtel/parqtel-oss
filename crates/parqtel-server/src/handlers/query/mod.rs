@@ -8,7 +8,7 @@
 //! - `pipeline_search` runs pipeline queries across signals.
 //! - `common` holds the response envelope and the shared parsing helpers.
 
-mod common;
+pub(crate) mod common;
 mod labels;
 mod logs;
 mod metrics;

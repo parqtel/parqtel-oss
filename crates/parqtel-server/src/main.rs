@@ -4,6 +4,7 @@ mod audit;
 mod auth;
 mod cli;
 mod commands;
+mod dashboards;
 mod grpc;
 mod handlers;
 mod metrics;

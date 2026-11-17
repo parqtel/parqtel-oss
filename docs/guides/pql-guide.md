@@ -189,6 +189,29 @@ result caps.
 POST /api/v1/saved_searches   {"name": "api errors", "signal": "logs", "query": "service=api severity>=ERROR", "range_minutes": 60}
 GET  /api/v1/saved_searches
 DELETE /api/v1/saved_searches/{id}
+
+### 2.4 Persisted dashboards
+
+A dashboard is a named, ordered set of panels. Each panel stores a query and a
+signal (`metrics` or `logs`); it never stores HTML. Dashboards survive restarts
+in `<data_dir>/dashboards.json`.
+
+```
+POST /api/v1/dashboards
+{"name":"API health","panels":[
+  {"title":"requests","signal":"metrics","query":"rate(http_requests_total[5m])","step_secs":60},
+  {"title":"errors","signal":"logs","query":"service=api severity>=ERROR","limit":50}
+]}
+
+GET  /api/v1/dashboards
+GET  /api/v1/dashboards/{id}/render?start=1760000000&end=1760003600
+PUT  /api/v1/dashboards/{id}
+DELETE /api/v1/dashboards/{id}
+```
+
+`render` returns one entry per panel, with either `result` (the same shape the
+query API returns) or `error`; one failing panel does not blank the dashboard.
+
 ```
 
 Persisted server-side; shared across browsers and restarts.

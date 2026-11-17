@@ -42,6 +42,11 @@ while measuring. Measurements and method are in
 
 ### Added
 
+- **Persisted dashboards.** `GET/POST /api/v1/dashboards`,
+  `PUT/DELETE /api/v1/dashboards/{id}`, and
+  `GET /api/v1/dashboards/{id}/render?start=&end=` store named panels over
+  metric or log queries in `dashboards.json` and execute every panel against
+  the live engine. Panels carry query text, never HTML.
 - **Page-index pruning for log, metric, and trace scans.** Blocks written with
   page statistics now skip data pages wholly outside the query window before
   decoding them; blocks without a page index fall back to row-group statistics.

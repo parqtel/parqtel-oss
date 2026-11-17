@@ -84,6 +84,11 @@ final partial step is not evaluated — the same as Prometheus.
 | PUT | `/api/v1/rules/:id` | Update a rule |
 | DELETE | `/api/v1/rules/:id` | Delete a rule |
 | GET | `/api/v1/saved_searches` | List saved searches |
+| GET | `/api/v1/dashboards` | List persisted dashboards |
+| POST | `/api/v1/dashboards` | Create a dashboard (`name`, `panels[]`) |
+| PUT | `/api/v1/dashboards/{id}` | Replace a dashboard's name and panels |
+| DELETE | `/api/v1/dashboards/{id}` | Delete a dashboard |
+| GET | `/api/v1/dashboards/{id}/render?start=&end=` | Execute every panel and return its result |
 | POST | `/api/v1/saved_searches` | Save a search |
 | DELETE | `/api/v1/saved_searches/:id` | Delete a saved search |
 

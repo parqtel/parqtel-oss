@@ -455,6 +455,43 @@ components:
           format: int64
           description: Creation time in Unix seconds.
 
+    DashboardPanel:
+      type: object
+      required: [title, signal, query]
+      properties:
+        id: { type: string }
+        title: { type: string }
+        signal: { type: string, enum: [metrics, logs] }
+        query: { type: string }
+        step_secs:
+          type: integer
+          minimum: 1
+          maximum: 86400
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 10000
+
+    DashboardInput:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string, maxLength: 120 }
+        panels:
+          type: array
+          maxItems: 50
+          items: { $ref: "#/components/schemas/DashboardPanel" }
+
+    Dashboard:
+      allOf:
+        - $ref: "#/components/schemas/DashboardInput"
+        - type: object
+          required: [id, created_at, updated_at]
+          properties:
+            id: { type: string }
+            created_at: { type: integer, format: int64 }
+            updated_at: { type: integer, format: int64 }
+
     AlertRoute:
       type: object
       description: A notification route. An alert matches when its severity is at or above `match_severity` and its labels contain every entry of `match_labels`.
@@ -1477,6 +1514,157 @@ paths:
                 $ref: "#/components/schemas/ApiResponse"
         "404":
           description: No such saved search
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiResponse"
+
+  /api/v1/dashboards:
+    get:
+      tags: [Query]
+      summary: List persisted dashboards
+      operationId: listDashboards
+      responses:
+        "200":
+          description: Dashboards
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string }
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/Dashboard" }
+    post:
+      tags: [Query]
+      summary: Create a dashboard
+      operationId: createDashboard
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DashboardInput" }
+      responses:
+        "201":
+          description: Dashboard created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string }
+                  data: { $ref: "#/components/schemas/Dashboard" }
+        "400":
+          description: Invalid dashboard
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiResponse"
+
+  /api/v1/dashboards/{id}:
+    put:
+      tags: [Query]
+      summary: Replace a dashboard
+      operationId: updateDashboard
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DashboardInput" }
+      responses:
+        "200":
+          description: Dashboard updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string }
+                  data: { $ref: "#/components/schemas/Dashboard" }
+        "404":
+          description: No such dashboard
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiResponse"
+    delete:
+      tags: [Query]
+      summary: Delete a dashboard
+      operationId: deleteDashboard
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Dashboard deleted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiResponse"
+        "404":
+          description: No such dashboard
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiResponse"
+
+  /api/v1/dashboards/{id}/render:
+    get:
+      tags: [Query]
+      summary: Execute every panel of a dashboard
+      operationId: renderDashboard
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: start
+          in: query
+          required: false
+          schema:
+            type: number
+        - name: end
+          in: query
+          required: false
+          schema:
+            type: number
+      responses:
+        "200":
+          description: Per-panel results or errors
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string }
+                  data:
+                    type: object
+                    properties:
+                      dashboard_id: { type: string }
+                      start: { type: integer, format: int64 }
+                      end: { type: integer, format: int64 }
+                      panels:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            id: { type: string }
+                            title: { type: string }
+                            result: {}
+                            error: { type: string }
+        "404":
+          description: No such dashboard
           content:
             application/json:
               schema:

@@ -38,7 +38,7 @@ pub struct PrometheusResult {
     pub values: Vec<(f64, String)>,
 }
 
-pub(super) fn map_error(e: parqtel_core::Error) -> Response {
+pub(crate) fn map_error(e: parqtel_core::Error) -> Response {
     let status = match &e {
         parqtel_core::Error::Validation(_) => StatusCode::BAD_REQUEST,
         parqtel_core::Error::InvalidOtlp(_) => StatusCode::BAD_REQUEST,
