@@ -522,7 +522,7 @@ impl SeriesIndex {
         };
 
         // Candidate lists from the postings; each one is a necessary condition.
-        let mut lists: Vec<Vec<u32>> = Vec::new();
+        let mut owned_lists: Vec<Vec<u32>> = Vec::new();
         for (label, value) in &selector.equals {
             let ids = self
                 .postings
@@ -533,7 +533,7 @@ impl SeriesIndex {
             if ids.is_empty() {
                 return Vec::new();
             }
-            lists.push(ids);
+            owned_lists.push(ids);
         }
         for (label, test) in &selector.value_tests {
             let Some(values) = self.postings.get(label) else {
@@ -552,24 +552,18 @@ impl SeriesIndex {
             if union.is_empty() {
                 return Vec::new();
             }
-            lists.push(union);
+            owned_lists.push(union);
         }
 
-        let candidates: Box<dyn Iterator<Item = u32>> = if lists.is_empty() {
-            Box::new(ranges.iter().flat_map(|(lo, hi)| *lo..*hi))
+        let candidates = if owned_lists.is_empty() {
+            ranges.iter().flat_map(|(lo, hi)| *lo..*hi).collect()
         } else {
-            lists.sort_by_key(|l| l.len());
-            let mut acc = lists.swap_remove(0);
-            for other in &lists {
-                acc = intersect(&acc, other);
-                if acc.is_empty() {
-                    return Vec::new();
-                }
-            }
-            Box::new(acc.into_iter())
+            let mut lists: Vec<&[u32]> = owned_lists.iter().map(Vec::as_slice).collect();
+            intersect_all(&mut lists)
         };
 
         candidates
+            .into_iter()
             .filter(|id| {
                 let s = &self.series[*id as usize];
                 s.min_ts <= end_ns
@@ -592,20 +586,31 @@ fn restrict(ids: &[u32], ranges: &[(u32, u32)]) -> Vec<u32> {
     out
 }
 
-/// Intersection of two ascending lists.
-fn intersect(a: &[u32], b: &[u32]) -> Vec<u32> {
-    let (mut i, mut j) = (0, 0);
-    let mut out = Vec::with_capacity(a.len().min(b.len()));
-    while i < a.len() && j < b.len() {
-        match a[i].cmp(&b[j]) {
-            std::cmp::Ordering::Less => i += 1,
-            std::cmp::Ordering::Greater => j += 1,
-            std::cmp::Ordering::Equal => {
-                out.push(a[i]);
-                i += 1;
-                j += 1;
+/// Intersects ascending lists; empty input has an empty result.
+fn intersect_all(lists: &mut [&[u32]]) -> Vec<u32> {
+    if lists.is_empty() {
+        return Vec::new();
+    }
+    lists.sort_by_key(|list| list.len());
+    let Some((shortest, others)) = lists.split_first() else {
+        return Vec::new();
+    };
+    if shortest.is_empty() {
+        return Vec::new();
+    }
+
+    let mut cursors = vec![0; others.len()];
+    let mut out = Vec::with_capacity(shortest.len());
+    'candidate: for &candidate in *shortest {
+        for (list, cursor) in others.iter().zip(&mut cursors) {
+            let remaining = &list[*cursor..];
+            *cursor += remaining.partition_point(|id| *id < candidate);
+            if list.get(*cursor) != Some(&candidate) {
+                continue 'candidate;
             }
+            *cursor += 1;
         }
+        out.push(candidate);
     }
     out
 }

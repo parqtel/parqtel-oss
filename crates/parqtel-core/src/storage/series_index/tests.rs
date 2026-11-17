@@ -292,12 +292,65 @@ fn the_same_series_in_two_blocks_shares_one_label_set() {
 }
 
 #[test]
-fn restrict_and_intersect_helpers() {
+fn restrict_helper() {
     assert_eq!(
         restrict(&[1, 3, 5, 8, 9], &[(2, 6), (8, 10)]),
         vec![3, 5, 8, 9]
     );
     assert_eq!(restrict(&[1, 3], &[]), Vec::<u32>::new());
-    assert_eq!(intersect(&[1, 2, 4, 7], &[2, 3, 7, 9]), vec![2, 7]);
-    assert_eq!(intersect(&[], &[1]), Vec::<u32>::new());
+}
+
+#[test]
+fn intersect_all_returns_empty_for_empty_input() {
+    assert_eq!(intersect_all(&mut []), Vec::<u32>::new());
+}
+
+#[test]
+fn intersect_all_returns_one_list_unchanged() {
+    assert_eq!(intersect_all(&mut [&[1, 3, 5]]), vec![1, 3, 5]);
+}
+
+#[test]
+fn intersect_all_handles_disjoint_and_identical_lists() {
+    assert!(intersect_all(&mut [&[1, 3], &[2, 4], &[1, 2, 3, 4]]).is_empty());
+    assert_eq!(
+        intersect_all(&mut [&[1, 3, 5], &[1, 3, 5], &[1, 3, 5]]),
+        vec![1, 3, 5]
+    );
+}
+
+#[test]
+fn intersect_all_matches_btree_set_intersection_for_seeded_inputs() {
+    fn next(seed: &mut u64) -> u32 {
+        *seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+        (*seed >> 32) as u32
+    }
+
+    let mut seed = 0x5eed_cafe_d00d_f00d;
+    for case in 0..200 {
+        let list_count = (next(&mut seed) % 7) as usize;
+        let owned: Vec<Vec<u32>> = (0..list_count)
+            .map(|_| {
+                let len = (next(&mut seed) % 30) as usize;
+                let mut list: Vec<u32> = (0..len).map(|_| next(&mut seed) % 80).collect();
+                list.sort_unstable();
+                list.dedup();
+                list
+            })
+            .collect();
+
+        let expected = if let Some(first) = owned.first() {
+            let mut intersection: std::collections::BTreeSet<u32> =
+                first.iter().copied().collect();
+            for list in owned.iter().skip(1) {
+                intersection.retain(|id| list.binary_search(id).is_ok());
+            }
+            intersection.into_iter().collect()
+        } else {
+            Vec::new()
+        };
+        let mut lists: Vec<&[u32]> = owned.iter().map(Vec::as_slice).collect();
+
+        assert_eq!(intersect_all(&mut lists), expected, "case {case}");
+    }
 }
