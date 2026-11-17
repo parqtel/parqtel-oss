@@ -38,7 +38,9 @@ pub struct AlertInstance {
     pub updated_at: DateTime<Utc>,
     pub resolved_at: Option<DateTime<Utc>>,
     pub acknowledged_by: Option<String>,
-    /// Reserved. No noise detector exists in 0.3.x, so this is always `0.0`.
+    /// Learned noise score: unacknowledged firings that resolved, derived from
+    /// this instance's transition history (0 = acknowledged/still firing,
+    /// 1 = every firing resolved unattended).
     pub noise_score: f32,
     pub transition_log: Vec<StateTransition>,
     pub notification_sent: bool,

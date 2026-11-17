@@ -42,6 +42,9 @@ while measuring. Measurements and method are in
 
 ### Added
 
+- **History-derived alert noise score.** `noise_score` is now computed from
+  each instance's transitions: unacknowledged firings that resolved score high,
+  acknowledged or still-firing alerts score low. It is no longer a reserved 0.
 - **Dataset isolation.** `server.dataset` prefixes the metrics/logs storage
   trees, token `datasets` accept exact names or `*` globs, and a conflicting
   `X-Parqtel-Dataset` header is rejected. One process serves one dataset;

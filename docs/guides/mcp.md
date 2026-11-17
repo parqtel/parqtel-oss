@@ -123,7 +123,7 @@ Live per-signal ingestion rates (metrics/logs/traces): current + 60s/5m/15m aver
 | `history_secs` | number | | Length of the per-second history arrays, 1–900 (default 180; the server keeps a 15-minute wheel) |
 
 ### `get_alert_history`
-Return alert instances fired within a lookback window, optionally filtered by service or pod. Includes state, severity, labels, and annotations. `noise_score` is reserved and currently always `0.0`; no noise detector is implemented in 0.3.x.
+Return alert instances fired within a lookback window, optionally filtered by service or pod. Includes state, severity, labels, and annotations. `noise_score` is the fraction of firings that resolved without acknowledgement, derived from each alert transition history (0..1).
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|

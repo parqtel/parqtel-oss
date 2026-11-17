@@ -72,6 +72,7 @@ impl EvaluationEngine {
                             instance.updated_at = Utc::now();
                             instance.value = Some(value);
                             instance.transition_log.push(transition);
+                            instance.noise_score = noise_score(&instance.transition_log);
                             self.store.save(&instance).await;
 
                             if new_state == AlertState::Firing && was_not_firing {
@@ -106,6 +107,7 @@ impl EvaluationEngine {
                             instance.updated_at = Utc::now();
                             instance.resolved_at = Some(Utc::now());
                             instance.transition_log.push(transition);
+                            instance.noise_score = noise_score(&instance.transition_log);
                             self.store.save(&instance).await;
                             if new_state == AlertState::Resolved {
                                 let _ = self.event_tx.send(AlertFiringEvent {
@@ -144,11 +146,59 @@ impl EvaluationEngine {
     }
 }
 
+/// Fraction of firings that resolved without being acknowledged.
+///
+/// A rule that fires and clears unattended is noise; a rule whose firings are
+/// acknowledged (or are still open) scores lower. Derived only from the
+/// instance's own transition history, so it is explainable from the alert.
+fn noise_score(log: &[crate::state::machine::StateTransition]) -> f32 {
+    let fired = log.iter().filter(|t| t.to == AlertState::Firing).count();
+    if fired == 0 {
+        return 0.0;
+    }
+    let acknowledged = log
+        .iter()
+        .filter(|t| t.to == AlertState::Acknowledged)
+        .count()
+        .min(fired);
+    let resolved = log
+        .iter()
+        .filter(|t| t.to == AlertState::Resolved)
+        .count()
+        .min(fired);
+    let unacked = (fired - acknowledged) as f32 / fired as f32;
+    let resolved_share = resolved as f32 / fired as f32;
+    (unacked * resolved_share).clamp(0.0, 1.0)
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use crate::rule::types::{Condition, Operator, Severity};
+    use crate::state::machine::StateTransition;
+    use chrono::Utc;
+
+    #[test]
+    fn noise_score_reflects_unacknowledged_resolves() {
+        let t = |from, to| StateTransition {
+            from,
+            to,
+            at: Utc::now(),
+            reason: String::new(),
+        };
+        let noisy = vec![
+            t(AlertState::Pending, AlertState::Firing),
+            t(AlertState::Firing, AlertState::Resolved),
+        ];
+        assert_eq!(super::noise_score(&noisy), 1.0);
+        let acked = vec![
+            t(AlertState::Pending, AlertState::Firing),
+            t(AlertState::Firing, AlertState::Acknowledged),
+            t(AlertState::Acknowledged, AlertState::Resolved),
+        ];
+        assert_eq!(super::noise_score(&acked), 0.0);
+    }
 
     fn test_rule() -> AlertRule {
         AlertRule {

@@ -291,7 +291,7 @@ More: [PQL Guide](docs/guides/pql-guide.md) •
 | **Ingestion** | OTLP gRPC (`:4317`, the OTel SDK default) + HTTP protobuf & JSON for metrics, logs, and traces |
 | **Storage** | Block-based Parquet with Zstd/Snappy/LZ4, automatic compaction, configurable retention |
 | **Query** | PromQL-compatible instant & range queries, label matching, aggregations (sum, avg, rate, histogram_quantile, etc.) |
-| **Alerting** | YAML-defined threshold rules, state machine (Inactive→Pending→Firing→Resolved), 15s evaluation loop, Alertmanager-style routing/inhibition/grouping, silences, Slack/Teams/PagerDuty/webhook receivers. Baseline anomaly rules use median+MAD over a configured window; noise scoring is **not implemented** |
+| **Alerting** | YAML-defined threshold rules, state machine (Inactive→Pending→Firing→Resolved), 15s evaluation loop, Alertmanager-style routing/inhibition/grouping, silences, Slack/Teams/PagerDuty/webhook receivers. Baseline anomaly rules use median+MAD over a configured window; alert instances expose a history-derived noise score |
 | **Pipeline** | Recording rules and log→metric stream pipelines, applied on live ingest; extracted metrics enter the normal metrics path |
 | **Span-metrics (RED)** | Auto-derived `traces_service_{requests,errors,duration_ms}_total` per service/operation from server spans — zero-config RED dashboards in Grafana |
 | **Tail sampling** | Trace-coherent sampling (errors/slow traces always kept, deterministic ratio per service) — controls trace storage volume while RED metrics stay unsampled |
