@@ -42,6 +42,10 @@ while measuring. Measurements and method are in
 
 ### Added
 
+- **OIDC login and role mapping.** Optional `[auth.oidc]` adds an
+  authorization-code flow at `/auth/login` and `/auth/callback`, an HttpOnly
+  session cookie, JWKS/RS256 bearer validation, and role-to-scope mapping
+  (`admin_role` / `write_role`; every authenticated user reads).
 - **Object-store compaction and retention.** Compaction opens sources and
   deletes merged sources through `BlockStore`; retention deletes through it too.
   Catalog entries are writer-owned, so a node retires only blocks it wrote and

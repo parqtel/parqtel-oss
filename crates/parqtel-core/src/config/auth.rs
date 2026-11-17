@@ -19,6 +19,45 @@ pub struct AuthConfig {
     /// Header carrying the token. Defaults to `Authorization: Bearer <token>`.
     #[serde(default = "default_header")]
     pub header: String,
+    /// Optional OpenID Connect login and bearer-token validation.
+    #[serde(default)]
+    pub oidc: Option<OidcConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OidcConfig {
+    /// Issuer URL; discovery is read from `/.well-known/openid-configuration`.
+    pub issuer: String,
+    pub client_id: String,
+    /// Required for the authorization-code flow; bearer validation alone does
+    /// not need it.
+    #[serde(default)]
+    pub client_secret: Option<String>,
+    /// Must match the IdP registration, e.g. `https://parqtel.example/auth/callback`.
+    pub redirect_url: String,
+    #[serde(default = "default_oidc_scopes")]
+    pub scopes: Vec<String>,
+    /// Claim carrying roles. Defaults to `roles`.
+    #[serde(default = "default_roles_claim")]
+    pub roles_claim: String,
+    /// Role mapped to admin scope; everything else authenticated is read.
+    #[serde(default = "default_admin_role")]
+    pub admin_role: String,
+    /// Optional role mapped to write scope.
+    #[serde(default)]
+    pub write_role: Option<String>,
+}
+
+fn default_oidc_scopes() -> Vec<String> {
+    vec!["openid".into(), "profile".into(), "email".into()]
+}
+
+fn default_roles_claim() -> String {
+    "roles".into()
+}
+
+fn default_admin_role() -> String {
+    "parqtel-admin".into()
 }
 
 impl Default for AuthConfig {
@@ -27,6 +66,7 @@ impl Default for AuthConfig {
             enabled: false,
             tokens: Vec::new(),
             header: default_header(),
+            oidc: None,
         }
     }
 }
@@ -70,8 +110,16 @@ impl AuthConfig {
         if !self.enabled {
             return Ok(());
         }
-        if self.tokens.is_empty() {
-            return Err("auth.enabled is true but auth.tokens is empty".into());
+        if self.tokens.is_empty() && self.oidc.is_none() {
+            return Err("auth.enabled is true but no tokens or OIDC are configured".into());
+        }
+        if let Some(oidc) = &self.oidc {
+            if oidc.issuer.trim().is_empty()
+                || oidc.client_id.trim().is_empty()
+                || oidc.redirect_url.trim().is_empty()
+            {
+                return Err("auth.oidc issuer, client_id and redirect_url are required".into());
+            }
         }
         let mut names = std::collections::HashSet::new();
         for token in &self.tokens {

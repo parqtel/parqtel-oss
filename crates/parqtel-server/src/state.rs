@@ -40,6 +40,7 @@ pub struct AppStateInner {
     pub saved_searches: crate::saved_searches::SavedSearchStore,
     pub dashboards: crate::dashboards::DashboardStore,
     pub object_catalog: Option<Arc<parqtel_core::storage::ObjectCatalog>>,
+    pub auth: Arc<crate::auth::AuthState>,
     pub audit: Arc<crate::audit::AuditLog>,
 }
 
@@ -101,6 +102,12 @@ impl AppState {
         let _ = parqtel_core::storage::block_store::install(object_store);
         let saved_search_dir = config.storage.data_dir.clone();
         let dashboard_dir = config.storage.data_dir.clone();
+        let auth = Arc::new(
+            crate::auth::AuthState::from_config(&config.auth).unwrap_or_else(|e| {
+                tracing::error!(error = %e, "invalid auth configuration; rejecting all requests");
+                crate::auth::AuthState::deny_all()
+            }),
+        );
         let audit = Arc::new(crate::audit::AuditLog::new(
             &config.audit,
             &config.storage.data_dir,
@@ -148,6 +155,7 @@ impl AppState {
                 saved_searches: crate::saved_searches::SavedSearchStore::new(saved_search_dir),
                 dashboards: crate::dashboards::DashboardStore::new(dashboard_dir),
                 object_catalog,
+                auth: auth.clone(),
                 audit,
             }),
         }

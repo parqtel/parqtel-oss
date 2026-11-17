@@ -589,6 +589,47 @@ paths:
               schema:
                 type: string
 
+  /auth/login:
+    get:
+      tags: [Auth]
+      summary: Start the OIDC authorization-code flow
+      operationId: oidcLogin
+      parameters:
+        - name: redirect
+          in: query
+          required: false
+          schema:
+            type: string
+      responses:
+        "302":
+          description: Redirect to the IdP authorization endpoint
+        "404":
+          description: OIDC is not configured
+
+  /auth/callback:
+    get:
+      tags: [Auth]
+      summary: Complete the OIDC flow and set the session cookie
+      operationId: oidcCallback
+      parameters:
+        - name: code
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: state
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        "302":
+          description: Session established; redirect to the console
+        "400":
+          description: Invalid state
+        "502":
+          description: Discovery or token exchange failed
+
   /health:
     get:
       tags: [Health]

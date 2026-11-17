@@ -52,10 +52,13 @@ opentelemetry_sdk = { workspace = true }
 opentelemetry-otlp = { workspace = true }
 tracing-opentelemetry = { workspace = true }
 pprof = { workspace = true }
+jsonwebtoken = { workspace = true }
+base64 = "0.22"
+reqwest = { workspace = true }
+urlencoding = "2"
 
 [dev-dependencies]
 tempfile = "3"
-urlencoding = "2"
 http-body-util = "0.1"
 hyper = { workspace = true }
 hyper-util = { workspace = true }

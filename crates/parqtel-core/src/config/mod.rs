@@ -14,7 +14,7 @@ pub use alert::{
     RouteConfig, SilenceConfig,
 };
 pub use audit::AuditConfig;
-pub use auth::{AuthConfig, AuthScope, AuthTokenConfig};
+pub use auth::{AuthConfig, AuthScope, AuthTokenConfig, OidcConfig};
 pub use ingest::{BufferOverflowPolicy, IngestConfig, TailSamplingConfig};
 pub use object_storage::ObjectStoreConfig;
 pub use query::{QueryConfig, UIConfig};

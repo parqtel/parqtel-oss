@@ -374,6 +374,28 @@ token_sha256 = "…64 lowercase hex characters…"
 actions = ["admin"]
 ```
 
+OpenID Connect can replace static tokens (or sit beside them). The console
+redirects to `/auth/login`, the IdP returns to `/auth/callback`, and the
+resulting ID token is stored in an HttpOnly `parqtel_session` cookie. API
+clients can send the same ID token as `Authorization: Bearer <id_token>`.
+
+```toml
+[auth.oidc]
+issuer = "https://idp.example.com"
+client_id = "parqtel"
+client_secret = "${OIDC_CLIENT_SECRET}"
+redirect_url = "https://parqtel.example.com/auth/callback"
+scopes = ["openid", "profile", "email"]
+roles_claim = "roles"              # claim holding role names
+admin_role = "parqtel-admin"       # maps to admin scope
+write_role = "parqtel-write"       # optional; maps to write scope
+```
+
+Discovery is read from `<issuer>/.well-known/openid-configuration`; JWKS is
+cached and refreshed once when a new key id appears. Tokens must carry `exp`,
+`iss`, and `aud` (the client id). A role change takes effect on the next
+request because scopes are derived from each token, not cached server-side.
+
 Generate a hash with `printf %s "$TOKEN" | sha256sum`. Plaintext `token` values
 are hashed at startup and never stored. Enabling auth does not add TLS; pair it
 with a TLS terminator or in-process TLS when the network is not trusted.

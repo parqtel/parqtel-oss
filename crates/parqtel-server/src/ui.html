@@ -694,7 +694,7 @@ function exitCorrelation(){ST.correlation={active:false};$('correlation-bar').cl
 $('corr-exit').onclick=exitCorrelation;
 $('corr-widen').onclick=()=>{if(ST.correlation){ST.correlation.windowMs*=2;$('corr-window').textContent=`±${ST.correlation.windowMs/1000}s from ${new Date(ST.correlation.anchorTs).toLocaleTimeString()}`;}};
 /* API */
-async function apiFetch(url){if(abortCtrl)abortCtrl.abort();abortCtrl=new AbortController();const r=await fetch(url,{signal:abortCtrl.signal});if(!r.ok){let m=`HTTP ${r.status}`;try{const j=await r.json();m=j.error||j.message||m;}catch{}throw new Error(m);}return r.json();}
+async function apiFetch(url){if(abortCtrl)abortCtrl.abort();abortCtrl=new AbortController();const r=await fetch(url,{signal:abortCtrl.signal});if(r.status===401&&!location.pathname.startsWith('/auth/')){location.href='/auth/login?redirect='+encodeURIComponent(location.pathname+location.search);throw new Error('authentication required');}if(!r.ok){let m=`HTTP ${r.status}`;try{const j=await r.json();m=j.error||j.message||m;}catch{}throw new Error(m);}return r.json();}
 async function apiPost(url,body){const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body||{})});if(!r.ok){let m=`HTTP ${r.status}`;try{const j=await r.json();m=j.error||j.message||m;}catch{}throw new Error(m);}return r.json();}
 
 /* STEP */

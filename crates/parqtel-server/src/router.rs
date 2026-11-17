@@ -128,6 +128,8 @@ pub fn build_router(state: AppState) -> Router {
     let routes = Router::new()
         // Health & UI
         .route("/health", get(handlers::misc::health))
+        .route("/auth/login", get(crate::auth::login))
+        .route("/auth/callback", get(crate::auth::callback))
         // Readiness is separate from liveness: /health is a static liveness
         // probe, /ready checks the storage path is actually usable.
         .route("/ready", get(handlers::misc::ready))
