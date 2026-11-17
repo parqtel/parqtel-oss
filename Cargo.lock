@@ -1914,6 +1914,7 @@ dependencies = [
  "bytes",
  "hex",
  "parqtel-core",
+ "parqtel-pipeline",
  "parquet",
  "prost 0.13.5",
  "prost-build 0.13.5",
