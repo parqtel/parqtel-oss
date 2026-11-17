@@ -249,13 +249,13 @@ fn load_block(file: &File) -> Result<LoadedBlock> {
 /// one string per row. New indexed blocks omit the column. Falls back to the
 /// file's own schema if the override is not accepted.
 pub(super) fn open_block(path: &std::path::Path) -> Result<Option<OpenedBlock>> {
-    let file = match File::open(path) {
+    let file = match crate::storage::block_store::open(path) {
         Ok(f) => f,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+        Err(Error::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
             tracing::warn!("Block file not found, skipping: {:?}", path);
             return Ok(None);
         }
-        Err(e) => return Err(Error::Io(e)),
+        Err(e) => return Err(e),
     };
     // Metadata is kept, not just the builder: bloom filters and the column
     // index live on it, and both prune row groups before any page is decoded.

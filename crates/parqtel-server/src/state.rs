@@ -58,6 +58,11 @@ impl AppState {
         index_stores: [Arc<parqtel_core::BlockIndexStore>; 3],
     ) -> Self {
         let data_dir = config.storage.data_dir.clone();
+        // The server owns block I/O for the process. Absolute block paths are
+        // unchanged; the store is the seam an object-store backend replaces.
+        let _ = parqtel_core::storage::block_store::install(std::sync::Arc::new(
+            parqtel_core::storage::LocalBlockStore::new(data_dir.clone()),
+        ));
         let saved_search_dir = config.storage.data_dir.clone();
         let dashboard_dir = config.storage.data_dir.clone();
         let audit = Arc::new(crate::audit::AuditLog::new(

@@ -1,7 +1,6 @@
 use super::index::{BlockIndex, BlockIndexStore};
 use crate::config::BlockConfig;
 use crate::error::{Error, Result};
-use std::fs;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
@@ -83,9 +82,8 @@ impl RetentionPolicy {
         let unlink = tokio::task::spawn_blocking(move || {
             let mut failed = 0u64;
             for path in deleting {
-                match fs::remove_file(&path) {
-                    Ok(()) => {}
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                match crate::storage::block_store::delete(&path) {
+                    Ok(_) => {}
                     Err(e) => {
                         failed += 1;
                         tracing::warn!(path = %path.display(), error = %e, "failed to delete expired block");

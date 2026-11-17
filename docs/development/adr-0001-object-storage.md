@@ -1,6 +1,6 @@
 # ADR 0001: Object storage uses a block-store seam, not `StorageEngine`
 
-Status: proposed (Phase 2 design spike)
+Status: accepted; P2-02 local seam implemented
 
 ## Context
 
@@ -35,6 +35,13 @@ pub trait BlockStore: Send + Sync {
 * Scans, compaction and retention call `BlockStore`, never a bucket SDK
   directly.
 * `ParquetStorageEngine` stays as the embedder/test backend and is not extended.
+
+## Implementation status
+
+P2-02 is implemented: `storage::block_store` defines the trait,
+`LocalBlockStore` implements it, the server installs one at startup, and the
+scanner and retention paths read/delete through it. Object upload and the
+shared catalog remain P2-03/P2-04.
 
 ## Shared catalog
 

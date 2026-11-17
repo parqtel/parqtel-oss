@@ -13,7 +13,6 @@ use parquet::arrow::arrow_reader::{
     ArrowReaderMetadata, ArrowReaderOptions, ParquetRecordBatchReaderBuilder,
 };
 use parquet::file::metadata::PageIndexPolicy;
-use std::fs::File;
 
 /// Coalesces sorted file-row indices into ascending, non-overlapping ranges.
 fn row_ranges(rows: &[(i64, u64)]) -> Vec<(u64, u64)> {
@@ -106,13 +105,13 @@ impl Scanner {
         limit: usize,
         trace_id_filter: Option<[u8; 16]>,
     ) -> Result<Vec<Span>> {
-        let file = match File::open(&meta.path) {
+        let file = match crate::storage::block_store::open(&meta.path) {
             Ok(f) => f,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            Err(Error::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
                 tracing::warn!("Trace block file not found, skipping: {:?}", meta.path);
                 return Ok(Vec::new());
             }
-            Err(e) => return Err(Error::Io(e)),
+            Err(e) => return Err(e),
         };
 
         let options = ArrowReaderOptions::new().with_page_index_policy(PageIndexPolicy::Optional);

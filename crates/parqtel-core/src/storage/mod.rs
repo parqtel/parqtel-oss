@@ -1,4 +1,5 @@
 pub mod block_file;
+pub mod block_store;
 pub mod compactor;
 pub mod index;
 pub mod log_index;
@@ -9,6 +10,7 @@ pub mod series_index;
 mod stream_compactor;
 
 pub use block_file::{footer_metadata, write_block_file, FooterIndex};
+pub use block_store::{BlockObject, BlockStore, LocalBlockStore};
 pub use compactor::Compactor;
 pub use index::{advance_wal_commit, reconcile, BlockIndex, BlockIndexStore, PendingIndex};
 pub use log_index::{LogIndexBuilder, LogIndexTable, LogSkipIndex, LOG_INDEX_FOOTER_KEY};

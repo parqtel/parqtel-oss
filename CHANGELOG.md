@@ -42,6 +42,10 @@ while measuring. Measurements and method are in
 
 ### Added
 
+- **`BlockStore` seam with a local backend.** Scanner reads, trace reads, and
+  retention deletes now go through a process-wide store; absolute block paths
+  keep the previous local behavior. The server installs `LocalBlockStore` at
+  startup, giving object storage a place to cache and publish blocks later.
 - **Compressed block-index sidecar.** `index.json` is now a `PQZ1` zstd frame
   instead of plain JSON; plain JSON sidecars still load. On the local 130-block
   corpus the sidecar fell from 42 KB to 2.8 KB, 0.4% of Parquet bytes.
