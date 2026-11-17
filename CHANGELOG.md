@@ -42,6 +42,11 @@ while measuring. Measurements and method are in
 
 ### Added
 
+- **Query timeout scoped to scans, ingest load shedding.** `query.timeout_secs`
+  now applies only to query/log/trace/Grafana scan endpoints; a slow ingest is
+  no longer reported as a query timeout. OTLP/HTTP ingest is bounded by
+  `ingest.max_concurrent_requests` (default 64) and returns `429` with
+  `Retry-After` when saturated. `parqtel_ingest_rejected_total` counts it.
 - **Bounded in-memory query buffer.** `ingest.buffer_max_points` (default 5M
   rows) and `ingest.buffer_max_bytes` (default 2 GiB estimated) cap the
   metrics/logs/traces buffer, with `drop_oldest` or `reject_new` overflow

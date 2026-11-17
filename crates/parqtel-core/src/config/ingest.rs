@@ -100,6 +100,13 @@ pub struct IngestConfig {
     /// What to do when either bound is reached.
     #[serde(default)]
     pub buffer_overflow_policy: BufferOverflowPolicy,
+    /// Maximum simultaneous OTLP/HTTP ingest requests. When full, requests are
+    /// rejected with `429` and `Retry-After` rather than queued without bound.
+    #[serde(default = "default_max_concurrent_requests")]
+    pub max_concurrent_requests: usize,
+    /// `Retry-After` value, in seconds, returned with an ingest `429`.
+    #[serde(default = "default_load_shed_retry_after_secs")]
+    pub load_shed_retry_after_secs: u64,
 }
 
 /// Overload behaviour for the in-memory query buffer.
@@ -119,6 +126,14 @@ fn default_buffer_max_points() -> usize {
 
 fn default_buffer_max_bytes() -> usize {
     2 * 1024 * 1024 * 1024
+}
+
+fn default_max_concurrent_requests() -> usize {
+    64
+}
+
+fn default_load_shed_retry_after_secs() -> u64 {
+    1
 }
 
 fn default_label_interner_capacity() -> usize {
@@ -193,6 +208,8 @@ impl Default for IngestConfig {
             buffer_max_points: default_buffer_max_points(),
             buffer_max_bytes: default_buffer_max_bytes(),
             buffer_overflow_policy: BufferOverflowPolicy::default(),
+            max_concurrent_requests: default_max_concurrent_requests(),
+            load_shed_retry_after_secs: default_load_shed_retry_after_secs(),
         }
     }
 }

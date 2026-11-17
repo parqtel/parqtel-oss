@@ -7,6 +7,7 @@ use tokio::sync::RwLock;
 pub struct ServerMetrics {
     pub ingested_points: AtomicU64,
     pub ingest_errors: AtomicU64,
+    pub ingest_rejected: AtomicU64,
     pub batches_received: AtomicU64,
     pub queries_executed: AtomicU64,
     pub query_errors: AtomicU64,
@@ -32,6 +33,7 @@ impl Default for ServerMetrics {
         Self {
             ingested_points: AtomicU64::new(0),
             ingest_errors: AtomicU64::new(0),
+            ingest_rejected: AtomicU64::new(0),
             batches_received: AtomicU64::new(0),
             queries_executed: AtomicU64::new(0),
             query_errors: AtomicU64::new(0),
@@ -78,6 +80,11 @@ impl ServerMetrics {
     pub fn with_index_stores(mut self, stores: [Arc<BlockIndexStore>; 3]) -> Self {
         self.index_stores = stores;
         self
+    }
+
+    /// Count an ingest request rejected by the concurrency guard.
+    pub fn record_ingest_rejected(&self) {
+        self.ingest_rejected.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Samples process memory and caches it for [`Self::render`].
@@ -381,6 +388,13 @@ impl ServerMetrics {
         out.push_str(&format!(
             "parqtel_ingest_errors_total {}\n",
             self.ingest_errors.load(Ordering::Relaxed)
+        ));
+
+        out.push_str("# HELP parqtel_ingest_rejected_total Ingest requests rejected by the concurrency guard\n");
+        out.push_str("# TYPE parqtel_ingest_rejected_total counter\n");
+        out.push_str(&format!(
+            "parqtel_ingest_rejected_total {}\n",
+            self.ingest_rejected.load(Ordering::Relaxed)
         ));
 
         out.push_str("# HELP parqtel_batches_received_total Total OTLP batches received\n");
