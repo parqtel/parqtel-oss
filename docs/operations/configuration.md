@@ -86,9 +86,9 @@ profiling_frequency = 99           # CPU sampling frequency (Hz)
 
 [alerts]
 rules_dir = "rules"
-noise_window_firings = 30
-refinement_enabled = true
-noise_suppression_threshold = 0.7
+noise_window_firings = 30            # reserved; no noise detector in 0.3.x
+refinement_enabled = true           # reserved
+noise_suppression_threshold = 0.7   # reserved; always 0 in 0.3.x
 [alerts.presets]
 # Built-in alert packs embedded in the binary (see rules/presets/README.md).
 # auto = activate a pack when its canary metrics are detected (default)
@@ -322,9 +322,9 @@ Per-service overrides; each entry fully replaces the global policy for that serv
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `rules_dir` | String | `"rules"` | Directory containing alert rule YAML files |
-| `noise_window_firings` | Integer | `30` | Number of firings in window to calculate noise score |
+| `noise_window_firings` | Integer | `30` | Reserved; no noise detector exists in 0.3.x |
 | `refinement_enabled` | Boolean | `true` | Enable automatic alert refinement |
-| `noise_suppression_threshold` | Float | `0.7` | Threshold for noise suppression (0.0-1.0) |
+| `noise_suppression_threshold` | Float | `0.7` | Reserved; no noise detector exists in 0.3.x |
 | `allow_runtime_updates` | Boolean | `false` | Permit REST writes to alert routes, recording rules, and pipelines. Keep off unless an authenticating proxy fronts the API. |
 | `recording_rules_enabled` | Boolean | `true` | Evaluate `rules/recording/` groups on their intervals and write results through the metrics ingest path |
 
@@ -562,7 +562,7 @@ annotations:
   description: "Tune to your traffic profile."
   runbook: "https://wiki.example.com/runbooks/http-errors"
 enabled: true
-noise_suppression_threshold: 0.7  # 0.0-1.0, higher = more suppression
+noise_suppression_threshold: 0.7  # reserved; no noise detector in 0.3.x
 ```
 
 The evaluation loop parses each enabled rule's `query` every 15s, executes it
