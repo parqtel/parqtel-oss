@@ -164,7 +164,7 @@ curl -X POST http://localhost:8080/api/v1/alerts/test_route \
   -d '{"labels":{"severity":"critical","service.name":"api"}}'
 ```
 
-Mutation endpoints that write routes, silences, rules, recording rules or
+Mutation endpoints that write notification routes, recording rules or
 pipelines require:
 
 ```toml
@@ -172,7 +172,9 @@ pipelines require:
 allow_runtime_updates = true
 ```
 
-Enable that only with `admin` auth or an authenticating proxy.
+Alert-rule and silence endpoints are not gated by this key; protect them with
+`admin` auth or an authenticating proxy. Enable the gate only in the same
+trusted context.
 
 ## Metrics
 

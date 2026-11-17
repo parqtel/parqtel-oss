@@ -344,7 +344,7 @@ parqtel export             # Export metric data to CSV
 | `PARQTEL__OBJECT_STORE__ENABLED` | Enable S3-compatible block upload | `false` |
 | `PARQTEL__OBJECT_STORE__CACHE_BYTES` | Read-cache quota | `1073741824` |
 | `PARQTEL__AUTH__ENABLED` | Require bearer/OIDC authentication | `false` |
-| `PARQTEL__ALERTS__ALLOW_RUNTIME_UPDATES` | Permit REST rule/route/pipeline mutations | `false` |
+| `PARQTEL__ALERTS__ALLOW_RUNTIME_UPDATES` | Permit REST route/recording-rule/pipeline mutations | `false` |
 
 ## MCP Integrations
 

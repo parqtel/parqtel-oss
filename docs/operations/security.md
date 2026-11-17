@@ -14,7 +14,7 @@ need a proxy or mesh.
 | HTTP auth | off | Every data route is open when `auth.enabled = false` |
 | OTLP gRPC auth | none | gRPC has no token layer even when HTTP auth is on |
 | TLS | off | Plaintext HTTP and gRPC |
-| REST mutations | disabled | `alerts.allow_runtime_updates = false` returns 403 |
+| REST route/recording/pipeline mutations | disabled | `alerts.allow_runtime_updates = false` returns 403 |
 | Alert egress | fail-closed | Private, loopback and redirect targets rejected |
 | Audit | on | Mutations append JSONL with secrets redacted |
 
@@ -141,16 +141,17 @@ datasets = ["api-*"]
 
 ## Mutation gate
 
-Routes, alert rules, recording rules and pipelines persist to disk when
-mutated. The REST mutation endpoints return 403 unless:
+Notification routes, recording rules and pipelines persist to disk when
+mutated. Their REST mutation endpoints return 403 unless:
 
 ```toml
 [alerts]
 allow_runtime_updates = true
 ```
 
-Enable this only behind authentication (`admin` scope) or an authenticating
-proxy. The gate is separate from `[auth]`; auth alone does not enable writes.
+Alert-rule and silence endpoints are not gated by this key; protect them with
+the `admin` scope or a proxy. The gate is separate from `[auth]`; auth alone does
+not enable writes.
 
 ## Audit trail
 

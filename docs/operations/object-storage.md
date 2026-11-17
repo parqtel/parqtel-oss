@@ -63,8 +63,7 @@ network.
 The identity needs, on the configured prefix:
 
 - `s3:PutObject`
-- `s3:GetObject`
-- `s3:HeadObject`
+- `s3:GetObject` (also authorizes HEAD)
 - `s3:DeleteObject`
 - `s3:ListBucket` on the bucket, restricted to the prefix
 

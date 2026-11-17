@@ -163,7 +163,7 @@ rules_dir = "rules"
 noise_window_firings = 30           # parsed; not read by this build
 refinement_enabled = true           # parsed; not read by this build
 noise_suppression_threshold = 0.7   # parsed; not read by this build
-allow_runtime_updates = false       # required for REST mutations
+allow_runtime_updates = false       # gate routes, recording rules, pipelines
 recording_rules_enabled = true
 
 [alerts.presets]
@@ -233,7 +233,7 @@ allow_hosts = []
 # routing_key = "${PAGERDUTY_ROUTING_KEY}"
 # send_resolved = true
 
-# Not implemented in this build; parsed and validated.
+# Not implemented in this build; parsed but inert.
 [k8s_provider]
 enabled = false
 bind_address = "0.0.0.0:6443"
@@ -485,7 +485,7 @@ before/after values. Webhook URLs and secrets are redacted.
 | `noise_window_firings` | Integer | `30` | Parsed; not read by this build. |
 | `refinement_enabled` | Boolean | `true` | Parsed; not read by this build. |
 | `noise_suppression_threshold` | Float | `0.7` | Parsed; not read by this build. |
-| `allow_runtime_updates` | Boolean | `false` | Permit REST mutations of routes, rules and pipelines. |
+| `allow_runtime_updates` | Boolean | `false` | Permit REST mutations of notification routes, recording rules and pipelines. Alert-rule and silence endpoints are not gated by this key. |
 | `recording_rules_enabled` | Boolean | `true` | Evaluate `rules/recording/` groups and write results through ingest. |
 
 `noise_score` is **implemented**: it is derived from an alert instance's
@@ -554,8 +554,8 @@ when both paths are configured.
 
 ### `[alerts.postmortem]` — not implemented
 
-The section is parsed and validated but no postmortem engine is wired up. All
-keys are inert: `enabled`, `auto_draft`, `postmortem_delay_minutes`,
+The section is parsed but no postmortem engine is wired up. All keys are
+inert: `enabled`, `auto_draft`, `postmortem_delay_minutes`,
 `template_path`, `auto_publish_notion`, `auto_publish_gdocs`,
 `auto_publish_slack`, `auto_create_jira_actions`, `min_duration_minutes`,
 `min_severity`, `max_knowledge_entries`.
@@ -626,7 +626,7 @@ routes, receivers, grouping keys and silence/inhibition state.
 
 ## `[k8s_provider]` — not implemented
 
-Parsed and validated, but no custom-metrics provider is started. Keys:
+Parsed but no custom-metrics provider is started. Keys:
 `enabled` (false), `bind_address` (`0.0.0.0:6443`), `cache_expiry_secs` (30),
 `query_timeout_secs` (10), `max_concurrent` (10), `tls_secret_name`
 (`parqtel-provider-tls`).
