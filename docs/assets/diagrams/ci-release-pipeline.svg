@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 400" role="img" aria-labelledby="ci-title ci-desc">
+  <title id="ci-title">Release pipeline</title>
+  <desc id="ci-desc">Animated release flow on a v-tag: the test gate runs first, then binary builds, Docker publish and Helm publish; Docker feeds Trivy scan and cosign signing; the GitHub release is created after the gates and notifies the Homebrew tap.</desc>
+  <defs>
+    <style>
+      .bg{fill:#fff}.node{fill:#fff;stroke:#64748b;stroke-width:1.2}.gate{fill:#ecfeff;stroke:#0891b2;stroke-width:1.5}
+      .ship{fill:#f0fdf4;stroke:#16a34a;stroke-width:1.3}.sec{fill:#fff7ed;stroke:#ea580c;stroke-width:1.3}
+      .t{fill:#0f172a;font:600 13px/1.2 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif}
+      .s{fill:#475569;font:11px/1.2 ui-monospace,SFMono-Regular,Menlo,monospace}
+      .h{fill:#0f766e;font:700 11px/1 ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:1.2px}
+      .flow{stroke:#0891b2;stroke-width:2;fill:none;stroke-dasharray:5 9;animation:flow 1.1s linear infinite}
+      .floww{stroke:#d97706;stroke-width:2;fill:none;stroke-dasharray:5 9;animation:flow 1.5s linear infinite}
+      .pulse{animation:pulse 3.2s ease-in-out infinite}.pulse2{animation:pulse 3.2s ease-in-out .7s infinite}
+      .pulse3{animation:pulse 3.2s ease-in-out 1.4s infinite}.pulse4{animation:pulse 3.2s ease-in-out 2.1s infinite}
+      @keyframes flow{to{stroke-dashoffset:-28}}@keyframes pulse{0%,100%{stroke-opacity:.45}50%{stroke-opacity:1}}
+      @media (prefers-reduced-motion:reduce){*{animation:none!important}.flow,.floww{stroke-dasharray:none}}
+    </style>
+  </defs>
+  <rect class="bg" width="960" height="400" rx="18"/>
+  <text x="28" y="34" class="h">RELEASE PIPELINE · TAG PUSH v*</text>
+
+  <g class="pulse"><rect class="gate" x="30" y="98" width="156" height="76" rx="10"/><text x="46" y="124" class="t">test gate</text><text x="46" y="144" class="s">clippy -D warnings</text><text x="46" y="160" class="s">workspace suite</text></g>
+  <g class="pulse2"><rect class="node" x="252" y="98" width="184" height="76" rx="10"/><text x="268" y="124" class="t">build-binaries</text><text x="268" y="144" class="s">4 targets · --locked</text><text x="268" y="160" class="s">checksums</text></g>
+  <g class="pulse3"><rect class="node" x="252" y="218" width="184" height="76" rx="10"/><text x="268" y="244" class="t">docker-publish</text><text x="268" y="264" class="s">multi-arch · SBOM</text><text x="268" y="280" class="s">provenance</text></g>
+  <g class="pulse4"><rect class="node" x="252" y="318" width="184" height="56" rx="10"/><text x="268" y="342" class="t">helm-publish</text><text x="268" y="360" class="s">OCI chart</text></g>
+
+  <g class="pulse2"><rect class="sec" x="510" y="188" width="170" height="60" rx="10"/><text x="526" y="212" class="t">trivy-scan</text><text x="526" y="230" class="s">SARIF · report-only</text></g>
+  <g class="pulse3"><rect class="sec" x="510" y="266" width="170" height="60" rx="10"/><text x="526" y="290" class="t">sign-image</text><text x="526" y="308" class="s">cosign keyless</text></g>
+
+  <g class="pulse"><rect class="ship" x="736" y="98" width="192" height="76" rx="10"/><text x="752" y="124" class="t">github-release</text><text x="752" y="144" class="s">binaries + notes</text><text x="752" y="160" class="s">after all gates</text></g>
+  <g class="pulse4"><rect class="ship" x="736" y="218" width="192" height="76" rx="10"/><text x="752" y="244" class="t">notify-homebrew-tap</text><text x="752" y="264" class="s">repository_dispatch</text><text x="752" y="280" class="s">formula bump + audit</text></g>
+
+  <path class="flow" d="M186 136 H252"/>
+  <path class="flow" d="M436 136 H688 V136 H736"/>
+  <path class="floww" d="M436 256 H510"/>
+  <path class="floww" d="M680 218 H710 V256 H736"/>
+  <path class="flow" d="M436 346 H710 V300 H736"/>
+  <path class="flow" d="M680 296 H710 V218 H736"/>
+  <path class="flow" d="M832 174 V218"/>
+
+  <text x="510" y="366" class="s">Image scan findings are report-only;</text>
+  <text x="510" y="384" class="s">the filesystem scan is the hard gate.</text>
+</svg>

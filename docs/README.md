@@ -2,6 +2,11 @@
 
 Documentation for Parqtel, an open-source SRE telemetry store.
 
+**Start here:** [Getting started](getting-started/getting-started.md) ·
+[Configuration](operations/configuration.md) ·
+[Architecture](development/architecture.md) ·
+[Object storage](operations/object-storage.md)
+
 ## Getting started
 
 | | |
@@ -14,21 +19,26 @@ Documentation for Parqtel, an open-source SRE telemetry store.
 
 | | |
 |---|---|
+| [Ingestion on-ramps](guides/ingestion.md) | OTLP, generic JSON, remote_write, Kafka, pipelines, limits |
 | [PQL guide](guides/pql-guide.md) | ParQL metrics, ParqtelQL log/trace search, pipelines |
-| [Query functions](guides/query-functions.md) | Supported function surface, and what is not yet supported |
+| [Query functions](guides/query-functions.md) | Supported function surface and gaps |
+| [Alerting](operations/alerting.md) | Evaluation, routing, grouping, inhibition, receivers |
 | [MCP](guides/mcp.md) | Model Context Protocol servers and tool schemas |
 | [Best practices](guides/best-practices.md) | Sizing and operating guidance |
 | [Argo Rollouts](guides/argo-rollouts.md) | Progressive delivery on Kubernetes |
-| [Agent on-ramps](../examples/agents/README.md) | OTel Collector, Vector, Fluent Bit, Filebeat configurations |
+| [Agent on-ramps](../examples/agents/README.md) | Collector, Vector, Fluent Bit and Filebeat configurations |
 
 ## Operations
 
 | | |
 |---|---|
 | [Configuration](operations/configuration.md) | Every knob, environment variable and TOML key |
-| [Deployment](operations/deployment.md) | Docker, Kubernetes, Helm |
-| [Edge mode](operations/edge-mode.md) | Single-node topology, sizing, and deliberate non-goals |
-| [Performance and sizing](operations/performance-sizing.md) | How to reason about memory and disk for your ingest rate |
+| [Deployment](operations/deployment.md) | Docker, Kubernetes, Helm, systemd |
+| [Object storage](operations/object-storage.md) | S3-compatible bucket, shared catalog, cache and failure modes |
+| [Security](operations/security.md) | Auth, OIDC, TLS, datasets, audit, egress |
+| [Alerting](operations/alerting.md) | Rules, routes, silences, receivers and delivery metrics |
+| [Edge mode](operations/edge-mode.md) | Single-node topology, sizing and deliberate non-goals |
+| [Performance and sizing](operations/performance-sizing.md) | Memory and disk for your ingest rate |
 | [Head-to-head benchmark](performance/comparison.md) | Reproducible query comparison harness |
 | [Troubleshooting](operations/troubleshooting.md) | Symptoms, metrics to check, fixes |
 | [Known issues](operations/known-issues.md) | Caveats worth knowing before you deploy |
@@ -37,8 +47,8 @@ Documentation for Parqtel, an open-source SRE telemetry store.
 
 | | |
 |---|---|
-| [Architecture](development/architecture.md) | Crates, data flow, storage engine, concurrency model |
-| [Diagrams](development/diagrams.md) | Visual architecture: context, crate graph, data flow, block lifecycle |
+| [Architecture](development/architecture.md) | Runtime, write/read paths, storage, security and delivery |
+| [Diagrams](development/diagrams.md) | Animated SVG architecture, ingest, query, storage and alert visuals |
 | [Developer guide](development/developer-guide.md) | Local setup, conventions, repository layout |
 | [Testing](development/testing.md) | Test strategy and how to run each layer |
 | [Test plan](development/test-plan.md) | End-to-end scenarios |
@@ -46,8 +56,6 @@ Documentation for Parqtel, an open-source SRE telemetry store.
 | [Efficiency plan](development/efficiency-plan.md) | Measured engine performance and optimisation backlog |
 | [Memory backlog](development/memory-backlog.md) | Measured query and ingest memory findings |
 | [Glossary](development/glossary.md) | Terminology |
-| [Efficiency plan](development/efficiency-plan.md) | The measured plan behind the scan budget and the L1 rollup |
-| [Memory backlog](development/memory-backlog.md) | Open memory items and what each one costs |
 
 ## Reference
 
@@ -62,10 +70,10 @@ Documentation for Parqtel, an open-source SRE telemetry store.
 
 ## Scope
 
-Parqtel is a **metrics, logs and traces store with an SRE console and alerting**.
-It is not a general-purpose log aggregator and does not replace a metrics
-warehouse. For where it sits relative to other tools, see the
-[FAQ](getting-started/faq.md).
+Parqtel is a **metrics, logs and traces store with an SRE console, alerting and
+optional object storage**. It is not a general-purpose log aggregator, a
+distributed consensus system, or a metrics warehouse replacement. For where it
+sits relative to other tools, see the [FAQ](getting-started/faq.md).
 
 ## Accuracy
 

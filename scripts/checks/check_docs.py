@@ -45,7 +45,16 @@ def markdown_files() -> list[str]:
         import subprocess
 
         result = subprocess.run(
-            ["git", "-C", ROOT, "ls-files", "*.md"],
+            [
+                "git",
+                "-C",
+                ROOT,
+                "ls-files",
+                "--cached",
+                "--others",
+                "--exclude-standard",
+                "*.md",
+            ],
             capture_output=True,
             text=True,
             check=True,
@@ -154,6 +163,25 @@ def check_links(files: list[str]) -> list[str]:
     return problems
 
 
+def check_no_mermaid(files: list[str]) -> list[str]:
+    """The documentation renders animated SVG, never Mermaid source blocks."""
+    problems = []
+    for path in files:
+        in_mermaid = False
+        with open(path, encoding="utf-8") as handle:
+            for number, line in enumerate(handle, 1):
+                stripped = line.lstrip()
+                if stripped.startswith("```mermaid"):
+                    in_mermaid = True
+                    problems.append(
+                        f"{os.path.relpath(path, ROOT)}:{number}: Mermaid fence; "
+                        "embed an animated SVG instead"
+                    )
+                elif in_mermaid and stripped.startswith("```"):
+                    in_mermaid = False
+    return problems
+
+
 def check_source_paths(files: list[str]) -> list[str]:
     problems = []
     roots = source_roots()
@@ -233,13 +261,20 @@ def check_api_coverage() -> list[str]:
 
 def main() -> int:
     files = markdown_files()
-    problems = check_links(files) + check_source_paths(files) + check_api_coverage()
+    problems = (
+        check_links(files)
+        + check_source_paths(files)
+        + check_api_coverage()
+        + check_no_mermaid(files)
+    )
     for problem in problems:
         print(problem)
     if problems:
         print(f"\n{len(problems)} documentation problem(s)")
         return 1
-    print(f"documentation OK ({len(files)} markdown files: links, anchors, paths, API)")
+    print(
+        f"documentation OK ({len(files)} markdown files: links, anchors, paths, API, SVG-only)"
+    )
     return 0
 
 

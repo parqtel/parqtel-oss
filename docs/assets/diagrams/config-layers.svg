@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 330" role="img" aria-labelledby="cfg-title cfg-desc">
+  <title id="cfg-title">Parqtel configuration layering</title>
+  <desc id="cfg-desc">Animated diagram showing built-in defaults, an optional TOML file, PARQTEL double-underscore environment variables, and CLI flags merging into a validated runtime configuration.</desc>
+  <defs>
+    <style>
+      .bg{fill:#fff}.node{fill:#fff;stroke:#64748b;stroke-width:1.2}.hot{fill:#ecfeff;stroke:#0891b2;stroke-width:1.5}
+      .out{fill:#f0fdf4;stroke:#16a34a;stroke-width:1.5}
+      .t{fill:#0f172a;font:600 13px/1.2 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif}
+      .s{fill:#475569;font:11px/1.2 ui-monospace,SFMono-Regular,Menlo,monospace}
+      .h{fill:#0f766e;font:700 11px/1 ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:1.2px}
+      .flow{stroke:#0891b2;stroke-width:2;fill:none;stroke-dasharray:5 9;animation:flow 1.1s linear infinite}
+      .pulse{animation:pulse 3.2s ease-in-out infinite}.pulse2{animation:pulse 3.2s ease-in-out .6s infinite}
+      .pulse3{animation:pulse 3.2s ease-in-out 1.2s infinite}.pulse4{animation:pulse 3.2s ease-in-out 1.8s infinite}
+      @keyframes flow{to{stroke-dashoffset:-28}}@keyframes pulse{0%,100%{stroke-opacity:.45}50%{stroke-opacity:1}}
+      @media (prefers-reduced-motion:reduce){*{animation:none!important}.flow{stroke-dasharray:none}}
+    </style>
+  </defs>
+  <rect class="bg" width="900" height="330" rx="18"/>
+  <text x="28" y="34" class="h">CONFIGURATION RESOLUTION · HIGHEST WINS</text>
+
+  <g class="pulse"><rect class="node" x="34" y="64" width="166" height="60" rx="9"/><text x="48" y="86" class="t">Built-in defaults</text><text x="48" y="104" class="s">Config::default()</text></g>
+  <g class="pulse2"><rect class="node" x="34" y="140" width="166" height="60" rx="9"/><text x="48" y="162" class="t">TOML file</text><text x="48" y="180" class="s">--config PATH</text></g>
+  <g class="pulse3"><rect class="node" x="34" y="216" width="166" height="60" rx="9"/><text x="48" y="238" class="t">Environment</text><text x="48" y="256" class="s">PARQTEL__SECTION__KEY</text></g>
+  <g class="pulse4"><rect class="node" x="34" y="278" width="166" height="44" rx="9"/><text x="48" y="304" class="t">CLI flags</text></g>
+
+  <rect class="hot" x="300" y="110" width="210" height="150" rx="14"/>
+  <text x="318" y="136" class="h">FIGMENT MERGE</text>
+  <text x="318" y="164" class="s">later source overrides</text>
+  <text x="318" y="182" class="s">earlier source</text>
+  <text x="318" y="206" class="s">secrets: ${ENV} or {env:ENV}</text>
+  <text x="318" y="224" class="s">single _ alias accepted</text>
+  <text x="318" y="242" class="s">unknown keys rejected per section</text>
+
+  <rect class="out" x="590" y="110" width="270" height="150" rx="14"/>
+  <text x="608" y="136" class="h">VALIDATED RUNTIME</text>
+  <text x="608" y="162" class="s">Config::validate()</text>
+  <text x="608" y="180" class="s">bind · dataset · TLS paths</text>
+  <text x="608" y="198" class="s">zstd 1–22 · row group ≤ block</text>
+  <text x="608" y="216" class="s">sampling ratio 0.0–1.0</text>
+  <text x="608" y="234" class="s">S3/catalog · auth · routing</text>
+
+  <path class="flow" d="M200 94 H300"/>
+  <path class="flow" d="M200 170 H300"/>
+  <path class="flow" d="M200 246 H300"/>
+  <path class="flow" d="M200 300 H250 V260 H300"/>
+  <path class="flow" d="M510 185 H590"/>
+</svg>

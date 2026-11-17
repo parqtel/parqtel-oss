@@ -1,0 +1,64 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 520" role="img" aria-labelledby="sec-title sec-desc">
+  <title id="sec-title">Parqtel security boundaries</title>
+  <desc id="sec-desc">Animated diagram of public routes, bearer or OIDC authentication, read write and admin scopes, dataset enforcement, TLS on HTTP and gRPC, audit logging and the outbound alert egress policy.</desc>
+  <defs>
+    <style>
+      .bg{fill:#fff}.zone{fill:#f8fafc;stroke:#cbd5e1;stroke-width:1.2}
+      .node{fill:#fff;stroke:#64748b;stroke-width:1.2}.hot{fill:#ecfeff;stroke:#0891b2;stroke-width:1.4}
+      .warn{fill:#fff7ed;stroke:#ea580c;stroke-width:1.3}.ok{fill:#f0fdf4;stroke:#16a34a;stroke-width:1.2}
+      .t{fill:#0f172a;font:600 13px/1.2 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif}
+      .s{fill:#475569;font:11px/1.2 ui-monospace,SFMono-Regular,Menlo,monospace}
+      .h{fill:#0f766e;font:700 11px/1 ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:1.2px}
+      .flow{stroke:#0891b2;stroke-width:2;fill:none;stroke-dasharray:5 9;animation:flow 1.1s linear infinite}
+      .floww{stroke:#ea580c;stroke-width:2;fill:none;stroke-dasharray:5 9;animation:flow 1.5s linear infinite}
+      .pulse{animation:pulse 3.2s ease-in-out infinite}.pulse2{animation:pulse 3.2s ease-in-out .7s infinite}
+      .pulse3{animation:pulse 3.2s ease-in-out 1.4s infinite}
+      @keyframes flow{to{stroke-dashoffset:-28}}@keyframes pulse{0%,100%{stroke-opacity:.45}50%{stroke-opacity:1}}
+      @media (prefers-reduced-motion:reduce){*{animation:none!important}.flow,.floww{stroke-dasharray:none}}
+    </style>
+  </defs>
+  <rect class="bg" width="1000" height="520" rx="18"/>
+  <text x="28" y="34" class="h">SECURITY · AUTH · EGRESS</text>
+
+  <rect class="zone" x="24" y="58" width="244" height="372" rx="14"/>
+  <text x="42" y="82" class="h">PUBLIC / UNAUTHENTICATED</text>
+  <g class="pulse"><rect class="ok" x="42" y="98" width="208" height="48" rx="8"/><text x="56" y="118" class="t">/health · /ready</text><text x="56" y="136" class="s">liveness + storage probe</text></g>
+  <g class="pulse2"><rect class="ok" x="42" y="158" width="208" height="48" rx="8"/><text x="56" y="178" class="t">/ui · /oas · /</text><text x="56" y="196" class="s">static shell</text></g>
+  <g class="pulse3"><rect class="ok" x="42" y="218" width="208" height="48" rx="8"/><text x="56" y="238" class="t">CORS preflight</text><text x="56" y="256" class="s">OPTIONS</text></g>
+  <text x="42" y="296" class="s">auth.enabled = false</text>
+  <text x="42" y="314" class="s">every data route is open</text>
+  <text x="42" y="332" class="s">keep a network boundary</text>
+  <text x="42" y="366" class="s">OTLP gRPC has no token layer</text>
+  <text x="42" y="384" class="s">even when HTTP auth is on</text>
+
+  <rect class="zone" x="292" y="58" width="400" height="372" rx="14"/>
+  <text x="310" y="82" class="h">REQUEST AUTHENTICATION</text>
+  <g class="pulse"><rect class="hot" x="310" y="98" width="172" height="72" rx="9"/><text x="324" y="120" class="t">Bearer token</text><text x="324" y="138" class="s">Authorization: Bearer</text><text x="324" y="156" class="s">or custom header</text></g>
+  <g class="pulse2"><rect class="hot" x="500" y="98" width="172" height="72" rx="9"/><text x="514" y="120" class="t">OIDC login</text><text x="514" y="138" class="s">/auth/login → callback</text><text x="514" y="156" class="s">HttpOnly session</text></g>
+
+  <rect class="node" x="310" y="194" width="172" height="62" rx="8"/>
+  <text x="324" y="216" class="t">read</text><text x="324" y="234" class="s">queries · metadata</text><text x="324" y="248" class="s">console data</text>
+  <rect class="node" x="500" y="194" width="172" height="62" rx="8"/>
+  <text x="514" y="216" class="t">write</text><text x="514" y="234" class="s">read + OTLP · JSON</text><text x="514" y="248" class="s">remote_write</text>
+  <rect class="warn" x="310" y="272" width="362" height="62" rx="8"/>
+  <text x="324" y="294" class="t">admin</text><text x="324" y="312" class="s">write + rules · routes · pipelines · silences</text><text x="324" y="326" class="s">mutation gate: alerts.allow_runtime_updates</text>
+  <text x="310" y="360" class="s">token datasets: exact names or * globs</text>
+  <text x="310" y="378" class="s">conflicting X-Parqtel-Dataset → 403</text>
+  <text x="310" y="396" class="s">one dataset per process, separate data roots</text>
+
+  <rect class="zone" x="716" y="58" width="260" height="372" rx="14"/>
+  <text x="734" y="82" class="h">TRANSPORT + OUTBOUND</text>
+  <g class="pulse2"><rect class="node" x="734" y="98" width="224" height="62" rx="8"/><text x="748" y="120" class="t">TLS</text><text x="748" y="138" class="s">server.tls.cert_path</text><text x="748" y="156" class="s">HTTP + OTLP gRPC</text></g>
+  <g class="pulse3"><rect class="node" x="734" y="174" width="224" height="62" rx="8"/><text x="748" y="196" class="t">Audit</text><text x="748" y="214" class="s">JSONL mutation trail</text><text x="748" y="232" class="s">secrets + URLs redacted</text></g>
+  <g class="pulse"><rect class="warn" x="734" y="250" width="224" height="84" rx="8"/><text x="748" y="272" class="t">Alert egress</text><text x="748" y="290" class="s">allow_private = false</text><text x="748" y="308" class="s">allow_hosts = []</text><text x="748" y="326" class="s">redirects disabled</text></g>
+  <text x="734" y="360" class="s">rejects loopback · private · ULA</text>
+  <text x="734" y="378" class="s">CGNAT · link-local · multicast</text>
+
+  <path class="flow" d="M268 122 H310"/>
+  <path class="flow" d="M268 182 H310"/>
+  <path class="floww" d="M482 134 H500"/>
+  <path class="flow" d="M482 224 H500"/>
+  <path class="flow" d="M674 134 H716"/>
+  <path class="flow" d="M674 210 H716"/>
+  <path class="floww" d="M674 286 H716"/>
+</svg>

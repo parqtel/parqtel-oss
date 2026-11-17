@@ -1,0 +1,53 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 360" role="img" aria-labelledby="edge-title edge-desc">
+  <title id="edge-title">Parqtel edge topology</title>
+  <desc id="edge-desc">Animated single-node topology: OTLP producers and Grafana or MCP clients connect to one Parqtel process that owns a local Parquet data directory and optional S3 upload.</desc>
+  <defs>
+    <style>
+      .bg{fill:#fff}.node{fill:#fff;stroke:#64748b;stroke-width:1.2}.hot{fill:#ecfeff;stroke:#0891b2;stroke-width:1.5}
+      .sink{fill:#fffbeb;stroke:#d97706;stroke-width:1.3}.ext{fill:#f8fafc;stroke:#64748b;stroke-width:1.1;stroke-dasharray:4 3}
+      .t{fill:#0f172a;font:600 13px/1.2 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif}
+      .s{fill:#475569;font:11px/1.2 ui-monospace,SFMono-Regular,Menlo,monospace}
+      .h{fill:#0f766e;font:700 11px/1 ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:1.2px}
+      .flow{stroke:#0891b2;stroke-width:2;fill:none;stroke-dasharray:5 9;animation:flow 1.1s linear infinite}
+      .floww{stroke:#d97706;stroke-width:2;fill:none;stroke-dasharray:5 9;animation:flow 1.5s linear infinite}
+      .pulse{animation:pulse 3.2s ease-in-out infinite}.pulse2{animation:pulse 3.2s ease-in-out .7s infinite}
+      .pulse3{animation:pulse 3.2s ease-in-out 1.4s infinite}
+      @keyframes flow{to{stroke-dashoffset:-28}}@keyframes pulse{0%,100%{stroke-opacity:.45}50%{stroke-opacity:1}}
+      @media (prefers-reduced-motion:reduce){*{animation:none!important}.flow,.floww{stroke-dasharray:none}}
+    </style>
+  </defs>
+  <rect class="bg" width="900" height="360" rx="18"/>
+  <text x="28" y="34" class="h">EDGE / SINGLE-NODE TOPOLOGY</text>
+
+  <g class="pulse"><rect class="node" x="30" y="82" width="196" height="58" rx="9"/><text x="44" y="104" class="t">OTel SDK / Collector</text><text x="44" y="122" class="s">OTLP gRPC :4317</text></g>
+  <g class="pulse2"><rect class="node" x="30" y="158" width="196" height="58" rx="9"/><text x="44" y="180" class="t">Grafana / curl</text><text x="44" y="198" class="s">HTTP :8080</text></g>
+  <g class="pulse3"><rect class="node" x="30" y="234" width="196" height="58" rx="9"/><text x="44" y="256" class="t">MCP client</text><text x="44" y="274" class="s">/mcp → HTTP API</text></g>
+
+  <rect class="hot" x="316" y="82" width="252" height="210" rx="16"/>
+  <text x="336" y="110" class="h">PARQTEL · ONE PROCESS</text>
+  <text x="336" y="140" class="t">ingest + WAL</text>
+  <text x="336" y="160" class="s">bounded buffer</text>
+  <text x="336" y="180" class="t">query + alerts</text>
+  <text x="336" y="200" class="s">/api/v1 · /ui · /metrics</text>
+  <text x="336" y="220" class="t">local compaction</text>
+  <text x="336" y="240" class="s">retention · index sidecars</text>
+  <text x="336" y="270" class="s">auth optional · TLS optional</text>
+
+  <rect class="sink" x="646" y="82" width="226" height="92" rx="12"/>
+  <text x="664" y="108" class="h">LOCAL DISK</text>
+  <text x="664" y="132" class="t">data/ · logs/ · traces/</text>
+  <text x="664" y="152" class="s">Parquet + index.json</text>
+  <text x="664" y="168" class="s">WAL staging</text>
+
+  <rect class="ext" x="646" y="200" width="226" height="92" rx="12"/>
+  <text x="664" y="226" class="h">OPTIONAL COLD TIER</text>
+  <text x="664" y="250" class="t">S3 / MinIO</text>
+  <text x="664" y="270" class="s">shared catalog · read cache</text>
+  <text x="664" y="286" class="s">not required for edge mode</text>
+
+  <path class="flow" d="M226 111 H316"/>
+  <path class="flow" d="M226 187 H316"/>
+  <path class="flow" d="M226 263 H316"/>
+  <path class="floww" d="M568 150 H646"/>
+  <path class="floww" d="M568 240 H646"/>
+</svg>

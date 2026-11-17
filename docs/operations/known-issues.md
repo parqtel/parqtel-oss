@@ -80,17 +80,21 @@ recent points are also held in the buffer above.
 
 ---
 
-## Log and trace scans decode every column
+## Log and trace scans are two-phase
 
-**Symptom.** Wide log or trace queries are slower than the equivalent metric
-query, and cost more memory than the row counts suggest.
+**Symptom.** A wide log or trace query can still cost more than a narrow metric
+selector, especially when it returns many rows.
 
-**Why.** Only the **metrics** scan projects columns; the log and trace decoders
-read all 19 and 26 respectively.
+**Why.** Logs and traces use late materialisation: a first pass reads
+timestamps/ids (and for logs, severity/body) to select rows, then a second pass
+decodes attributes, events and links only for the selected rows. This is not a
+full-column decode, but a query that selects most of a block still pays for the
+second pass.
 
-**Workaround.** Narrow the query window, and use index blocks for pre-filtering
-rather than scanning everything (`service.name` selectors are pushed into the
-scan).
+**Workaround.** Narrow the time range, push a selective field predicate, and use
+the log skip index by preferring conditions on time, severity, body terms,
+`trace_id`/`span_id`, `service`, `attr.K` or `res.K`. Avoid selecting a broad
+range with `limit` far above what you will display.
 
 ---
 

@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 300" role="img" aria-labelledby="mcp-title mcp-desc">
+  <title id="mcp-title">MCP topology</title>
+  <desc id="mcp-desc">Animated diagram: an LLM or agent speaks JSON-RPC to parqtel-mcp-parqtel over Streamable HTTP, which calls the Parqtel HTTP API; Parqtel reads local or S3-backed telemetry.</desc>
+  <defs>
+    <style>
+      .bg{fill:#fff}.node{fill:#fff;stroke:#64748b;stroke-width:1.2}.hot{fill:#ecfeff;stroke:#0891b2;stroke-width:1.5}
+      .store{fill:#fffbeb;stroke:#d97706;stroke-width:1.3}.ext{fill:#f8fafc;stroke:#64748b;stroke-width:1.1;stroke-dasharray:4 3}
+      .t{fill:#0f172a;font:600 13px/1.2 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif}
+      .s{fill:#475569;font:11px/1.2 ui-monospace,SFMono-Regular,Menlo,monospace}
+      .h{fill:#0f766e;font:700 11px/1 ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:1.2px}
+      .flow{stroke:#0891b2;stroke-width:2;fill:none;stroke-dasharray:5 9;animation:flow 1.1s linear infinite}
+      .floww{stroke:#d97706;stroke-width:2;fill:none;stroke-dasharray:5 9;animation:flow 1.5s linear infinite}
+      .pulse{animation:pulse 3.2s ease-in-out infinite}.pulse2{animation:pulse 3.2s ease-in-out .7s infinite}
+      .pulse3{animation:pulse 3.2s ease-in-out 1.4s infinite}
+      @keyframes flow{to{stroke-dashoffset:-28}}@keyframes pulse{0%,100%{stroke-opacity:.45}50%{stroke-opacity:1}}
+      @media (prefers-reduced-motion:reduce){*{animation:none!important}.flow,.floww{stroke-dasharray:none}}
+    </style>
+  </defs>
+  <rect class="bg" width="900" height="300" rx="18"/>
+  <text x="28" y="34" class="h">MCP · AGENT TO TELEMETRY</text>
+
+  <g class="pulse"><rect class="node" x="34" y="86" width="196" height="92" rx="10"/><text x="50" y="112" class="t">LLM / Agent</text><text x="50" y="132" class="s">Claude · GPT · Cline</text><text x="50" y="150" class="s">tools/list · tools/call</text><text x="50" y="166" class="s">Streamable HTTP</text></g>
+  <g class="pulse2"><rect class="hot" x="300" y="86" width="250" height="92" rx="10"/><text x="318" y="112" class="t">parqtel-mcp-parqtel</text><text x="318" y="132" class="s">POST /mcp · GET /health</text><text x="318" y="150" class="s">JSON-RPC · rate limit</text><text x="318" y="166" class="s">read-only tools</text></g>
+  <g class="pulse3"><rect class="node" x="620" y="86" width="246" height="92" rx="10"/><text x="638" y="112" class="t">Parqtel HTTP API</text><text x="638" y="132" class="s">/api/v1/query · /logs</text><text x="638" y="150" class="s">/alerts · /stats</text><text x="638" y="166" class="s">bearer token optional</text></g>
+
+  <g class="pulse2"><rect class="ext" x="620" y="216" width="246" height="56" rx="9"/><text x="638" y="238" class="t">Telemetry store</text><text x="638" y="256" class="s">local Parquet · S3 catalog</text></g>
+  <g class="pulse"><rect class="ext" x="34" y="216" width="196" height="56" rx="9"/><text x="50" y="238" class="t">Incident workflow</text><text x="50" y="256" class="s">RCA · postmortem · chat</text></g>
+
+  <path class="flow" d="M230 112 H300"/>
+  <path class="flow" d="M300 152 H230"/>
+  <path class="flow" d="M550 112 H620"/>
+  <path class="flow" d="M620 152 H550"/>
+  <path class="floww" d="M743 178 V216"/>
+  <path class="floww" d="M132 178 V216"/>
+
+  <text x="34" y="82" class="s">no engine linked</text>
+  <text x="620" y="206" class="s">MCP is a separate process</text>
+</svg>

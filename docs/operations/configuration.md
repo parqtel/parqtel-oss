@@ -1,18 +1,31 @@
 # Configuration Reference
 
-Parqtel uses [Figment](https://github.com/SergioBenitez/Figment) for layered configuration. Settings are resolved in this priority order (highest wins):
+Parqtel uses [Figment](https://github.com/SergioBenitez/Figment) for layered
+configuration. Settings resolve in this order, highest priority first:
 
 1. **CLI flags** — `--bind`, `--data-dir`, `--config`, `--log-level`
-2. **Environment variables** — prefixed with `PARQTEL__`, using `__` as section separator (`PARQTEL_SERVER__BIND_ADDRESS` with a single underscore is accepted as an alias)
-3. **TOML config file** — optional; specified via `--config` / `PARQTEL_CONFIG`, or auto-detected at `config/default.toml` if present (not shipped by default)
-4. **Built-in defaults** — hardcoded in the source
+2. **Environment variables** — prefix `PARQTEL__`, separator `__`
+   (`PARQTEL_SERVER__BIND_ADDRESS` with a single underscore is accepted as an
+   alias)
+3. **TOML file** — `--config PATH` / `PARQTEL_CONFIG`, or `config/default.toml`
+   if present
+4. **Built-in defaults** — hardcoded in `parqtel-core/src/config/`
 
-## TOML Configuration File
+The merged configuration is validated at startup. Invalid values fail the
+process with every error listed, rather than starting with a silent fallback.
+
+![Configuration layers: defaults, TOML, environment and CLI merge through Figment into a validated runtime configuration](../assets/diagrams/config-layers.svg)
+
+## Annotated example
+
+This is a complete, valid starting point. Every section is optional; omitted
+keys take the defaults in the tables below.
 
 ```toml
 [server]
+dataset = "default"                 # one dataset per process; non-default prefixes data dirs
 bind_address = "0.0.0.0:8080"
-grpc_bind_address = "0.0.0.0:4317"   # OTLP gRPC; "" disables
+grpc_bind_address = "0.0.0.0:4317"  # "" disables OTLP gRPC
 max_connections = 1024
 shutdown_timeout_secs = 30
 flush_interval_secs = 5
@@ -20,156 +33,207 @@ alert_interval_secs = 15
 retention_interval_secs = 3600
 grpc_concurrency_limit = 64
 index_persist_interval_secs = 2
+# [server.tls]
+# cert_path = "/etc/parqtel/tls.crt"
+# key_path = "/etc/parqtel/tls.key"
 
 [storage]
 backend = "parquet"
 data_dir = "data"
-block_duration_secs = 7200        # 2 hours
+block_duration_secs = 7200
 max_rows_per_block = 1000000
-compression = "zstd"              # zstd | snappy | lz4 | none
-compression_level = 1             # optional zstd level (1-22); unset = codec default
+compression = "zstd"                # zstd | snappy | lz4 | none
+# compression_level = 1             # zstd 1..22; unset = codec default
 retention_days = 7
-compaction_interval_secs = 300    # 5 minutes (floored at 60 s)
+compaction_interval_secs = 300
 row_group_size = 100000
-compaction_max_merge_blocks = 12  # max source blocks merged in one pass
-compaction_max_merges_per_pass = 8 # max merges one cycle performs
+compaction_max_merge_blocks = 12
+compaction_max_merges_per_pass = 8
 
 [logs]
 data_dir = "data/logs"
-block_duration_secs = 1800        # 30 minutes
+block_duration_secs = 1800
 max_rows_per_block = 200000
 compression = "zstd"
-compression_level = 1             # optional zstd level (1-22); unset = codec default
+# compression_level = 1
 retention_days = 3
 compaction_interval_secs = 3600
 row_group_size = 20000
+compaction_max_merge_blocks = 12
+compaction_max_merges_per_pass = 8
 
 [ingest]
-max_body_size = 10485760          # 10 MB
-wal_enabled = true                # metrics WAL; also gates the background flush worker
+max_body_size = 10485760            # decompressed body limit
+wal_enabled = true                  # metrics WAL + background flush worker
 log_wal_enabled = true
-wal_sync_mode = "interval"        # none | interval | always
-wal_sync_interval_ms = 1000       # fsync period in "interval" mode
-wal_max_segment_bytes = 67108864  # WAL segment roll size
-max_inflight_flushes = 4          # concurrent block encodes
-rotator_shards = 4                # metrics writer shards (1-256)
-label_interner_capacity = 1048576 # distinct label sets the interner holds
-[ingest.tail_sampling]
-keep_errors = true                   # always keep traces with ERROR spans
-# slow_trace_ms = 1000               # keep traces slower than this (ms)
-sampling_ratio = 1.0                 # fraction of remaining traces kept
+wal_sync_mode = "interval"          # none | interval | always
+wal_sync_interval_ms = 1000
+wal_max_segment_bytes = 67108864
+max_inflight_flushes = 4
+rotator_shards = 4                  # clamped 1..256
+label_interner_capacity = 1048576   # >= 2x active series count
+buffer_max_points = 5000000         # 0 disables the row bound
+buffer_max_bytes = 2147483648       # 0 disables the byte bound
+buffer_overflow_policy = "drop_oldest" # drop_oldest | reject_new
+max_concurrent_requests = 64
+load_shed_retry_after_secs = 1
+json_timestamp_field = "timestamp"
+json_body_field = "message"
+json_severity_field = "level"
+series_limit_per_metric = 1000000  # 0 disables
 
-# Per-service overrides fully replace the global policy for that service:
+[ingest.tail_sampling]
+keep_errors = true
+# slow_trace_ms = 1000
+sampling_ratio = 1.0
+
+# Per-service overrides replace the global policy for that service:
 # [ingest.tail_sampling.per_service.noisy-service]
 # keep_errors = false
 # sampling_ratio = 0.05
+
+# Optional Kafka JSON log consumer:
+# [ingest.kafka]
+# enabled = true
+# brokers = "kafka-1:9092,kafka-2:9092"
+# topic = "parqtel-logs"
+# group_id = "parqtel"
+# service = "kafka-apps"
+# format = "json"                   # only json
 
 [query]
 max_series = 1000
 max_samples_per_series = 10000
 timeout_secs = 30
-lookback_delta_ns = 300000000000   # 5 minutes (Prometheus default)
+lookback_delta_ns = 300000000000    # 5 minutes
 
 [ui]
 enabled = true
 
 [telemetry]
 log_level = "info"
-log_format = "text"               # text | json
-# Self-observability: export Parqtel's own traces + SLI metrics over OTLP/gRPC.
+log_format = "text"                 # text | json
 otlp_enabled = false
-otlp_endpoint = "http://127.0.0.1:4317"  # http:// = plaintext gRPC; https:// = TLS
-otlp_trace_level = "info"          # span level exported; independent of log_level
-export_interval_secs = 30          # SLI metric push interval
-profiling_enabled = false          # /debug/pprof/profile and /summary; 404 while disabled
-profiling_frequency = 99           # CPU sampling frequency in Hz (10-999)
+otlp_endpoint = "http://127.0.0.1:4317"
+otlp_trace_level = "info"
+export_interval_secs = 30           # clamped 5..300
+profiling_enabled = false
+profiling_frequency = 99            # clamped 10..999
+
+# Optional object storage. See object-storage.md for the deployment guide.
+# [object_store]
+# enabled = true
+# bucket = "parqtel-blocks"
+# region = "eu-north-1"
+# endpoint = "http://127.0.0.1:9000" # MinIO; omit for AWS
+# access_key = "${AWS_ACCESS_KEY_ID}"
+# secret_key = "${AWS_SECRET_ACCESS_KEY}"
+# prefix = "parqtel"
+# cache_dir = "/var/lib/parqtel/cache"
+# cache_bytes = 1073741824
+# catalog_interval_secs = 5
+
+# Optional scoped authentication.
+# [auth]
+# enabled = true
+# header = "authorization"
+#
+# [[auth.tokens]]
+# name = "grafana"
+# token = "${PARQTEL_READ_TOKEN}"    # or token_sha256 = "<64 lowercase hex>"
+# actions = ["read"]
+# datasets = ["api-*"]
+#
+# [auth.oidc]
+# issuer = "https://idp.example.com"
+# client_id = "parqtel"
+# client_secret = "${OIDC_CLIENT_SECRET}"
+# redirect_url = "https://parqtel.example.com/auth/callback"
+# scopes = ["openid", "profile", "email"]
+# roles_claim = "roles"
+# admin_role = "parqtel-admin"
+# write_role = "parqtel-write"
+
+[audit]
+enabled = true
+path = "audit.jsonl"                # relative to storage.data_dir, or absolute
 
 [alerts]
 rules_dir = "rules"
-noise_window_firings = 30            # reserved; no noise detector in 0.3.x
-refinement_enabled = true           # reserved
-noise_suppression_threshold = 0.7   # reserved; always 0 in 0.3.x
+noise_window_firings = 30           # parsed; not read by this build
+refinement_enabled = true           # parsed; not read by this build
+noise_suppression_threshold = 0.7   # parsed; not read by this build
+allow_runtime_updates = false       # required for REST mutations
+recording_rules_enabled = true
+
 [alerts.presets]
-# Built-in alert packs embedded in the binary (see rules/presets/README.md).
-# auto = activate a pack when its canary metrics are detected (default)
-# all  = activate every selected pack at startup, regardless of metrics
-# off  = never load built-in packs
-mode = "auto"
-# Include-only pack keys (wins over exclude when both are set):
-# include = ["kubernetes", "postgres"]
-# Or exclude specific packs (applied when include is empty):
-# exclude = ["service-red"]
+mode = "auto"                       # auto | all | off
 include = []
 exclude = []
-[alerts.postmortem]
-enabled = true
-auto_draft = true
-postmortem_delay_minutes = 5
-# template_path = ""             # unset by default
-auto_publish_notion = false
-auto_publish_gdocs = false
-auto_publish_slack = true
-auto_create_jira_actions = false
-min_duration_minutes = 5
-min_severity = "warning"
-max_knowledge_entries = 1000
+
+# Not implemented in this build; parsed for forward compatibility.
+# [alerts.postmortem]
+# enabled = false
+# auto_draft = false
+# postmortem_delay_minutes = 5
+# auto_publish_slack = false
 
 [alerts.notifications]
-send_timeout_secs = 30            # the only key this build reads
+send_timeout_secs = 30              # only this key is read by this build
 # dedup_flush_interval_secs = 300
 # max_concurrent_sends = 10
 # self_monitoring_failure_threshold = 0.5
-# [[alerts.notifications.routes]]
-# name = "slack-critical"
-# match_severity = "critical"
-# match_labels = { team = "platform" }
-# webhook_url = "https://hooks.slack.com/services/..."
-# repeat_minutes = 240
 
-# Alertmanager-compatible routing, grouping, inhibition and native receivers.
-# Secrets can be injected as "${ENV_VAR}" or "{env:ENV_VAR}".
-[alerting.routing.global]
-resolve_timeout = "5m"
-http_timeout = "10s"
-retry_initial_backoff = "1s"
-retry_max_backoff = "30s"
-retry_max_attempts = 3
-
-[alerting.routing]
-max_active_groups = 10000
-
-[alerting.routing.egress]
+[alerts.notifications.egress]
 allow_private = false
+allow_hosts = []
 
-[alerting.routing.route]
-receiver = "slack-default"
-group_by = ["service.name"]
-group_wait = "30s"
-group_interval = "5m"
-repeat_interval = "4h"
+# Alertmanager-compatible routing. When present, it replaces the legacy
+# [alerts.notifications.routes] table. Secrets may be ${ENV_VAR} or {env:ENV_VAR}.
+# [alerting.routing.global]
+# resolve_timeout = "5m"
+# http_timeout = "10s"
+# retry_initial_backoff = "1s"
+# retry_max_backoff = "30s"
+# retry_max_attempts = 3
+#
+# [alerting.routing]
+# max_active_groups = 10000
+#
+# [alerting.routing.egress]
+# allow_private = false
+# allow_hosts = ["*.internal.example"]
+#
+# [alerting.routing.route]
+# receiver = "slack-default"
+# group_by = ["service.name"]
+# group_wait = "30s"
+# group_interval = "5m"
+# repeat_interval = "4h"
+#
+# [[alerting.routing.route.routes]]
+# matchers = ["severity = critical"]
+# receiver = "pagerduty-oncall"
+# continue = true
+#
+# [[alerting.routing.inhibit_rules]]
+# source_matchers = ["severity = critical"]
+# target_matchers = ["severity = warning"]
+# equal = ["service.name"]
+#
+# [[alerting.routing.receivers]]
+# name = "slack-default"
+# [[alerting.routing.receivers.slack_configs]]
+# webhook_url = "${SLACK_WEBHOOK_URL}"
+# send_resolved = true
+#
+# [[alerting.routing.receivers]]
+# name = "pagerduty-oncall"
+# [[alerting.routing.receivers.pagerduty_configs]]
+# routing_key = "${PAGERDUTY_ROUTING_KEY}"
+# send_resolved = true
 
-[[alerting.routing.route.routes]]
-matchers = ["severity = critical"]
-receiver = "pagerduty-oncall"
-continue = true
-
-[[alerting.routing.inhibit_rules]]
-source_matchers = ["severity = critical"]
-target_matchers = ["severity = warning"]
-equal = ["service.name"]
-
-[[alerting.routing.receivers]]
-name = "slack-default"
-[[alerting.routing.receivers.slack_configs]]
-webhook_url = "${SLACK_WEBHOOK_URL}"
-send_resolved = true
-
-[[alerting.routing.receivers]]
-name = "pagerduty-oncall"
-[[alerting.routing.receivers.pagerduty_configs]]
-routing_key = "${PAGERDUTY_ROUTING_KEY}"
-send_resolved = true
-
+# Not implemented in this build; parsed and validated.
 [k8s_provider]
 enabled = false
 bind_address = "0.0.0.0:6443"
@@ -179,33 +243,31 @@ max_concurrent = 10
 tls_secret_name = "parqtel-provider-tls"
 ```
 
-## Section Reference
-
-### `[server]`
+## `[server]`
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `bind_address` | String | `"0.0.0.0:8080"` | TCP address to listen on |
-| `grpc_bind_address` | String | `"0.0.0.0:4317"` | TCP address for OTLP gRPC; empty string disables |
-| `max_connections` | Integer | `1024` | Maximum simultaneous TCP connections |
-| `shutdown_timeout_secs` | Integer | `30` | Seconds to wait for in-flight requests during graceful shutdown |
-| `flush_interval_secs` | Integer | `5` | Background tick that checks whether a block has reached its duration. Bounds how *late* a duration-triggered flush can be, not how often blocks are written |
-| `alert_interval_secs` | Integer | `15` | Seconds between alert-rule evaluation cycles |
-| `retention_interval_secs` | Integer | `3600` | Seconds between retention sweeps. Lower it if the sweep visibly stalls endpoints; raise it on very large indexes |
-| `grpc_concurrency_limit` | Integer | `64` | Maximum concurrent OTLP exports per gRPC connection. Without it a single client can monopolise the ingest mutex that HTTP exporters also queue on |
-| `index_persist_interval_secs` | Integer | `2` | How often the block-index sidecar is written. Mutations mark the index dirty and are batched into one write per interval, so this bounds how long a block can sit in memory before the sidecar catches up. Lower it if you restart often; raise it to cut filesystem writes on write-heavy ingest |
-| `tls` | Table | unset | PEM certificate/key pair; enables HTTPS and TLS on the OTLP gRPC listener |
+| `dataset` | String | `"default"` | Logical dataset served by this process. Non-default values prefix the metrics and logs data directories. Allowed characters: letters, digits, `-`, `_`, `.`. |
+| `bind_address` | String | `"0.0.0.0:8080"` | HTTP listen address. Must not be empty. |
+| `grpc_bind_address` | String | `"0.0.0.0:4317"` | OTLP gRPC listen address; empty disables it. |
+| `max_connections` | Integer | `1024` | Maximum simultaneous TCP connections. |
+| `shutdown_timeout_secs` | Integer | `30` | Grace period for in-flight requests. |
+| `flush_interval_secs` | Integer | `5` | How often the flush tick asks each rotator whether its block duration elapsed. It bounds flush lateness, not write frequency. |
+| `alert_interval_secs` | Integer | `15` | Alert evaluation interval. |
+| `retention_interval_secs` | Integer | `3600` | Retention sweep interval. |
+| `grpc_concurrency_limit` | Integer | `64` | Concurrent OTLP exports per gRPC connection. |
+| `index_persist_interval_secs` | Integer | `2` | Debounce for block-index sidecar writes. A durable flush forces an immediate write. |
+| `tls` | Table | unset | Optional [`server.tls`](#servertls). |
 
 ### `[server.tls]`
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `cert_path` | String | required | PEM certificate chain |
-| `key_path` | String | required | PEM private key (PKCS#8, PKCS#1, or SEC1) |
+| `cert_path` | String | required | PEM certificate chain. |
+| `key_path` | String | required | PEM private key (PKCS#8, PKCS#1 or SEC1). |
 
-When set, the HTTP listener serves TLS only — there is no plaintext port — and
-the OTLP gRPC listener uses the same identity. There is no hot reload; restart
-to pick up a renewed certificate.
+When set, HTTP serves TLS only — there is no plaintext listener — and the OTLP
+gRPC listener uses the same identity. There is no hot reload.
 
 ```toml
 [server.tls]
@@ -213,321 +275,264 @@ cert_path = "/etc/parqtel/tls.crt"
 key_path = "/etc/parqtel/tls.key"
 ```
 
-### `[storage]`
+## `[storage]` and `[logs]`
 
-| Key | Type | Default | Description |
-|-----|------|---------|-------------|
-| `backend` | String | `"parquet"` | Storage backend (currently only `"parquet"`) |
-| `data_dir` | Path | `"data"` | Directory for metric block files |
-| `block_duration_secs` | Integer | `7200` | Time span of a single block (seconds) |
-| `max_rows_per_block` | Integer | `1000000` | Maximum rows before forced rotation |
-| `compression` | String | `"zstd"` | Parquet compression: `zstd`, `snappy`, `lz4`, `none` |
-| `compression_level` | Integer | unset | Compression level for `zstd` (`1`–`22`). Unset uses the codec default. Lower levels encode faster and compress less; use a low level for frequently rewritten blocks |
-| `retention_days` | Integer | `7` | Days to retain metric data |
-| `compaction_interval_secs` | Integer | `300` | Interval between compaction passes. Each pass merges small log blocks, rolls metric blocks up into 5-minute L1 windows, and runs the tiered log merge. Lower it to roll up sooner; raise it on a store where each pass is expensive. The interval is floored at 60 s; the logs compactor has its own interval, default 1 hour |
-| `row_group_size` | Integer | `100000` | Rows per Parquet row group. Must be ≤ `max_rows_per_block` — this is what row-group pruning depends on, so a too-large value silently costs query time |
-| `compaction_max_merge_blocks` | Integer | `12` | Max source blocks merged into one compacted block. Too few and the small-block population grows faster than compaction removes it |
-| `compaction_max_merges_per_pass` | Integer | `8` | Max merges one compaction cycle performs. Bounds the disk I/O a single cycle can take |
+Both blocks carry the same keys; only the defaults differ. Validation is
+shared, so a rule cannot drift between metrics and logs.
 
-**What a compaction pass does.** Every `compaction_interval_secs` the background
-loop runs three bounded passes: small log blocks are merged, metric blocks are
-rolled up into 5-minute **L1** windows by a streaming merge, and old log blocks
-are merged within a 6-hour tier. Metric block files are named by level, so the
-layout is readable from the filesystem alone:
+| Key | Metrics default | Logs default | Description |
+|-----|-----------------|--------------|-------------|
+| `backend` | `"parquet"` | — | Storage backend. Only `parquet` is implemented. |
+| `data_dir` | `"data"` | `"data/logs"` | Block directory. Must not be empty. |
+| `block_duration_secs` | `7200` | `1800` | Nominal block span. The flush tick checks this every 5 s. |
+| `max_rows_per_block` | `1000000` | `200000` | Row cap that forces rotation. |
+| `compression` | `"zstd"` | `"zstd"` | `zstd`, `snappy`, `lz4` or `none`. |
+| `compression_level` | unset | unset | Zstd level `1`–`22`; unset uses the codec default. Out-of-range values are rejected; snappy/lz4/none ignore the level. |
+| `retention_days` | `7` | `3` | Time-based retention. |
+| `compaction_interval_secs` | `300` | `3600` | Compaction pass interval. Metric passes are floored at 60 s. |
+| `row_group_size` | `100000` | `20000` | Rows per Parquet row group. Must be `> 0` and `<= max_rows_per_block`. |
+| `compaction_max_merge_blocks` | `12` | `12` | Maximum source blocks merged into one output. |
+| `compaction_max_merges_per_pass` | `8` | `8` | Maximum merges one cycle performs. |
+
+**Trace blocks** use the metrics `BlockConfig` and live under
+`<storage.data_dir>/traces`, with their own `index.json`. Do not set
+`logs.data_dir` equal to `storage.data_dir`; that would mix signal directories.
+
+**Compaction pass.** Every `compaction_interval_secs` the loop merges small log
+blocks, rolls metric L0 blocks into five-minute L1 windows, and runs the tiered
+log merge. Metric files are readable by level:
 
 | Prefix | Meaning |
-|--------|---------|
-| `m_l0_` | One ingest flush, series-sorted by the final query-visible labels |
+|---|---|
+| `m_l0_` | One ingest flush, series-sorted by query-visible labels |
 | `m_n_` | A legacy block normalised into the same order |
-| `m_l1_` | A coalesced 5-minute window |
+| `m_l1_` | A coalesced five-minute window |
 
-The L1 pass is bounded (8 sources, 2 groups, 16 M rows per pass) and reserves
-2 of the 4 process-wide scan slots, so it never monopolises the disk. Run
-`parqtel compact` to trigger the same pass offline.
+The L1 pass is bounded and reserves scan capacity. `parqtel compact` runs the
+same pass offline.
 
-### `[logs]`
-
-| Key | Type | Default | Description |
-|-----|------|---------|-------------|
-| `data_dir` | Path | `"data/logs"` | Directory for log block files |
-| `block_duration_secs` | Integer | `1800` | Time span of a single log block |
-| `max_rows_per_block` | Integer | `200000` | Maximum rows before forced rotation |
-| `compression` | String | `"zstd"` | Parquet compression codec |
-| `compression_level` | Integer | unset | Compression level for `zstd` (`1`–`22`). Unset uses the codec default |
-| `retention_days` | Integer | `3` | Days to retain log data |
-| `compaction_interval_secs` | Integer | `3600` | Interval between compaction passes |
-| `row_group_size` | Integer | `20000` | Rows per Parquet row group. Must be ≤ `max_rows_per_block` |
-| `compaction_max_merge_blocks` | Integer | `12` | Max source blocks merged into one compacted block |
-| `compaction_max_merges_per_pass` | Integer | `8` | Max merges one compaction cycle performs |
-
-### Kafka log consumer
-
-`[ingest.kafka]` feeds JSON records through the same decoder and WAL path as
-`POST /api/v1/ingest`. Offsets commit only after `ingest_logs` returns; a
-failed batch stays uncommitted and is redelivered.
-
-```toml
-[ingest.kafka]
-enabled = true
-brokers = "kafka-1:9092,kafka-2:9092"
-topic = "parqtel-logs"
-group_id = "parqtel"
-service = "kafka-apps"
-format = "json"          # only json is implemented
-```
-
-### `[ingest]`
+## `[ingest]`
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `max_body_size` | Integer | `10485760` | Maximum request body size in bytes (10 MB) |
-| `wal_enabled` | Boolean | `true` | Write-ahead log for metrics. Bounds crash loss to the sync interval instead of the whole block window. A WAL that cannot be opened **fails startup** rather than silently accepting unrecoverable data. **Also gates the background flush worker**: the worker acknowledges a request once the WAL has its rows rather than once the block is on disk, which is only sound with a WAL. Setting this `false` disables the worker too and flushing falls back to synchronous — still acknowledged only once the block is durable |
-| `max_inflight_flushes` | Integer | `4` | Max block encodes in flight for the background flush worker, which also bounds its queue. When the queue is full a flush encodes inline, so backpressure degrades to synchronous rather than growing a backlog. The worker only starts when `wal_enabled` is `true` — with the WAL off, flushing falls back to synchronous. This is a runtime consequence, not a startup validation error |
-| `wal_sync_mode` | String | `interval` | `none` (write only — survives a *process* crash, not a machine loss), `interval` (periodic `fsync`, the default), `always` (fsync per batch) |
-| `wal_sync_interval_ms` | Integer | `1000` | How often the WAL is `fsync`ed in `interval` mode |
-| `wal_max_segment_bytes` | Integer | `67108864` | Size at which the WAL rolls to a new segment. Segments are deleted once the commit point passes them, so the on-disk WAL stays bounded |
-| `label_interner_capacity` | Integer | `1048576` | Distinct label sets the process-wide interner holds before it starts emptying shards. Interning lets every point of a series share one copy of its labels; past this capacity sharing is lost and memory grows with points instead of series. Set it to at least **twice the active series count**, because each series is interned twice (as received, and with `service.name` for the memory buffer). The table only holds sets that were actually seen, so a high value costs nothing on a small deployment |
-| `rotator_shards` | Integer | `4` | Writer shards for the metrics ingest rotator. Every ingest request serialises on one lock per signal and a block flush runs while that lock is held, so one flush stalls every metric request for its encode duration. Sharding lets unrelated metrics be ingested concurrently during a flush. **The shards are not independent blocks** — a flush merges them into one file, so block count and query fan-out are unchanged, and durability is unchanged. Clamped to 1–256. Raise only where `parqtel_ingest_lock_wait_seconds` shows real contention; it costs one writer buffer per shard |
-| `log_wal_enabled` | Boolean | `true` | Enable write-ahead log for logs |
-| `buffer_max_points` | Integer | `5000000` | Max buffered rows across metrics, logs, and traces (`0` disables). The writer and WAL hold the same rows, so eviction shortens the pre-flush query window, not durability |
-| `buffer_max_bytes` | Integer | `2147483648` | Approximate max buffered bytes (`0` disables). Counts record structure plus body and label bytes, not allocator overhead |
-| `buffer_overflow_policy` | String | `drop_oldest` | `drop_oldest` evicts the oldest buffered rows; `reject_new` refuses the incoming batch. Both increment `parqtel_buffer_dropped_total{signal,reason}` |
-| `max_concurrent_requests` | Integer | `64` | Simultaneous OTLP/HTTP ingest requests. When full, ingest returns `429` with `Retry-After` instead of queueing unbounded work. gRPC has its own `server.grpc_concurrency_limit` |
-| `load_shed_retry_after_secs` | Integer | `1` | `Retry-After` value on an ingest `429` |
-| `json_timestamp_field` | String | `"timestamp"` | Generic JSON ingest timestamp field (RFC3339, or integer seconds/ms/µs/ns) |
-| `json_body_field` | String | `"message"` | Generic JSON ingest body field; absent falls back to the whole object |
-| `json_severity_field` | String | `"level"` | Generic JSON ingest severity field; maps trace/debug/info/warn/error/fatal |
-| `series_limit_per_metric` | Integer | `1000000` | Max distinct series admitted per metric; existing series keep ingesting, new ones are dropped and counted. `0` disables |
+| `max_body_size` | Integer | `10485760` | Maximum **decompressed** body size. gzip is expanded before this check. |
+| `wal_enabled` | Boolean | `true` | Metrics WAL. Also gates the background flush worker; without it flushing falls back to synchronous. A WAL that cannot open fails startup. |
+| `log_wal_enabled` | Boolean | `true` | Log WAL. |
+| `wal_sync_mode` | String | `"interval"` | `none` (process-crash safe only), `interval`, or `always`. |
+| `wal_sync_interval_ms` | Integer | `1000` | fsync period in `interval` mode. |
+| `wal_max_segment_bytes` | Integer | `67108864` | WAL segment roll size. |
+| `max_inflight_flushes` | Integer | `4` | Concurrent block encodes and queue depth. Full queue encodes inline. |
+| `rotator_shards` | Integer | `4` | Metrics writer shards. Clamped to 1–256; shards are merged into one block. |
+| `label_interner_capacity` | Integer | `1048576` | Distinct label sets interned. Set to at least twice the active series count. |
+| `buffer_max_points` | Integer | `5000000` | Maximum buffered rows across signals; `0` disables. |
+| `buffer_max_bytes` | Integer | `2147483648` | Approximate buffered bytes; `0` disables. |
+| `buffer_overflow_policy` | String | `"drop_oldest"` | `drop_oldest` or `reject_new`. Both count drops. |
+| `max_concurrent_requests` | Integer | `64` | Concurrent HTTP ingest requests. Saturation returns `429` + `Retry-After`. |
+| `load_shed_retry_after_secs` | Integer | `1` | `Retry-After` value; clamped to at least 1 s. |
+| `json_timestamp_field` | String | `"timestamp"` | Generic JSON timestamp field. RFC3339 or integer s/ms/µs/ns. |
+| `json_body_field` | String | `"message"` | Generic JSON body field; absent uses the whole object. |
+| `json_severity_field` | String | `"level"` | Generic JSON severity field. |
+| `series_limit_per_metric` | Integer | `1000000` | New-series cap per metric; existing series continue. `0` disables. |
 
-Buffer occupancy and drops are exported at `/metrics` as
-`parqtel_buffer_points{signal}`, `parqtel_buffer_bytes`,
-`parqtel_buffer_limit_points`, `parqtel_buffer_limit_bytes`, and
-`parqtel_buffer_dropped_total{signal,reason}`. Rejected ingest requests are
-counted by `parqtel_ingest_rejected_total`.
+Buffer and rejection counters:
 
-The query timeout (`query.timeout_secs`) applies only to scan endpoints
-(`/api/v1/query*`, labels, log/trace search, correlate, pipeline search, and
-Grafana `/query`/`/search`). Ingest is never wrapped in the query timeout.
+- `parqtel_buffer_points{signal}`
+- `parqtel_buffer_bytes`
+- `parqtel_buffer_limit_points`
+- `parqtel_buffer_limit_bytes`
+- `parqtel_buffer_dropped_total{signal,reason}`
+- `parqtel_ingest_rejected_total`
+- `parqtel_series_rejected_total{metric}`
 
 ### `[ingest.tail_sampling]`
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `keep_errors` | Boolean | `true` | Keep traces containing ERROR-status spans |
-| `slow_trace_ms` | Integer (optional) | `null` | Keep traces whose server spans exceed this duration (ms) |
-| `sampling_ratio` | Float | `1.0` | Fraction of remaining traces to keep (0.0–1.0) |
+| `keep_errors` | Boolean | `true` | Keep traces containing ERROR-status spans. |
+| `slow_trace_ms` | Integer | unset | Keep traces whose server spans exceed this duration. |
+| `sampling_ratio` | Float | `1.0` | Fraction of remaining traces kept; deterministic trace-id hash. |
+| `per_service` | Table | `{}` | Per-service policy that replaces the global policy entirely. |
 
-### `[ingest.tail_sampling.per_service]`
-
-Per-service overrides; each entry fully replaces the global policy for that service.
-
-### `[query]`
+### `[ingest.kafka]`
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `max_series` | Integer | `1000` | Maximum time series returned per query |
-| `max_samples_per_series` | Integer | `10000` | Maximum samples per series |
-| `timeout_secs` | Integer | `30` | Query execution timeout |
-| `lookback_delta_ns` | Integer | `300000000000` | Instant-query lookback window in nanoseconds (5 minutes default) |
+| `enabled` | Boolean | `false` | Start the consumer. |
+| `brokers` | String | `""` | Comma-separated broker list; required when enabled. |
+| `topic` | String | `""` | Topic name; required when enabled. |
+| `group_id` | String | `"parqtel"` | Consumer group. |
+| `service` | String | `"kafka"` | Service name attached to decoded logs. |
+| `format` | String | `"json"` | Only `json` is implemented. |
 
-### `[ui]`
+Offsets commit only after the batch is written through the normal durable
+ingest path; a failed batch remains uncommitted and is redelivered.
+
+## `[query]` and `[ui]`
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `enabled` | Boolean | `true` | Enable the built-in web UI at `/ui` |
+| `query.max_series` | Integer | `1000` | Maximum series returned. |
+| `query.max_samples_per_series` | Integer | `10000` | Maximum samples per series. |
+| `query.timeout_secs` | Integer | `30` | Scan-endpoint timeout. Ingest is excluded. |
+| `query.lookback_delta_ns` | Integer | `300000000000` | Instant-query lookback (5 minutes). |
+| `ui.enabled` | Boolean | `true` | Serve the embedded console at `/ui`. |
 
-### `[telemetry]`
+`GET /api/v1/query` accepts `lookback_delta` as a duration or float seconds
+(positive, maximum 30 days), overriding the configured default for that request.
+
+## `[object_store]`
+
+Object storage is optional. When enabled, blocks are uploaded to an
+S3-compatible bucket after the local file is durable and renamed to its final
+Parquet name. Local disk remains the WAL staging area and read cache.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `log_level` | String | `"info"` | Log level filter (trace, debug, info, warn, error) |
-| `log_format` | String | `"text"` | Log output format: `text` or `json` |
-| `otlp_enabled` | Boolean | `false` | Export Parqtel's own traces + SLI metrics over OTLP/gRPC |
-| `otlp_endpoint` | String | `"http://127.0.0.1:4317"` | OTLP/gRPC collector endpoint (`http://` = plaintext, `https://` = TLS) |
-| `otlp_trace_level` | String | `"info"` | Minimum span level exported over OTLP — independent of `log_level`, so trace export survives a raised console level |
-| `export_interval_secs` | Integer | `30` | SLI metric push interval (seconds). Values outside 5–300 are clamped |
-| `profiling_enabled` | Boolean | `false` | Enable the `/debug/pprof/profile` and `/debug/pprof/summary` endpoints (they 404 while disabled). `/debug/pprof/memory` is always available |
-| `profiling_frequency` | Integer | `99` | CPU sampling frequency in Hz. Values outside 10–999 are clamped |
+| `enabled` | Boolean | `false` | Upload blocks and use the shared catalog. |
+| `bucket` | String | `""` | Bucket name; required when enabled. |
+| `region` | String | `"us-east-1"` | AWS region; required when enabled. |
+| `endpoint` | String | unset | Custom S3 endpoint (MinIO, Ceph, R2). `http://` permits plaintext for local endpoints. |
+| `access_key` | String | unset | Static access key. Unset uses the AWS credential chain. |
+| `secret_key` | String | unset | Static secret key. |
+| `prefix` | String | `"parqtel"` | Key prefix; must not be empty. |
+| `cache_dir` | Path | unset | Read-cache directory; defaults to `<storage.data_dir>/cache`. |
+| `cache_bytes` | Integer | `1073741824` | LRU cache quota; must be greater than 0. |
+| `catalog_interval_secs` | Integer | `5` | Catalog publish/poll interval; must be greater than 0. |
 
-> **Operational note**: when `otlp_enabled = true` but the OTLP SDK fails to initialise (e.g. an unreachable collector), the server prints the reason to **stderr** and continues with console logs only — ingestion is never blocked by self-telemetry. The message is not part of the structured log stream and is not filtered by `log_level`.
-
-### Dataset isolation
-
-`server.dataset` names the dataset this process serves. A non-default value
-prefixes both storage trees (`<storage.data_dir>/<dataset>` and
-`<logs.data_dir>/<dataset>`) and is enforced by token scopes:
+Validation: enabled requires non-empty bucket, region and prefix, a non-zero
+cache quota, and a non-zero catalog interval. See the
+[object-storage guide](object-storage.md) for bucket policy, multi-node
+topology and failure behaviour.
 
 ```toml
-[server]
-dataset = "api-prod"
-
-[[auth.tokens]]
-name = "api-prod-reader"
-token = "${TENANT_TOKEN}"
-actions = ["read"]
-datasets = ["api-*"]        # exact names or `*` globs
-```
-
-A token with a non-empty `datasets` list may only access matching dataset
-names; requests carrying a conflicting `X-Parqtel-Dataset` header get 403.
-Run one dataset per process: each process owns its WAL, buffers, block indexes,
-retention, and series quota. Two processes on distinct data roots are fully
-isolated; multi-dataset serving from one process is not supported.
-
-### `[auth]`
-
-Optional scoped bearer-token authentication. Disabled by default; the
-single-user/edge deployment is unchanged. When enabled, `/health`, `/ready`,
-`/ui`, `/oas`, `/`, and CORS preflight stay public; every data route needs a
-token. Scope mapping: `read` covers GET queries/metadata, `write` adds ingest,
-and `admin` adds rule/route/pipeline/silence mutations. Token names are used as
-the actor in audit records.
-
-| Key | Type | Default | Description |
-|-----|------|---------|-------------|
-| `enabled` | Boolean | `false` | Require a token on non-public routes |
-| `header` | String | `"authorization"` | Request header carrying the token; `Bearer <token>` and a raw value are both accepted |
-| `tokens` | Array | `[]` | Token entries: `name`, `token` (or `${ENV}`), optional `token_sha256`, `actions: [read|write|admin]` (empty = read) |
-
-```toml
-[auth]
+[object_store]
 enabled = true
-
-[[auth.tokens]]
-name = "grafana"
-token = "${PARQTEL_READ_TOKEN}"
-actions = ["read"]
-
-[[auth.tokens]]
-name = "otel-collector"
-token = "${PARQTEL_WRITE_TOKEN}"
-actions = ["write"]
-
-[[auth.tokens]]
-name = "operator"
-token_sha256 = "…64 lowercase hex characters…"
-actions = ["admin"]
+bucket = "parqtel-blocks"
+region = "eu-north-1"
+prefix = "prod"
+cache_dir = "/var/lib/parqtel/cache"
+cache_bytes = 4294967296
+catalog_interval_secs = 5
 ```
 
-OpenID Connect can replace static tokens (or sit beside them). The console
-redirects to `/auth/login`, the IdP returns to `/auth/callback`, and the
-resulting ID token is stored in an HttpOnly `parqtel_session` cookie. API
-clients can send the same ID token as `Authorization: Bearer <id_token>`.
+## `[auth]`
 
-```toml
-[auth.oidc]
-issuer = "https://idp.example.com"
-client_id = "parqtel"
-client_secret = "${OIDC_CLIENT_SECRET}"
-redirect_url = "https://parqtel.example.com/auth/callback"
-scopes = ["openid", "profile", "email"]
-roles_claim = "roles"              # claim holding role names
-admin_role = "parqtel-admin"       # maps to admin scope
-write_role = "parqtel-write"       # optional; maps to write scope
-```
-
-Discovery is read from `<issuer>/.well-known/openid-configuration`; JWKS is
-cached and refreshed once when a new key id appears. Tokens must carry `exp`,
-`iss`, and `aud` (the client id). A role change takes effect on the next
-request because scopes are derived from each token, not cached server-side.
-
-Generate a hash with `printf %s "$TOKEN" | sha256sum`. Plaintext `token` values
-are hashed at startup and never stored. Enabling auth does not add TLS; pair it
-with a TLS terminator or in-process TLS when the network is not trusted.
-
-### `[audit]`
-
-Append-only JSONL trail for configuration mutations (alert rules, routes,
-silences, recording rules, pipelines). Each line records the timestamp, token
-name (or `anonymous` when auth is off), action, target, and before/after
-values. Webhook URLs are redacted before they reach the file.
+Authentication is optional and off by default. When enabled, every data route
+needs a token or OIDC identity. Public routes: `/health`, `/ready`, `/ui`,
+`/oas`, `/`, `/auth/login`, `/auth/callback`, and CORS preflight.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `enabled` | Boolean | `true` | Write mutation records |
-| `path` | String | `"audit.jsonl"` | Relative to `storage.data_dir`, or an absolute path |
+| `enabled` | Boolean | `false` | Require authentication on non-public routes. |
+| `header` | String | `"authorization"` | Header carrying the token. `Bearer <token>` and a raw value are accepted. |
+| `tokens` | Array | `[]` | Static token entries. |
+| `oidc` | Table | unset | Optional OpenID Connect login and bearer validation. |
 
-### `[alerts]`
+### `[[auth.tokens]]`
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `rules_dir` | String | `"rules"` | Directory containing alert rule YAML files |
-| `noise_window_firings` | Integer | `30` | Number of firings in window to calculate noise score. Parsed, but not read by this build
-| `refinement_enabled` | Boolean | `true` | Enable automatic alert refinement. Parsed, but not read by this build
-| `noise_suppression_threshold` | Float | `0.7` | Threshold for noise suppression (0.0–1.0). Parsed, but not read by this build — use the per-rule `noise_suppression_threshold` instead, which the alert engine does honour. The range is not validated at startup
-| `allow_runtime_updates` | Boolean | `false` | Permit REST writes to alert routes, recording rules, and pipelines. Keep off unless an authenticating proxy fronts the API. 
-| `recording_rules_enabled` | Boolean | `true` | Evaluate `rules/recording/` groups on their intervals and write results through the metrics ingest path
+| `name` | String | required | Actor name used in logs and audit records. Must be unique. |
+| `token` | String | unset | Plaintext token; hashed at startup. Prefer `${ENV_VAR}`. |
+| `token_sha256` | String | unset | Lowercase hex SHA-256 instead of `token`. |
+| `actions` | Array | `["read"]` | `read`, `write`, `admin`. Empty means read. |
+| `datasets` | Array | `[]` | Allowed dataset names or `*` globs. Empty means all. |
+
+At least one of `token` or `token_sha256` is required for each token.
+`auth.enabled = true` requires at least one token or an OIDC block.
+
+### `[auth.oidc]`
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `issuer` | String | required | Issuer URL; discovery from `/.well-known/openid-configuration`. |
+| `client_id` | String | required | OIDC client id and expected token audience. |
+| `client_secret` | String | unset | Required for the authorization-code flow. |
+| `redirect_url` | String | required | Registered callback URL. |
+| `scopes` | Array | `["openid","profile","email"]` | Requested scopes. |
+| `roles_claim` | String | `"roles"` | Claim carrying role names. |
+| `admin_role` | String | `"parqtel-admin"` | Role mapped to `admin`. |
+| `write_role` | String | unset | Optional role mapped to `write`. |
+
+Every authenticated user gets `read`; the configured roles add `write` or
+`admin`. JWKS is cached and refreshed once when a new key id appears. Tokens
+must carry `exp`, `iss` and `aud`.
+
+Generate a hash with:
+
+```bash
+printf %s "$TOKEN" | sha256sum
+```
+
+Auth does not add TLS. Pair it with in-process TLS or a TLS terminator.
+
+## `[audit]`
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `enabled` | Boolean | `true` | Append one JSON line per configuration mutation. |
+| `path` | String | `"audit.jsonl"` | Relative to `storage.data_dir`, or absolute. |
+
+Recorded mutations: alert rules, routes, silences, recording rules and
+pipelines. Each record carries timestamp, actor, action, target and
+before/after values. Webhook URLs and secrets are redacted.
+
+## `[alerts]`
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `rules_dir` | String | `"rules"` | Alert rule YAML directory. |
+| `noise_window_firings` | Integer | `30` | Parsed; not read by this build. |
+| `refinement_enabled` | Boolean | `true` | Parsed; not read by this build. |
+| `noise_suppression_threshold` | Float | `0.7` | Parsed; not read by this build. |
+| `allow_runtime_updates` | Boolean | `false` | Permit REST mutations of routes, rules and pipelines. |
+| `recording_rules_enabled` | Boolean | `true` | Evaluate `rules/recording/` groups and write results through ingest. |
+
+`noise_score` is **implemented**: it is derived from an alert instance's
+transition history (unacknowledged firing→resolved events raise it). The
+global suppression knobs above are not wired into delivery; use routing
+matchers, silences or per-rule tuning instead.
 
 ### `[alerts.presets]`
 
-Built-in alert packs embedded in the binary (`rules/presets/*.yaml`). Packs activate automatically when
-their canary metrics appear in the metric index/buffer, or explicitly via the
-selection lists below. Once activated, a pack never deactivates, and rules in
-`rules_dir` (or created via the API) with the same id always override the
-built-in.
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `mode` | String | `"auto"` | `auto` (activate on canary metric), `all`, or `off`. |
+| `include` | Array or comma string | `[]` | Include-only pack keys; wins over `exclude`. |
+| `exclude` | Array or comma string | `[]` | Pack keys to skip when `include` is empty. |
+
+Built-in pack keys: `kubernetes`, `coredns`, `external-secrets`,
+`service-red`, `parqtel`. Packs are embedded in the binary; a rule with the
+same id in `rules_dir` or via the API always wins.
+
+### `[alerts.notifications]` — legacy routes
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `mode` | String | `"auto"` | Activation mode: `auto` (activate on canary metric detection), `all` (activate all selected packs at startup), `off` (never load built-ins) |
-| `include` | String list or comma-separated string | `[]` | Include-only list of pack keys; wins over `exclude` when both are set (warning logged). Unknown keys are logged and ignored |
-| `exclude` | String list or comma-separated string | `[]` | Pack keys to skip; applied only when `include` is empty |
+| `send_timeout_secs` | Integer | `0` in a running default config | Effective webhook timeout, clamped to at least 1 s. Set it explicitly. |
+| `dedup_flush_interval_secs` | Integer | `0` | Parsed; not read by this build. |
+| `max_concurrent_sends` | Integer | `0` | Parsed; not read by this build. |
+| `self_monitoring_failure_threshold` | Float | `0.0` | Parsed; not read by this build. |
+| `routes` | Array | `[]` | Legacy severity/label webhook table. |
+| `egress` | Table | fail-closed | Outbound destination policy. |
 
-Pack keys: `kubernetes`, `coredns`, `external-secrets`, `service-red`,
-`parqtel` (more packs land with the remaining plan phases).
+`[[alerts.notifications.routes]]` fields: `name`, `match_severity` (minimum
+severity, default `info`), `match_labels`, `webhook_url`, `repeat_minutes`
+(parsed; repeats are tracked by the router). The first matching route wins.
+This table is used only when `[alerting.routing]` is absent.
 
-The packs live in `rules/presets/` (embedded in the binary) but are inert until
-copied into the `alerts.rules_dir` tree; the directory itself is not scanned
-automatically.
+### Egress policy
 
-Env override examples:
-
-```bash
-PARQTEL__ALERTS__PRESETS__MODE=auto
-PARQTEL__ALERTS__PRESETS__INCLUDE=kubernetes,parqtel   # include-only
-PARQTEL__ALERTS__PRESETS__EXCLUDE=service-red          # exclude
-```
-
-### `[alerts.postmortem]`
-
-> **Not implemented in this build.** The section is parsed and validated, but no
-> postmortem engine is wired up, so every key below is currently inert.
+Both the legacy router and the Alertmanager dispatcher check every outbound
+destination immediately before the POST.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `enabled` | Boolean | `true` | Enable the postmortem engine |
-| `auto_draft` | Boolean | `true` | Auto-generate drafts when alerts resolve |
-| `postmortem_delay_minutes` | Integer | `5` | Minutes to wait after resolution before generating draft |
-| `template_path` | String (optional) | unset | Path to custom template directory. Unset by default — `""` is a *set* value, not the default |
-| `auto_publish_notion` | Boolean | `false` | Auto-publish to Notion |
-| `auto_publish_gdocs` | Boolean | `false` | Auto-publish to Google Docs |
-| `auto_publish_slack` | Boolean | `true` | Auto-publish to Slack |
-| `auto_create_jira_actions` | Boolean | `false` | Auto-create Jira action items |
-| `min_duration_minutes` | Integer | `5` | Minimum incident duration to trigger postmortem |
-| `min_severity` | String | `"warning"` | Minimum severity level to trigger postmortem |
-| `max_knowledge_entries` | Integer | `1000` | Maximum entries in knowledge base |
+| `allow_private` | Boolean | `false` | Permit loopback, private, link-local, CGNAT and ULA destinations. |
+| `allow_hosts` | Array | `[]` | Exact hosts or `*.suffix` patterns that bypass the address check. |
 
-### `[alerts.notifications]`
-
-| Key | Type | Default | Description |
-|-----|------|---------|-------------|
-| `dedup_flush_interval_secs` | Integer | `0` | Deduplication flush interval. Parsed, but not read by this build |
-| `max_concurrent_sends` | Integer | `0` | Max concurrent webhook sends. Parsed, but not read by this build |
-| `send_timeout_secs` | Integer | `0` | Webhook send timeout. **The only key this build reads** — the router clamps it to at least 1 s, so the effective timeout is 1 s until you set it explicitly |
-| `self_monitoring_failure_threshold` | Float | `0.0` | Self-monitoring failure threshold. Parsed, but not read by this build |
-| `routes` | Array | `[]` | Alert routing rules (see RouteConfig) |
-| `egress` | Table | fail-closed | Outbound destination policy (see below) |
-
-### `[alerts.notifications.egress]`
-
-Every webhook destination — legacy routes and the Alertmanager receivers — is
-checked immediately before delivery. The default rejects loopback, private,
-link-local, CGNAT, ULA, multicast, and reserved addresses, and disables HTTP
-redirects. A receiver that needs a private address must opt in explicitly.
-
-| Key | Type | Default | Description |
-|-----|------|---------|-------------|
-| `allow_private` | Boolean | `false` | Permit loopback/private/link-local/CGNAT/ULA destinations |
-| `allow_hosts` | Array | `[]` | Exact hosts or `*.suffix` patterns that bypass the address check |
+Redirects are disabled. A receiver on an internal network must opt in
+explicitly:
 
 ```toml
 [alerts.notifications.egress]
@@ -535,140 +540,134 @@ allow_private = false
 allow_hosts = ["*.internal.example"]
 ```
 
-> **Note on the defaults.** The serde defaults for these keys are
-> `300 / 10 / 30 / 0.5`, but the section is seeded from the struct's
-> `Default` (all zeros) before the TOML file is merged over it, so an omitted
-> key keeps its **zero** value rather than the serde default. The table above
-> lists the values a running server actually uses. Set `send_timeout_secs`
-> explicitly — the default 0 is clamped up to a 1-second webhook timeout.
+`[alerting.routing.egress]` is a separate policy for the dispatcher; set both
+when both paths are configured.
 
-### `[alerts.notifications.routes]` (array of tables)
+### `[alerts.postmortem]` — not implemented
 
-| Key | Type | Default | Description |
-|-----|------|---------|-------------|
-| `name` | String | required | Route name |
-| `match_severity` | String | `"info"` | Minimum severity: `critical`, `warning`, `info`. A route matches when the alert's severity is at or above this level; routes are evaluated in order and the first match wins. Any other string ranks as `info` |
-| `match_labels` | Map | `{}` | Exact label matches required |
-| `webhook_url` | String | required | Webhook URL for delivery |
-| `repeat_minutes` | Integer | `240` | Re-notification interval (0 = no repeat). Parsed, but not read by this build — repeats are tracked by the router itself |
+The section is parsed and validated but no postmortem engine is wired up. All
+keys are inert: `enabled`, `auto_draft`, `postmortem_delay_minutes`,
+`template_path`, `auto_publish_notion`, `auto_publish_gdocs`,
+`auto_publish_slack`, `auto_create_jira_actions`, `min_duration_minutes`,
+`min_severity`, `max_knowledge_entries`.
 
-### `[alerting.routing]`
+## `[alerting.routing]`
 
-Alertmanager-compatible routing. When set, firing **and** resolved alerts flow
-through grouping, inhibition, silences, and the native receivers below. The
-legacy `[alerts.notifications.routes]` webhook table is used only when this
-section is absent; configuring both logs a warning and disables the legacy
-routes, so an event is never delivered twice. Invalid matchers, bad durations,
-or a `receiver` that names no configured receiver fail validation at startup.
+Alertmanager-compatible routing, grouping, inhibition, silences and native
+receivers. When present, firing and resolved alerts flow through it; the legacy
+`[alerts.notifications.routes]` table is disabled. Configuring both logs a
+warning. Validation rejects bad matchers, bad durations, or a route naming an
+unknown receiver.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `max_active_groups` | Integer | `10000` | Bound on in-memory alert groups; oldest resolved/idle groups are evicted first |
-| `global` | Table | — | `resolve_timeout` `5m`, `http_timeout` `10s`, `retry_initial_backoff` `1s`, `retry_max_backoff` `30s`, `retry_max_attempts` `3` |
-| `route` | Table | none | Root route (see below) |
-| `inhibit_rules` | Array | `[]` | `source_matchers`, `target_matchers`, `equal` |
-| `receivers` | Array | `[]` | Named receivers with `slack_configs`, `pagerduty_configs`, `teams_configs`, `webhook_configs` |
-| `egress` | Table | fail-closed | Same `allow_private` / `allow_hosts` policy as `[alerts.notifications.egress]` |
+| `global` | Table | defaults below | Resolve timeout, HTTP timeout and retry policy. |
+| `max_active_groups` | Integer | `10000` | Bound on in-memory alert groups. |
+| `route` | Table | unset | Hierarchical route tree. |
+| `inhibit_rules` | Array | `[]` | Source/target matcher rules. |
+| `receivers` | Array | `[]` | Named Slack, PagerDuty, Teams and webhook receivers. |
+| `egress` | Table | fail-closed | Outbound policy for receivers. |
 
-`[alerting.routing.egress]` applies to every receiver built by this dispatcher.
-The legacy route table and the dispatcher each carry their own policy; set both
-when both are configured.
+### `[alerting.routing.global]`
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `resolve_timeout` | `"5m"` | Resolve timeout. |
+| `http_timeout` | `"10s"` | Per-request HTTP timeout. |
+| `retry_initial_backoff` | `"1s"` | First retry delay. |
+| `retry_max_backoff` | `"30s"` | Maximum retry delay. |
+| `retry_max_attempts` | `3` | Attempt count. |
 
 Durations accept `ms`, `s`, `m`, `h`, `d`, `w` and compound forms (`1h30m`).
-Matchers use `=`, `!=`, `=~` (anchored regex), `!~`; a missing label compares as
-`""`. Any value may be `${ENV_VAR}` or `{env:ENV_VAR}`.
 
-### `[alerting.routing.route]`
+### Route fields
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `matchers` | `[]` | `=` / `!=` / `=~` (anchored) / `!~`; empty matches everything. |
+| `continue` | `false` | Continue evaluating sibling routes after a match. |
+| `group_by` | inherits | Labels to group by; `["..."]` disables grouping. |
+| `group_wait` | `"30s"` | First-notification buffer for a new group. |
+| `group_interval` | `"5m"` | Minimum gap when new alerts join a group. |
+| `repeat_interval` | `"4h"` | Re-notify an unchanged firing group. |
+| `receiver` | inherits | Receiver for matched alerts. |
+| `routes` | `[]` | Child routes, evaluated depth-first. |
+
+### Inhibition
+
+`source_matchers`, `target_matchers`, `equal`. A target is suppressed when a
+source alert matches and every `equal` label has the same value.
+
+### Receivers
+
+`[[alerting.routing.receivers]]` has a `name` plus one or more channel arrays.
+
+- `slack_configs`: `webhook_url`, `channel`, `username`, `icon_emoji`,
+  `send_resolved`.
+- `pagerduty_configs`: `routing_key`, `url`, `severity`, `send_resolved`.
+- `teams_configs`: `webhook_url`, `title`, `send_resolved`.
+- `webhook_configs`: `url`, `headers`, `send_resolved`.
+
+Transient failures (`429` honoring `Retry-After`, `5xx`, timeouts) retry with
+exponential backoff and jitter; `400`/`401`/`403`/`404` fail immediately.
+
+`POST /api/v1/alerts/test_route` dry-runs a label set and reports matched
+routes, receivers, grouping keys and silence/inhibition state.
+`GET /api/v1/alerts/routes` returns the configured tree with secrets redacted.
+
+## `[k8s_provider]` — not implemented
+
+Parsed and validated, but no custom-metrics provider is started. Keys:
+`enabled` (false), `bind_address` (`0.0.0.0:6443`), `cache_expiry_secs` (30),
+`query_timeout_secs` (10), `max_concurrent` (10), `tls_secret_name`
+(`parqtel-provider-tls`).
+
+## `[telemetry]`
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `matchers` | Array | `[]` | Alertmanager matchers; empty matches everything |
-| `continue` | Boolean | `false` | Keep evaluating sibling routes after a match (fan-out) |
-| `group_by` | Array | inherits | Labels to group by; `["..."]` disables grouping |
-| `group_wait` | Duration | `30s` | First-notification buffer for a new group |
-| `group_interval` | Duration | `5m` | Minimum gap when new alerts join an active group |
-| `repeat_interval` | Duration | `4h` | Re-notify an unchanged firing group |
-| `receiver` | String | inherits | Receiver for matched alerts |
-| `routes` | Array | `[]` | Child routes, evaluated depth-first |
+| `log_level` | String | `"info"` | `trace`, `debug`, `info`, `warn`, `error`. |
+| `log_format` | String | `"text"` | `text` or `json`. |
+| `otlp_enabled` | Boolean | `false` | Export Parqtel's own traces and SLI metrics. |
+| `otlp_endpoint` | String | `"http://127.0.0.1:4317"` | OTLP/gRPC endpoint; `https://` uses TLS. |
+| `otlp_trace_level` | String | `"info"` | Span export level, independent of console log level. |
+| `export_interval_secs` | Integer | `30` | SLI push interval; clamped 5–300. |
+| `profiling_enabled` | Boolean | `false` | Enable `/debug/pprof/profile` and `/summary`; `/memory` is always available. |
+| `profiling_frequency` | Integer | `99` | CPU sampling Hz; clamped 10–999. |
 
-`slack_configs` take `webhook_url`, `channel`, `username`, `icon_emoji`,
-`send_resolved`; `pagerduty_configs` take `routing_key`, `url`, `severity`,
-`send_resolved`; `teams_configs` take `webhook_url`, `title`, `send_resolved`;
-`webhook_configs` take `url`, `headers`, `send_resolved`.
+If OTLP self-telemetry fails to initialise, the reason is printed to stderr and
+the server continues with console logging. Ingest is never blocked.
 
-### `[k8s_provider]`
+## Environment variables
 
-> **Not implemented in this build.** The section is parsed and validated, but
-> no custom-metrics provider is started, so `enabled = true` has no effect.
-
-| Key | Type | Default | Description |
-|-----|------|---------|-------------|
-| `enabled` | Boolean | `false` | Enable Kubernetes custom metrics API server |
-| `bind_address` | String | `"0.0.0.0:6443"` | Address for the K8s API service |
-| `cache_expiry_secs` | Integer | `30` | Cache TTL for metric values |
-| `query_timeout_secs` | Integer | `10` | Query timeout to parqtel storage |
-| `max_concurrent` | Integer | `10` | Max concurrent queries |
-| `tls_secret_name` | String | `"parqtel-provider-tls"` | TLS certificate secret name |
-
-## Environment Variables
-
-Environment variables use the `PARQTEL__` prefix with `__` as the section separator. The single-underscore form (`PARQTEL_SERVER__BIND_ADDRESS`) is accepted as an alias. Examples:
+Use `PARQTEL__` with `__` between sections and `_` inside a key. The single
+underscore alias after `PARQTEL` is accepted.
 
 ```bash
 # Server
 export PARQTEL__SERVER__BIND_ADDRESS="0.0.0.0:9090"
-export PARQTEL__SERVER__MAX_CONNECTIONS=2048
+export PARQTEL__SERVER__DATASET="api-prod"
 export PARQTEL__SERVER__GRPC_BIND_ADDRESS="0.0.0.0:4317"
-export PARQTEL__SERVER__FLUSH_INTERVAL_SECS=10
-export PARQTEL__SERVER__RETENTION_INTERVAL_SECS=1800
-export PARQTEL__SERVER__INDEX_PERSIST_INTERVAL_SECS=5
-
-# Object storage (optional)
-
-Blocks can be uploaded to an S3-compatible bucket while local disk remains the
-WAL staging area and read cache. Query nodes need the bucket and the shared
-catalog (P2-04) before they can serve each other's blocks.
-
-```toml
-[object_store]
-enabled = false
-bucket = "parqtel-blocks"
-region = "us-east-1"
-endpoint = "http://127.0.0.1:9000"   # MinIO; omit for AWS
-access_key = "${AWS_ACCESS_KEY_ID}"
-secret_key = "${AWS_SECRET_ACCESS_KEY}"
-prefix = "parqtel"
-cache_dir = "/var/lib/parqtel/cache" # defaults to <storage.data_dir>/cache
-cache_bytes = 1073741824             # 1 GiB LRU cache
-catalog_interval_secs = 5            # publish/poll the shared manifest
-```
-
-When enabled, every closed block is uploaded after the local file is durable.
-`open` materialises a cache file for Parquet seeking; the cache evicts the
-oldest files when `cache_bytes` is exceeded.
+export PARQTEL__SERVER__GRPC_CONCURRENCY_LIMIT=64
+export PARQTEL__SERVER__INDEX_PERSIST_INTERVAL_SECS=2
 
 # Storage
 export PARQTEL__STORAGE__DATA_DIR="/var/lib/parqtel/data"
 export PARQTEL__STORAGE__COMPRESSION="zstd"
 export PARQTEL__STORAGE__COMPRESSION_LEVEL=1
 export PARQTEL__STORAGE__RETENTION_DAYS=14
-export PARQTEL__STORAGE__BLOCK_DURATION_SECS=3600
-# Row-group pruning only works when the row group fits inside a block.
 export PARQTEL__STORAGE__ROW_GROUP_SIZE=50000
-export PARQTEL__STORAGE__COMPACTION_INTERVAL_SECS=300
-
-# Logs
 export PARQTEL__LOGS__DATA_DIR="/var/lib/parqtel/logs"
 export PARQTEL__LOGS__RETENTION_DAYS=7
-export PARQTEL__LOGS__BLOCK_DURATION_SECS=1800
 
 # Ingest
 export PARQTEL__INGEST__MAX_BODY_SIZE=20971520
 export PARQTEL__INGEST__ROTATOR_SHARDS=8
 export PARQTEL__INGEST__WAL_ENABLED=true
-export PARQTEL__INGEST__LOG_WAL_ENABLED=true
 export PARQTEL__INGEST__LABEL_INTERNER_CAPACITY=2097152
-export PARQTEL__INGEST__TAIL_SAMPLING__KEEP_ERRORS=true
+export PARQTEL__INGEST__BUFFER_MAX_POINTS=5000000
+export PARQTEL__INGEST__BUFFER_MAX_BYTES=2147483648
+export PARQTEL__INGEST__SERIES_LIMIT_PER_METRIC=1000000
 export PARQTEL__INGEST__TAIL_SAMPLING__SAMPLING_RATIO=0.5
 
 # Query
@@ -676,57 +675,71 @@ export PARQTEL__QUERY__TIMEOUT_SECS=60
 export PARQTEL__QUERY__MAX_SERIES=5000
 export PARQTEL__QUERY__LOOKBACK_DELTA_NS=300000000000
 
+# Object storage
+export PARQTEL__OBJECT_STORE__ENABLED=true
+export PARQTEL__OBJECT_STORE__BUCKET="parqtel-blocks"
+export PARQTEL__OBJECT_STORE__REGION="eu-north-1"
+export PARQTEL__OBJECT_STORE__PREFIX="prod"
+export PARQTEL__OBJECT_STORE__CACHE_BYTES=4294967296
+
+# Auth
+export PARQTEL__AUTH__ENABLED=true
+export PARQTEL_READ_TOKEN="..."
+export PARQTEL__AUTH__OIDC__ISSUER="https://idp.example.com"
+
 # Telemetry
 export PARQTEL__TELEMETRY__LOG_LEVEL="debug"
 export PARQTEL__TELEMETRY__LOG_FORMAT="json"
 
 # Alerts
 export PARQTEL__ALERTS__RULES_DIR="/etc/parqtel/rules"
-export PARQTEL__ALERTS__NOISE_SUPPRESSION_THRESHOLD=0.8
-export PARQTEL__ALERTS__POSTMORTEM__ENABLED=true
-export PARQTEL__ALERTS__NOTIFICATIONS__MAX_CONCURRENT_SENDS=20
-
-# K8s Provider
-export PARQTEL__K8S_PROVIDER__ENABLED=true
-export PARQTEL__K8S_PROVIDER__BIND_ADDRESS="0.0.0.0:6443"
+export PARQTEL__ALERTS__ALLOW_RUNTIME_UPDATES=false
+export PARQTEL__ALERTS__PRESETS__MODE=auto
+export PARQTEL__ALERTS__PRESETS__INCLUDE=kubernetes,parqtel
 ```
 
-## CLI Flags
+Array values in environment variables are comma-separated (`include`,
+`exclude`, `scopes`, `actions`). Nested tables use the same `__` path.
 
-```bash
+## CLI
+
+```text
 parqtel [OPTIONS] [COMMAND]
 
 Options:
-  -c, --config <PATH>      Path to TOML configuration file [env: PARQTEL_CONFIG]
+  -c, --config <PATH>      TOML configuration file [env: PARQTEL_CONFIG]
   -b, --bind <ADDRESS>     TCP bind address [env: PARQTEL_BIND]
   -d, --data-dir <PATH>    Data directory [env: PARQTEL_DATA_DIR]
-      --log-level <LEVEL>  Log level override [env: RUST_LOG]
-  -h, --help               Print help
-  -V, --version            Print version
+      --log-level <LEVEL>  Log level [env: RUST_LOG]
+  -h, --help
+  -V, --version
 
 Commands:
-  serve    Start the HTTP server (default)
-  compact  Run one compaction pass and exit
-  inspect  Print storage summary as JSON
-  export   Export metric data to CSV
+  serve     Start the HTTP server (default)
+  compact   Run one compaction pass and exit
+  inspect   Print storage summary as JSON
+  export    Export metric data to CSV
 ```
 
-## Alert Rule YAML Schema
+`--data-dir` overrides `storage.data_dir`; it does not automatically move the
+logs directory. Set `PARQTEL__LOGS__DATA_DIR` or `[logs].data_dir` separately.
 
-Alert rules are defined in YAML files under the `rules_dir` (one rule per
-`---` document; files are loaded non-recursively at startup):
+## Alert rule YAML
+
+Rules live in `alerts.rules_dir` (non-recursive) and are loaded at startup and
+on change. One rule per `---` document.
 
 ```yaml
-id: http-error-rate-high          # unique, stable — used as the alert instance prefix
+id: http-error-rate-high
 name: HTTP error rate high
-signal: metrics                   # metrics | logs | traces (default: metrics)
-query: "rate(http_errors_total[5m])"   # PromQL selector + optional aggregation
+signal: metrics                 # metrics | logs | traces
+query: "rate(http_errors_total[5m])"
 condition:
-  type: threshold                 # threshold; LearnedAnomaly rules use source.sensitivity
-  operator: ">"                  # > >= < <= == !=
-  value: 0.5                     # errors/sec — see tuning note below
-  for_duration_secs: 300         # must hold this long before Pending → Firing
-severity: critical               # critical | warning | info
+  type: threshold
+  operator: ">"
+  value: 0.5
+  for_duration_secs: 300
+severity: critical              # critical | warning | info
 labels:
   team: platform
 annotations:
@@ -734,42 +747,26 @@ annotations:
   description: "Tune to your traffic profile."
   runbook: "https://wiki.example.com/runbooks/http-errors"
 enabled: true
-noise_suppression_threshold: 0.7  # reserved; no noise detector in 0.3.x
 ```
 
-For a `learned_anomaly` source, the loop queries the configured
-`baseline_window_days`, computes median absolute deviation (MAD) per series, and
-fires when the latest sample is more than `sensitivity` MADs from the median.
-The static `condition` is ignored for that rule type. Threshold rules use the
-trailing 5-minute window and threshold the **last sample of every result
-series** — one alert instance per series, fingerprinted by `id` + the
-series' labels. Two consequences for the queries you can write:
+Threshold rules evaluate the last sample of every result series. Rule queries
+are a single selector with optional aggregation; cross-metric arithmetic and
+`histogram_quantile` are not available in the alert plan path.
 
-1. **No cross-metric arithmetic** — a rule query is a single selector with an
-   optional aggregation (`rate`, `increase`, `avg`/`sum`/`min`/`max`/`count`
-   with `by`/`without`, `topk`/`bottomk`, `irate`, `delta`, `round`,
-   `abs`/`ceil`/`floor`, `clamp_min`/`clamp_max`, `label_replace`). Ratios
-   such as `errors / requests` cannot be expressed — threshold absolute rates
-   or window counts instead.
-2. **`histogram_quantile` is unavailable in alert rules** — the alert loop
-   uses the query plan path, not the AST engine that powers interactive
-   queries. Use `_sum` rate proxies (e.g. seconds-of-flush per second) for
-   latency-style rules.
+Learned anomaly rules use a `source` block with `type: learned_anomaly`,
+`baseline_window_days` and `sensitivity`. The loop queries the baseline, computes
+median + MAD per series, and requires at least five samples. `noise_score` is
+reported on alert instances from transition history; it is not a suppression
+input.
 
-**Presets.** `rules/presets/` ships ready-made packs for Kubernetes cluster
-health, CoreDNS, external-secrets, service RED health, and Parqtel
-self-monitoring — see [its README](../../rules/presets/README.md). The presets
-directory is not scanned by default; copy the packs you want into `rules_dir`.
+Presets ship under `rules/presets/` (embedded). See
+[its README](../../rules/presets/README.md).
 
-## Recording Rule YAML Schema
+## Recording rule YAML
 
-Files under `rules/recording/` contain a `groups:` list. Each group is
-evaluated on its `interval`; every rule runs its PromQL expression over the
-configured instant lookback and writes the resulting series under `record`
-through the normal metrics ingest path (WAL, buffer, index). Set
-`alerts.recording_rules_enabled = false` to disable the scheduler. The
-interval is a **group-level** duration string, and each rule uses `record:`
-and `expr:`.
+Files under `rules/recording/` contain a `groups:` list. Each group runs on its
+`interval`; each rule writes its expression result under `record` through the
+normal metrics ingest path.
 
 ```yaml
 groups:
@@ -783,22 +780,14 @@ groups:
         description: "Pre-aggregated request rate per service"
 ```
 
-Invalid expressions are logged and skipped; a group's cadence is tracked in
-`data/ruler/state.json` so a restart does not immediately re-run every group.
+Invalid expressions are rejected at creation and logged/skipped on file load.
+Ruler state is persisted under `data/ruler/state.json`.
 
-## Pipeline YAML Schema
+## Pipeline YAML
 
-Pipelines live in a file with a `pipelines:` list. Stage settings are **flat**
-fields on the stage — there is no nested `config:` object. Each pipeline
-matches log records (`match.signal: logs`) and runs stages in order. The
-first matching pipeline wins; unmatched logs pass through unchanged.
-
-A worked example ships in
-[`rules/pipelines/nginx-access-logs.yaml`](../../rules/pipelines/nginx-access-logs.yaml).
-
-As with recording rules, pipelines are registered through the HTTP API in this
-build (`POST /api/v1/pipelines`); the shipped YAML file is the reference
-implementation.
+Pipelines are a `pipelines:` list. Stage settings are flat fields — there is no
+nested `config:` object. The first matching pipeline wins; unmatched logs pass
+through unchanged.
 
 ```yaml
 pipelines:
@@ -809,6 +798,7 @@ pipelines:
       conditions:
         - field: service_name
           op: "="
+          value: "nginx"
     stages:
       - type: processor
         name: parse_nginx_log
@@ -841,34 +831,36 @@ pipelines:
         action: drop
 ```
 
-Stage types: `preprocessor`, `processor` (`regex_extract`, `add_fields`,
-`cast`), `metric_extract` (`gauge`, `counter`, `histogram`), `masker`, and
-`router` (`drop` or `route` + `destination`). Condition operators: `=`, `!=`,
-`>`, `>=`, `<`, `<=`, `contains`, `=~`, `exists`, `in`, `between`. Regex
-patterns are validated at load time; a trailing newline from a YAML block
-scalar is stripped.
+Stage types: `preprocessor`, `processor` (`regex_extract`, `add_fields`, `cast`),
+`metric_extract` (`gauge`, `counter`, `histogram`), `masker`, and `router`
+(`drop` or `route` + `destination`). Condition operators: `=`, `!=`, `>`, `>=`,
+`<`, `<=`, `contains`, `=~`, `exists`, `in`, `between`.
 
-## Validation
+The shipped example is
+[`rules/pipelines/nginx-access-logs.yaml`](../../rules/pipelines/nginx-access-logs.yaml).
+Pipelines created through the API require `alerts.allow_runtime_updates = true`;
+they are validated and compiled before storage.
 
-Configuration is validated at startup. Invalid configurations produce clear error messages:
-
-```
-Error: server.bind_address cannot be empty; storage.compression must be one of: zstd, snappy, lz4, none
-```
-
-The full set of rules enforced at startup:
+## Validation rules
 
 | Section | Rule |
-|---------|------|
-| `server` | `bind_address` must not be empty |
-| `storage` | `data_dir` must not be empty |
-| `storage` | `compression` must be one of `zstd`, `snappy`, `lz4`, `none` |
-| `storage` | `compression_level` must be between 1 and 22 (0, negative and 23+ are rejected) |
-| `storage` | `row_group_size` must be greater than 0 and no larger than `max_rows_per_block` |
-| `logs` | `data_dir` must not be empty |
-| `logs` | `compression` must be one of `zstd`, `snappy`, `lz4`, `none` |
-| `logs` | `compression_level` must be between 1 and 22 |
-| `logs` | `row_group_size` must be greater than 0 and no larger than `max_rows_per_block` |
-| `telemetry` | `log_format` must be `text` or `json` |
-| `ingest.tail_sampling` | `sampling_ratio` must be between 0.0 and 1.0 |
-| `ingest.tail_sampling.per_service.<service>` | `sampling_ratio` must be between 0.0 and 1.0 |
+|---|---|
+| `server` | `bind_address` non-empty; `dataset` non-empty and limited to letters, digits, `-`, `_`, `.` |
+| `server.tls` | Both `cert_path` and `key_path` set |
+| `storage` / `logs` | `data_dir` non-empty; codec in `zstd`, `snappy`, `lz4`, `none`; zstd level 1–22; `row_group_size` > 0 and ≤ `max_rows_per_block` |
+| `object_store` | Enabled requires bucket, region, prefix, `cache_bytes > 0`, `catalog_interval_secs > 0` |
+| `ingest.kafka` | Enabled requires brokers, topic, non-empty group, format `json` |
+| `ingest.tail_sampling` | Every ratio in `[0.0, 1.0]` |
+| `telemetry` | `log_format` is `text` or `json` |
+| `auth` | Enabled requires a token or OIDC; token names unique; each token has a secret; OIDC issuer/client/redirect set |
+| `alerting.routing` | Matchers, regexes, durations and receiver names valid; route receivers exist |
+
+Errors are joined into one startup message, for example:
+
+```text
+Error: storage.compression must be one of: zstd, snappy, lz4, none; object_store.bucket is required when enabled
+```
+
+For the operational view, see [Deployment](deployment.md),
+[Object storage](object-storage.md), [Security](security.md) and
+[Known issues](known-issues.md).

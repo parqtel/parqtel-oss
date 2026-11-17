@@ -1,0 +1,113 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 560" role="img" aria-labelledby="obj-title obj-desc">
+  <title id="obj-title">Parqtel object-storage architecture</title>
+  <desc id="obj-desc">Animated diagram of two Parqtel nodes writing final Parquet names to an S3-compatible bucket after the local WAL and rename, publishing a compare-and-swap catalog, materialising blocks into a bounded local read cache, and retiring only writer-owned blocks during compaction and retention.</desc>
+  <defs>
+    <linearGradient id="o-teal" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#0d9488"/><stop offset="1" stop-color="#0284c7"/>
+    </linearGradient>
+    <linearGradient id="o-warm" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#d97706"/><stop offset="1" stop-color="#e11d48"/>
+    </linearGradient>
+    <style>
+      .bg{fill:#fff}
+      .lane{fill:#f8fafc;stroke:#cbd5e1;stroke-width:1.2}
+      .node{fill:#fff;stroke:#64748b;stroke-width:1.2}
+      .hot{fill:#ecfeff;stroke:#0891b2;stroke-width:1.4}
+      .bucket{fill:#fffbeb;stroke:#d97706;stroke-width:1.5}
+      .ghost{fill:#f8fafc;stroke:#94a3b8;stroke-width:1.1;stroke-dasharray:4 3}
+      .t{fill:#0f172a;font:600 13px/1.2 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif}
+      .s{fill:#475569;font:11px/1.2 ui-monospace,SFMono-Regular,Menlo,monospace}
+      .h{fill:#0f766e;font:700 11px/1 ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:1.2px}
+      .flow{stroke:url(#o-teal);stroke-width:2.2;fill:none;stroke-dasharray:5 9;animation:flow 1.1s linear infinite}
+      .floww{stroke:url(#o-warm);stroke-width:2.2;fill:none;stroke-dasharray:5 9;animation:flow 1.5s linear infinite}
+      .edge{stroke:#94a3b8;stroke-width:1.2;fill:none}
+      .pulse{animation:pulse 3.3s ease-in-out infinite}
+      .pulse2{animation:pulse 3.3s ease-in-out .7s infinite}
+      .pulse3{animation:pulse 3.3s ease-in-out 1.4s infinite}
+      @keyframes flow{to{stroke-dashoffset:-28}}
+      @keyframes pulse{0%,100%{stroke-opacity:.45}50%{stroke-opacity:1}}
+      @media (prefers-reduced-motion: reduce){*{animation:none!important}.flow,.floww{stroke-dasharray:none}}
+    </style>
+  </defs>
+
+  <rect class="bg" width="1000" height="560" rx="18"/>
+  <text x="28" y="34" class="h">OBJECT STORAGE · SHARED CATALOG · READ CACHE</text>
+
+  <rect class="lane" x="24" y="58" width="286" height="330" rx="14"/>
+  <text x="42" y="82" class="h">NODE A · WRITER</text>
+  <g class="pulse">
+    <rect class="hot" x="42" y="98" width="250" height="58" rx="9"/>
+    <text x="56" y="120" class="t">Ingest flush</text>
+    <text x="56" y="138" class="s">WAL → temp → atomic rename</text>
+  </g>
+  <g class="pulse2">
+    <rect class="node" x="42" y="174" width="250" height="58" rx="9"/>
+    <text x="56" y="196" class="t">Final-name upload</text>
+    <text x="56" y="214" class="s">publish after durable local copy</text>
+  </g>
+  <g class="pulse3">
+    <rect class="node" x="42" y="250" width="250" height="58" rx="9"/>
+    <text x="56" y="272" class="t">Catalog publish</text>
+    <text x="56" y="290" class="s">CAS merge · writer lease</text>
+  </g>
+  <text x="42" y="340" class="s">compaction / retention</text>
+  <text x="42" y="358" class="s">retires only its own blocks</text>
+
+  <rect class="lane" x="690" y="58" width="286" height="330" rx="14"/>
+  <text x="708" y="82" class="h">NODE B · READER</text>
+  <g class="pulse2">
+    <rect class="node" x="708" y="98" width="250" height="58" rx="9"/>
+    <text x="722" y="120" class="t">Catalog poll</text>
+    <text x="722" y="138" class="s">adopt unseen block keys</text>
+  </g>
+  <g class="pulse3">
+    <rect class="hot" x="708" y="174" width="250" height="58" rx="9"/>
+    <text x="722" y="196" class="t">Bounded LRU cache</text>
+    <text x="722" y="214" class="s">materialise one Parquet seek file</text>
+  </g>
+  <g class="pulse">
+    <rect class="node" x="708" y="250" width="250" height="58" rx="9"/>
+    <text x="722" y="272" class="t">Scanner</text>
+    <text x="722" y="290" class="s">local + remote blocks, one index</text>
+  </g>
+  <text x="708" y="340" class="s">cache eviction keeps the active block</text>
+  <text x="708" y="358" class="s">missing object → skip with warning</text>
+
+  <rect class="bucket" x="330" y="112" width="340" height="232" rx="16"/>
+  <text x="350" y="138" class="h">S3-COMPATIBLE BUCKET</text>
+  <rect class="ghost" x="350" y="154" width="300" height="44" rx="7"/>
+  <text x="364" y="172" class="t">prefix/m_l1_…parquet</text>
+  <text x="364" y="190" class="s">final key · zstd · immutable</text>
+  <rect class="ghost" x="350" y="208" width="300" height="44" rx="7"/>
+  <text x="364" y="226" class="t">prefix/logs/blk_…parquet</text>
+  <text x="364" y="244" class="s">ordered trace blocks under traces/</text>
+  <rect class="hot" x="350" y="262" width="300" height="58" rx="7"/>
+  <text x="364" y="282" class="t">prefix/_catalog/manifest.json</text>
+  <text x="364" y="300" class="s">generation · blocks[] · writer</text>
+  <text x="364" y="316" class="s">compare-and-swap update</text>
+
+  <path class="edge" d="M292 127 H330"/>
+  <path class="flow" d="M292 127 H330"/>
+  <path class="edge" d="M292 203 H330"/>
+  <path class="flow" d="M292 203 H330"/>
+  <path class="edge" d="M292 279 H330"/>
+  <path class="floww" d="M292 279 H330"/>
+
+  <path class="edge" d="M670 279 H708"/>
+  <path class="floww" d="M670 279 H708"/>
+  <path class="edge" d="M670 203 H708"/>
+  <path class="flow" d="M670 203 H708"/>
+  <path class="edge" d="M708 127 H670"/>
+  <path class="flow" d="M708 127 H670"/>
+
+  <rect class="lane" x="24" y="420" width="952" height="112" rx="14"/>
+  <text x="42" y="444" class="h">WRITE ORDER THAT KEEPS THE BUCKET CONSISTENT</text>
+  <text x="42" y="472" class="t">1. rows in WAL + memory buffer</text>
+  <text x="42" y="494" class="s">acknowledged writes survive</text>
+  <text x="302" y="472" class="t">2. temp Parquet → rename</text>
+  <text x="302" y="494" class="s">never upload a .tmp_ key</text>
+  <text x="540" y="472" class="t">3. upload final object</text>
+  <text x="540" y="494" class="s">compaction can read it</text>
+  <text x="760" y="472" class="t">4. CAS catalog publish</text>
+  <text x="760" y="494" class="s">readers adopt after this point</text>
+</svg>

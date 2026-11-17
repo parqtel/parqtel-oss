@@ -1,0 +1,185 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 640" role="img" aria-labelledby="arch-title arch-desc">
+  <title id="arch-title">Parqtel runtime architecture</title>
+  <desc id="arch-desc">Animated component diagram: OTLP, generic JSON, remote_write and Kafka enter the ingest service; logs pass through pipelines; rows enter the WAL and memory buffer and become Parquet blocks on local disk or S3; the query engine serves PromQL, ParqtelQL, pipelines, alerts, the console, Grafana and MCP. Authentication and the shared object catalog span the write and read paths.</desc>
+  <defs>
+    <linearGradient id="a-teal" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#2dd4bf"/><stop offset="1" stop-color="#38bdf8"/>
+    </linearGradient>
+    <linearGradient id="a-warm" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#fbbf24"/><stop offset="1" stop-color="#fb7185"/>
+    </linearGradient>
+    <style>
+      .bg{fill:#ffffff}
+      .zone{fill:#f8fafc;stroke:#cbd5e1;stroke-width:1.2}
+      .zone2{fill:#f0fdfa;stroke:#99f6e4;stroke-width:1.2}
+      .node{fill:#ffffff;stroke:#94a3b8;stroke-width:1.2}
+      .core{fill:#ecfeff;stroke:#0891b2;stroke-width:1.4}
+      .sink{fill:#fffbeb;stroke:#d97706;stroke-width:1.3}
+      .ext{fill:#f8fafc;stroke:#64748b;stroke-width:1.1;stroke-dasharray:4 3}
+      .t{fill:#0f172a;font:600 13px/1.2 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif}
+      .s{fill:#475569;font:11px/1.2 ui-monospace,SFMono-Regular,Menlo,monospace}
+      .h{fill:#0f766e;font:700 11px/1 ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:1.3px}
+      .flow{stroke:url(#a-teal);stroke-width:2;fill:none;stroke-dasharray:5 9;animation:flow 1.15s linear infinite}
+      .floww{stroke:url(#a-warm);stroke-width:2;fill:none;stroke-dasharray:5 9;animation:flow 1.55s linear infinite}
+      .edge{stroke:#94a3b8;stroke-width:1.2;fill:none}
+      .pulse{animation:pulse 3.4s ease-in-out infinite}
+      .pulse2{animation:pulse 3.4s ease-in-out .6s infinite}
+      .pulse3{animation:pulse 3.4s ease-in-out 1.2s infinite}
+      .pulse4{animation:pulse 3.4s ease-in-out 1.8s infinite}
+      @keyframes flow{to{stroke-dashoffset:-28}}
+      @keyframes pulse{0%,100%{stroke-opacity:.45}50%{stroke-opacity:1}}
+      @media (prefers-reduced-motion: reduce){*{animation:none!important}.flow,.floww{stroke-dasharray:none}}
+    </style>
+  </defs>
+
+  <rect class="bg" width="1000" height="640" rx="18"/>
+  <text x="28" y="34" class="h">PARQTEL · RUNTIME ARCHITECTURE</text>
+
+  <rect class="zone" x="24" y="56" width="176" height="392" rx="14"/>
+  <text x="40" y="80" class="h">PRODUCERS</text>
+  <g class="pulse">
+    <rect class="node" x="40" y="96" width="144" height="54" rx="9"/>
+    <text x="52" y="118" class="t">OTel SDK</text><text x="52" y="136" class="s">gRPC :4317</text>
+  </g>
+  <g class="pulse2">
+    <rect class="node" x="40" y="164" width="144" height="54" rx="9"/>
+    <text x="52" y="186" class="t">Collector</text><text x="52" y="204" class="s">OTLP/HTTP + gzip</text>
+  </g>
+  <g class="pulse3">
+    <rect class="node" x="40" y="232" width="144" height="54" rx="9"/>
+    <text x="52" y="254" class="t">Prometheus</text><text x="52" y="272" class="s">remote_write</text>
+  </g>
+  <g class="pulse4">
+    <rect class="node" x="40" y="300" width="144" height="54" rx="9"/>
+    <text x="52" y="322" class="t">Apps / Kafka</text><text x="52" y="340" class="s">JSON logs</text>
+  </g>
+  <text x="40" y="386" class="s">bearer token (optional)</text>
+  <text x="40" y="404" class="s">TLS (optional)</text>
+
+  <rect class="zone2" x="224" y="56" width="500" height="392" rx="14"/>
+  <text x="242" y="80" class="h">SINGLE BINARY · TOKIO</text>
+
+  <rect class="core" x="244" y="96" width="150" height="82" rx="10"/>
+  <text x="258" y="118" class="t">Auth + TLS</text>
+  <text x="258" y="136" class="s">read · write · admin</text>
+  <text x="258" y="152" class="s">OIDC · dataset</text>
+  <text x="258" y="168" class="s">audit trail</text>
+
+  <rect class="core" x="420" y="96" width="128" height="82" rx="10"/>
+  <text x="434" y="118" class="t">Ingest</text>
+  <text x="434" y="136" class="s">decode + limits</text>
+  <text x="434" y="152" class="s">RED bridge</text>
+  <text x="434" y="168" class="s">tail sampling</text>
+
+  <rect class="core" x="568" y="96" width="136" height="82" rx="10"/>
+  <text x="582" y="118" class="t">Live pipelines</text>
+  <text x="582" y="136" class="s">parse · mask</text>
+  <text x="582" y="152" class="s">metric_extract</text>
+  <text x="582" y="168" class="s">router</text>
+
+  <rect class="core" x="244" y="206" width="150" height="82" rx="10"/>
+  <text x="258" y="228" class="t">Memory buffer</text>
+  <text x="258" y="246" class="s">bounded rows/bytes</text>
+  <text x="258" y="262" class="s">live tail · instant</text>
+
+  <rect class="node" x="420" y="206" width="128" height="82" rx="10"/>
+  <text x="434" y="228" class="t">WAL</text>
+  <text x="434" y="246" class="s">frame · fsync</text>
+  <text x="434" y="262" class="s">replay on start</text>
+
+  <rect class="core" x="568" y="206" width="136" height="82" rx="10"/>
+  <text x="582" y="228" class="t">Query engine</text>
+  <text x="582" y="246" class="s">ParQL · ParqtelQL</text>
+  <text x="582" y="262" class="s">pipelines · stats</text>
+
+  <rect class="node" x="244" y="316" width="150" height="82" rx="10"/>
+  <text x="258" y="338" class="t">Alert engine</text>
+  <text x="258" y="356" class="s">rules · anomalies</text>
+  <text x="258" y="372" class="s">groups · silences</text>
+
+  <rect class="node" x="420" y="316" width="128" height="82" rx="10"/>
+  <text x="434" y="338" class="t">Scheduler</text>
+  <text x="434" y="356" class="s">flush · compact</text>
+  <text x="434" y="372" class="s">retention · S3</text>
+
+  <rect class="node" x="568" y="316" width="136" height="82" rx="10"/>
+  <text x="582" y="338" class="t">Surfaces</text>
+  <text x="582" y="356" class="s">/ui · /api/v1</text>
+  <text x="582" y="372" class="s">Grafana · MCP</text>
+  <text x="582" y="388" class="s">/metrics · /oas</text>
+
+  <rect class="sink" x="224" y="480" width="238" height="118" rx="12"/>
+  <text x="242" y="504" class="h">LOCAL DISK</text>
+  <text x="242" y="528" class="t">WAL staging + Parquet blocks</text>
+  <text x="242" y="548" class="s">data/ · data/logs/</text>
+  <text x="242" y="566" class="s">data/traces/ · index.json</text>
+  <text x="242" y="584" class="s">label_values.json · LRU cache</text>
+
+  <rect class="sink" x="486" y="480" width="238" height="118" rx="12"/>
+  <text x="504" y="504" class="h">OBJECT STORAGE · OPTIONAL</text>
+  <text x="504" y="528" class="t">S3 / MinIO · final Parquet keys</text>
+  <text x="504" y="548" class="s">_catalog/manifest.json · CAS</text>
+  <text x="504" y="566" class="s">writer-owned retirement</text>
+  <text x="504" y="584" class="s">publish after rename</text>
+
+  <rect class="zone" x="754" y="56" width="224" height="392" rx="14"/>
+  <text x="772" y="80" class="h">CONSUMERS</text>
+  <g class="pulse2">
+    <rect class="ext" x="772" y="98" width="188" height="52" rx="9"/>
+    <text x="786" y="120" class="t">Grafana</text><text x="786" y="138" class="s">Prometheus / SimpleJSON</text>
+  </g>
+  <g class="pulse3">
+    <rect class="ext" x="772" y="164" width="188" height="52" rx="9"/>
+    <text x="786" y="186" class="t">Operators</text><text x="786" y="204" class="s">/ui · API · MCP</text>
+  </g>
+  <g class="pulse4">
+    <rect class="ext" x="772" y="230" width="188" height="52" rx="9"/>
+    <text x="786" y="252" class="t">On-call</text><text x="786" y="270" class="s">Slack · PagerDuty · Teams</text>
+  </g>
+  <g class="pulse">
+    <rect class="ext" x="772" y="296" width="188" height="52" rx="9"/>
+    <text x="786" y="318" class="t">LLM agents</text><text x="786" y="336" class="s">parqtel-mcp-parqtel</text>
+  </g>
+  <text x="772" y="386" class="s">self-telemetry → OTLP</text>
+  <text x="772" y="404" class="s">Prometheus scrape → /metrics</text>
+
+  <path class="edge" d="M184 123 H224"/>
+  <path class="flow" d="M184 123 H224"/>
+  <path class="edge" d="M184 191 H224"/>
+  <path class="flow" d="M184 191 H224"/>
+  <path class="edge" d="M184 259 H224"/>
+  <path class="floww" d="M184 259 H224"/>
+  <path class="edge" d="M184 327 H224"/>
+  <path class="floww" d="M184 327 H224"/>
+
+  <path class="edge" d="M394 137 H420"/>
+  <path class="flow" d="M394 137 H420"/>
+  <path class="edge" d="M548 137 H568"/>
+  <path class="flow" d="M548 137 H568"/>
+  <path class="edge" d="M636 178 V206"/>
+  <path class="flow" d="M636 178 V206"/>
+
+  <path class="edge" d="M484 178 V206"/>
+  <path class="floww" d="M484 178 V206"/>
+  <path class="edge" d="M484 288 V316"/>
+  <path class="floww" d="M484 288 V316"/>
+  <path class="edge" d="M394 247 H420"/>
+  <path class="flow" d="M394 247 H420"/>
+  <path class="edge" d="M548 247 H568"/>
+  <path class="flow" d="M548 247 H568"/>
+
+  <path class="edge" d="M484 398 V480"/>
+  <path class="floww" d="M484 398 V480"/>
+  <path class="edge" d="M605 634 V480" transform="translate(0 -36)"/>
+  <path class="floww" d="M605 444 V480"/>
+
+  <path class="edge" d="M636 398 V430 H724 V378"/>
+  <path class="flow" d="M636 398 V430 H724 V378"/>
+  <path class="edge" d="M704 247 H754"/>
+  <path class="flow" d="M704 247 H754"/>
+  <path class="edge" d="M704 357 H754"/>
+  <path class="floww" d="M704 357 H754"/>
+
+  <path class="edge" d="M636 288 V300"/>
+  <path class="floww" d="M636 288 V300"/>
+</svg>
