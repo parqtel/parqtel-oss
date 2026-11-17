@@ -610,6 +610,16 @@ paths:
     get:
       tags: [Health]
       summary: Storage, buffer, and configuration snapshot
+      parameters:
+        - name: dataset
+          in: query
+          required: false
+          schema:
+            type: string
+          description: >
+            `service.name` to summarize. Adds a `dataset` object with matching
+            blocks, rows, bytes, metric count, global sidecar bytes, and
+            compaction lag.
       description: >
         Per-signal storage stats (blocks, stored rows, on-disk bytes from
         block index metadata), live in-memory buffer counts, and the

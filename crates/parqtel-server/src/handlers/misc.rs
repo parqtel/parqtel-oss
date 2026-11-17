@@ -45,7 +45,13 @@ pub async fn ready(State(state): State<AppState>) -> Response {
 /// Handler for GET /api/v1/stats — storage, block, buffer, and config
 /// snapshot for the UI overview and settings panels. Reads block-index
 /// metadata only (no Parquet decode), plus live buffer counts.
-pub async fn stats(State(state): State<AppState>) -> Response {
+#[derive(Debug, Deserialize)]
+pub struct StatsParams {
+    /// `service.name` to summarize. Omit for the global snapshot only.
+    pub dataset: Option<String>,
+}
+
+pub async fn stats(State(state): State<AppState>, Query(params): Query<StatsParams>) -> Response {
     tracing::debug!("stats request received");
     let cfg = &state.inner.config;
     let [metrics, logs, traces] = match state.inner.query_executor.storage_stats().await {
@@ -63,6 +69,51 @@ pub async fn stats(State(state): State<AppState>) -> Response {
     };
     let (buf_metrics, buf_logs, buf_spans) =
         state.inner.query_executor.memory_buffer().stats().await;
+    let dataset = match params.dataset.as_deref() {
+        Some(dataset) => {
+            let index = state.inner.index.read().await;
+            let blocks: Vec<_> = index
+                .blocks
+                .iter()
+                .filter(|block| {
+                    block
+                        .label_values
+                        .get("service.name")
+                        .is_some_and(|values| values.contains(dataset))
+                })
+                .collect();
+            let rows: usize = blocks.iter().map(|block| block.row_count).sum();
+            let bytes: u64 = blocks.iter().map(|block| block.size_bytes).sum();
+            let mut metrics = std::collections::BTreeSet::new();
+            for block in &blocks {
+                metrics.extend(block.metric_names.iter().cloned());
+            }
+            let newest = blocks
+                .iter()
+                .map(|block| block.end_timestamp_ns)
+                .max()
+                .unwrap_or(0);
+            let lag_secs = if newest == 0 {
+                0
+            } else {
+                ((chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0) - newest) / 1_000_000_000)
+                    .max(0)
+            };
+            let sidecar_bytes = std::fs::metadata(cfg.storage.data_dir.join("index.json"))
+                .map(|metadata| metadata.len())
+                .unwrap_or(0);
+            Some(serde_json::json!({
+                "name": dataset,
+                "blocks": blocks.len(),
+                "rows": rows,
+                "bytes": bytes,
+                "metrics": metrics.len(),
+                "sidecar_bytes_global": sidecar_bytes,
+                "compaction_lag_secs": lag_secs,
+            }))
+        }
+        None => None,
+    };
 
     Json(serde_json::json!({
         "status": "success",
@@ -77,6 +128,7 @@ pub async fn stats(State(state): State<AppState>) -> Response {
                 "logs": buf_logs,
                 "spans": buf_spans,
             },
+            "dataset": dataset,
             "config": {
                 "storage": {
                     "data_dir": cfg.storage.data_dir,

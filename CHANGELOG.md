@@ -42,6 +42,9 @@ while measuring. Measurements and method are in
 
 ### Added
 
+- **Per-service stats.** `GET /api/v1/stats?dataset=<service.name>` reports
+  matching block count, rows, bytes, metric count, global sidecar bytes, and
+  compaction lag; the global snapshot is unchanged.
 - **Per-metric series cap.** `ingest.series_limit_per_metric` (default 1M)
   refuses new label sets past the cap while existing series keep ingesting,
   and exports `parqtel_series_rejected_total{metric}`. One label explosion no
