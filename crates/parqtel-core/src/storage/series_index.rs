@@ -150,6 +150,72 @@ impl SeriesTableBuilder {
 }
 
 impl SeriesTable {
+    /// String at `id`, or `None` when out of bounds.
+    pub fn string(&self, id: u32) -> Option<&str> {
+        self.strings.get(id as usize).map(String::as_str)
+    }
+
+    /// Flat label id pairs for `series`, or `None` when out of bounds.
+    pub fn label_ids(&self, series: usize) -> Option<&[u32]> {
+        self.labels.get(series).map(Vec::as_slice)
+    }
+
+    /// Total label pairs across all series.
+    pub fn label_pair_count(&self) -> usize {
+        self.labels
+            .iter()
+            .fold(0usize, |count, labels| count.saturating_add(labels.len()))
+            / 2
+    }
+
+    /// Approximate heap allocation size, including vector headers and payload capacity.
+    pub fn approx_heap_bytes(&self) -> usize {
+        let mut bytes = self
+            .strings
+            .capacity()
+            .saturating_mul(std::mem::size_of::<String>());
+        for string in &self.strings {
+            bytes = bytes.saturating_add(string.capacity());
+        }
+        bytes = bytes.saturating_add(
+            self.metrics
+                .capacity()
+                .saturating_mul(std::mem::size_of::<(u32, u32, u32)>()),
+        );
+        bytes = bytes.saturating_add(
+            self.start
+                .capacity()
+                .saturating_mul(std::mem::size_of::<u64>()),
+        );
+        bytes = bytes.saturating_add(
+            self.len
+                .capacity()
+                .saturating_mul(std::mem::size_of::<u32>()),
+        );
+        bytes = bytes.saturating_add(
+            self.min_ts
+                .capacity()
+                .saturating_mul(std::mem::size_of::<i64>()),
+        );
+        bytes = bytes.saturating_add(
+            self.max_ts
+                .capacity()
+                .saturating_mul(std::mem::size_of::<i64>()),
+        );
+        bytes = bytes.saturating_add(
+            self.labels
+                .capacity()
+                .saturating_mul(std::mem::size_of::<Vec<u32>>()),
+        );
+        self.labels.iter().fold(bytes, |bytes, labels| {
+            bytes.saturating_add(
+                labels
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<u32>()),
+            )
+        })
+    }
+
     /// Number of metric runs in table order.
     pub fn metric_run_count(&self) -> usize {
         self.metrics.len()

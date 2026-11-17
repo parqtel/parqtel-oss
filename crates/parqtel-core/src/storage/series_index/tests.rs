@@ -8,7 +8,7 @@ fn ls(pairs: &[(&str, &str)]) -> LabelSet {
 }
 
 /// cpu: h0..h3 across two envs; mem: one series. Rows are 10 per series.
-fn sample() -> SeriesIndex {
+fn sample_table() -> SeriesTable {
     let mut b = SeriesTableBuilder::new();
     b.begin_metric("cpu");
     let mut row = 0u64;
@@ -32,7 +32,11 @@ fn sample() -> SeriesIndex {
     }
     b.begin_metric("mem");
     b.push_series(&ls(&[("host", "h0")]), row, 10, 0, 99);
-    SeriesIndex::from_table(&b.finish()).unwrap()
+    b.finish()
+}
+
+fn sample() -> SeriesIndex {
+    SeriesIndex::from_table(&sample_table()).unwrap()
 }
 
 fn pick(idx: &SeriesIndex, metric: &str, sel: &SeriesSelector) -> Vec<String> {
@@ -57,6 +61,76 @@ fn table_round_trips_through_the_footer_text() {
     let table = b.finish();
     let text = table.to_footer_value().unwrap();
     assert_eq!(SeriesTable::from_footer_value(&text).unwrap(), table);
+}
+
+#[test]
+fn table_accessors_expose_strings_labels_counts_and_heap_size() {
+    let table = sample_table();
+
+    assert_eq!(table.string(0), Some("cpu"));
+    assert_eq!(table.string(u32::MAX), None);
+
+    let labels = table.label_ids(0).unwrap();
+    let pairs: Vec<_> = labels
+        .chunks_exact(2)
+        .map(|pair| (table.string(pair[0]).unwrap(), table.string(pair[1]).unwrap()))
+        .collect();
+    assert_eq!(
+        pairs,
+        vec![("env", "prod"), ("host", "h0"), ("service.name", "api")]
+    );
+    assert_eq!(table.label_ids(5), None);
+    assert_eq!(table.label_pair_count(), 13);
+
+    let expected_heap_bytes = table
+        .strings
+        .capacity()
+        .saturating_mul(std::mem::size_of::<String>())
+        .saturating_add(table.strings.iter().map(String::capacity).sum::<usize>())
+        .saturating_add(
+            table
+                .metrics
+                .capacity()
+                .saturating_mul(std::mem::size_of::<(u32, u32, u32)>()),
+        )
+        .saturating_add(
+            table
+                .start
+                .capacity()
+                .saturating_mul(std::mem::size_of::<u64>()),
+        )
+        .saturating_add(
+            table
+                .len
+                .capacity()
+                .saturating_mul(std::mem::size_of::<u32>()),
+        )
+        .saturating_add(
+            table
+                .min_ts
+                .capacity()
+                .saturating_mul(std::mem::size_of::<i64>()),
+        )
+        .saturating_add(
+            table
+                .max_ts
+                .capacity()
+                .saturating_mul(std::mem::size_of::<i64>()),
+        )
+        .saturating_add(
+            table
+                .labels
+                .capacity()
+                .saturating_mul(std::mem::size_of::<Vec<u32>>()),
+        )
+        .saturating_add(
+            table
+                .labels
+                .iter()
+                .map(|labels| labels.capacity().saturating_mul(std::mem::size_of::<u32>()))
+                .sum::<usize>(),
+        );
+    assert_eq!(table.approx_heap_bytes(), expected_heap_bytes);
 }
 
 #[test]
