@@ -60,6 +60,8 @@ final partial step is not evaluated — the same as Prometheus.
 | GET | `/v1/traces/search` | Search spans (per-span `trace_id` included for client-side grouping) |
 | GET | `/v1/correlate` | Cross-signal correlation for a time window |
 | POST | `/v1/search` | Run a pipeline search |
+| POST | `/api/v1/ingest` | Generic JSON log ingest; service from `X-Parqtel-Service` |
+| POST | `/api/v1/write` | Prometheus remote_write (snappy + protobuf) |
 
 ## Alerts and rules
 

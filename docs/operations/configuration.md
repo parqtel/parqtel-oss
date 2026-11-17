@@ -282,6 +282,9 @@ The L1 pass is bounded (8 sources, 2 groups, 16 M rows per pass) and reserves
 | `buffer_overflow_policy` | String | `drop_oldest` | `drop_oldest` evicts the oldest buffered rows; `reject_new` refuses the incoming batch. Both increment `parqtel_buffer_dropped_total{signal,reason}` |
 | `max_concurrent_requests` | Integer | `64` | Simultaneous OTLP/HTTP ingest requests. When full, ingest returns `429` with `Retry-After` instead of queueing unbounded work. gRPC has its own `server.grpc_concurrency_limit` |
 | `load_shed_retry_after_secs` | Integer | `1` | `Retry-After` value on an ingest `429` |
+| `json_timestamp_field` | String | `"timestamp"` | Generic JSON ingest timestamp field (RFC3339, or integer seconds/ms/µs/ns) |
+| `json_body_field` | String | `"message"` | Generic JSON ingest body field; absent falls back to the whole object |
+| `json_severity_field` | String | `"level"` | Generic JSON ingest severity field; maps trace/debug/info/warn/error/fatal |
 
 Buffer occupancy and drops are exported at `/metrics` as
 `parqtel_buffer_points{signal}`, `parqtel_buffer_bytes`,

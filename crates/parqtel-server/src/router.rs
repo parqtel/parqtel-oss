@@ -45,6 +45,8 @@ pub(crate) fn is_ingest_path(path: &str) -> bool {
             | "/v1/logs/json"
             | "/v1/traces"
             | "/v1/traces/json"
+            | "/api/v1/ingest"
+            | "/api/v1/write"
     )
 }
 
@@ -144,6 +146,11 @@ pub fn build_router(state: AppState) -> Router {
         .route("/v1/metrics/json", post(handlers::ingest::ingest_json))
         .route("/v1/logs", post(handlers::ingest::ingest_otlp_logs))
         .route("/v1/logs/json", post(handlers::ingest::ingest_logs_json))
+        .route(
+            "/api/v1/ingest",
+            post(handlers::ingest::ingest_generic_json),
+        )
+        .route("/api/v1/write", post(handlers::remote_write::remote_write))
         .route("/v1/traces", post(handlers::ingest::ingest_otlp_traces))
         .route(
             "/v1/traces/json",

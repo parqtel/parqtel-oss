@@ -2039,6 +2039,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "snap",
  "tempfile",
  "tikv-jemallocator",
  "tokio",

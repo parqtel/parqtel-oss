@@ -42,6 +42,15 @@ while measuring. Measurements and method are in
 
 ### Added
 
+- **Prometheus `remote_write`.** `POST /api/v1/write` accepts the standard
+  snappy-compressed protobuf WriteRequest, converts samples to gauge points
+  (ms timestamps), and writes them through the metrics ingestion path. This
+  unlocks Prometheus agents/collectors that speak remote_write.
+- **Generic JSON log ingest.** `POST /api/v1/ingest` accepts an object or array,
+  maps timestamp/body/severity via `ingest.json_*_field`, turns the remaining
+  keys into attributes, and takes the service name from
+  `X-Parqtel-Service`. This is the on-ramp for applications without an OTel
+  shim. Rows go through live log pipelines and the normal WAL/buffer path.
 - **Append-only audit trail.** Config mutations (alert rules/routes/silences,
   recording rules, pipelines) append a JSONL record with timestamp, token
   actor, action, target, and before/after values. Webhook URLs are redacted.

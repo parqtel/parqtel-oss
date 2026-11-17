@@ -303,3 +303,195 @@ fn is_protobuf(headers: &axum::http::HeaderMap) -> bool {
         .map(|c| c.contains("protobuf"))
         .unwrap_or(false)
 }
+
+/// POST /api/v1/ingest — generic newline/JSON-array log ingest.
+///
+/// Maps a JSON object (or array) into the log model using
+/// `ingest.json_{timestamp,body,severity}_field`; every other field becomes a
+/// log attribute. The service name comes from `X-Parqtel-Service` (default
+/// `"default"`).
+pub async fn ingest_generic_json(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    body: Bytes,
+) -> Response {
+    if body.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "status": "error", "error": "Empty body" })),
+        )
+            .into_response();
+    }
+    let value: serde_json::Value = match serde_json::from_slice(&body) {
+        Ok(value) => value,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "status": "error", "error": format!("invalid JSON: {e}") })),
+            )
+                .into_response()
+        }
+    };
+    let objects =
+        match value {
+            serde_json::Value::Array(values) => values,
+            object @ serde_json::Value::Object(_) => vec![object],
+            _ => return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "status": "error", "error": "body must be a JSON object or array" })),
+            )
+                .into_response(),
+        };
+    let service = headers
+        .get("x-parqtel-service")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("default");
+    let config = &state.inner.config.ingest;
+    let mut logs = Vec::with_capacity(objects.len());
+    for object in objects {
+        let Some(fields) = object.as_object() else {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "status": "error", "error": "array entries must be objects" })),
+            )
+                .into_response();
+        };
+        let timestamp_ns = fields
+            .get(&config.json_timestamp_field)
+            .map(parse_json_timestamp)
+            .unwrap_or_else(|| chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0));
+        let body_text = fields
+            .get(&config.json_body_field)
+            .map(json_scalar_string)
+            .unwrap_or_else(|| object.to_string());
+        let level = fields
+            .get(&config.json_severity_field)
+            .map(json_scalar_string)
+            .unwrap_or_else(|| "INFO".to_string());
+        let (severity_number, severity_text) = json_severity(&level);
+        let attributes: Vec<(String, String)> = fields
+            .iter()
+            .filter(|(key, _)| {
+                key.as_str() != config.json_timestamp_field
+                    && key.as_str() != config.json_body_field
+                    && key.as_str() != config.json_severity_field
+            })
+            .map(|(key, value)| (key.clone(), json_scalar_string(value)))
+            .collect();
+        let attributes = parqtel_core::LabelSet::try_from_iter(attributes).unwrap_or_default();
+        let resource_attributes =
+            parqtel_core::LabelSet::try_from_iter(vec![("service.name", service)])
+                .unwrap_or_default();
+        logs.push(parqtel_core::LogRecord::new(
+            timestamp_ns,
+            chrono::Utc::now()
+                .timestamp_nanos_opt()
+                .unwrap_or(timestamp_ns),
+            severity_number,
+            severity_text,
+            body_text,
+            attributes,
+            resource_attributes,
+            [0; 16],
+            [0; 8],
+            0,
+            "generic-json".into(),
+            "1.0".into(),
+        ));
+    }
+    let count = logs.len() as u64;
+    match state
+        .inner
+        .log_ingestion_service
+        .ingest_logs_live(logs)
+        .await
+    {
+        Ok(_) => {
+            state
+                .inner
+                .metrics
+                .ingested_points
+                .fetch_add(count, std::sync::atomic::Ordering::Relaxed);
+            state
+                .inner
+                .metrics
+                .rates
+                .record_logs(count, body.len() as u64);
+            crate::otel_sli::record_ingest("logs", count);
+            (StatusCode::OK, Json(json!({ "ingested": count }))).into_response()
+        }
+        Err(e) => {
+            state
+                .inner
+                .metrics
+                .ingest_errors
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            map_error(e)
+        }
+    }
+}
+
+fn json_scalar_string(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(value) => value.clone(),
+        other => other.to_string(),
+    }
+}
+
+fn parse_json_timestamp(value: &serde_json::Value) -> i64 {
+    if let Some(value) = value.as_i64() {
+        // Accept seconds, milliseconds, microseconds and nanoseconds.
+        return match value {
+            value if value > 10_000_000_000_000_000 => value,
+            value if value > 10_000_000_000_000 => value * 1_000,
+            value if value > 10_000_000_000 => value * 1_000_000,
+            value => value * 1_000_000_000,
+        };
+    }
+    if let Some(text) = value.as_str() {
+        if let Ok(value) = text.parse::<i64>() {
+            return parse_json_timestamp(&serde_json::Value::Number(value.into()));
+        }
+        if let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(text) {
+            return parsed.timestamp_nanos_opt().unwrap_or(0);
+        }
+    }
+    chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+}
+
+fn json_severity(level: &str) -> (i32, String) {
+    let number = match level.to_ascii_lowercase().as_str() {
+        "trace" | "trace2" | "trace3" | "trace4" => 1,
+        "debug" | "debug2" | "debug3" | "debug4" => 5,
+        "info" | "information" | "notice" => 9,
+        "warn" | "warning" => 13,
+        "error" | "err" => 17,
+        "fatal" | "critical" | "crit" | "alert" | "emergency" => 21,
+        _ => 9,
+    };
+    (number, level.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+    use super::*;
+
+    #[test]
+    fn timestamp_units_are_detected() {
+        let seconds = parse_json_timestamp(&serde_json::json!(1_700_000_000));
+        assert_eq!(seconds, 1_700_000_000 * 1_000_000_000);
+        let millis = parse_json_timestamp(&serde_json::json!(1_700_000_000_000i64));
+        assert_eq!(millis, 1_700_000_000_000_000_000);
+        let rfc = parse_json_timestamp(&serde_json::json!("2024-01-01T00:00:00Z"));
+        assert!(rfc > 1_700_000_000_000_000_000);
+    }
+
+    #[test]
+    fn severity_maps_to_otel_numbers() {
+        assert_eq!(json_severity("error").0, 17);
+        assert_eq!(json_severity("WARN").0, 13);
+        assert_eq!(json_severity("info").0, 9);
+        assert_eq!(json_severity("unknown").0, 9);
+    }
+}

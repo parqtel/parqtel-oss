@@ -107,6 +107,15 @@ pub struct IngestConfig {
     /// `Retry-After` value, in seconds, returned with an ingest `429`.
     #[serde(default = "default_load_shed_retry_after_secs")]
     pub load_shed_retry_after_secs: u64,
+    /// Generic JSON ingest: field carrying the timestamp.
+    #[serde(default = "default_json_timestamp_field")]
+    pub json_timestamp_field: String,
+    /// Generic JSON ingest: field carrying the log body/message.
+    #[serde(default = "default_json_body_field")]
+    pub json_body_field: String,
+    /// Generic JSON ingest: field carrying the severity/level.
+    #[serde(default = "default_json_severity_field")]
+    pub json_severity_field: String,
 }
 
 /// Overload behaviour for the in-memory query buffer.
@@ -134,6 +143,18 @@ fn default_max_concurrent_requests() -> usize {
 
 fn default_load_shed_retry_after_secs() -> u64 {
     1
+}
+
+fn default_json_timestamp_field() -> String {
+    "timestamp".to_string()
+}
+
+fn default_json_body_field() -> String {
+    "message".to_string()
+}
+
+fn default_json_severity_field() -> String {
+    "level".to_string()
 }
 
 fn default_label_interner_capacity() -> usize {
@@ -210,6 +231,9 @@ impl Default for IngestConfig {
             buffer_overflow_policy: BufferOverflowPolicy::default(),
             max_concurrent_requests: default_max_concurrent_requests(),
             load_shed_retry_after_secs: default_load_shed_retry_after_secs(),
+            json_timestamp_field: default_json_timestamp_field(),
+            json_body_field: default_json_body_field(),
+            json_severity_field: default_json_severity_field(),
         }
     }
 }
