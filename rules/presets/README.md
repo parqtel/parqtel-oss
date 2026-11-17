@@ -121,5 +121,6 @@ It needs `curl`, `jq`, and `python3`.
   CPU/memory utilization rules assume 0–1 ratios from the OTel
   `k8sclusterreceiver`; if you collect byte gauges instead, swap the query
   to the byte metric and set the value to the matching fraction of capacity.
-- **noise_suppression_threshold** (default 0.7) can be raised for packs
-  that see bursty traffic.
+- **noise_suppression_threshold** is reserved; no noise detector is implemented
+  in 0.3.x, so the value has no effect. Tune the threshold/`for_duration_secs`
+  instead.

@@ -17,6 +17,8 @@ pub enum Severity {
 pub enum RuleType {
     Static,
     AiDerived,
+    /// Source metadata only. The rule still uses its threshold `condition`;
+    /// no baseline/anomaly detector exists in 0.3.x.
     LearnedAnomaly,
 }
 

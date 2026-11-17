@@ -291,8 +291,8 @@ More: [PQL Guide](docs/guides/pql-guide.md) •
 | **Ingestion** | OTLP gRPC (`:4317`, the OTel SDK default) + HTTP protobuf & JSON for metrics, logs, and traces |
 | **Storage** | Block-based Parquet with Zstd/Snappy/LZ4, automatic compaction, configurable retention |
 | **Query** | PromQL-compatible instant & range queries, label matching, aggregations (sum, avg, rate, histogram_quantile, etc.) |
-| **Alerting** | YAML-defined rules, threshold & anomaly detection, state machine (Inactive→Pending→Firing→Resolved), background evaluation loop (15s), noise scoring |
-| **Pipeline** | Recording rules, stream processing pipelines, metric extraction from logs |
+| **Alerting** | YAML-defined threshold rules, state machine (Inactive→Pending→Firing→Resolved), 15s evaluation loop, Alertmanager-style routing/inhibition/grouping, silences, Slack/Teams/PagerDuty/webhook receivers. Anomaly detection and noise scoring are **not implemented** in 0.3.x |
+| **Pipeline** | Recording rules and log→metric stream pipelines, applied on live ingest; extracted metrics enter the normal metrics path |
 | **Span-metrics (RED)** | Auto-derived `traces_service_{requests,errors,duration_ms}_total` per service/operation from server spans — zero-config RED dashboards in Grafana |
 | **Tail sampling** | Trace-coherent sampling (errors/slow traces always kept, deterministic ratio per service) — controls trace storage volume while RED metrics stay unsampled |
 | **Visualization** | Built-in web UI, Grafana SimpleJSON datasource, Prometheus-compatible `/api/v1/*` |

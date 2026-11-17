@@ -335,6 +335,7 @@ components:
         noise_suppression_threshold:
           type: number
           default: 0.7
+          description: Reserved. No noise detector is implemented in 0.3.x.
 
     AlertCondition:
       type: object

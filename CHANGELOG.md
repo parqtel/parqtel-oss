@@ -188,6 +188,13 @@ while measuring. Measurements and method are in
 
 ### Documentation
 
+- **Anomaly and noise claims match the binary.** The README, MCP guide,
+  configuration reference, OpenAPI schema, and preset tuning notes now state
+  that anomaly detection/noise scoring are not implemented in 0.3.x;
+  `LearnedAnomaly` is documented as source metadata over the threshold
+  condition, and `noise_score` as reserved/always `0.0`. The alerting feature
+  row now also lists the routing, inhibition, grouping, silence and receiver
+  capabilities that do exist.
 - **Architecture diagrams** (`docs/development/diagrams.md`): ten Mermaid
   diagrams covering the system context, the crate graph, the ingest and query
   paths, the block lifecycle, the on-disk layout, admission control, the alert
