@@ -43,7 +43,7 @@ Refer to [values.yaml](values.yaml) for a full list of configuration options.
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `image.repository` | string | `ghcr.io/parqtel/parqtel` | Container image repository |
-| `replicaCount` | int | `1` | Number of replicas (Note: >1 requires shared storage) |
+| `replicaCount` | int | `1` | Number of replicas. Single-writer: the schema rejects >1 because shared storage is not implemented |
 | `storage.size` | string | `10Gi` | Size of the persistent volume |
 | `storage.storageClassName` | string | `""` | Storage class (empty = cluster default) |
 | `service.port` | int | `8080` | HTTP service port |

@@ -1,5 +1,5 @@
 # Full CI values — tests all features enabled
-replicaCount: 2
+replicaCount: 1
 
 image:
   repository: ghcr.io/parqtel/parqtel
@@ -27,9 +27,11 @@ storage:
   storageClassName: gp3
 
 autoscaling:
-  enabled: true
-  minReplicas: 2
-  maxReplicas: 10
+  # Single-writer release: HPA cannot create useful replicas until shared
+  # storage exists. Kept in the fixture to validate the values schema.
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 1
   targetCPUUtilizationPercentage: 70
   targetMemoryUtilizationPercentage: 80
 

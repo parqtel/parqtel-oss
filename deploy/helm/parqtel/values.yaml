@@ -2,7 +2,8 @@
 # Parqtel Helm Chart — Default Values
 # ─────────────────────────────────────────────────────────────────────────────
 
-# -- Number of replicas. >1 requires shared storage (NFS/EFS).
+# -- Number of replicas. Parqtel is single-writer: values.schema.json caps this at 1.
+# Shared storage/multi-node is not implemented; >1 would split the dataset.
 replicaCount: 1
 
 image:
@@ -311,7 +312,8 @@ parqtel:
 
 # ── Autoscaling ──────────────────────────────────────────────────────────────
 autoscaling:
-  # -- Enable HPA. Requires shared storage for >1 replica.
+  # -- Reserved. HPA is rejected while maxReplicas > 1 because each replica owns
+# a disjoint local data directory; shared storage is not implemented.
   enabled: false
   minReplicas: 1
   maxReplicas: 5

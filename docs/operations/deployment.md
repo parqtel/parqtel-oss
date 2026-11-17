@@ -1,6 +1,6 @@
 # Deployment Guide
 
-Parqtel supports multiple deployment methods, from a single Docker container to production Kubernetes clusters with autoscaling.
+Parqtel supports multiple deployment methods, from a single Docker container to production Kubernetes clusters. It is **single-writer**: every process owns one local data directory, so replicas must stay at 1 until shared storage lands.
 
 ## Docker (Single Container)
 
@@ -126,7 +126,7 @@ Pre-configured value files for different environments:
 |------|----------|
 | `deploy/k8s/overlays/minimal/values.yaml` | Minimal resources, single replica |
 | `deploy/k8s/overlays/dev/values.yaml` | Development with debug logging |
-| `deploy/k8s/overlays/production/values.yaml` | Production with HPA, PDB, NetworkPolicy |
+| `deploy/k8s/overlays/production/values.yaml` | Production with PDB and NetworkPolicy (single replica) |
 | `deploy/k8s/overlays/load-test/values.yaml` | High-resource for load testing |
 | `deploy/k8s/overlays/ci/values.yaml` | CI/CD pipeline testing |
 | `deploy/k8s/overlays/orbstack/values.yaml` | OrbStack local development |
@@ -135,8 +135,8 @@ Pre-configured value files for different environments:
 
 The chart (`deploy/helm/parqtel`) includes:
 
-- **Deployment** with configurable replicas, resources, and probes
-- **HorizontalPodAutoscaler** — scales on CPU/memory/custom metrics
+- **Deployment** with configurable resources and probes; `replicaCount` is capped at 1
+- **HorizontalPodAutoscaler** — reserved; enabling >1 replica is rejected because each pod owns a disjoint data directory
 - **PodDisruptionBudget** — ensures availability during rollouts
 - **NetworkPolicy** — restricts ingress/egress traffic
 - **ServiceMonitor** — Prometheus Operator integration
@@ -149,7 +149,7 @@ The chart (`deploy/helm/parqtel`) includes:
 ### Custom Values Example
 
 ```yaml
-replicaCount: 3
+replicaCount: 1  # single-writer; >1 is rejected by values.schema.json
 
 resources:
   requests:
@@ -163,12 +163,6 @@ persistence:
   enabled: true
   size: 50Gi
   storageClass: gp3
-
-autoscaling:
-  enabled: true
-  minReplicas: 2
-  maxReplicas: 10
-  targetCPUUtilizationPercentage: 70
 
 networkPolicy:
   enabled: true
