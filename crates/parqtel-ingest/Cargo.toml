@@ -8,6 +8,7 @@ authors.workspace = true
 
 [dependencies]
 parqtel-core = { workspace = true }
+parqtel-pipeline = { workspace = true }
 prost = { workspace = true }
 tonic = { workspace = true }
 prost-types = { workspace = true }

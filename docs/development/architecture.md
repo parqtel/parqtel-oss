@@ -208,10 +208,20 @@ Parqtel ships **three query surfaces** over one storage engine (see [PQL_GUIDE.m
 
 ### Pipeline Path
 
-1. **Rule Loading** → Recording rules and pipeline definitions loaded from YAML
-2. **Evaluation** → `Ruler` evaluates PromQL/DQL expressions on a schedule with backfill support
-3. **Processing** → Stream pipelines process incoming data through configurable stages (preprocessor → processor → metric extractor → router)
-4. **Output** → Derived metrics are written back into the ingestion pipeline
+1. **Rule Loading** → Recording rules and pipeline definitions are loaded from
+   `rules/recording/` and `rules/pipelines/` at startup; API mutations are
+   written back and bump a generation counter.
+2. **Compilation** → `PipelineSet` compiles definitions into ordered stages
+   once per generation. Invalid regexes, unknown processors, missing fields,
+   and non-log signals fail at load/compile time.
+3. **Processing** → Live log ingest applies the first matching pipeline
+   (`preprocessor → processor → metric_extract → masker → router`) on the
+   blocking pool. WAL replay deliberately skips this path so derived metrics
+   are not duplicated after a crash.
+4. **Output** → Surviving logs continue through the normal WAL/buffer/writer;
+   extracted metrics are forwarded to the metrics ingestion service through a
+   bounded channel. Recording-rule evaluation is wired separately from this
+   stream path.
 
 ## Storage Engine
 

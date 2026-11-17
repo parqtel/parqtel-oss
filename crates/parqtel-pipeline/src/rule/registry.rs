@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
@@ -17,6 +18,9 @@ pub struct RuleRegistry {
     recording_dir: Option<PathBuf>,
     /// Where API-created pipelines are written.
     pipeline_dir: Option<PathBuf>,
+    /// Incremented on every mutation; the ingest path uses it to recompile
+    /// pipelines without polling the definition maps per batch.
+    generation: Arc<AtomicU64>,
 }
 
 impl RuleRegistry {
@@ -26,7 +30,17 @@ impl RuleRegistry {
             pipelines: Arc::new(RwLock::new(BTreeMap::new())),
             recording_dir: None,
             pipeline_dir: None,
+            generation: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    /// Current mutation generation.
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
+    }
+
+    fn bump_generation(&self) {
+        self.generation.fetch_add(1, Ordering::Release);
     }
 
     /// Persist API-created definitions into the directories the server loads
@@ -77,6 +91,7 @@ impl RuleRegistry {
                 pipelines.insert(pipeline.name.clone(), pipeline);
             }
         }
+        self.bump_generation();
         Ok(())
     }
 
@@ -86,6 +101,7 @@ impl RuleRegistry {
         if let Ok(mut groups) = self.groups.write() {
             groups.remove(name);
         }
+        self.bump_generation();
         remove_definition(&self.recording_dir, name);
     }
 
@@ -100,6 +116,7 @@ impl RuleRegistry {
         if let Ok(mut groups) = self.groups.write() {
             groups.insert(group.name.clone(), group);
         }
+        self.bump_generation();
     }
 
     /// Add a pipeline definition.
@@ -113,6 +130,7 @@ impl RuleRegistry {
         if let Ok(mut pipelines) = self.pipelines.write() {
             pipelines.insert(pipeline.name.clone(), pipeline);
         }
+        self.bump_generation();
     }
 
     /// Remove a pipeline by name.
@@ -121,6 +139,7 @@ impl RuleRegistry {
         if let Ok(mut pipelines) = self.pipelines.write() {
             pipelines.remove(name);
         }
+        self.bump_generation();
         remove_definition(&self.pipeline_dir, name);
     }
 

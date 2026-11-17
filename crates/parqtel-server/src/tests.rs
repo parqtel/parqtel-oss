@@ -60,6 +60,7 @@ async fn setup_test_state() -> AppState {
         IngestionService::new(config.storage.clone(), tx),
         LogIngestionService::new(config.logs.clone(), ltx),
         TraceIngestionService::new(config.storage.clone(), ttx),
+        parqtel_pipeline::rule::registry::RuleRegistry::new(),
         QueryExecutor::new(
             index.clone(),
             log_index,

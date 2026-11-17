@@ -122,10 +122,30 @@ pub(crate) async fn run_server(
         &config.logs.data_dir,
         config.ingest.log_wal_enabled,
     )?;
+    // Recording rules and pipelines live beside the alert rules. Load them at
+    // startup and write API-created definitions back into the same directories,
+    // so a restart does not silently lose them.
+    let rules_root = std::path::PathBuf::from(&config.alerts.rules_dir);
+    let recording_dir = rules_root.join("recording");
+    let pipeline_dir = rules_root.join("pipelines");
+    let pipeline_registry = parqtel_pipeline::rule::registry::RuleRegistry::new()
+        .with_dirs(recording_dir.clone(), pipeline_dir.clone());
+    for dir in [&recording_dir, &pipeline_dir] {
+        if let Err(e) = pipeline_registry.load_dir(dir) {
+            tracing::warn!(path = %dir.display(), error = %e, "failed to load rule definitions");
+        }
+    }
+    // Extracted pipeline metrics go through the metrics service, which owns
+    // that signal's WAL and buffer. The channel is bounded: if the metric path
+    // is slower than log ingest, derived metrics are dropped with a warning
+    // rather than growing an unbounded backlog.
+    let (pipeline_metric_tx, mut pipeline_metric_rx) =
+        mpsc::channel::<Vec<parqtel_core::Metric>>(64);
     let log_ingestion_service =
         LogIngestionService::with_wal(config.logs.clone(), log_tx, logs_wal)
             .with_memory_buffer(memory_buffer.clone())
-            .with_contention(contention.clone());
+            .with_contention(contention.clone())
+            .with_pipelines(pipeline_registry.clone(), pipeline_metric_tx);
     let (trace_tx, trace_rx) = mpsc::unbounded_channel::<parqtel_core::storage::PendingIndex>();
     // Span-metrics RED bridge: trace ingestion derives
     // traces_service_{requests,errors,duration_ms} metrics and feeds them
@@ -265,6 +285,7 @@ pub(crate) async fn run_server(
         ingestion_service,
         log_ingestion_service,
         trace_ingestion_service,
+        pipeline_registry,
         query_executor,
         index.clone(),
         config.clone(),
@@ -282,6 +303,19 @@ pub(crate) async fn run_server(
         signals = "metrics, logs, traces",
         "parqtel application state initialized"
     );
+
+    // Pipeline-extracted metrics enter the metrics WAL/buffer through the same
+    // service OTLP metrics use.
+    let pipeline_metrics_task = {
+        let state = state.clone();
+        tokio::spawn(async move {
+            while let Some(metrics) = pipeline_metric_rx.recv().await {
+                if let Err(e) = state.inner.ingestion_service.ingest_metrics(metrics).await {
+                    tracing::warn!(error = %e, "failed to ingest pipeline-extracted metrics");
+                }
+            }
+        })
+    };
 
     // Span-metrics RED consumer: derived metrics flow into the metrics
     // ingestion path as normal OTLP metrics would.
@@ -355,6 +389,7 @@ pub(crate) async fn run_server(
     alert_eval_task.abort();
     grpc_task.abort();
     span_metrics_task.abort();
+    pipeline_metrics_task.abort();
     alert_router_task.abort();
     if let Some(task) = alert_dispatcher_tick_task {
         task.abort();

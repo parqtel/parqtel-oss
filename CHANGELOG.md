@@ -42,13 +42,17 @@ while measuring. Measurements and method are in
 
 ### Added
 
-- **Executable pipeline compiler and PII masker.** YAML pipeline definitions
-  are now compiled into stages with validation at load time (unknown
-  processors, invalid regex, missing fields, unsupported signals). The new
-  `masker` stage rewrites the stored log body and matching attributes, not just
-  the pipeline field map. The `nginx-access-logs.yaml` example compiles and
-  produces its counter and latency metrics; the `/health` router drops the
-  matching rows.
+- **Pipelines execute on live log ingest.** YAML pipeline definitions are now
+  compiled into stages with validation at load time (unknown processors,
+  invalid regex, missing fields, unsupported signals) and applied to live logs
+  with first-match-wins. Extracted metrics are forwarded to the metrics
+  ingestion service through a bounded channel; surviving logs continue through
+  the normal WAL/buffer/writer. WAL replay skips pipeline derivation so a crash
+  does not duplicate derived metrics.
+- **PII masker stage.** The new `masker` stage rewrites the stored log body and
+  matching attributes, not just the pipeline field map. The
+  `nginx-access-logs.yaml` example compiles and produces its counter and
+  latency metrics; the `/health` router drops the matching rows.
 - **Dedicated scan slot for alert evaluation.** Alert evaluation no longer
   competes with queries for the four-slot scan budget; it reserves its own slot
   and reports `parqtel_alert_eval_skipped_total` when a previous cycle still

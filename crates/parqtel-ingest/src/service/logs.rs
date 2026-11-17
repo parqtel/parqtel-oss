@@ -8,12 +8,17 @@ use crate::otel::collector::logs::v1::ExportLogsServiceRequest;
 use bytes::Bytes;
 use parqtel_core::storage::PendingIndex;
 use parqtel_core::wal::WalWriter;
-use parqtel_core::MemoryBuffer;
-use parqtel_core::{ContentionMetrics, Error, LogBlockConfig, LogRecord, Result, SignalType};
+use parqtel_core::{
+    ContentionMetrics, Error, LogBlockConfig, LogRecord, MemoryBuffer, Metric, Result, SignalType,
+};
+use parqtel_pipeline::pipeline::PipelineSet;
+use parqtel_pipeline::rule::registry::RuleRegistry as PipelineRegistry;
 use prost::Message;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, Mutex, RwLock};
+
+type CompiledPipelineCache = Arc<RwLock<Option<(u64, Arc<PipelineSet>)>>>;
 
 /// Public service for ingesting OTLP logs.
 pub struct LogIngestionService {
@@ -22,6 +27,14 @@ pub struct LogIngestionService {
     stats: Arc<IngestionStats>,
     memory_buffer: Option<MemoryBuffer>,
     contention: Option<Arc<ContentionMetrics>>,
+    /// Definitions and their compiled form. The ingest path recompiles only
+    /// when the registry generation changes, so API edits take effect without
+    /// a restart and without compiling on every batch.
+    pipeline_registry: Option<PipelineRegistry>,
+    pipeline_cache: CompiledPipelineCache,
+    /// Extracted metrics are forwarded through the metrics ingestion service,
+    /// which owns the WAL and buffer for that signal.
+    metric_tx: Option<mpsc::Sender<Vec<Metric>>>,
 }
 
 impl LogIngestionService {
@@ -51,7 +64,25 @@ impl LogIngestionService {
             stats: Arc::new(IngestionStats::default()),
             memory_buffer: None,
             contention: None,
+            pipeline_registry: None,
+            pipeline_cache: Arc::new(RwLock::new(None)),
+            metric_tx: None,
         }
+    }
+
+    /// Attach compiled pipelines and the sink for metrics they extract.
+    ///
+    /// The registry is shared with the API so a definition change is picked up
+    /// by the next live batch (WAL replay deliberately does not re-run
+    /// pipelines, otherwise a crash would duplicate derived metrics).
+    pub fn with_pipelines(
+        mut self,
+        registry: PipelineRegistry,
+        metric_tx: mpsc::Sender<Vec<Metric>>,
+    ) -> Self {
+        self.pipeline_registry = Some(registry);
+        self.metric_tx = Some(metric_tx);
+        self
     }
 
     /// Set the shared memory buffer for stream-queryable data.
@@ -84,7 +115,7 @@ impl LogIngestionService {
         .inspect_err(|_| {
             self.stats.failed_batches.fetch_add(1, Ordering::Relaxed);
         })?;
-        self.ingest_logs(logs).await
+        self.ingest_logs_live(logs).await
     }
 
     /// Ingests a request a transport has already decoded (gRPC).
@@ -95,7 +126,7 @@ impl LogIngestionService {
             .inspect_err(|_| {
                 self.stats.failed_batches.fetch_add(1, Ordering::Relaxed);
             })?;
-        self.ingest_logs(logs).await
+        self.ingest_logs_live(logs).await
     }
 
     pub async fn ingest_json(&self, body: Bytes) -> Result<u64> {
@@ -109,7 +140,62 @@ impl LogIngestionService {
         .inspect_err(|_| {
             self.stats.failed_batches.fetch_add(1, Ordering::Relaxed);
         })?;
+        self.ingest_logs_live(logs).await
+    }
+
+    /// Live ingest: run the configured pipelines, forward extracted metrics,
+    /// then write the surviving logs through the normal WAL/buffer path.
+    ///
+    /// WAL replay calls [`Self::ingest_logs`] directly instead, so a crash
+    /// between the log WAL append and the metric WAL append does not derive
+    /// the same metrics twice.
+    pub async fn ingest_logs_live(&self, logs: Vec<LogRecord>) -> Result<u64> {
+        let (logs, metrics) = self.apply_pipelines(logs).await?;
+        if !metrics.is_empty() {
+            if let Some(tx) = &self.metric_tx {
+                if let Err(e) = tx.try_send(metrics) {
+                    tracing::warn!(
+                        error = %e,
+                        "pipeline metric queue is full; dropping extracted metrics"
+                    );
+                }
+            }
+        }
         self.ingest_logs(logs).await
+    }
+
+    async fn apply_pipelines(&self, logs: Vec<LogRecord>) -> Result<(Vec<LogRecord>, Vec<Metric>)> {
+        let Some(registry) = &self.pipeline_registry else {
+            return Ok((logs, Vec::new()));
+        };
+        let generation = registry.generation();
+        let cached = self.pipeline_cache.read().await.clone();
+        let set = match cached {
+            Some((cached_generation, set)) if cached_generation == generation => set,
+            _ => {
+                let definitions = registry.get_pipelines();
+                match PipelineSet::from_definitions(&definitions) {
+                    Ok(compiled) => {
+                        let compiled = Arc::new(compiled);
+                        *self.pipeline_cache.write().await = Some((generation, compiled.clone()));
+                        compiled
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            error = %e,
+                            "pipeline compilation failed; passing logs through unchanged"
+                        );
+                        return Ok((logs, Vec::new()));
+                    }
+                }
+            }
+        };
+        if set.is_empty() {
+            return Ok((logs, Vec::new()));
+        }
+        tokio::task::spawn_blocking(move || set.execute(logs))
+            .await
+            .map_err(|e| Error::Internal(format!("pipeline task failed: {e}")))
     }
 
     /// Ingests already-decoded log records.
