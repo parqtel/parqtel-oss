@@ -1,0 +1,10 @@
+{
+  "parqtel": [
+    {"name": "single_series", "query": "http_requests_total{service.name=\"api\"}"},
+    {"name": "group_by_env", "query": "sum by (env) (rate(http_requests_total[5m]))"}
+  ],
+  "parseable": [
+    {"name": "single_series", "sql": "SELECT * FROM \"api\" LIMIT 10"},
+    {"name": "group_by_env", "sql": "SELECT env, count(*) FROM \"api\" GROUP BY env LIMIT 100"}
+  ]
+}

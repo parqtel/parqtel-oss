@@ -250,6 +250,10 @@ while measuring. Measurements and method are in
 
 ### Documentation
 
+- **Comparative benchmark harness.** `scripts/bench/compare_queries.py` runs a
+  per-engine query set with warmup/runs and emits p50/min/max JSON plus host
+  shape; `docs/performance/comparison.md` records the method and forbids
+  comparing unlike runs.
 - **Edge/single-node mode documented as a product shape.** Topology,
   recommended buffer/series settings, operating checks, and explicit non-goals
   (no replication, object storage, tenants, SQL, or dashboard builder).
