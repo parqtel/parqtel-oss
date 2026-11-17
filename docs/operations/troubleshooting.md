@@ -95,9 +95,10 @@ coalesced 5-minute window.
 
 ## 4. Ingest latency (contention)
 
-Every signal is ingested under one mutex, and a block flush runs while that
-mutex is held. These series make that contention measurable instead of
-requiring a profiler:
+Metrics ingest is sharded (`ingest.rotator_shards`, default 4), so unrelated
+metrics can continue while one shard flushes. Logs and traces each serialize on
+one lock, and a block flush runs while that lock is held. These series make the
+contention measurable instead of requiring a profiler:
 
 | Metric | What it tells you |
 |--------|-------------------|
@@ -145,6 +146,25 @@ very large index or contending background maintenance (compaction/retention).
 Raise `PARQTEL__SERVER__INDEX_PERSIST_INTERVAL_SECS` to write less often, and
 `PARQTEL__SERVER__RETENTION_INTERVAL_SECS` to sweep less often.
 
+### Object storage: uploads or catalog fail
+- **`catalog publish failed` with 403/404** — check the bucket policy
+  (`PutObject`/`GetObject`/`ListBucket` on the prefix) and the region. The
+  process stays up; local ingest continues.
+- **`catalog publish failed ... redirect without LOCATION`** — the configured
+  region is wrong for the bucket.
+- **`.tmp_` keys in the bucket** — an old build uploaded before the atomic
+  rename. Upgrade; do not query those keys.
+- **A query skips a block with a warning** — the object is missing. The scan
+  treats not-found as a skipped block, not a failure.
+- **A query returns 500 with a Parquet footer error** — the object is corrupt.
+  Remove/replace it and delete the cached copy. See
+  [Object storage](object-storage.md#failure-behaviour).
+- **`ca-certificates` / TLS error in the scratch image** — mount a custom CA
+  bundle at `/etc/ssl/certs/ca-certificates.crt`, not at `/etc/ssl/certs`.
+- **Cache grows past `cache_bytes`** — the active block is never evicted, so a
+  quota smaller than one block can be exceeded temporarily. Otherwise check for
+  concurrent large queries and raise the quota.
+
 ### "Invalid timestamp column" / arrow2-era blocks
 After the arrow2 → arrow 60 migration, Parquet blocks written by older builds are unreadable: compaction and scans log `Arrow error: Invalid timestamp column`. **Wipe the data directory** (`data/`, `data/logs/`, `data/traces/`) when upgrading across that boundary — old blocks cannot be converted in place.
 
@@ -152,12 +172,14 @@ After the arrow2 → arrow 60 migration, Parquet blocks written by older builds 
 Two on-disk shapes changed with the L0/L1 work:
 - New metric blocks store labels only in the footer series table, so the
   row-level `labels` column is gone. An older binary cannot read them.
-- The block-index sidecar is now `{"blocks": [...], "label_values": {...}}`. An
-  older binary cannot parse it.
+- The block-index sidecar is now `{"blocks": [...]}` with the autocomplete
+  dictionary in a sibling `label_values.json`. An older binary cannot parse the
+  compressed `PQZ1` sidecar; it also ignores the sibling dictionary.
 
-Forward migration is automatic (the loader still accepts the old sidecar
-shape). **Rolling back** is only safe once the superseded `m_l0_` sources have
-been removed.
+Forward migration is automatic (the loader accepts the legacy bare-array
+sidecar and the inline dictionary, then rewrites the new shape). **Rolling
+back** is only safe once the superseded `m_l0_` sources have been removed and
+the sidecars have been rewritten in the old format.
 
 ### Memory grows with points instead of series
 The label interner lets every point of a series share one copy of its labels.
@@ -183,12 +205,15 @@ If the compose stack behaves oddly after a source change (panics referencing the
 - **SLI push interval**: `export_interval_secs` (default 30).
 
 ### Profiling endpoints 404
-`/debug/pprof/{profile,summary,memory}` return 404 unless `telemetry.profiling_enabled = true`. Enable it, then capture a profile and view the flamegraph:
+`/debug/pprof/profile` and `/debug/pprof/summary` return 404 unless
+`telemetry.profiling_enabled = true`. `/debug/pprof/memory` is always
+available. Enable profiling, then capture a profile and view the flamegraph:
 ```bash
 curl -o profile.pb.gz http://localhost:8080/debug/pprof/profile?seconds=30
 go tool pprof -http=:0 profile.pb.gz
 ```
-Restrict these endpoints with a NetworkPolicy in Kubernetes — they expose runtime internals.
+Restrict all three with a NetworkPolicy in Kubernetes — they expose runtime
+internals.
 
 ## 6. MCP Connectivity
 

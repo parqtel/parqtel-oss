@@ -12,13 +12,7 @@ This page shows how to:
 
 Argo Rollouts gates each progressive-delivery step on **AnalysisRuns**. Each AnalysisRun evaluates one or more *metrics*; a *provider* fetches a measurement, and `successCondition` / `failureCondition` expressions decide pass/fail. Parqtel is the data source behind the provider:
 
-```
-Rollout ──(canary step)──▶ AnalysisRun ──▶ Prometheus provider ──HTTP──▶ Parqtel /api/v1/query
-                                                                          │
-                                                                      ParQL (PromQL) over
-                                                                      OTel metrics + derived
-                                                                      RED span-metrics
-```
+![Argo Rollouts flow: a canary step starts an AnalysisRun; the stock Prometheus provider calls Parqtel's query API; ParQL evaluates OTel metrics and derived RED span metrics and the rollout passes or fails](../assets/diagrams/argo-rollouts-flow.svg)
 
 The provider is stock Argo Rollouts; only `provider.prometheus.address` points at Parqtel.
 

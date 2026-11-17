@@ -60,7 +60,7 @@ pipelines:
         action: drop
 ```
 
-Valid stage `type` values are `preprocessor`, `processor`, `metric_extract`, `masker`, and `router`; metric stages take `metric_name`/`metric_type`/`value_field`/`dimensions`/`condition`, and filtering uses `condition:` (`field`/`op`/`value`) — not a `filter:` expression. See [docs/operations/configuration.md](../operations/configuration.md#pipeline-yaml-schema) for the full schema.
+Valid stage `type` values are `preprocessor`, `processor`, `metric_extract`, `masker`, and `router`; metric stages take `metric_name`/`metric_type`/`value_field`/`dimensions`/`condition`, and filtering uses `condition:` (`field`/`op`/`value`) — not a `filter:` expression. See [docs/operations/configuration.md](../operations/configuration.md#pipeline-yaml) for the full schema.
 
 ### Step 2: Stream Logs to Parqtel
 Use an OTLP-compatible collector (like the OpenTelemetry Collector) to tail Nginx logs and send them to `http://parqtel:9090/v1/logs` (port 9090 in the compose stack; 8080 for a bare `parqtel serve`).
@@ -112,9 +112,25 @@ curl -X POST http://localhost:3007/mcp -H 'Content-Type: application/json' \
        "params":{"name":"get_alert_history","arguments":{"since_hours":1}}}'
 ```
 
-Parqtel does not dispatch notifications to Slack, PagerDuty or email itself. Use
-the alert stream from your own automation, or have an agent poll it through the
-MCP server above.
+Parqtel dispatches firing and resolved alerts itself when routing is configured.
+Add a receiver and route in `[alerting.routing]` (Slack, PagerDuty, Teams or a
+generic webhook), or keep the legacy webhook table for a single sink. Delivery
+is fail-closed for private addresses by default; opt in explicitly for an
+internal receiver. See [Alerting](../operations/alerting.md).
+
+```toml
+[[alerting.routing.receivers]]
+name = "slack-oncall"
+[[alerting.routing.receivers.slack_configs]]
+webhook_url = "${SLACK_WEBHOOK_URL}"
+send_resolved = true
+
+[alerting.routing.route]
+receiver = "slack-oncall"
+group_by = ["service.name"]
+```
+
+Use `POST /api/v1/alerts/test_route` to dry-run a label set without sending.
 
 ---
 

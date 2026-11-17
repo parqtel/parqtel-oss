@@ -29,7 +29,7 @@ Key mechanics:
 - **Concurrency**: `cancel-in-progress` kills superseded runs on the same branch — pushing five commits in a row bills once.
 - **Path gating** (`dorny/paths-filter`): Helm lint doesn't run because you edited a README; Docker doesn't build because you touched a chart.
 - **Docker smoke test**: after building the image, the job boots it, waits for `/health`, and checks `/metrics`. A scratch-based image that compiles but doesn't serve fails the PR.
-- **Docs check**: `scripts/checks/check_docs.py` (run locally with `make docs-check`) verifies that every relative link and anchor resolves, that every repository path quoted in the docs exists, and that the OpenAPI spec and the Axum router describe the same set of endpoints.
+- **Docs check**: `scripts/checks/check_docs.py` (run locally with `make docs-check`) verifies that every relative link, anchor, embedded image and quoted repository path resolves, that the OpenAPI spec and the Axum router describe the same endpoints, and that no Markdown file contains a Mermaid fence. Diagrams render as self-contained animated SVG.
 - **`--locked` everywhere**: CI builds exactly what's pinned in `Cargo.lock`; dependency drift fails loudly instead of silently changing the tested surface.
 - **`-D warnings` scoped to clippy only**: setting it globally via `RUSTFLAGS` also compiles *dependencies* with warnings-as-errors and breaks spuriously when new rustc lints land upstream.
 - **Least privilege**: workflow-level `permissions: contents: read`; no write tokens in the PR lane.
@@ -37,14 +37,7 @@ Key mechanics:
 
 ### `release.yml` — tag push (`v*`)
 
-```
-test ──┬─► build-binaries (4 targets, --locked)
-       ├─► docker-publish (multi-arch, SBOM + provenance attestation)
-       │        ├─► trivy-scan (SARIF → Security tab)
-       │        ├─► sign-image (cosign keyless)
-       │        └─► helm-publish (OCI chart)
-       └────────────────────► github-release ─► notify-homebrew-tap (repository_dispatch)
-```
+![Release pipeline: the tag test gate runs first; binaries, Docker and Helm publish; Docker feeds Trivy scan and cosign signing; the GitHub release is created after the gates and notifies the Homebrew tap](../assets/diagrams/ci-release-pipeline.svg)
 
 The new `test` gate re-runs clippy `-D warnings` + the full workspace suite on the tagged commit. Tags can point at stale commits — without this gate a tag could publish binaries that were never validated.
 

@@ -11,6 +11,27 @@ build cannot reach a registry or the release page.
 
 ## [Unreleased]
 
+### Documentation (current refresh)
+
+- **README hero and current positioning.** Added an animated SVG hero, corrected
+  the status/version, feature matrix, API surface, storage design and security
+  caveats, and replaced the Mermaid architecture block with an animated SVG.
+- **Configuration reference rebuilt against `parqtel-core/src/config/`.** Every
+  section, key, default, validation rule and environment-variable example now
+  covers server/TLS, storage, logs, ingest, Kafka, tail sampling, query, UI,
+  object storage, auth/OIDC, audit, alerts/presets, legacy notifications,
+  Alertmanager routing/egress, telemetry and the two explicitly inert sections.
+- **New operations guides.** Object storage (S3 bucket policy, shared catalog,
+  cache, failure modes), security (tokens, OIDC, TLS, datasets, audit, egress)
+  and alerting (evaluation, routing, grouping, inhibition, receivers).
+- **New ingestion guide.** OTLP gRPC/HTTP, generic JSON, remote_write, Kafka,
+  live pipelines, RED/tail sampling, limits and verification.
+- **SVG-only diagrams.** Architecture, ingestion, object storage, security,
+  configuration, edge topology and alert delivery are self-contained animated
+  SVG; `make docs-check` now rejects Mermaid fences.
+- **Corrected stale claims** about S3 support, TLS, notification delivery,
+  authentication, object-store multi-writer behaviour, log/trace projection,
+  the compressed sidecar shape and profiling endpoints.
 ### Fixed
 
 - **S3 block upload used temporary names.** Uploads now happen only after the

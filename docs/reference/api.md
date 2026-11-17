@@ -13,7 +13,9 @@ default). The Docker Compose stack publishes Parqtel on `9090` — see
 | Port | Protocol | Default | Note |
 |---|---|---|---|
 | `8080` | HTTP | `server.bind_address` = `0.0.0.0:8080` | API, embedded UI, Prometheus scrape |
-| `4317` | gRPC | `server.grpc_bind_address` = `0.0.0.0:4317` | OTLP gRPC, the OTel SDK default. Empty string disables it |
+| `4317` | gRPC | `server.grpc_bind_address` = `0.0.0.0:4317` | OTLP gRPC, the OTel SDK default. Empty string disables it. No token layer |
+
+Authentication adds `/auth/login` and `/auth/callback` when OIDC is enabled.
 
 The Compose stack overrides the HTTP port to **`9090`**
 (`deploy/compose/parqtel/config/dev.toml`) so it does not collide with
@@ -105,12 +107,16 @@ final partial step is not evaluated — the same as Prometheus.
 | GET | `/api/v1/rules/status` | Registry generation, definitions, load errors, and persisted ruler state |
 
 > **Mutation gate.** Route, recording-rule, and pipeline `POST`/`PUT`/`DELETE`
-> endpoints return `403` unless `alerts.allow_runtime_updates = true`. The OSS
-> build has no authentication; enable this only behind an authenticating proxy.
-> Mutations are persisted: routes to `data/alert_routes.json`, definitions to
-> `rules/recording/` and `rules/pipelines/`, and both are reloaded at startup.
-> Creating a definition validates its expressions and compiles pipelines first;
-> a bad definition returns `400` with the stage or rule name and is not stored.
+> endpoints return `403` unless `alerts.allow_runtime_updates = true`. Enable it
+> only behind `admin` auth or an authenticating proxy. Mutations are persisted:
+> routes to `data/alert_routes.json`, definitions to `rules/recording/` and
+> `rules/pipelines/`, and both are reloaded at startup. Creating a definition
+> validates its expressions and compiles pipelines first; a bad definition
+> returns `400` with the stage or rule name and is not stored.
+>
+> When `[auth]` is enabled, data routes require a token/OIDC identity: `read`
+> for queries and metadata, `write` for ingest, `admin` for mutations. `/health`,
+> `/ready`, `/ui`, `/oas`, `/`, `/auth/login` and `/auth/callback` stay public.
 
 ## Grafana SimpleJSON
 
@@ -133,7 +139,7 @@ final partial step is not evaluated — the same as Prometheus.
 | GET | `/api/v1/ingest_rates` | Live per-signal rates: current plus 60s/5m/15m averages, `gap_secs`, sparkline via `history_secs` (default 180s, max 900s) |
 | GET | `/debug/pprof/profile` | CPU profile (404 unless `telemetry.profiling_enabled`) |
 | GET | `/debug/pprof/summary` | Profile summary (404 unless enabled) |
-| GET | `/debug/pprof/memory` | Memory profile (404 unless enabled) |
+| GET | `/debug/pprof/memory` | Memory snapshot (always available) |
 | GET | `/oas` | OpenAPI 3.0 specification |
 | GET | `/ui` | Built-in web console |
 

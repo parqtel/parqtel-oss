@@ -10,7 +10,7 @@ Parqtel is a Rust workspace composed of several specialized crates. This modular
 
 Every crate is a directory under `crates/`, one per concern.
 
-- **`parqtel-core`**: The heart of the system. Contains the `StorageEngine` trait, the `BlockIndex`, the write-ahead log, the shared data models (`Metric`, `LogRecord`, `Span`) and the layered configuration. Depends on no other workspace crate.
+- **`parqtel-core`**: The heart of the system. Contains the `BlockStore`/`StorageEngine` seams, the `BlockIndex`, the write-ahead log, the shared data models (`Metric`, `LogRecord`, `Span`), the scanner/compactor and the layered configuration. Depends on no other workspace crate.
 - **`parqtel-ingest`**: Handles the heavy lifting of OTLP decoding. It manages the `BlockRotator` and ensures crash-safe writes to Parquet.
 - **`parqtel-query`**: Contains the query execution engine. It handles PromQL parsing and coordinates data retrieval from the storage layer.
 - **`parqtel-alert`**: Alert rules, the evaluation loop, the state machine and the built-in preset packs.
@@ -18,26 +18,33 @@ Every crate is a directory under `crates/`, one per concern.
 - **`parqtel-server`**: The Axum-based HTTP entry point — routes, middleware, telemetry, and the embedded console. The binary is named `parqtel`, not `parqtel-server`.
 - **`parqtel-mcp-core`** and **`parqtel-mcp-parqtel`**: the Model Context Protocol framework and the Parqtel query/observability MCP server.
 
-See [Diagrams](diagrams.md#2-crate-dependency-graph) for the dependency graph.
+See [Diagrams](diagrams.md) and [Architecture](architecture.md#2-crate-dependency-graph) for the dependency graph.
 
-## 2. Extending the Storage Engine
+## 2. Extending block storage
 
-Parqtel uses a registry pattern for storage backends. If you want to add a new backend (e.g., S3 or a different file format):
+There are two seams, and they solve different problems:
 
-1. **Implement the Trait**: Define your backend by implementing the `StorageEngine` trait found in `crates/parqtel-core/src/engine/mod.rs`.
-   ```rust
-   #[async_trait]
-   pub trait StorageEngine: Send + Sync {
-       async fn write_metrics_batch(&self, metrics: Vec<Metric>) -> Result<WrittenBlockMeta>;
-       async fn write_logs_batch(&self, logs: Vec<LogRecord>) -> Result<WrittenBlockMeta>;
-       async fn scan_metrics(&self, request: MetricScanRequest) -> Result<Vec<DataPoint>>;
-       async fn scan_logs(&self, request: LogScanRequest) -> Result<Vec<LogRecord>>;
-       async fn compact_metrics(&self) -> Result<CompactionStats>;
-       async fn compact_logs(&self) -> Result<CompactionStats>;
-       // ... expiry and stats methods
-   }
-   ```
-2. **Register the Backend**: Add your implementation to the `StorageEngineRegistry`.
+- **`StorageEngine`** (`crates/parqtel-core/src/engine/`) is the write/compaction
+  registry. Only the `parquet` backend ships. Adding a new format means
+  implementing the trait and registering it.
+- **`BlockStore`** (`crates/parqtel-core/src/storage/block_store.rs`) is the I/O
+  seam used by the scanner, compaction and retention. `LocalBlockStore` and
+  `ObjectBlockStore` implement it. Object storage does **not** implement a
+  second engine: it keeps the same Parquet blocks and materialises a cache file
+  for `Seek`.
+
+To add an object-storage provider:
+
+1. Build an `object_store::ObjectStore` implementation.
+2. Construct `ObjectBlockStore` with the store, prefix, cache directory, cache
+   quota and Tokio handle.
+3. Install it once with `block_store::install`.
+4. Publish a `CatalogBlock` after the local block is durable; the shared
+   catalog uses compare-and-swap and writer-owned retirement.
+
+See [Object storage](../operations/object-storage.md) for the operational
+contract and [ADR 0001](adr-0001-object-storage.md) for why the seam is
+`BlockStore`, not `StorageEngine`.
 
 ## 3. Working on the Embedded UI
 
@@ -53,7 +60,7 @@ The web console (`crates/parqtel-server/src/ui.html`) is a single-file vanilla-J
     --virtual-time-budget=15000 http://localhost:8080/ui
   ```
   Any `Uncaught SyntaxError`/`ReferenceError` lines in stderr indicate a regression.
-- **Design system**: semantic CSS tokens, inline SVG icon sprite, WCAG AA contrast, `prefers-reduced-motion` support. The console is a single embedded file (`crates/parqtel-server/src/ui.html`) with no external requests and no framework — see [Architecture](architecture.md#11-embedded-web-ui).
+- **Design system**: semantic CSS tokens, inline SVG icon sprite, WCAG AA contrast, `prefers-reduced-motion` support. The console is a single embedded file (`crates/parqtel-server/src/ui.html`) with no external requests and no framework — see [Architecture](architecture.md#12-console-and-mcp).
 
 ## 4. Adding a New MCP Tool
 

@@ -14,15 +14,18 @@ Rust provides the memory safety and performance required for high-throughput ing
 ### Storage
 
 #### How do I back up my data?
-Since Parquet blocks are immutable once written, you can simply use `rsync` or cloud snapshots to back up the `data/` directory. Each signal directory also holds its `index.json` sidecar (block index) — include it for faster startups after restoration.
+Parquet blocks are immutable once written, so `rsync` or a filesystem snapshot of the `data/` directory is safe. Include each signal's `index.json` and `label_values.json` for a faster startup; reconciliation can rebuild a missing index from block footers. With object storage enabled, enable bucket versioning (or replicate the bucket) as well as backing up the local WAL and cache.
 
-#### Can I store data in S3/GCS?
-Currently, Parqtel stores data on the local filesystem. Support for S3-compatible object storage as a "cold tier" is not yet supported.
+#### Can I store data in S3/GCS/Azure?
+Yes for S3-compatible storage: set `[object_store]` and Parqtel uploads final Parquet blocks after the local rename, keeps a bounded LRU read cache, and shares a versioned catalog across nodes. GCS and Azure Blob are not implemented. See [Object storage](../operations/object-storage.md).
+
+#### Is Parqtel multi-writer?
+No. Run one writer per data root or object-store prefix. Additional nodes can read/adopt blocks from the shared catalog, but there is no writer fencing.
 
 ### Ingestion
 
 #### Does Parqtel support scraping?
-No. Parqtel is a **push-based** backend. We recommend using the **OpenTelemetry Collector** to scrape your targets and export them to Parqtel via OTLP.
+Parqtel does not run a Prometheus scrape loop. It is push-first: use the **OpenTelemetry Collector** to scrape and export OTLP, or point Prometheus `remote_write` at `POST /api/v1/write`.
 
 #### Why doesn't my metric show up in instant queries?
 `/api/v1/query` uses a 5-minute lookback window (`query.lookback_delta_ns`, default 300s — the Prometheus default). Send data stamped within the last 5 minutes, or use `/api/v1/query_range` with an explicit range covering your flushed blocks.
@@ -46,7 +49,7 @@ spans/s. The method and the raw outputs are in
 by disk I/O and by how many blocks a query has to touch.
 
 #### How does high cardinality affect performance?
-Unlike traditional TSDBs, Parqtel handles high cardinality (e.g., `user_id`, `container_id`) exceptionally well because of its columnar format. Adding more labels increases the file size slightly but does not "explode" memory usage in the same way it does in Prometheus.
+Parquet stores labels in a per-block series table rather than on every row, so a high-cardinality series set costs less than a row-per-label TSDB. It is still a real cost: the series table, label interner, and query fan-out grow with active series. `ingest.series_limit_per_metric` (default 1M) caps new series per metric, and `ingest.label_interner_capacity` should be at least twice the active series count.
 
 ### Integration
 
@@ -60,7 +63,7 @@ Three built-in mechanisms:
 - **`/metrics`** — Prometheus exposition of internal counters (`parqtel_batches_received_total`, `parqtel_storage_blocks`, and friends) for dashboards and alerting.
 - **OTLP self-telemetry** — set `telemetry.otlp_enabled = true` (plus `otlp_endpoint`, `export_interval_secs`, `otlp_trace_level`) and Parqtel exports its own traces and SLI metrics to a collector, exactly like any other service it ingests from.
 
-For CPU/memory profiling during tuning, set `telemetry.profiling_enabled = true` (with `profiling_frequency`) and scrape the `/debug/pprof/{profile,summary,memory}` endpoints — they 404 while profiling is disabled.
+For CPU/memory profiling during tuning, set `telemetry.profiling_enabled = true` (with `profiling_frequency`) and scrape `/debug/pprof/profile` or `/summary`. `/debug/pprof/memory` is always available. Restrict these endpoints to an internal network.
 
 #### How does the MCP server work?
 `parqtel-mcp-parqtel` is a lightweight Streamable HTTP (`/mcp`) server built on `parqtel-mcp-core` that translates LLM tool calls into Parqtel HTTP API queries (`/api/v1/query`, `/api/v1/logs`, `/api/v1/alerts`, `/api/v1/ingest_rates`, `/api/v1/stats`). It gives AI agents read access to your metrics, logs, alerts, and observed topology during an incident. See [MCP Integration](../guides/mcp.md).

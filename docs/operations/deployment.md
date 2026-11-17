@@ -1,6 +1,11 @@
 # Deployment Guide
 
-Parqtel supports multiple deployment methods, from a single Docker container to production Kubernetes clusters. It is **single-writer**: every process owns one local data directory, so replicas must stay at 1 until shared storage lands.
+Parqtel supports multiple deployment methods, from a single Docker container to
+production Kubernetes clusters. It is **single-writer per data root**: every
+process owns its WAL, buffer, indexes and compaction. An optional S3-compatible
+bucket shares a catalog and lets reader nodes adopt blocks, but there is no
+writer fencing — keep one writer per prefix and keep the Helm replica count at
+1.
 
 ## Docker (Single Container)
 
@@ -13,7 +18,7 @@ docker build -t parqtel:local .
 The Dockerfile uses a multi-stage cargo-chef build:
 - **Builder**: `rust:1.88-slim` (chef → planner → builder) with pkg-config, cmake, make, g++, protobuf-compiler, and libcurl4-openssl-dev (librdkafka OAuthbearer builds need `<curl/curl.h>`)
 - **Probe**: a std-only Rust `healthcheck` binary used by the image `HEALTHCHECK`
-- **Runtime**: a `runtime-libs` stage collects only the glibc/libgcc the binary needs, then `FROM scratch` ships that minimal rootfs (~15 MB final image, no shell)
+- **Runtime**: a `runtime-libs` stage collects only the glibc/libgcc and CA bundle the binary needs, then `FROM scratch` ships that minimal rootfs (no shell; current image is roughly 60 MB)
 
 ### Run
 
@@ -136,7 +141,7 @@ Pre-configured value files for different environments:
 The chart (`deploy/helm/parqtel`) includes:
 
 - **Deployment** with configurable resources and probes; `replicaCount` is capped at 1
-- **HorizontalPodAutoscaler** — reserved; enabling >1 replica is rejected because each pod owns a disjoint data directory
+- **HorizontalPodAutoscaler** — reserved; >1 replica is rejected because each pod owns a disjoint data directory and object storage has no writer fencing
 - **PodDisruptionBudget** — ensures availability during rollouts
 - **NetworkPolicy** — restricts ingress/egress traffic
 - **ServiceMonitor** — Prometheus Operator integration
@@ -288,9 +293,16 @@ sudo journalctl -u parqtel -f
 
 ### Storage
 
-- Use SSDs for the data directory — Parquet benefits from fast sequential reads
-- Size storage for: `(ingest_rate × retention_days) / compression_ratio`
-- Typical compression ratio with Zstd: 10-20x
+- Use SSDs for the data directory — Parquet benefits from fast sequential reads.
+  The read cache and WAL staging area are also latency-sensitive.
+- Size storage for: `(ingest_rate × retention_days) / compression_ratio`.
+  Typical compression ratio with Zstd: 10-20x.
+- `storage.data_dir` holds metrics and trace blocks; `logs.data_dir` is
+  separate. Trace blocks live under `<data_dir>/traces`.
+- For object storage, follow [Object storage](object-storage.md). One writer per
+  prefix; readers may adopt blocks; compaction/retention stay on the writer.
+- The cache is bounded by `object_store.cache_bytes`; size it for the working
+  set of blocks a query touches, not the whole bucket.
 
 ### Memory
 
@@ -306,9 +318,15 @@ sudo journalctl -u parqtel -f
 
 ### Networking
 
-- Place behind a reverse proxy (nginx, envoy) for TLS termination
-- Configure `max_body_size` to match your proxy's limit
-- Use health check endpoint (`/health`) for load balancer probes
+- Prefer in-process TLS (`[server.tls]`) or a reverse proxy. If a proxy
+  terminates TLS, do not publish `:8080` or `:4317` directly.
+- Enable `[auth]` (tokens/OIDC) when the network is not fully trusted. OTLP
+  gRPC has no token layer; keep it on a private listener.
+- Configure `ingest.max_body_size` to match your proxy's limit.
+- Use `/health` for liveness and `/ready` for readiness. `/ready` checks local
+  storage, not S3 reachability.
+- For object storage, allow outbound HTTPS to the bucket endpoint and mount a
+  custom CA at `/etc/ssl/certs/ca-certificates.crt` if needed.
 
 ### Monitoring
 

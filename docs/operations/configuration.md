@@ -521,6 +521,15 @@ severity, default `info`), `match_labels`, `webhook_url`, `repeat_minutes`
 (parsed; repeats are tracked by the router). The first matching route wins.
 This table is used only when `[alerting.routing]` is absent.
 
+```toml
+[[alerts.notifications.routes]]
+name = "slack-critical"
+match_severity = "critical"
+match_labels = { team = "platform" }
+webhook_url = "${SLACK_WEBHOOK_URL}"
+repeat_minutes = 240
+```
+
 ### Egress policy
 
 Both the legacy router and the Alertmanager dispatcher check every outbound

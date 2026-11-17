@@ -17,12 +17,7 @@ observability data through a standardized JSON-RPC interface:
 
 ## Architecture
 
-```
-┌──────────────────┐     JSON-RPC      ┌─────────────────────┐     HTTP API     ┌─────────┐
-│   LLM / Agent    │ ◄──────────────── │  parqtel-mcp-parqtel│ ───────────────► │ Parqtel │
-│  (Claude, GPT)   │ ────────────────► │  (:3007 → :3000)    │ ◄─────────────── │ (:8080) │
-└──────────────────┘                    └─────────────────────┘                  └─────────┘
-```
+![MCP topology: an LLM or agent speaks JSON-RPC to parqtel-mcp-parqtel over Streamable HTTP, which calls the Parqtel HTTP API; Parqtel reads local or S3-backed telemetry](../assets/diagrams/mcp-topology.svg)
 
 The MCP server:
 
@@ -139,7 +134,7 @@ Snapshot the observed service landscape: indexed service names, storage stats, a
 | `namespace` | string | | Optional namespace filter |
 
 ### `get_noise_statistics`
-Return per-rule alert noise statistics: total/firing/resolved alert counts. Noise scores are reserved and currently `0.0`.
+Return per-rule alert noise statistics: total/firing/resolved alert counts, average and maximum `noise_score`. The score is derived from each instance's transition history: unacknowledged firings that later resolve score high; acknowledged or still-firing alerts score low.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|

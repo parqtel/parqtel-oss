@@ -46,9 +46,10 @@ keeping it resident in glibc arenas.
 open; the OTLP gRPC listener has no token layer even when HTTP auth is enabled.
 
 **Mitigating now.** Enable `[auth]` with `read`/`write`/`admin` bearer tokens
-for HTTP, and keep gRPC behind a proxy or mesh. Auth is disabled by default so
-the single-user/edge topology keeps working; do not expose `8080` or `4317`
-without either auth or a network boundary.
+and/or OIDC for HTTP, and keep gRPC behind a proxy or mesh. Auth is disabled by
+default so the single-user/edge topology keeps working; do not expose `8080` or
+`4317` without either auth or a network boundary. In-process TLS is available;
+it does not add authentication by itself.
 
 ---
 
@@ -152,6 +153,36 @@ from the previous evaluation.
 - Watch `parqtel_scan_background_slots_in_use` against
   `parqtel_scan_background_slots_limit` and
   `parqtel_alert_eval_skipped_total`.
+
+---
+
+## A corrupt object fails the whole query
+
+**Symptom.** With object storage enabled, a query returns HTTP 500 and a
+Parquet footer error even though other blocks are healthy.
+
+**Why.** A missing object is treated as not-found and skipped. A **corrupt**
+object cannot be decoded, so the scan returns an error rather than silently
+returning partial results.
+
+**Mitigating now.** Identify the key from the server log, remove or replace the
+corrupt object, and retry. If the data is still in the local cache, delete the
+cached copy so it is re-fetched. Narrow the query range to exclude the block
+while you repair it. See [Object storage](object-storage.md#failure-behaviour).
+
+---
+
+## Object storage is one-writer-per-prefix
+
+**Symptom.** Two Parqtel writers publish to the same bucket prefix and blocks
+or catalog entries intermittently disappear.
+
+**Why.** The shared catalog uses compare-and-swap and writer-owned retirement,
+but there is no lease/fencing protocol. Concurrent writers can overwrite each
+other's compaction outputs.
+
+**Mitigating now.** Use one writer per prefix. Reader nodes may adopt blocks
+from that prefix. Run compaction and retention only on the writer.
 
 ---
 

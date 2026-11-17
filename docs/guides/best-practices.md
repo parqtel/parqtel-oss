@@ -39,12 +39,27 @@ Parquet is a columnar format that benefits from fast sequential and random reads
 ## 3. Security Hardening
 
 ### TLS Termination
-Parqtel does not natively support TLS. **Always** place Parqtel behind a reverse proxy (Nginx, Envoy, or HAProxy) or use a Service Mesh (Istio, Linkerd) to terminate TLS.
+Parqtel supports in-process TLS for HTTP and OTLP gRPC via `[server.tls]`. A
+reverse proxy or service mesh is still useful for certificate automation,
+request logging, rate limiting and a single public entry point. If TLS
+terminates at a proxy, keep `:8080` and `:4317` private.
 
 ### Authentication
-Parqtel endpoints are open by default. Use your reverse proxy to implement:
-- **Basic Auth** or **OAuth2** for the Query API and UI.
-- **IP Allow-listing** for the OTLP Ingestion API.
+HTTP authentication is optional and off by default. Enable scoped bearer tokens
+and/or OIDC when the network is not fully trusted:
+
+```toml
+[auth]
+enabled = true
+# [[auth.tokens]] ...
+```
+
+`read` covers queries, `write` adds ingest, and `admin` adds mutations. OTLP gRPC
+has no token layer — protect `:4317` with a proxy, mesh or private listener.
+Keep `alerts.allow_runtime_updates = false` unless the admin surface is
+authenticated. Alert delivery is fail-closed for private destinations; opt in
+with `[alerting.routing.egress].allow_hosts` rather than `allow_private = true`
+where possible.
 
 ### Network Isolation
 In Kubernetes, use **NetworkPolicies** to restrict access:
@@ -69,6 +84,19 @@ Don't let your monitoring tool go unmonitored!
 
 ## 5. High Availability (HA)
 
-Parqtel is currently designed as a single-node engine. For HA:
-1. **Replication**: Run two identical Parqtel instances and have your OTLP collector "load balance" or "mirror" data to both.
-2. **Persistence**: Use a Persistent Volume Claim (PVC) in Kubernetes with `ReadWriteOnce` and rely on K8s to restart the pod on a healthy node if one fails.
+Parqtel is a single-writer engine. Object storage shares a catalog across
+nodes, but there is no writer fencing; do not point two writers at one prefix.
+
+For HA:
+1. **Mirror ingest**: Send the same OTLP stream to two independent instances
+   with separate data roots, or use the collector's queued retry and run one
+   writer with fast restart.
+2. **Persistence**: Use a PersistentVolumeClaim with `ReadWriteOnce` and let
+   Kubernetes reschedule the pod. WAL replay recovers acknowledged writes.
+3. **Read replicas**: A second node can adopt blocks from the same S3 prefix
+   and serve queries, but keep compaction/retention on the writer.
+4. **Failure detection**: Alert on `/ready`, `parqtel_flush_*`,
+   `parqtel_process_rss_bytes`, catalog/upload warnings and disk pressure.
+
+For true multi-writer scale-out, use separate prefixes and aggregate at query
+time or with recording rules; do not rely on concurrent compaction.

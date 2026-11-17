@@ -1,6 +1,6 @@
 # ADR 0001: Object storage uses a block-store seam, not `StorageEngine`
 
-Status: accepted; P2-02 local seam implemented
+Status: accepted and implemented; one writer per prefix
 
 ## Context
 
@@ -18,13 +18,12 @@ code path. It would not make a server query read from a bucket.
 Introduce a `BlockStore` seam used by the code that actually owns blocks:
 
 ```rust
-#[async_trait]
 pub trait BlockStore: Send + Sync {
-    async fn put(&self, key: &str, bytes: &[u8]) -> Result<BlockVersion>;
-    async fn get(&self, key: &str) -> Result<Arc<[u8]>>;
-    async fn head(&self, key: &str) -> Result<Option<BlockMeta>>;
-    async fn list(&self, prefix: &str) -> Result<Vec<BlockMeta>>;
-    async fn delete(&self, key: &str, version: &BlockVersion) -> Result<()>;
+    fn open(&self, key: &Path) -> Result<File>;
+    fn delete(&self, key: &Path) -> Result<bool>;
+    fn head(&self, key: &Path) -> Result<Option<BlockObject>>;
+    fn list(&self, prefix: &Path) -> Result<Vec<BlockObject>>;
+    fn publish(&self, key: &Path) -> Result<()>;
 }
 ```
 
@@ -48,7 +47,10 @@ and CAS version for the catalog manifest; writers merge by block key, and
 the server's catalog task publishes local blocks and adopts remote ones.
 P2-05 is implemented: compaction and retention read/delete through
 `BlockStore`, and catalog blocks carry a writer field so retirement is scoped
-to the node that owns them.
+to the node that owns them. The 2026-11 object-storage QA found and fixed
+temporary-name uploads, local staging resurrection, an encoded catalog key,
+trace-block reconciliation and active-cache eviction; those fixes are part of
+the current implementation.
 
 ## Shared catalog
 
@@ -58,8 +60,9 @@ Phase 2 therefore adds a per-signal manifest:
 ```json
 {
   "generation": 42,
-  "writer_lease": "node-a/2026-11-17T10:00:00Z",
-  "blocks": [{"key": "...", "start_ns": 0, "end_ns": 0, "rows": 0, "bytes": 0}]
+  "writer_lease": "node-a",
+  "blocks": [{"key": "...", "start_timestamp_ns": 0, "end_timestamp_ns": 0,
+              "row_count": 0, "size_bytes": 0, "writer": "node-a"}]
 }
 ```
 
@@ -84,8 +87,12 @@ deleted.
 ## Consequences
 
 - P2-02 is a refactor with parity tests in local mode; no behavior change.
-- P2-03 adds S3 and a local read cache; single-writer upload first.
-- P2-04 is the multi-node gate; without it, multiple pods must not write.
-- P2-05 ports compaction/retention and is where most object-store edge cases
+- P2-03 added S3 and a local read cache; uploads happen after the final rename.
+- P2-04 added the shared catalog; readers can adopt blocks, but it is not a
+  writer lease.
+- P2-05 ported compaction/retention and is where most object-store edge cases
   live.
-- The Helm single-writer guard remains until P2-04 lands.
+- The Helm single-writer guard remains because there is **no writer fencing**.
+  One writer per prefix is the supported topology.
+- GCS and Azure Blob are still out of scope; the seam is generic, but only S3 is
+  wired.
