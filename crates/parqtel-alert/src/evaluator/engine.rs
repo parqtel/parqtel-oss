@@ -1,106 +1,25 @@
 use chrono::Utc;
 use std::collections::BTreeMap;
-use std::sync::Arc;
-use std::time::Duration;
 use tokio::sync::mpsc;
-use tokio::task::JoinSet;
 use ulid::Ulid;
 
 use crate::evaluator::threshold::evaluate_threshold;
-use crate::rule::registry::AlertRuleRegistry;
 use crate::rule::types::AlertRule;
 use crate::state::machine::{AlertState, AlertStateMachine, TransitionEvent};
 use crate::store::alert_store::AlertStore;
 use crate::{AlertFiringEvent, AlertInstance};
 
-/// Configuration for the evaluation engine.
-#[derive(Debug, Clone)]
-pub struct EvalConfig {
-    pub evaluation_interval_secs: u64,
-    pub evaluation_timeout_secs: u64,
-}
-
-/// The background evaluation engine.
+/// Applies threshold outcomes to alert state and emits firing/resolved events.
+/// The query loop lives in `parqtel-server::tasks`; this type only owns the
+/// state machine and event sender.
 pub struct EvaluationEngine {
-    config: EvalConfig,
-    registry: AlertRuleRegistry,
     store: AlertStore,
     event_tx: mpsc::UnboundedSender<AlertFiringEvent>,
 }
 
 impl EvaluationEngine {
-    pub fn new(
-        config: EvalConfig,
-        registry: AlertRuleRegistry,
-        store: AlertStore,
-        event_tx: mpsc::UnboundedSender<AlertFiringEvent>,
-    ) -> Self {
-        Self {
-            config,
-            registry,
-            store,
-            event_tx,
-        }
-    }
-
-    /// Start the evaluation loop as a background task.
-    pub async fn run(self: Arc<Self>, mut shutdown: tokio::sync::watch::Receiver<bool>) {
-        let interval = Duration::from_secs(self.config.evaluation_interval_secs);
-        loop {
-            tokio::select! {
-                _ = tokio::time::sleep(interval) => {}
-                _ = shutdown.changed() => {
-                    tracing::info!("alert evaluation engine shutting down");
-                    return;
-                }
-            }
-            self.evaluate_all().await;
-        }
-    }
-
-    async fn evaluate_all(&self) {
-        let rules = self.registry.list_enabled().await;
-        let rule_count = rules.len();
-        tracing::debug!(rules = rule_count, "alert evaluation cycle starting");
-        let timeout = Duration::from_secs(self.config.evaluation_timeout_secs);
-        let mut join_set = JoinSet::new();
-        let cycle_start = std::time::Instant::now();
-
-        for rule in rules {
-            let store = self.store.clone();
-            let event_tx = self.event_tx.clone();
-
-            join_set.spawn(async move {
-                let result = tokio::time::timeout(timeout, async {
-                    Self::evaluate_rule(&rule, &store, &event_tx).await;
-                })
-                .await;
-                if result.is_err() {
-                    tracing::warn!(rule_id = %rule.id, "rule evaluation timed out");
-                } else {
-                    tracing::debug!(rule_id = %rule.id, "rule evaluated");
-                }
-            });
-        }
-
-        while join_set.join_next().await.is_some() {}
-        tracing::debug!(
-            rules = rule_count,
-            duration_ms = cycle_start.elapsed().as_millis(),
-            "alert evaluation cycle complete"
-        );
-    }
-
-    async fn evaluate_rule(
-        rule: &AlertRule,
-        store: &AlertStore,
-        _event_tx: &mpsc::UnboundedSender<AlertFiringEvent>,
-    ) {
-        let labels: BTreeMap<String, String> = rule.labels.clone();
-        let fingerprint = AlertInstance::compute_fingerprint(&rule.id, &labels);
-        let _existing = store.get_by_fingerprint(fingerprint).await;
-        // In a full implementation, this queries the storage layer and evaluates conditions.
-        // The query field on the rule would be executed against the metrics store.
+    pub fn new(store: AlertStore, event_tx: mpsc::UnboundedSender<AlertFiringEvent>) -> Self {
+        Self { store, event_tx }
     }
 
     /// Evaluate a single rule with a provided metric value (for testing/direct use).
@@ -239,40 +158,12 @@ mod tests {
         }
     }
 
-    fn test_config() -> EvalConfig {
-        EvalConfig {
-            evaluation_interval_secs: 1,
-            evaluation_timeout_secs: 10,
-        }
-    }
-
-    #[tokio::test]
-    async fn test_evaluate_rule_no_existing_instance() {
-        let store = AlertStore::in_memory();
-        let (tx, _rx) = mpsc::unbounded_channel();
-        let rule = test_rule();
-        EvaluationEngine::evaluate_rule(&rule, &store, &tx).await;
-    }
-
-    #[tokio::test]
-    async fn test_evaluate_all_timeout() {
-        let store = AlertStore::in_memory();
-        let (tx, _rx) = mpsc::unbounded_channel();
-        let registry = AlertRuleRegistry::new();
-        let rule = test_rule();
-        registry.insert(rule).await;
-
-        let engine = EvaluationEngine::new(test_config(), registry, store, tx);
-        engine.evaluate_all().await;
-    }
-
     #[tokio::test]
     async fn test_evaluate_rule_with_value_firing_and_resolved_events() {
         let store = AlertStore::in_memory();
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let registry = AlertRuleRegistry::new();
         let rule = test_rule();
-        let engine = EvaluationEngine::new(test_config(), registry, store.clone(), tx);
+        let engine = EvaluationEngine::new(store.clone(), tx);
         let labels = BTreeMap::from([("service.name".into(), "api".into())]);
 
         // 1. Condition met -> Pending (no event yet)

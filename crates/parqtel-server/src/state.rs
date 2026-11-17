@@ -1,6 +1,6 @@
 use parqtel_alert::dispatcher::metrics::RoutingMetrics;
 use parqtel_alert::dispatcher::AlertDispatcher;
-use parqtel_alert::evaluator::engine::{EvalConfig, EvaluationEngine};
+use parqtel_alert::evaluator::engine::EvaluationEngine;
 use parqtel_alert::router::AlertRouter;
 use parqtel_alert::AlertRuleRegistry;
 use parqtel_alert::AlertStore;
@@ -60,15 +60,7 @@ impl AppState {
         let alert_registry = AlertRuleRegistry::new();
         let alert_store = AlertStore::new(Some(data_dir)).await;
         let (alert_tx, alert_event_rx) = tokio::sync::mpsc::unbounded_channel();
-        let alert_engine = Arc::new(EvaluationEngine::new(
-            EvalConfig {
-                evaluation_interval_secs: 15,
-                evaluation_timeout_secs: 10,
-            },
-            alert_registry.clone(),
-            alert_store.clone(),
-            alert_tx,
-        ));
+        let alert_engine = Arc::new(EvaluationEngine::new(alert_store.clone(), alert_tx));
         let alert_router = Arc::new(
             AlertRouter::new(config.alerts.notifications.clone().unwrap_or_default())
                 // Persist silences alongside alerts.json (same data dir).

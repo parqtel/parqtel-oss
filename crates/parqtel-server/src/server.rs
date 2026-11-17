@@ -371,8 +371,23 @@ pub(crate) async fn run_server(
     let preset_task = activate_alert_presets(&state).await;
     load_alert_rules(&state).await;
 
-    // Alert routing: consume firing/resolved events from the eval engine and
-    // deliver via Alertmanager dispatcher (if configured) and legacy routes.
+    // Alert routing: consume firing/resolved events from the eval engine.
+    // The Alertmanager dispatcher wins when configured; the legacy webhook
+    // route table is the fallback. Delivering through both would send every
+    // notification twice.
+    if state.inner.alert_dispatcher.is_some()
+        && state
+            .inner
+            .config
+            .alerts
+            .notifications
+            .as_ref()
+            .is_some_and(|notifications| !notifications.routes.is_empty())
+    {
+        tracing::warn!(
+            "both [alerting.routing] and legacy [alerts.notifications.routes] are configured;              the Alertmanager dispatcher wins and legacy routes are disabled"
+        );
+    }
     let router_state = state.clone();
     let alert_router_task = tokio::spawn(async move {
         let rx = router_state.inner.alert_event_rx.lock().await.take();
@@ -384,8 +399,9 @@ pub(crate) async fn run_server(
                     dispatcher
                         .ingest_event(event.instance.clone(), &silences, &active_alerts)
                         .await;
+                } else {
+                    let _ = router_state.inner.alert_router.handle_event(event).await;
                 }
-                let _ = router_state.inner.alert_router.handle_event(event).await;
             }
         }
     });

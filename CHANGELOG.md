@@ -156,6 +156,12 @@ while measuring. Measurements and method are in
 
 ### Fixed
 
+- **One alert delivery path.** When `[alerting.routing]` is configured it now
+  wins; the legacy `[alerts.notifications.routes]` table is a fallback only.
+  Configuring both logs a warning and disables the legacy routes, so an event
+  is never delivered twice. Removed the dead `EvaluationEngine::run` /
+  `evaluate_all` / `evaluate_rule` stub; the live query loop remains in the
+  server tasks.
 - **A capped query could return different series after every restart.** The
   label-set fingerprint used a randomly seeded hasher although it is documented
   as stable, and series are ordered by fingerprint before the series limit is
