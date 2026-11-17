@@ -39,6 +39,13 @@ pub(crate) fn spawn_catalog_sync_task(
             for index in &indexes {
                 let idx = index.read().await;
                 for block in &idx.blocks {
+                    // A block adopted from another node lives only in this
+                    // node's index until its cache is materialised. Publishing
+                    // it as our own would resurrect entries the owner has
+                    // already retired.
+                    if !block.path.exists() {
+                        continue;
+                    }
                     let Ok(mut catalog_block) =
                         parqtel_core::storage::CatalogBlock::from_metadata(block)
                     else {

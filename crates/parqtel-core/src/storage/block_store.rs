@@ -268,7 +268,7 @@ impl ObjectBlockStore {
         }
     }
 
-    fn evict(&self) {
+    fn evict(&self, keep: &Path) {
         let mut entries: Vec<(PathBuf, u64, std::time::SystemTime)> = Vec::new();
         let Ok(dir) = fs::read_dir(&self.cache_dir) else {
             return;
@@ -290,6 +290,12 @@ impl ObjectBlockStore {
             if total <= self.cache_bytes {
                 break;
             }
+            // Never evict the block this call is about to open. A cache quota
+            // smaller than one block is a misconfiguration, but it must fail
+            // the quota, not the query.
+            if path == keep {
+                continue;
+            }
             if fs::remove_file(&path).is_ok() {
                 total = total.saturating_sub(size);
             }
@@ -304,18 +310,30 @@ impl BlockStore for ObjectBlockStore {
             return File::open(cached).map_err(Error::Io);
         }
         let object_key = self.key(key);
-        let bytes = self
-            .block_on(async { self.store.get(&object_key).await?.bytes().await })?
-            .map_err(|e| Error::Io(std::io::Error::other(e.to_string())))?;
+        let fetched = self.block_on(async { self.store.get(&object_key).await?.bytes().await })?;
+        let bytes = match fetched {
+            Ok(bytes) => bytes,
+            Err(object_store::Error::NotFound { .. }) => {
+                return Err(Error::Io(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!("S3 object not found: {object_key}"),
+                )));
+            }
+            Err(e) => return Err(Error::Io(std::io::Error::other(e.to_string()))),
+        };
         let tmp = cached.with_extension("tmp");
         fs::write(&tmp, &bytes)?;
         fs::rename(tmp, &cached)?;
-        self.evict();
+        self.evict(&cached);
         File::open(cached).map_err(Error::Io)
     }
 
     fn delete(&self, key: &Path) -> Result<bool> {
         let _ = fs::remove_file(self.cache_path(key));
+        // The local file is the WAL staging copy, not a permanent second copy.
+        // Leaving it behind lets startup reconciliation adopt a block that was
+        // compacted or expired, resurrecting an index entry with no object.
+        let _ = fs::remove_file(key);
         let object_key = self.key(key);
         match self.block_on(async { self.store.delete(&object_key).await })? {
             Ok(()) => Ok(true),
@@ -384,6 +402,28 @@ mod object_tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use std::io::{Read, Write};
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cache_does_not_evict_the_block_it_is_opening() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(object_store::memory::InMemory::new());
+        let local = ObjectBlockStore::new(
+            store,
+            "blocks",
+            dir.path().join("cache"),
+            1,
+            tokio::runtime::Handle::current(),
+        )
+        .unwrap();
+        let src = dir.path().join("block.parquet");
+        File::create(&src).unwrap().write_all(b"parquet").unwrap();
+        local.publish(&src).unwrap();
+        fs::remove_file(&src).unwrap();
+        assert!(
+            local.open(&src).is_ok(),
+            "active cache file must survive eviction"
+        );
+    }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn object_store_roundtrip_and_bounded_cache() {

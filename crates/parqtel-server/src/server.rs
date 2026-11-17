@@ -154,8 +154,14 @@ pub(crate) async fn run_server(
     // traces_service_{requests,errors,duration_ms} metrics and feeds them
     // back through the normal metrics path.
     let (span_metrics_tx, span_metrics_rx) = mpsc::unbounded_channel::<Vec<parqtel_core::Metric>>();
-    // Trace blocks live in the metrics data dir (TraceWriter is built from
-    // config.storage), so the trace WAL goes there too.
+    // Trace blocks live under their own directory so the trace index's
+    // sidecar parent is also the directory reconcile scans. Keeping them in
+    // the metrics directory made a restart drop every trace entry as orphaned.
+    let trace_data_dir = config.storage.data_dir.join("traces");
+    std::fs::create_dir_all(&trace_data_dir).unwrap_or_default();
+    let mut trace_storage = config.storage.clone();
+    trace_storage.data_dir = trace_data_dir.clone();
+
     let traces_wal = open_wal(
         &config,
         "traces",
@@ -163,15 +169,13 @@ pub(crate) async fn run_server(
         config.ingest.wal_enabled,
     )?;
     let trace_ingestion_service =
-        TraceIngestionService::with_wal(config.storage.clone(), trace_tx, traces_wal)
+        TraceIngestionService::with_wal(trace_storage, trace_tx, traces_wal)
             .with_memory_buffer(memory_buffer.clone())
             .with_span_metrics(span_metrics_tx)
             .with_tail_sampling(config.ingest.tail_sampling.clone())
             .with_contention(contention.clone());
 
-    // Trace index - uses same data_dir as metrics but separate index file
-    let trace_data_dir = config.storage.data_dir.join("traces");
-    std::fs::create_dir_all(&trace_data_dir).unwrap_or_default();
+    // Trace index lives beside its blocks, so reconcile sees the same directory.
     let mut trace_index = BlockIndex::new(&trace_data_dir);
     trace_index.load().unwrap_or_default();
     // One store, shared by the reconcile below, the index task, and the

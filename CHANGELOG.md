@@ -11,6 +11,29 @@ build cannot reach a registry or the release page.
 
 ## [Unreleased]
 
+### Fixed
+
+- **S3 block upload used temporary names.** Uploads now happen only after the
+  atomic rename, so object keys are final Parquet names and compaction can read
+  them.
+- **Object deletion left local staging files.** Retention/compaction now remove
+  both the object and the local copy, preventing restart reconciliation from
+  resurrecting retired sources.
+- **Catalog manifest key was percent-encoded** (`_catalog%2Fmanifest.json`); it
+  is now the normal `_catalog` directory plus `manifest.json`.
+- **Ordered trace blocks lived outside the trace index directory**, so restart
+  reconciliation dropped every trace entry. Trace blocks now live under
+  `<data_dir>/traces`.
+- **Adopted remote blocks were republished as local**, which could resurrect
+  blocks another node had retired. Only blocks present on local disk are
+  published.
+- **Missing S3 objects now map to not-found**, so a scan skips the block instead
+  of failing the query.
+- **The read cache no longer evicts the block it is opening**, so a quota
+  smaller than one block still serves that query.
+- **Runtime image now ships `ca-certificates.crt` at the standard path**, fixing
+  the S3 HTTP client startup failure in the scratch image.
+
 Ingest and query performance, and a set of durability and visibility fixes found
 while measuring. Measurements and method are in
 [docs/performance/README.md](docs/performance/README.md).

@@ -94,7 +94,9 @@ impl std::fmt::Debug for ObjectCatalog {
 
 impl ObjectCatalog {
     pub fn new(store: Arc<dyn ObjectStore>, prefix: &str) -> Self {
-        let key = object_store::path::Path::from(prefix).join("_catalog/manifest.json");
+        let key = object_store::path::Path::from(prefix)
+            .join("_catalog")
+            .join("manifest.json");
         Self { store, key }
     }
 
@@ -188,6 +190,13 @@ mod tests {
             wal_range: None,
             writer: None,
         }
+    }
+
+    #[test]
+    fn manifest_key_is_not_percent_encoded() {
+        let store = Arc::new(object_store::memory::InMemory::new());
+        let catalog = ObjectCatalog::new(store, "p");
+        assert_eq!(catalog.key.to_string(), "p/_catalog/manifest.json");
     }
 
     #[tokio::test]

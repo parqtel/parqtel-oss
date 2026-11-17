@@ -280,6 +280,7 @@ impl BlockWriter {
             Some(FooterIndex::Series(&series)),
         )?;
         fs::rename(&tmp_path, &final_path)?;
+        parqtel_core::storage::block_store::store().publish(&final_path)?;
         let size_bytes = fs::metadata(&final_path)?.len();
         self.batches.clear();
         self.rows = 0;
@@ -418,6 +419,7 @@ impl LogWriter {
             Some(FooterIndex::Logs(&skip_index)),
         )?;
         fs::rename(&tmp_path, &final_path)?;
+        parqtel_core::storage::block_store::store().publish(&final_path)?;
         let size_bytes = fs::metadata(&final_path)?.len();
         self.buffer.clear();
 
@@ -524,6 +526,7 @@ impl TraceWriter {
             None,
         )?;
         fs::rename(&tmp_path, &final_path)?;
+        parqtel_core::storage::block_store::store().publish(&final_path)?;
         let size_bytes = fs::metadata(&final_path)?.len();
         self.buffer.clear();
 

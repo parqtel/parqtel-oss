@@ -688,6 +688,7 @@ impl Compactor {
 
         fs::rename(&tmp_path, &final_path)?;
         sync_parent_dir(&final_path)?;
+        crate::storage::block_store::store().publish(&final_path)?;
         let size_bytes = fs::metadata(&final_path)?.len();
         tracing::debug!(
             signal = ?signal_type,

@@ -980,6 +980,7 @@ fn compact_metric_blocks(
     validate_compacted_file(&temp_path, &plan)?;
     fs::rename(&temp_path, &final_path)?;
     sync_parent_dir(&final_path)?;
+    crate::storage::block_store::store().publish(&final_path)?;
     let size_bytes = fs::metadata(&final_path)?.len();
     let row_count = usize::try_from(plan.total_rows)
         .map_err(|_| Error::Internal("compacted row count exceeds usize".into()))?;

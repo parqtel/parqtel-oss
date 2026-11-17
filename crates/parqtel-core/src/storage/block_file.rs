@@ -161,7 +161,6 @@ pub(crate) fn sync_parent_dir(path: &Path) -> Result<()> {
 pub(crate) struct BlockFileWriter {
     writer: ArrowWriter<File>,
     sync_file: File,
-    path: PathBuf,
 }
 
 impl BlockFileWriter {
@@ -182,11 +181,7 @@ impl BlockFileWriter {
         let sync_file = file.try_clone()?;
         let writer = ArrowWriter::try_new(file, schema, Some(properties))
             .map_err(|e| Error::Parquet(e.to_string()))?;
-        Ok(Self {
-            writer,
-            sync_file,
-            path: path.to_path_buf(),
-        })
+        Ok(Self { writer, sync_file })
     }
 
     pub(crate) fn write(&mut self, batch: &arrow::record_batch::RecordBatch) -> Result<()> {
@@ -196,21 +191,16 @@ impl BlockFileWriter {
     }
 
     pub(crate) fn close(self) -> Result<()> {
-        let Self { writer, path, .. } = self;
-        writer.close().map_err(|e| Error::Parquet(e.to_string()))?;
-        crate::storage::block_store::store().publish(&path)?;
+        self.writer
+            .close()
+            .map_err(|e| Error::Parquet(e.to_string()))?;
         Ok(())
     }
 
     pub(crate) fn close_and_sync(self) -> Result<()> {
-        let Self {
-            writer,
-            sync_file,
-            path,
-        } = self;
+        let Self { writer, sync_file } = self;
         writer.close().map_err(|e| Error::Parquet(e.to_string()))?;
         sync_file.sync_all()?;
-        crate::storage::block_store::store().publish(&path)?;
         Ok(())
     }
 }

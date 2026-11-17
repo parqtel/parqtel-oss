@@ -101,6 +101,12 @@ RUN rustc -O /src/healthcheck.rs -o /usr/local/bin/healthcheck && strip /usr/loc
 # shrink the image (base layers still ship them). So we build a scratch rootfs
 # with exactly the shared libraries the binaries require.
 FROM rust:${RUST_VERSION}-slim AS runtime-libs
+# rustls/S3 needs a CA bundle at runtime; the slim base has the hashed certs
+# directory but not necessarily ca-certificates.crt. Without it the object-store
+# HTTP client fails at startup with "Generic HTTP client error: builder error".
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /usr/local/bin/parqtel /usr/local/bin/parqtel
 COPY --from=probe /usr/local/bin/healthcheck /usr/local/bin/healthcheck
 RUN set -eux; \
@@ -120,7 +126,10 @@ RUN set -eux; \
     mkdir -p /out/data && chown 65532:65532 /out/data; \
     printf 'nonroot:x:65532:65532::/nonexistent:/sbin/nologin\n' > /out/etc/passwd; \
     printf 'nonroot:x:65532:\n' > /out/etc/group; \
-    if [ -d /etc/ssl/certs ]; then cp -rL /etc/ssl/certs /out/etc/ssl; fi; \
+    if [ -d /etc/ssl/certs ]; then \
+      mkdir -p /out/etc/ssl/certs; \
+      cp -L /etc/ssl/certs/* /out/etc/ssl/certs/; \
+    fi; \
     echo '--- runtime rootfs ---'; find /out -type f | sort
 
 # ── Stage 5: Final scratch image ────────────────────────────────────────────
