@@ -82,6 +82,7 @@ hyper-util = { version = "0.1", features = ["server", "server-auto", "server-gra
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
 rustls-pemfile = "2"
 snap = "1"
+async-stream = "0.3"
 
 # Internal crates
 parqtel-core = { path = "crates/parqtel-core" }

@@ -42,6 +42,9 @@ while measuring. Measurements and method are in
 
 ### Added
 
+- **Live tail over SSE.** `GET /api/v1/logs/tail` streams buffered log rows as
+  server-sent events with optional `service_name` and `body_contains` filters.
+  It polls the existing memory buffer (250 ms) and requires the read scope.
 - **Prometheus `remote_write`.** `POST /api/v1/write` accepts the standard
   snappy-compressed protobuf WriteRequest, converts samples to gauge points
   (ms timestamps), and writes them through the metrics ingestion path. This

@@ -24,6 +24,7 @@ pub(crate) fn is_query_path(path: &str) -> bool {
         || path.starts_with("/api/v1/label")
         || path == "/api/v1/labels"
         || path == "/api/v1/logs"
+        || path.starts_with("/api/v1/logs/tail")
         || path == "/v1/logs/count"
         || path == "/v1/logs/fields"
         || path == "/v1/logs/field_values"
@@ -160,6 +161,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/v1/query", get(handlers::query::query_instant))
         .route("/api/v1/query_range", get(handlers::query::query_range))
         .route("/api/v1/logs", get(handlers::query::query_logs))
+        .route("/api/v1/logs/tail", get(handlers::tail::tail_logs))
         .route(
             "/api/v1/label/__name__/values",
             get(handlers::query::list_metric_names),

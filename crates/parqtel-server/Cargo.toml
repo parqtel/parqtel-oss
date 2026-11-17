@@ -41,10 +41,11 @@ hyper-util = { workspace = true }
 tokio-rustls = { workspace = true }
 rustls-pemfile = { workspace = true }
 snap = { workspace = true }
+async-stream = { workspace = true }
+futures = { workspace = true }
 clap = { workspace = true }
 figment = { workspace = true }
 regex = { workspace = true }
-futures = { workspace = true }
 # Self-instrumentation: OTLP traces/SLI metrics + on-demand CPU profiling.
 opentelemetry = { workspace = true }
 opentelemetry_sdk = { workspace = true }
