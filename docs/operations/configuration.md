@@ -412,9 +412,10 @@ allow_hosts = ["*.internal.example"]
 
 Alertmanager-compatible routing. When set, firing **and** resolved alerts flow
 through grouping, inhibition, silences, and the native receivers below. The
-legacy `[alerts.notifications.routes]` webhook table keeps working alongside it.
-Invalid matchers, bad durations, or a `receiver` that names no configured
-receiver fail validation at startup.
+legacy `[alerts.notifications.routes]` webhook table is used only when this
+section is absent; configuring both logs a warning and disables the legacy
+routes, so an event is never delivered twice. Invalid matchers, bad durations,
+or a `receiver` that names no configured receiver fail validation at startup.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
