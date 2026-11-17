@@ -19,6 +19,7 @@ Documentation for Parqtel, an open-source SRE telemetry store.
 | [MCP](guides/mcp.md) | Model Context Protocol servers and tool schemas |
 | [Best practices](guides/best-practices.md) | Sizing and operating guidance |
 | [Argo Rollouts](guides/argo-rollouts.md) | Progressive delivery on Kubernetes |
+| [Agent on-ramps](../examples/agents/README.md) | OTel Collector, Vector, Fluent Bit, Filebeat configurations |
 
 ## Operations
 

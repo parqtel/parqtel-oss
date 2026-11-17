@@ -244,6 +244,9 @@ while measuring. Measurements and method are in
 
 ### Documentation
 
+- **Agent on-ramps.** `examples/agents/` has tested-shape configurations for OTel
+  Collector (gRPC/HTTP), Vector, Fluent Bit, and a Filebeat→Vector path, with
+  the exact endpoint and encoding each one uses.
 - **Anomaly and noise claims match the binary.** The README, MCP guide,
   configuration reference, OpenAPI schema, and preset tuning notes now state
   that anomaly detection/noise scoring are not implemented in 0.3.x;

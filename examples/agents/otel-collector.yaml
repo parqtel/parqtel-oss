@@ -1,0 +1,33 @@
+# OTel Collector -> Parqtel over the OTLP/gRPC default (protobuf).
+receivers:
+  otlp:
+    protocols:
+      grpc:
+      http:
+
+processors:
+  batch:
+
+exporters:
+  otlp/parqtel:
+    endpoint: parqtel:4317
+    tls:
+      insecure: true
+    # When [auth] is enabled:
+    # headers:
+    #   authorization: "Bearer ${env:PARQTEL_WRITE_TOKEN}"
+
+service:
+  pipelines:
+    metrics:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlp/parqtel]
+    logs:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlp/parqtel]
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlp/parqtel]

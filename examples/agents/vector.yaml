@@ -1,0 +1,31 @@
+# Vector -> Parqtel generic JSON ingest.
+# `framing.method = "json"` sends a JSON array, which /api/v1/ingest accepts.
+sources:
+  files:
+    type: file
+    include:
+      - /var/log/**/*.log
+
+transforms:
+  parse:
+    type: remap
+    inputs: [files]
+    source: |
+      .timestamp = to_timestamp!(.timestamp, default: now())
+      .level = .level ?? "info"
+      .message = .message ?? to_string(.message)
+
+sinks:
+  parqtel:
+    type: http
+    inputs: [parse]
+    uri: http://parqtel:8080/api/v1/ingest
+    method: post
+    encoding:
+      codec: json
+    framing:
+      method: json
+    request:
+      headers:
+        X-Parqtel-Service: vector
+        # Authorization: "Bearer ${PARQTEL_WRITE_TOKEN}"

@@ -1,0 +1,16 @@
+# Filebeat has no generic HTTP output. Ship JSON lines to Vector (or Logstash),
+# then use examples/agents/vector.yaml to reach Parqtel.
+filebeat.inputs:
+  - type: filestream
+    id: app-logs
+    paths:
+      - /var/log/**/*.log
+
+processors:
+  - decode_json_fields:
+      fields: ["message"]
+      target: ""
+      overwrite_keys: true
+
+output.logstash:
+  hosts: ["vector:5044"]
