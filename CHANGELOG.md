@@ -42,6 +42,12 @@ while measuring. Measurements and method are in
 
 ### Added
 
+- **Runtime configuration is persisted and gated.** Alert routes written over
+  the API are saved atomically to `data/alert_routes.json`, and recording-rule
+  and pipeline definitions to `rules/recording/` and `rules/pipelines/`; all
+  three are reloaded at startup. Because the OSS build has no authentication,
+  the mutation endpoints now return `403` unless
+  `alerts.allow_runtime_updates = true`.
 - **Outbound egress policy for alert delivery.** Every webhook destination —
   legacy `[alerts.notifications.routes]` and Alertmanager receivers — is
   checked immediately before the POST. The default rejects loopback, private,

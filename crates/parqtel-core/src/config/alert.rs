@@ -96,6 +96,14 @@ pub struct AlertConfig {
     /// Notification router configuration.
     #[serde(default)]
     pub notifications: Option<NotificationConfig>,
+    /// Permit REST mutations of alert routes, recording rules, and pipelines.
+    ///
+    /// Default `false`: the OSS build has no authentication, so a remote
+    /// caller could otherwise rewrite delivery destinations or replace
+    /// definitions. Enable it only behind an authenticating proxy, or after
+    /// scoped tokens land.
+    #[serde(default)]
+    pub allow_runtime_updates: bool,
 }
 
 impl Default for AlertConfig {
@@ -108,6 +116,7 @@ impl Default for AlertConfig {
             presets: PresetConfig::default(),
             postmortem: Some(PostmortemConfig::default()),
             notifications: Some(NotificationConfig::default()),
+            allow_runtime_updates: false,
         }
     }
 }

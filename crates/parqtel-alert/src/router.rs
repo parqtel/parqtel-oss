@@ -46,6 +46,8 @@ pub struct AlertRouter {
     egress: EgressPolicy,
     /// Directory for silence persistence (None = in-memory only).
     silence_dir: Option<std::path::PathBuf>,
+    /// Runtime route table persisted by the API (None = config-file only).
+    routes_path: Option<std::path::PathBuf>,
 }
 
 impl AlertRouter {
@@ -65,6 +67,7 @@ impl AlertRouter {
                 .unwrap_or_default(),
             egress,
             silence_dir: None,
+            routes_path: None,
         }
     }
 
@@ -76,9 +79,61 @@ impl AlertRouter {
     /// Enable silence persistence in the given directory (loads existing
     /// silences from `silences.json`, atomic tmp+rename on every change).
     pub fn with_silence_dir(mut self, dir: impl Into<std::path::PathBuf>) -> Self {
-        self.silence_dir = Some(dir.into());
+        let dir = dir.into();
+        self.routes_path = Some(dir.join("alert_routes.json"));
+        self.silence_dir = Some(dir);
         self.load_silences_from_disk();
+        self.load_routes_from_disk();
         self
+    }
+
+    /// Replace the route table from the runtime file, if one exists.
+    ///
+    /// Runtime routes win over the TOML table because they are the result of a
+    /// later explicit API mutation. A corrupt file is ignored with a warning so
+    /// the process still starts with its configured routes.
+    fn load_routes_from_disk(&self) {
+        let Some(path) = &self.routes_path else {
+            return;
+        };
+        let Ok(content) = std::fs::read_to_string(path) else {
+            return;
+        };
+        let routes: Vec<RouteConfig> = match serde_json::from_str(&content) {
+            Ok(routes) => routes,
+            Err(e) => {
+                tracing::warn!(path = %path.display(), error = %e, "alert_routes.json is corrupt, using configured routes");
+                return;
+            }
+        };
+        if let Ok(mut config) = self.config.try_write() {
+            config.routes = routes;
+        }
+    }
+
+    fn persist_routes(&self, routes: &[RouteConfig]) {
+        let Some(path) = &self.routes_path else {
+            return;
+        };
+        let Some(dir) = path.parent() else {
+            return;
+        };
+        let Ok(json) = serde_json::to_vec_pretty(routes) else {
+            tracing::warn!("failed to serialize alert routes");
+            return;
+        };
+        if let Err(e) = std::fs::create_dir_all(dir) {
+            tracing::warn!(path = %dir.display(), error = %e, "failed to create alert state directory");
+            return;
+        }
+        let tmp = path.with_extension("json.tmp");
+        if let Err(e) = std::fs::write(&tmp, &json) {
+            tracing::warn!(path = %tmp.display(), error = %e, "failed to write alert routes");
+            return;
+        }
+        if let Err(e) = std::fs::rename(&tmp, path) {
+            tracing::warn!(path = %path.display(), error = %e, "failed to replace alert routes");
+        }
     }
 
     fn load_silences_from_disk(&self) {
@@ -122,7 +177,11 @@ impl AlertRouter {
     }
 
     /// Replace the full routing configuration (API-driven config reload).
+    ///
+    /// When a state directory is configured, the route table is written
+    /// atomically so a restart keeps the API-visible configuration.
     pub async fn set_config(&self, config: NotificationConfig) {
+        self.persist_routes(&config.routes);
         *self.config.write().await = config;
     }
 
@@ -535,5 +594,35 @@ mod persistence_tests {
         // No panic, no file access — in-memory mode for tests/embedding.
         let router = AlertRouter::new(NotificationConfig::default());
         assert!(router.silence_dir.is_none());
+        assert!(router.routes_path.is_none());
+    }
+
+    #[tokio::test]
+    async fn routes_survive_router_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let router = AlertRouter::new(NotificationConfig::default()).with_silence_dir(dir.path());
+        let route = RouteConfig {
+            name: "persisted".into(),
+            match_severity: "critical".into(),
+            match_labels: BTreeMap::new(),
+            webhook_url: "https://example.com/hook".into(),
+            repeat_minutes: 240,
+        };
+        router
+            .set_config(NotificationConfig {
+                routes: vec![route],
+                ..NotificationConfig::default()
+            })
+            .await;
+        assert!(
+            dir.path().join("alert_routes.json").exists(),
+            "route table written"
+        );
+
+        let restarted =
+            AlertRouter::new(NotificationConfig::default()).with_silence_dir(dir.path());
+        let routes = restarted.config().await.routes;
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].name, "persisted");
     }
 }

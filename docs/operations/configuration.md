@@ -310,6 +310,7 @@ Per-service overrides; each entry fully replaces the global policy for that serv
 | `noise_window_firings` | Integer | `30` | Number of firings in window to calculate noise score |
 | `refinement_enabled` | Boolean | `true` | Enable automatic alert refinement |
 | `noise_suppression_threshold` | Float | `0.7` | Threshold for noise suppression (0.0-1.0) |
+| `allow_runtime_updates` | Boolean | `false` | Permit REST writes to alert routes, recording rules, and pipelines. Keep off unless an authenticating proxy fronts the API. |
 
 ### `[alerts.presets]`
 

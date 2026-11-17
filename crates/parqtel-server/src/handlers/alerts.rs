@@ -329,11 +329,21 @@ pub async fn test_route(
 pub async fn set_routes(
     State(state): State<AppState>,
     axum::Json(routes): axum::Json<Vec<parqtel_core::config::RouteConfig>>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if !state.inner.config.alerts.allow_runtime_updates {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({
+                "status": "error",
+                "error": "runtime updates are disabled; set alerts.allow_runtime_updates = true behind an authenticating proxy"
+            })),
+        )
+            .into_response();
+    }
     let mut config = state.inner.alert_router.config().await;
     config.routes = routes;
     state.inner.alert_router.set_config(config).await;
-    axum::Json(serde_json::json!({ "status": "success" }))
+    axum::Json(serde_json::json!({ "status": "success" })).into_response()
 }
 
 /// List active (unexpired) silences.
@@ -515,6 +525,29 @@ mod tests {
         let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["data"]["silenced"], true);
+    }
+
+    #[tokio::test]
+    async fn set_routes_is_forbidden_by_default_and_persists_when_enabled() {
+        let state = AppState::default_for_tests().await;
+        let resp = set_routes(State(state.clone()), axum::Json(Vec::new())).await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        let mut config = parqtel_core::Config::default();
+        config.alerts.allow_runtime_updates = true;
+        let state = AppState::default_for_tests_with_config(config).await;
+        let route = parqtel_core::config::RouteConfig {
+            name: "persisted".into(),
+            match_severity: "critical".into(),
+            match_labels: BTreeMap::new(),
+            webhook_url: "https://example.com/hook".into(),
+            repeat_minutes: 240,
+        };
+        let resp = set_routes(State(state.clone()), axum::Json(vec![route])).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let routes = state.inner.alert_router.config().await.routes;
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].name, "persisted");
     }
 
     #[tokio::test]

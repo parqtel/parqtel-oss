@@ -73,6 +73,20 @@ impl AppState {
                 // Persist silences alongside alerts.json (same data dir).
                 .with_silence_dir(config.storage.data_dir.clone()),
         );
+        // Recording rules and pipelines live beside the alert rules. Load them
+        // at startup and write API-created definitions back into the same
+        // directories, so a restart does not silently lose them.
+        let rules_root = std::path::PathBuf::from(&config.alerts.rules_dir);
+        let recording_dir = rules_root.join("recording");
+        let pipeline_dir = rules_root.join("pipelines");
+        let pipeline_registry =
+            PipelineRegistry::new().with_dirs(recording_dir.clone(), pipeline_dir.clone());
+        for dir in [&recording_dir, &pipeline_dir] {
+            if let Err(e) = pipeline_registry.load_dir(dir) {
+                tracing::warn!(path = %dir.display(), error = %e, "failed to load rule definitions");
+            }
+        }
+
         let routing_metrics = Arc::new(RoutingMetrics::new());
         let alert_dispatcher = config.alerting.routing.as_ref().and_then(|routing_cfg| {
             match AlertDispatcher::from_config(routing_cfg, routing_metrics.clone()) {
@@ -103,7 +117,7 @@ impl AppState {
                 alert_router,
                 alert_dispatcher,
                 alert_event_rx: tokio::sync::Mutex::new(Some(alert_event_rx)),
-                pipeline_registry: PipelineRegistry::new(),
+                pipeline_registry,
                 saved_searches: crate::saved_searches::SavedSearchStore::new(saved_search_dir),
             }),
         }
