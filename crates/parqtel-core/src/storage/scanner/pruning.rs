@@ -2,6 +2,7 @@
 
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::file::metadata::ParquetMetaData;
+use parquet::file::page_index::column_index::ColumnIndexMetaData;
 use parquet::file::statistics::Statistics;
 use std::fs::File;
 
@@ -201,6 +202,70 @@ pub fn row_groups_in_range(
 /// Restricts a reader to the given file row ranges: only the row groups that
 /// hold them are visited, and a selection skips the rest inside those groups.
 /// When the ranges are whole groups no selection is needed.
+
+/// Row ranges selected by the timestamp column's page index.
+///
+/// A row group's statistics bound the whole group; the column index bounds each
+/// data page. When the writer emitted page statistics, pages wholly outside the
+/// window can be skipped before they are decoded, which matters for a block
+/// whose row groups span a wider window than the query.
+///
+/// Returns `None` when any requested group lacks a usable INT64 page index, so
+/// the caller falls back to the row groups it already selected. Ranges are
+/// ascending, non-overlapping and coalesced.
+pub(super) fn page_ranges_in_time(
+    metadata: &ParquetMetaData,
+    ts_column: &str,
+    start_ns: i64,
+    end_ns: i64,
+    groups: &[usize],
+) -> Option<Vec<(u64, u64)>> {
+    let col_idx = metadata
+        .file_metadata()
+        .schema_descr()
+        .columns()
+        .iter()
+        .position(|c| c.name() == ts_column)?;
+    let page_index = metadata.page_index()?;
+    let mut out: Vec<(u64, u64)> = Vec::new();
+    let mut file_start = 0u64;
+    for (g, rg) in metadata.row_groups().iter().enumerate() {
+        let rows = rg.num_rows().max(0) as u64;
+        if !groups.contains(&g) {
+            file_start += rows;
+            continue;
+        }
+        let ColumnIndexMetaData::INT64(index) = page_index.column_index(g, col_idx)? else {
+            return None;
+        };
+        let offset = page_index.offset_index(g, col_idx)?;
+        let locs = offset.page_locations();
+        let (mins, maxs) = (index.min_values(), index.max_values());
+        if locs.is_empty() || mins.len() != locs.len() || maxs.len() != locs.len() {
+            return None;
+        }
+        for (i, loc) in locs.iter().enumerate() {
+            let page_start = loc.first_row_index.max(0) as u64;
+            let page_end = locs
+                .get(i + 1)
+                .map_or(rows, |next| next.first_row_index.max(0) as u64);
+            if page_start >= page_end || index.is_null_page(i) {
+                continue;
+            }
+            if maxs[i] < start_ns || mins[i] > end_ns {
+                continue;
+            }
+            let (a, b) = (file_start + page_start, file_start + page_end);
+            match out.last_mut() {
+                Some(last) if last.1 == a => last.1 = b,
+                _ => out.push((a, b)),
+            }
+        }
+        file_start += rows;
+    }
+    Some(out)
+}
+
 pub(super) fn restrict_to_ranges<T>(
     builder: ParquetRecordBatchReaderBuilder<T>,
     ranges: &[(u64, u64)],
@@ -267,4 +332,48 @@ pub(super) fn plan_row_selection(
             selected_rows,
         ),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+    use super::*;
+    use arrow_array::{Int64Array, RecordBatch};
+    use arrow_schema::{DataType, Field, Schema};
+    use parquet::arrow::ArrowWriter;
+    use parquet::file::properties::WriterProperties;
+    use std::sync::Arc;
+
+    #[test]
+    fn page_index_narrows_time_ranges() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pages.parquet");
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("timestamp_ns", DataType::Int64, false),
+            Field::new("value", DataType::Int64, false),
+        ]));
+        let ts = Int64Array::from((0..1_000).collect::<Vec<_>>());
+        let val = Int64Array::from(vec![1i64; 1_000]);
+        let batch =
+            RecordBatch::try_new(schema.clone(), vec![Arc::new(ts), Arc::new(val)]).unwrap();
+        let props = WriterProperties::builder()
+            .set_data_page_row_count_limit(100)
+            .set_write_batch_size(100)
+            .build();
+        let mut writer =
+            ArrowWriter::try_new(std::fs::File::create(&path).unwrap(), schema, Some(props))
+                .unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+
+        let md = parquet::file::metadata::ParquetMetaDataReader::new()
+            .with_page_index_policy(parquet::file::metadata::PageIndexPolicy::Optional)
+            .parse_and_finish(&std::fs::File::open(&path).unwrap())
+            .unwrap();
+        assert!(md.page_index().is_some(), "writer must emit a page index");
+        let ranges = page_ranges_in_time(&md, "timestamp_ns", 250, 350, &[0]).unwrap();
+        assert!(!ranges.is_empty());
+        assert!(ranges.iter().all(|(a, b)| *a >= 200 && *b <= 400));
+        assert_eq!(ranges.iter().map(|(a, b)| b - a).sum::<u64>(), 200);
+    }
 }

@@ -2,7 +2,8 @@
 
 use super::block::{open_block, OpenedBlock};
 use super::pruning::{
-    plan_row_selection, project_present, restrict_to_ranges, row_groups_in_range,
+    page_ranges_in_time, plan_row_selection, project_present, restrict_to_ranges,
+    row_groups_in_range,
 };
 use super::Scanner;
 use super::{
@@ -123,6 +124,9 @@ fn log_row_ranges(
     let md = opened.meta.metadata();
     let groups = row_groups_in_range(md, "timestamp_ns", start_ns, end_ns)
         .unwrap_or_else(|| (0..md.num_row_groups()).collect());
+    if let Some(pages) = page_ranges_in_time(md, "timestamp_ns", start_ns, end_ns, &groups) {
+        return pages;
+    }
     let mut out: Vec<(u64, u64)> = Vec::new();
     let mut starts = Vec::with_capacity(md.num_row_groups());
     let mut at = 0u64;

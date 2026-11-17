@@ -42,6 +42,9 @@ while measuring. Measurements and method are in
 
 ### Added
 
+- **Page-index pruning for log, metric, and trace scans.** Blocks written with
+  page statistics now skip data pages wholly outside the query window before
+  decoding them; blocks without a page index fall back to row-group statistics.
 - **Median+MAD baseline anomaly rules.** `LearnedAnomaly` rules now query their
   configured baseline window and fire when the latest sample deviates from the
   median by more than `sensitivity` MADs, instead of silently reusing the static

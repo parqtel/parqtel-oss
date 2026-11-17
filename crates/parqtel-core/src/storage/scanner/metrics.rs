@@ -2,7 +2,8 @@
 
 use super::block::{open_block, OpenedBlock};
 use super::pruning::{
-    plan_row_selection, project_present, row_groups_in_range, row_groups_matching_value,
+    page_ranges_in_time, plan_row_selection, project_present, restrict_to_ranges,
+    row_groups_in_range, row_groups_matching_value,
 };
 use super::Scanner;
 use super::{
@@ -319,8 +320,18 @@ impl Scanner {
             reader_builder.parquet_schema(),
             project_present(reader_builder.parquet_schema(), &METRIC_SCAN_COLUMNS),
         );
+        let reader_builder = match page_ranges_in_time(
+            reader_builder.metadata(),
+            "timestamp_ns",
+            start_ns,
+            end_ns,
+            &groups,
+        ) {
+            Some(ranges) if ranges.is_empty() => return Ok(MetricScan::default()),
+            Some(ranges) => restrict_to_ranges(reader_builder, &ranges),
+            None => reader_builder.with_row_groups(groups),
+        };
         let reader = reader_builder
-            .with_row_groups(groups)
             .with_projection(mask)
             .with_batch_size(SCAN_BATCH_ROWS)
             .build()

@@ -1,13 +1,14 @@
 //! Trace scans.
 
-use super::pruning::row_groups_in_range;
+use super::pruning::{page_ranges_in_time, restrict_to_ranges, row_groups_in_range};
 use super::Scanner;
 use super::{acquire_scan_slot, record_scan_block, record_scan_output, MAX_CONCURRENT_BLOCK_SCANS};
 use crate::error::{Error, Result};
 use crate::models::storage::{BlockMetadata, StorageModel};
 use crate::models::traces::Span;
 use arrow_array::{Array, BinaryArray, FixedSizeBinaryArray, TimestampNanosecondArray};
-use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+use parquet::arrow::arrow_reader::{ArrowReaderOptions, ParquetRecordBatchReaderBuilder};
+use parquet::file::metadata::PageIndexPolicy;
 use std::collections::BTreeMap;
 use std::fs::File;
 
@@ -99,7 +100,8 @@ impl Scanner {
             Err(e) => return Err(Error::Io(e)),
         };
 
-        let reader_builder = ParquetRecordBatchReaderBuilder::try_new(file)
+        let options = ArrowReaderOptions::new().with_page_index_policy(PageIndexPolicy::Optional);
+        let reader_builder = ParquetRecordBatchReaderBuilder::try_new_with_options(file, options)
             .map_err(|e| Error::Parquet(e.to_string()))?;
 
         // Prune by the column the caller filters on (`start_time_ns`, index 4 of
@@ -108,7 +110,17 @@ impl Scanner {
             match row_groups_in_range(reader_builder.metadata(), "start_time_ns", start_ns, end_ns)
             {
                 Some(groups) if groups.is_empty() => return Ok(Vec::new()),
-                Some(groups) => reader_builder.with_row_groups(groups),
+                Some(groups) => match page_ranges_in_time(
+                    reader_builder.metadata(),
+                    "start_time_ns",
+                    start_ns,
+                    end_ns,
+                    &groups,
+                ) {
+                    Some(ranges) if ranges.is_empty() => return Ok(Vec::new()),
+                    Some(ranges) => restrict_to_ranges(reader_builder, &ranges),
+                    None => reader_builder.with_row_groups(groups),
+                },
                 None => reader_builder,
             };
 
