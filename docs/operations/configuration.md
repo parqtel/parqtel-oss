@@ -597,25 +597,56 @@ labels:
 
 ## Pipeline YAML Schema
 
+Files under `rules/pipelines/` contain a `pipelines:` list. Each pipeline
+matches log records (`match.signal: logs`) and runs stages in order. The
+first matching pipeline wins; unmatched logs pass through unchanged.
+
 ```yaml
-name: nginx-access-logs
-enabled: true
-stages:
-  - name: parse
-    type: preprocessor
-    config:
-      pattern: '$remote_addr - $remote_user [$time_local] "$request" $status $body_bytes_sent'
-  - name: extract_metrics
-    type: metric_extractor
-    config:
-      metrics:
-        - name: nginx_requests_total
-          type: counter
-          value_field: status
-        - name: nginx_bytes_total
-          type: counter
-          value_field: body_bytes_sent
+pipelines:
+  - name: nginx-access-logs
+    match:
+      signal: logs
+      conditions:
+        - field: service_name
+          op: "="
+          value: nginx
+    stages:
+      - type: processor
+        name: parse
+        processor: regex_extract
+        source_field: body
+        pattern: '^(?P<ip>\S+) .* "(?P<method>\S+) (?P<path>\S+)'
+        target_fields:
+          http.method: method
+          http.target: path
+        on_parse_failure: keep_original
+      - type: metric_extract
+        name: requests
+        metric_name: nginx_requests_total
+        metric_type: counter
+        value_field: "constant:1"
+        dimensions: [http.method, http.target, service_name]
+      - type: masker
+        name: mask_ips
+        rules:
+          - field: body
+            pattern: '\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}'
+            replacement: "[IP_MASKED]"
+      - type: router
+        name: drop_health
+        conditions:
+          - field: http.target
+            op: "=~"
+            value: '^/(health|ready|live)'
+        action: drop
 ```
+
+Stage types: `preprocessor`, `processor` (`regex_extract`, `add_fields`,
+`cast`), `metric_extract` (`gauge`, `counter`, `histogram`), `masker`, and
+`router` (`drop` or `route` + `destination`). Condition operators: `=`, `!=`,
+`>`, `>=`, `<`, `<=`, `contains`, `=~`, `exists`, `in`, `between`. Regex
+patterns are validated at load time; a trailing newline from a YAML block
+scalar is stripped.
 
 ## Validation
 

@@ -14,6 +14,12 @@ pub struct SignalRecord {
 
 impl SignalRecord {
     pub fn from_log(log: LogRecord) -> Self {
+        let fields = Self::fields_for_log(&log);
+        Self { log, fields }
+    }
+
+    /// Build only the field map used by matchers and stages.
+    pub fn fields_for_log(log: &LogRecord) -> BTreeMap<String, String> {
         let mut fields = BTreeMap::new();
         // Populate fields from log attributes and resource attributes
         for (k, v) in log.attributes.iter() {
@@ -22,13 +28,25 @@ impl SignalRecord {
         for (k, v) in log.resource_attributes.iter() {
             fields.insert(k.to_string(), v.to_string());
         }
+        // Pipeline YAML uses the flattened names the storage columns expose,
+        // not the dotted OTLP resource keys.
+        if let Some(service) = log.resource_attributes.get("service.name") {
+            fields
+                .entry("service_name".to_string())
+                .or_insert_with(|| service.to_string());
+        }
+        if let Some(namespace) = log.resource_attributes.get("k8s.namespace.name") {
+            fields
+                .entry("k8s_namespace".to_string())
+                .or_insert_with(|| namespace.to_string());
+        }
         fields.insert("body".to_string(), log.body.clone());
         fields.insert(
             "severity_number".to_string(),
             log.severity_number.to_string(),
         );
         fields.insert("severity_text".to_string(), log.severity_text.clone());
-        Self { log, fields }
+        fields
     }
 }
 
