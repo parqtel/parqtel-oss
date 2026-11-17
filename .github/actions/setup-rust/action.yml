@@ -41,7 +41,10 @@ runs:
           brew install protobuf 2>/dev/null || true
         else
           sudo apt-get update -qq
-          sudo apt-get install -y -qq protobuf-compiler
+          # libcurl4-openssl-dev: librdkafka's OAuthbearer/OIDC support
+          # (ON by default) compiles in <curl/curl.h>; the runner image does
+          # not ship the dev headers, which failed the rdkafka-sys build.
+          sudo apt-get install -y -qq protobuf-compiler libcurl4-openssl-dev
         fi
         protoc --version
 
