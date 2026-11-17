@@ -1,5 +1,7 @@
 //! Scanner tests.
 
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
 use super::block::open_block;
 use super::pruning::plan_row_selection;
 use super::*;

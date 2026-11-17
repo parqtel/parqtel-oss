@@ -453,6 +453,24 @@ impl ServerMetrics {
         out.push_str("# HELP parqtel_scan_slots_limit Process-wide block scan slot limit\n");
         out.push_str("# TYPE parqtel_scan_slots_limit gauge\n");
         out.push_str(&format!("parqtel_scan_slots_limit {}\n", scans.slot_limit));
+        out.push_str("# HELP parqtel_scan_background_slots_in_use Dedicated alert-evaluation scan slots in use\n");
+        out.push_str("# TYPE parqtel_scan_background_slots_in_use gauge\n");
+        out.push_str(&format!(
+            "parqtel_scan_background_slots_in_use {}\n",
+            scans.background_active_slots
+        ));
+        out.push_str("# HELP parqtel_scan_background_slots_limit Dedicated alert-evaluation scan slot limit\n");
+        out.push_str("# TYPE parqtel_scan_background_slots_limit gauge\n");
+        out.push_str(&format!(
+            "parqtel_scan_background_slots_limit {}\n",
+            scans.background_slot_limit
+        ));
+        out.push_str("# HELP parqtel_alert_eval_skipped_total Alert evaluation cycles skipped because the dedicated slot was busy\n");
+        out.push_str("# TYPE parqtel_alert_eval_skipped_total counter\n");
+        out.push_str(&format!(
+            "parqtel_alert_eval_skipped_total {}\n",
+            scans.background_skips
+        ));
         out.push_str("# HELP parqtel_scan_low_priority_skips_total Background work deferred while the process scan budget was full\n");
         out.push_str("# TYPE parqtel_scan_low_priority_skips_total counter\n");
         out.push_str(&format!(

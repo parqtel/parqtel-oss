@@ -42,6 +42,10 @@ while measuring. Measurements and method are in
 
 ### Added
 
+- **Dedicated scan slot for alert evaluation.** Alert evaluation no longer
+  competes with queries for the four-slot scan budget; it reserves its own slot
+  and reports `parqtel_alert_eval_skipped_total` when a previous cycle still
+  holds it.
 - **Query timeout scoped to scans, ingest load shedding.** `query.timeout_secs`
   now applies only to query/log/trace/Grafana scan endpoints; a slow ingest is
   no longer reported as a query timeout. OTLP/HTTP ingest is bounded by

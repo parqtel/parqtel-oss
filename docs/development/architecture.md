@@ -166,8 +166,9 @@ A query resolves in three stages, each with its own pruning mechanism:
 **Bounding the fan-out.** The first stage decides how many blocks a query has
 to open at all. Coalescing metric blocks into 5-minute L1 windows (see
 [Compaction](#compaction)) keeps that number bounded on a busy store, and the
-process-wide 4-slot scan budget stops concurrent queries from turning the
-block count into a memory spike.
+process-wide 4-slot query scan budget stops concurrent queries from turning the
+block count into a memory spike. Alert evaluation has a separate single slot,
+so query saturation cannot silently skip alert cycles.
 
 Label matchers are pushed into the block scan: a predicate over the series' label set runs once per distinct series per block. New metric blocks store labels only in the series table; legacy blocks retain their row-level labels column. Rows of series that cannot match are never turned into points. Parsed Parquet footers (and series tables) are cached per immutable block file, within a byte budget. Log search first asks the block's skip index (`parqtel.log_index` in the footer: per 4 096-row granule, time bounds, highest severity and a bloom filter over body three-byte windows and `name=value` attribute pairs) which granules can hold a match, and reads only those. It then rejects rows from the timestamp, severity and body columns alone before decoding the other columns. The prefilter is derived only from the query's AND conjuncts; unless it is the whole predicate (`exact`), the full predicate still judges every row that passes. When it is the whole predicate, matches are counted from three columns and the remaining columns are decoded only for the rows returned. Unflushed log rows are filtered inside the memory buffer, so only matches are copied out.
 

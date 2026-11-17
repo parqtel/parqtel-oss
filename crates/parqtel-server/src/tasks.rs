@@ -185,8 +185,9 @@ pub(crate) fn spawn_alert_eval_task(state: AppState, interval_secs: u64) -> Join
                     Ok(p) => p,
                     Err(_) => continue,
                 };
-                let Some(_scan_slot) = parqtel_core::Scanner::try_reserve_scan_slot() else {
-                    tracing::debug!(rule_id = %rule.id, "skipping alert evaluation while scan budget is busy");
+                let Some(_scan_slot) = parqtel_core::Scanner::try_reserve_background_scan_slot()
+                else {
+                    tracing::debug!(rule_id = %rule.id, "skipping alert evaluation while its scan slot is busy");
                     continue;
                 };
                 if let Ok(qr) = state.inner.query_executor.execute(plan).await {

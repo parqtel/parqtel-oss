@@ -129,22 +129,24 @@ is a harder boundary: a wipe was required there.
 
 ---
 
-## Alert evaluation can be skipped under load
+## Alert evaluation has a dedicated scan slot
 
-**Symptom.** An alert that should have fired did not, and
-`parqtel_scan_low_priority_skips_total` is climbing.
+**Symptom.** `parqtel_alert_eval_skipped_total` climbs and an alert evaluation
+cycle was skipped.
 
-**Why.** Block scans share a process-wide budget of 4 slots. Alert evaluation
-reserves a slot **without waiting** and skips its cycle when none is free, so
-background work never starves interactive queries — but it also means a
-busy store can defer alerts.
+**Why.** Query scans share a process-wide budget of 4 slots. Alert evaluation
+has its own single slot, so saturating dashboard queries cannot starve the
+alert loop; the alert cycle is skipped only when its own slot is still busy
+from the previous evaluation.
 
 **Mitigating now.**
 
 - Reduce the query fan-out of the alert rule (narrower window, fewer series).
 - Roll metric blocks up into 5-minute L1 windows more aggressively by lowering
   `storage.compaction_interval_secs` (default 300).
-- Watch `parqtel_scan_slots_in_use` against `parqtel_scan_slots_limit`.
+- Watch `parqtel_scan_background_slots_in_use` against
+  `parqtel_scan_background_slots_limit` and
+  `parqtel_alert_eval_skipped_total`.
 
 ---
 

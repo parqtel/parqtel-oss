@@ -19,11 +19,16 @@ pub use pruning::{
     project_present, row_groups_in_range, row_groups_matching_metric, row_groups_matching_value,
 };
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 /// Process-wide block-scan admission budget for the 4 GiB UAT pod.
 const MAX_CONCURRENT_BLOCK_SCANS: usize = 4;
+/// Dedicated slot for alert evaluation, so a saturating query load cannot
+/// starve the alert loop. This is one scan above the query budget on purpose:
+/// the alternative (carving it out of four) reduces query throughput and trace
+/// parallelism for every deployment.
+const BACKGROUND_BLOCK_SCANS: usize = 1;
 /// Hard cap on blocks scanned per query.
 const MAX_BLOCKS: usize = 128;
 
@@ -32,15 +37,22 @@ const MAX_BLOCKS: usize = 128;
 const SCAN_BATCH_ROWS: usize = 8192;
 
 fn scan_admission() -> Arc<tokio::sync::Semaphore> {
-    static ADMISSION: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
-    Arc::clone(
-        ADMISSION.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_BLOCK_SCANS))),
-    )
+    static ADMISSION: LazyLock<Arc<tokio::sync::Semaphore>> =
+        LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_BLOCK_SCANS)));
+    Arc::clone(&ADMISSION)
+}
+
+fn background_admission() -> Arc<tokio::sync::Semaphore> {
+    static ADMISSION: LazyLock<Arc<tokio::sync::Semaphore>> =
+        LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(BACKGROUND_BLOCK_SCANS)));
+    Arc::clone(&ADMISSION)
 }
 
 #[derive(Default)]
 struct ScanMetrics {
     active_slots: AtomicU64,
+    background_active_slots: AtomicU64,
+    background_skips: AtomicU64,
     low_priority_skips: AtomicU64,
     admission_wait_ns: AtomicU64,
     blocks: AtomicU64,
@@ -53,8 +65,8 @@ struct ScanMetrics {
 }
 
 fn scan_metrics() -> &'static ScanMetrics {
-    static METRICS: OnceLock<ScanMetrics> = OnceLock::new();
-    METRICS.get_or_init(ScanMetrics::default)
+    static METRICS: LazyLock<ScanMetrics> = LazyLock::new(ScanMetrics::default);
+    &METRICS
 }
 
 /// Cumulative scanner counters exposed by `/metrics`.
@@ -62,6 +74,9 @@ fn scan_metrics() -> &'static ScanMetrics {
 pub struct ScanMetricsSnapshot {
     pub active_slots: u64,
     pub slot_limit: u64,
+    pub background_active_slots: u64,
+    pub background_slot_limit: u64,
+    pub background_skips: u64,
     pub low_priority_skips: u64,
     pub admission_wait_ns: u64,
     pub blocks: u64,
@@ -84,6 +99,20 @@ impl Drop for ScanPermit {
         scan_metrics()
             .active_slots
             .fetch_sub(self.slots, Ordering::Relaxed);
+    }
+}
+
+/// Reserved slot for alert evaluation. Separate from the query pool so a
+/// saturating query load cannot starve the alert loop.
+pub(crate) struct BackgroundScanPermit {
+    _permit: tokio::sync::OwnedSemaphorePermit,
+}
+
+impl Drop for BackgroundScanPermit {
+    fn drop(&mut self) {
+        scan_metrics()
+            .background_active_slots
+            .fetch_sub(1, Ordering::Relaxed);
     }
 }
 
@@ -171,9 +200,30 @@ fn record_scan_output(rows_considered: u64, rows_returned: usize) {
 pub struct Scanner;
 
 impl Scanner {
-    /// Reserves one scan slot without waiting, for best-effort background work.
+    /// Reserves one query scan slot without waiting, for best-effort background
+    /// work that may compete with queries.
     pub fn try_reserve_scan_slot() -> Option<impl Send> {
         reserve_scan_slots(1)
+    }
+
+    /// Reserves the dedicated alert-evaluation slot without waiting. Alert
+    /// evaluation must not consume the query pool, or a saturating dashboard
+    /// load silently skips alert cycles.
+    pub fn try_reserve_background_scan_slot() -> Option<impl Send> {
+        match background_admission().try_acquire_owned() {
+            Ok(permit) => {
+                scan_metrics()
+                    .background_active_slots
+                    .fetch_add(1, Ordering::Relaxed);
+                Some(BackgroundScanPermit { _permit: permit })
+            }
+            Err(_) => {
+                scan_metrics()
+                    .background_skips
+                    .fetch_add(1, Ordering::Relaxed);
+                None
+            }
+        }
     }
 
     /// Reserves several process-wide scan slots without waiting.
@@ -187,6 +237,9 @@ impl Scanner {
         ScanMetricsSnapshot {
             active_slots: metrics.active_slots.load(Ordering::Relaxed),
             slot_limit: MAX_CONCURRENT_BLOCK_SCANS as u64,
+            background_active_slots: metrics.background_active_slots.load(Ordering::Relaxed),
+            background_slot_limit: BACKGROUND_BLOCK_SCANS as u64,
+            background_skips: metrics.background_skips.load(Ordering::Relaxed),
             low_priority_skips: metrics.low_priority_skips.load(Ordering::Relaxed),
             admission_wait_ns: metrics.admission_wait_ns.load(Ordering::Relaxed),
             blocks: metrics.blocks.load(Ordering::Relaxed),
