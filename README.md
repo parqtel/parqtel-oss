@@ -219,8 +219,10 @@ RAM, alongside scan throughput of 101M points/s — see
 per-query numbers, including the cases where a measured optimisation was *not*
 adopted.
 
-RSS scales with ingest rate × `storage.block_duration_secs` because the memory
-buffer is unbounded by design — read
+RSS scales with the buffered row count, so `ingest.buffer_max_points` (5M) and
+`ingest.buffer_max_bytes` (2 GiB estimated) bound it; under overload the oldest
+buffered rows are evicted (`drop_oldest`, the default) or the batch is refused
+(`reject_new`). Read
 [Performance & Memory Sizing](docs/operations/performance-sizing.md) before
 raising the rate.
 
@@ -366,9 +368,12 @@ Parqtel is in **public beta**. Three things bite in production:
    `4317` publicly; put them behind a reverse proxy or service mesh that
    terminates TLS and authenticates. The web console has the same privileges as
    the API.
-2. **The in-memory buffer is unbounded.** Points stay buffered until a block is
-   flushed, so RSS scales with ingest rate × `storage.block_duration_secs`
-   (default 7200). Lower that value or size the container from
+2. **The in-memory buffer is bounded and can drop pre-flush rows.** Points stay
+   buffered until a block is flushed. `ingest.buffer_max_points` (5M) and
+   `buffer_max_bytes` (2 GiB estimated) cap it; `drop_oldest` evicts the oldest
+   buffered rows and `reject_new` refuses new batches. The writer and WAL keep
+   the acknowledged rows, so this affects the pre-flush query window, not
+   durability. Tune with
    [Performance & Memory Sizing](docs/operations/performance-sizing.md).
 3. **Instant queries see only the last 5 minutes.** Data older than
    `query.lookback_delta_ns` is answered by `/api/v1/query_range` after the

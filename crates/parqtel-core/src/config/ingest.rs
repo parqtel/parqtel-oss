@@ -84,6 +84,41 @@ pub struct IngestConfig {
     /// were actually seen, so a high value costs nothing on a small deployment.
     #[serde(default = "default_label_interner_capacity")]
     pub label_interner_capacity: usize,
+    /// Maximum buffered rows across metrics, logs, and traces. `0` disables
+    /// the row bound.
+    ///
+    /// The buffer exists so data is queryable before a block flush; the writer
+    /// and WAL hold the same rows, so dropping the oldest buffered rows only
+    /// shortens the pre-flush query window, it does not lose acknowledged data.
+    #[serde(default = "default_buffer_max_points")]
+    pub buffer_max_points: usize,
+    /// Approximate maximum buffered bytes across all signals. `0` disables the
+    /// byte bound. The estimate counts point/record structure plus body and
+    /// label bytes, not allocator overhead.
+    #[serde(default = "default_buffer_max_bytes")]
+    pub buffer_max_bytes: usize,
+    /// What to do when either bound is reached.
+    #[serde(default)]
+    pub buffer_overflow_policy: BufferOverflowPolicy,
+}
+
+/// Overload behaviour for the in-memory query buffer.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BufferOverflowPolicy {
+    /// Evict the oldest buffered rows and keep accepting new data.
+    #[default]
+    DropOldest,
+    /// Refuse the new batch and keep the rows already buffered.
+    RejectNew,
+}
+
+fn default_buffer_max_points() -> usize {
+    5_000_000
+}
+
+fn default_buffer_max_bytes() -> usize {
+    2 * 1024 * 1024 * 1024
 }
 
 fn default_label_interner_capacity() -> usize {
@@ -155,6 +190,9 @@ impl Default for IngestConfig {
             tail_sampling: TailSamplingConfig::default(),
             rotator_shards: default_rotator_shards(),
             label_interner_capacity: default_label_interner_capacity(),
+            buffer_max_points: default_buffer_max_points(),
+            buffer_max_bytes: default_buffer_max_bytes(),
+            buffer_overflow_policy: BufferOverflowPolicy::default(),
         }
     }
 }

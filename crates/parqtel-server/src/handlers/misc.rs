@@ -152,7 +152,8 @@ pub async fn ingest_rates(
 
 /// Handler for GET /metrics (Prometheus text format).
 pub async fn metrics(State(state): State<AppState>) -> (StatusCode, String) {
-    let body = state.inner.metrics.render(&state.inner.index).await;
+    let mut body = state.inner.metrics.render(&state.inner.index).await;
+    body.push_str(&state.inner.query_executor.memory_buffer().render_metrics());
     (StatusCode::OK, body)
 }
 

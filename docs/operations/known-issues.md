@@ -6,24 +6,32 @@ not belong here.
 
 ---
 
-## The in-memory buffer is unbounded
+## The in-memory buffer has a row and byte bound
 
-**Symptom.** Resident memory (`parqtel_process_rss_bytes`) grows with ingest
-rate × `storage.block_duration_secs` and does not come down until a block is
-flushed. A sustained rate that fits at 100 k points/s can OOM at 300 k.
+**Symptom.** `parqtel_buffer_dropped_total{signal,reason}` climbs during a
+sustained spike, and queries over the pre-flush window can miss the oldest
+rows.
 
 **Why.** Points are buffered in memory so they are immediately queryable, and
-flushed to a Parquet block on a timer or at the row cap. There is no maximum
-size, no byte accounting and no eviction, so the only bound is time.
+flushed to a Parquet block on a timer or at the row cap. `ingest.buffer_max_points`
+(default **5 000 000** rows) and `ingest.buffer_max_bytes` (default **2 GiB**
+estimated) bound that buffer. Under `drop_oldest` the oldest buffered rows are
+evicted; under `reject_new` the incoming batch is refused. The writer and WAL
+hold the same rows, so eviction does not lose acknowledged data — it only
+shortens the window that is queryable before the flush.
 
-**Mitigating now.**
+**Tuning.**
 
-- Lower `storage.block_duration_secs` (default **7200**). This is the strongest
-  lever: buffered points scale directly with it.
+- Lower `storage.block_duration_secs` (default **7200**) to flush more often;
+  buffered rows scale directly with it.
+- Raise `ingest.buffer_max_points` / `buffer_max_bytes` when the node has RAM
+  to spare and the pre-flush window matters.
 - Set `ingest.label_interner_capacity` to at least **twice** the active series
   count (default 1 048 576). Below that, every point keeps its own copy of its
   labels and memory grows with points instead of series.
-- Watch `parqtel_process_rss_bytes` and alert on it.
+- Watch `parqtel_buffer_bytes`, `parqtel_buffer_points{signal}`,
+  `parqtel_buffer_dropped_total{signal,reason}` and
+  `parqtel_process_rss_bytes`.
 - Size the container from the formula in [performance-sizing.md](performance-sizing.md)
   rather than from a default.
 

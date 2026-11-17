@@ -29,11 +29,13 @@ series' labels are cloned once per block rather than once per step
 (`ast::SharedLabels`).
 
 The structural point still holds: RAM scales with **buffered points**, and
-buffered points scale with **ingest rate × block duration**. Two consequences
-that were *not* addressed and remain the live risk:
+buffered points scale with **ingest rate × block duration**. Two consequences:
 
-- The memory buffer is still unbounded — no max size, no byte accounting and no
-  eviction. See the sizing rule below before raising the ingest rate.
+- The memory buffer is bounded by `ingest.buffer_max_points` (default **5M**
+  rows) and `ingest.buffer_max_bytes` (default **2 GiB** estimated), with
+  `drop_oldest` or `reject_new` overflow policy. The writer and WAL keep the
+  acknowledged rows, so eviction changes the pre-flush query window, not
+  durability. Watch `parqtel_buffer_dropped_total{signal,reason}`.
 - `storage.block_duration_secs` (default **2 h**) sets how long points sit
   buffered. Shortening it trades query freshness (points become visible on
   flush) against resident memory.
@@ -183,10 +185,12 @@ while one runs returns 429.
 
 ## 5. Limits and caveats
 
-* **The memory buffer is unbounded.** `MemoryBuffer` has no cap, no byte
-  accounting and no eviction, so resident memory is a function of ingest rate x
-  block duration with no ceiling. Size the data directory and the container limit
-  from the formula in §2 and alert on `parqtel_process_rss_bytes`.
+* **The memory buffer has a row and byte ceiling.** `MemoryBuffer` enforces
+  `ingest.buffer_max_points` / `buffer_max_bytes`; under overload the oldest
+  buffered rows are evicted or the new batch is refused. Acknowledged rows stay
+  in the writer/WAL, so the loss is limited to the pre-flush query window. Size
+  the data directory and the container limit from the formula in §2, and alert
+  on `parqtel_buffer_dropped_total` and `parqtel_process_rss_bytes`.
 * **`KiB_PER_POINT` is conservative.** The 6.3 KiB/point slope was measured
   before label sets were shared behind an `Arc`, before the label interner was
   made configurable, and before the write-ahead log, so real usage is lower. Measure resident memory at your own ingest rate before

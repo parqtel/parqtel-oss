@@ -65,8 +65,13 @@ pub(crate) async fn run_server(
         contention.clone(),
     );
 
-    // Create shared in-memory buffer for stream-queryable data
-    let memory_buffer = parqtel_core::MemoryBuffer::new();
+    // Create shared in-memory buffer for stream-queryable data. The writer and
+    // WAL hold the same rows, so the bounds govern queryability, not durability.
+    let memory_buffer = parqtel_core::MemoryBuffer::with_limits(
+        config.ingest.buffer_max_points,
+        config.ingest.buffer_max_bytes,
+        config.ingest.buffer_overflow_policy,
+    );
 
     // Opened before the service so replay can feed the same path live ingest
     // uses. A WAL that cannot be opened stops startup: continuing would accept

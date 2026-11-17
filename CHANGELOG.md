@@ -42,6 +42,14 @@ while measuring. Measurements and method are in
 
 ### Added
 
+- **Bounded in-memory query buffer.** `ingest.buffer_max_points` (default 5M
+  rows) and `ingest.buffer_max_bytes` (default 2 GiB estimated) cap the
+  metrics/logs/traces buffer, with `drop_oldest` or `reject_new` overflow
+  policy. The writer and WAL keep acknowledged rows, so eviction shortens the
+  pre-flush query window rather than losing data. New counters:
+  `parqtel_buffer_points{signal}`, `parqtel_buffer_bytes`,
+  `parqtel_buffer_limit_points`, `parqtel_buffer_limit_bytes`, and
+  `parqtel_buffer_dropped_total{signal,reason}`.
 - **Runtime configuration is persisted and gated.** Alert routes written over
   the API are saved atomically to `data/alert_routes.json`, and recording-rule
   and pipeline definitions to `rules/recording/` and `rules/pipelines/`; all

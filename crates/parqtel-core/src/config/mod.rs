@@ -10,7 +10,7 @@ pub use alert::{
     AlertConfig, EgressConfig, NotificationConfig, PostmortemConfig, PresetConfig, PresetMode,
     RouteConfig, SilenceConfig,
 };
-pub use ingest::{IngestConfig, TailSamplingConfig};
+pub use ingest::{BufferOverflowPolicy, IngestConfig, TailSamplingConfig};
 pub use query::{QueryConfig, UIConfig};
 pub use routing::{
     parse_duration, parse_matcher_str, resolve_secret, resolve_secret_with, AlertRouteConfig,

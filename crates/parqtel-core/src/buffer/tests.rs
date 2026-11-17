@@ -225,6 +225,84 @@ async fn untracked_points_ignore_sealed_epochs() {
     assert!(stamps(&buf, "m").await.is_empty());
 }
 
+#[tokio::test]
+async fn drop_oldest_bounds_metric_points_and_counts_drops() {
+    let buf = MemoryBuffer::with_limits(3, 0, BufferOverflowPolicy::DropOldest);
+    buf.push_metrics("m", &[pt(1), pt(2), pt(3), pt(4), pt(5), pt(6)])
+        .await;
+    assert_eq!(stamps(&buf, "m").await, vec![4, 5, 6]);
+    let text = buf.render_metrics();
+    assert!(
+        text.contains("parqtel_buffer_dropped_total{signal=\"metrics\",reason=\"drop_oldest\"} 3")
+    );
+    assert!(text.contains("parqtel_buffer_points{signal=\"metrics\"} 3"));
+}
+
+#[tokio::test]
+async fn reject_new_keeps_existing_rows_and_counts_rejection() {
+    let buf = MemoryBuffer::with_limits(2, 0, BufferOverflowPolicy::RejectNew);
+    buf.push_metrics("m", &[pt(1), pt(2)]).await;
+    buf.push_metrics("m", &[pt(3)]).await;
+    assert_eq!(stamps(&buf, "m").await, vec![1, 2]);
+    let text = buf.render_metrics();
+    assert!(
+        text.contains("parqtel_buffer_dropped_total{signal=\"metrics\",reason=\"reject_new\"} 1")
+    );
+}
+
+fn test_log(ts: i64, body: &str) -> LogRecord {
+    LogRecord::new(
+        ts,
+        ts + 1,
+        9,
+        "INFO".into(),
+        body.into(),
+        Default::default(),
+        Default::default(),
+        [0; 16],
+        [0; 8],
+        0,
+        "scope".into(),
+        "1.0".into(),
+    )
+}
+
+#[tokio::test]
+async fn bounded_log_and_span_buffers_drop_oldest() {
+    let buf = MemoryBuffer::with_limits(2, 0, BufferOverflowPolicy::DropOldest);
+    buf.push_logs(&[test_log(1, "a"), test_log(2, "b"), test_log(3, "c")])
+        .await;
+    let logs = buf.scan_logs(0, i64::MAX).await;
+    assert_eq!(logs.len(), 2);
+    assert_eq!(logs[1].body, "c");
+
+    let span_buf = MemoryBuffer::with_limits(2, 0, BufferOverflowPolicy::DropOldest);
+    span_buf
+        .push_spans(&[test_span(1, 1, 2), test_span(2, 3, 4), test_span(3, 5, 6)])
+        .await;
+    let (m, l, s) = span_buf.stats().await;
+    assert_eq!((m, l, s), (0, 0, 2));
+    assert!(span_buf
+        .render_metrics()
+        .contains("reason=\"drop_oldest\"} 1"));
+}
+
+#[tokio::test]
+async fn draining_the_buffer_clears_usage_counters() {
+    let buf = MemoryBuffer::with_limits(10, 0, BufferOverflowPolicy::DropOldest);
+    buf.push_metrics("m", &[pt(1), pt(2), pt(3)]).await;
+    buf.push_logs(&[test_log(1, "a")]).await;
+    buf.push_spans(&[test_span(1, 1, 2)]).await;
+    let _ = buf.take_metrics().await;
+    let _ = buf.take_logs().await;
+    let _ = buf.take_spans().await;
+    let text = buf.render_metrics();
+    assert!(text.contains("parqtel_buffer_points{signal=\"metrics\"} 0"));
+    assert!(text.contains("parqtel_buffer_points{signal=\"logs\"} 0"));
+    assert!(text.contains("parqtel_buffer_points{signal=\"traces\"} 0"));
+    assert!(text.contains("parqtel_buffer_bytes 0"));
+}
+
 /// The sharded map keeps every whole-buffer view consistent.
 #[tokio::test]
 async fn whole_buffer_views_span_all_map_shards() {

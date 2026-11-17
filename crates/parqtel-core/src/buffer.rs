@@ -2,12 +2,14 @@
 //!
 //! Uses a HashMap indexed by metric name for O(1) lookup instead of O(n) scan.
 
+use crate::config::BufferOverflowPolicy;
 use crate::models::labels::LabelSet;
 use crate::models::logs::LogRecord;
 use crate::models::metrics::DataPoint;
 use crate::models::storage::SignalType;
 use crate::models::traces::Span;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -19,6 +21,106 @@ const METRIC_MAP_SHARDS: usize = 16;
 
 /// Marks the writer shard of points that were buffered without epoch tracking.
 const UNTRACKED: u16 = u16::MAX;
+
+/// Bounds for the in-memory query buffer. A zero bound disables that
+/// dimension. The byte figure is an estimate, not an allocator measurement.
+#[derive(Debug, Clone, Copy)]
+pub struct BufferLimits {
+    pub max_points: usize,
+    pub max_bytes: usize,
+    pub policy: BufferOverflowPolicy,
+}
+
+impl BufferLimits {
+    /// No limits. Used by tests and embedders that manage memory themselves.
+    pub const fn unbounded() -> Self {
+        Self {
+            max_points: 0,
+            max_bytes: 0,
+            policy: BufferOverflowPolicy::DropOldest,
+        }
+    }
+
+    fn would_exceed(
+        &self,
+        points: usize,
+        bytes: usize,
+        added_points: usize,
+        added_bytes: usize,
+    ) -> bool {
+        (self.max_points > 0 && points.saturating_add(added_points) > self.max_points)
+            || (self.max_bytes > 0 && bytes.saturating_add(added_bytes) > self.max_bytes)
+    }
+}
+
+#[derive(Default)]
+struct BufferUsage {
+    points: AtomicUsize,
+    bytes: AtomicUsize,
+    metric_points: AtomicUsize,
+    log_rows: AtomicUsize,
+    span_rows: AtomicUsize,
+    /// Index: 0 metrics, 1 logs, 2 traces.
+    dropped_oldest: [AtomicU64; 3],
+    rejected_new: [AtomicU64; 3],
+}
+
+impl BufferUsage {
+    fn add(&self, signal: usize, rows: usize, bytes: usize) {
+        self.points.fetch_add(rows, Ordering::Relaxed);
+        self.bytes.fetch_add(bytes, Ordering::Relaxed);
+        match signal {
+            0 => self.metric_points.fetch_add(rows, Ordering::Relaxed),
+            1 => self.log_rows.fetch_add(rows, Ordering::Relaxed),
+            _ => self.span_rows.fetch_add(rows, Ordering::Relaxed),
+        };
+    }
+
+    fn remove(&self, signal: usize, rows: usize, bytes: usize) {
+        self.points.fetch_sub(rows, Ordering::Relaxed);
+        self.bytes.fetch_sub(bytes, Ordering::Relaxed);
+        match signal {
+            0 => self.metric_points.fetch_sub(rows, Ordering::Relaxed),
+            1 => self.log_rows.fetch_sub(rows, Ordering::Relaxed),
+            _ => self.span_rows.fetch_sub(rows, Ordering::Relaxed),
+        };
+    }
+
+    fn drop_oldest(&self, signal: usize, rows: usize) {
+        self.dropped_oldest[signal].fetch_add(rows as u64, Ordering::Relaxed);
+    }
+
+    fn reject_new(&self, signal: usize, rows: usize) {
+        self.rejected_new[signal].fetch_add(rows as u64, Ordering::Relaxed);
+    }
+}
+
+const METRIC_POINT_ESTIMATE: usize = std::mem::size_of::<DataPoint>() + 64;
+
+fn metric_point_bytes(_point: &DataPoint) -> usize {
+    METRIC_POINT_ESTIMATE
+}
+
+fn log_row_bytes(row: &LogRecord) -> usize {
+    std::mem::size_of::<LogRecord>()
+        + row.body.len()
+        + row.severity_text.len()
+        + row.scope_name.len()
+        + row.scope_version.len()
+        + 64
+}
+
+fn span_row_bytes(span: &Span) -> usize {
+    std::mem::size_of::<Span>()
+        + span.name.len()
+        + span.trace_state.len()
+        + span
+            .events
+            .iter()
+            .map(|e| std::mem::size_of_val(e) + e.name.len())
+            .sum::<usize>()
+        + 64
+}
 
 /// A run of points that entered the buffer in the same writer epoch.
 #[derive(Debug, Clone, Copy)]
@@ -63,6 +165,8 @@ pub struct MemoryBuffer {
     metrics: Arc<MetricMaps>,
     logs: Arc<RwLock<Vec<LogRecord>>>,
     spans: Arc<RwLock<Vec<Span>>>,
+    limits: Arc<BufferLimits>,
+    usage: Arc<BufferUsage>,
 }
 
 fn map_shard(name: &str) -> usize {
@@ -71,8 +175,45 @@ fn map_shard(name: &str) -> usize {
     (state.hash_one(name) as usize) % METRIC_MAP_SHARDS
 }
 
+/// Drop the oldest `cut` points of one slot, keeping epoch marks consistent.
+fn drop_front_slot(slot: &mut Slot, cut: usize) -> (usize, usize) {
+    let cut = cut.min(slot.points.len());
+    if cut == 0 {
+        return (0, 0);
+    }
+    let bytes: usize = slot.points[..cut].iter().map(metric_point_bytes).sum();
+    slot.points.drain(..cut);
+
+    let mut removed_marks = 0;
+    for mark in &mut slot.marks {
+        if mark.start < cut {
+            removed_marks += 1;
+        } else {
+            mark.start -= cut;
+        }
+    }
+    slot.marks.drain(..removed_marks);
+
+    if slot.series.len() > slot.points.len().max(16) {
+        slot.series.clear();
+        slot.series_seen.clear();
+        for dp in &slot.points {
+            if slot.series_seen.insert(dp.labels.addr()) {
+                slot.series.push(dp.labels.clone());
+            }
+        }
+    }
+    (cut, bytes)
+}
+
 impl MemoryBuffer {
     pub fn new() -> Self {
+        let limits = BufferLimits::unbounded();
+        Self::with_limits(limits.max_points, limits.max_bytes, limits.policy)
+    }
+
+    /// Buffer bounded by `max_points` / `max_bytes` (0 disables a bound).
+    pub fn with_limits(max_points: usize, max_bytes: usize, policy: BufferOverflowPolicy) -> Self {
         Self {
             metrics: Arc::new(
                 (0..METRIC_MAP_SHARDS)
@@ -81,7 +222,17 @@ impl MemoryBuffer {
             ),
             logs: Arc::new(RwLock::new(Vec::with_capacity(5_000))),
             spans: Arc::new(RwLock::new(Vec::with_capacity(5_000))),
+            limits: Arc::new(BufferLimits {
+                max_points,
+                max_bytes,
+                policy,
+            }),
+            usage: Arc::new(BufferUsage::default()),
         }
+    }
+
+    pub fn limits(&self) -> BufferLimits {
+        *self.limits
     }
 
     /// Push metric data points into the indexed buffer.
@@ -107,6 +258,23 @@ impl MemoryBuffer {
         if data_points.is_empty() {
             return;
         }
+        let batch_bytes: usize = data_points.iter().map(metric_point_bytes).sum();
+        if self.limits.policy == BufferOverflowPolicy::RejectNew
+            && self.limits.would_exceed(
+                self.usage.points.load(Ordering::Relaxed),
+                self.usage.bytes.load(Ordering::Relaxed),
+                data_points.len(),
+                batch_bytes,
+            )
+        {
+            self.usage.reject_new(0, data_points.len());
+            tracing::warn!(
+                metric = %name,
+                points = data_points.len(),
+                "buffer full; rejected metric batch"
+            );
+            return;
+        }
         tracing::debug!(metric = %name, points = data_points.len(), "buffered metrics");
         let mut map = self.metrics[map_shard(name)].write().await;
         let slot = map.entry(name.to_string()).or_default();
@@ -128,6 +296,70 @@ impl MemoryBuffer {
         for dp in data_points {
             if slot.series_seen.insert(dp.labels.addr()) {
                 slot.series.push(dp.labels.clone());
+            }
+        }
+        self.usage.add(0, data_points.len(), batch_bytes);
+        self.evict_metrics_locked(&mut map);
+    }
+
+    /// Evict oldest points from one shard until the global estimate is within
+    /// its bounds. Called with the shard lock held, so it cannot wait on a
+    /// second shard. Overload is rare and this is deliberately approximate.
+    fn evict_metrics_locked(&self, map: &mut HashMap<String, Slot>) {
+        for _ in 0..4 {
+            let excess_points = if self.limits.max_points > 0 {
+                self.usage
+                    .points
+                    .load(Ordering::Relaxed)
+                    .saturating_sub(self.limits.max_points)
+            } else {
+                0
+            };
+            let excess_bytes = self
+                .usage
+                .bytes
+                .load(Ordering::Relaxed)
+                .saturating_sub(self.limits.max_bytes);
+            let points_over = self.limits.max_points > 0 && excess_points > 0;
+            let bytes_over = self.limits.max_bytes > 0 && excess_bytes > 0;
+            if !points_over && !bytes_over {
+                return;
+            }
+
+            let mut remaining = map.values().filter(|s| !s.points.is_empty()).count();
+            if remaining == 0 {
+                return;
+            }
+            let mut excess_p = excess_points;
+            let mut excess_b = excess_bytes;
+            for slot in map.values_mut() {
+                if slot.points.is_empty() {
+                    continue;
+                }
+                let share_p = if points_over {
+                    excess_p.div_ceil(remaining)
+                } else {
+                    0
+                };
+                let share_b = if bytes_over {
+                    excess_b.div_ceil(remaining)
+                } else {
+                    0
+                };
+                // A byte-share estimate maps to at least one point when the
+                // byte bound is the one being hit.
+                let points_for_bytes = if share_b > 0 {
+                    (share_b / METRIC_POINT_ESTIMATE).max(1)
+                } else {
+                    0
+                };
+                let cut = share_p.max(points_for_bytes).clamp(1, slot.points.len());
+                let (dropped, bytes) = drop_front_slot(slot, cut);
+                self.usage.remove(0, dropped, bytes);
+                self.usage.drop_oldest(0, dropped);
+                excess_p = excess_p.saturating_sub(dropped);
+                excess_b = excess_b.saturating_sub(bytes);
+                remaining = remaining.saturating_sub(1);
             }
         }
     }
@@ -161,7 +393,10 @@ impl MemoryBuffer {
                     .marks
                     .get(droppable)
                     .map_or(slot.points.len(), |m| m.start);
-                freed.push(slot.points.drain(..cut).collect());
+                let dropped: Vec<DataPoint> = slot.points.drain(..cut).collect();
+                let bytes: usize = dropped.iter().map(metric_point_bytes).sum();
+                self.usage.remove(0, dropped.len(), bytes);
+                freed.push(dropped);
                 slot.marks.drain(..droppable);
                 for m in slot.marks.iter_mut() {
                     m.start -= cut;
@@ -187,18 +422,134 @@ impl MemoryBuffer {
 
     /// Push log records into the buffer.
     pub async fn push_logs(&self, logs: &[LogRecord]) {
-        if !logs.is_empty() {
-            tracing::debug!(logs = logs.len(), "buffered logs");
+        if logs.is_empty() {
+            return;
         }
+        let batch_bytes: usize = logs.iter().map(log_row_bytes).sum();
+        if self.limits.policy == BufferOverflowPolicy::RejectNew
+            && self.limits.would_exceed(
+                self.usage.points.load(Ordering::Relaxed),
+                self.usage.bytes.load(Ordering::Relaxed),
+                logs.len(),
+                batch_bytes,
+            )
+        {
+            self.usage.reject_new(1, logs.len());
+            tracing::warn!(rows = logs.len(), "buffer full; rejected log batch");
+            return;
+        }
+        tracing::debug!(logs = logs.len(), "buffered logs");
         self.logs.write().await.extend_from_slice(logs);
+        self.usage.add(1, logs.len(), batch_bytes);
+        self.evict_logs().await;
+    }
+
+    async fn evict_logs(&self) {
+        for _ in 0..4 {
+            let excess_points = if self.limits.max_points > 0 {
+                self.usage
+                    .points
+                    .load(Ordering::Relaxed)
+                    .saturating_sub(self.limits.max_points)
+            } else {
+                0
+            };
+            let excess_bytes = if self.limits.max_bytes > 0 {
+                self.usage
+                    .bytes
+                    .load(Ordering::Relaxed)
+                    .saturating_sub(self.limits.max_bytes)
+            } else {
+                0
+            };
+            if excess_points == 0 && excess_bytes == 0 {
+                return;
+            }
+            let dropped: Vec<LogRecord> = {
+                let mut buf = self.logs.write().await;
+                let avg = (self.usage.bytes.load(Ordering::Relaxed)
+                    / self.usage.points.load(Ordering::Relaxed).max(1))
+                .max(1);
+                let n = excess_points
+                    .max(excess_bytes / avg)
+                    .max(usize::from(excess_bytes > 0))
+                    .min(buf.len());
+                if n == 0 {
+                    return;
+                }
+                buf.drain(..n).collect()
+            };
+            let bytes: usize = dropped.iter().map(log_row_bytes).sum();
+            self.usage.remove(1, dropped.len(), bytes);
+            self.usage.drop_oldest(1, dropped.len());
+            Self::offload_drop(dropped).await;
+        }
     }
 
     /// Push spans into the buffer (queryable immediately, pre-flush).
     pub async fn push_spans(&self, spans: &[Span]) {
-        if !spans.is_empty() {
-            tracing::debug!(spans = spans.len(), "buffered spans");
+        if spans.is_empty() {
+            return;
         }
+        let batch_bytes: usize = spans.iter().map(span_row_bytes).sum();
+        if self.limits.policy == BufferOverflowPolicy::RejectNew
+            && self.limits.would_exceed(
+                self.usage.points.load(Ordering::Relaxed),
+                self.usage.bytes.load(Ordering::Relaxed),
+                spans.len(),
+                batch_bytes,
+            )
+        {
+            self.usage.reject_new(2, spans.len());
+            tracing::warn!(rows = spans.len(), "buffer full; rejected span batch");
+            return;
+        }
+        tracing::debug!(spans = spans.len(), "buffered spans");
         self.spans.write().await.extend_from_slice(spans);
+        self.usage.add(2, spans.len(), batch_bytes);
+        self.evict_spans().await;
+    }
+
+    async fn evict_spans(&self) {
+        for _ in 0..4 {
+            let excess_points = if self.limits.max_points > 0 {
+                self.usage
+                    .points
+                    .load(Ordering::Relaxed)
+                    .saturating_sub(self.limits.max_points)
+            } else {
+                0
+            };
+            let excess_bytes = if self.limits.max_bytes > 0 {
+                self.usage
+                    .bytes
+                    .load(Ordering::Relaxed)
+                    .saturating_sub(self.limits.max_bytes)
+            } else {
+                0
+            };
+            if excess_points == 0 && excess_bytes == 0 {
+                return;
+            }
+            let dropped: Vec<Span> = {
+                let mut buf = self.spans.write().await;
+                let avg = (self.usage.bytes.load(Ordering::Relaxed)
+                    / self.usage.points.load(Ordering::Relaxed).max(1))
+                .max(1);
+                let n = excess_points
+                    .max(excess_bytes / avg)
+                    .max(usize::from(excess_bytes > 0))
+                    .min(buf.len());
+                if n == 0 {
+                    return;
+                }
+                buf.drain(..n).collect()
+            };
+            let bytes: usize = dropped.iter().map(span_row_bytes).sum();
+            self.usage.remove(2, dropped.len(), bytes);
+            self.usage.drop_oldest(2, dropped.len());
+            Self::offload_drop(dropped).await;
+        }
     }
 
     /// Query spans from the buffer matching the given time range.
@@ -354,6 +705,12 @@ impl MemoryBuffer {
             );
         }
         let total: usize = drained.iter().map(|(_, v)| v.len()).sum();
+        let bytes: usize = drained
+            .iter()
+            .flat_map(|(_, points)| points.iter())
+            .map(metric_point_bytes)
+            .sum();
+        self.usage.remove(0, total, bytes);
         tracing::debug!(
             signal = "metrics",
             drained = total,
@@ -369,6 +726,8 @@ impl MemoryBuffer {
             let mut buf = self.logs.write().await;
             std::mem::take(&mut *buf)
         };
+        let bytes: usize = drained.iter().map(log_row_bytes).sum();
+        self.usage.remove(1, drained.len(), bytes);
         tracing::debug!(
             signal = "logs",
             drained = drained.len(),
@@ -384,6 +743,8 @@ impl MemoryBuffer {
             let mut buf = self.spans.write().await;
             std::mem::take(&mut *buf)
         };
+        let bytes: usize = drained.iter().map(span_row_bytes).sum();
+        self.usage.remove(2, drained.len(), bytes);
         tracing::debug!(
             signal = "traces",
             drained = drained.len(),
@@ -400,6 +761,8 @@ impl MemoryBuffer {
             let n = n.min(buf.len());
             buf.drain(..n).collect()
         };
+        let bytes: usize = dropped.iter().map(log_row_bytes).sum();
+        self.usage.remove(1, dropped.len(), bytes);
         Self::offload_drop(dropped).await;
     }
 
@@ -410,6 +773,8 @@ impl MemoryBuffer {
             let n = n.min(buf.len());
             buf.drain(..n).collect()
         };
+        let bytes: usize = dropped.iter().map(span_row_bytes).sum();
+        self.usage.remove(2, dropped.len(), bytes);
         Self::offload_drop(dropped).await;
     }
 
@@ -466,6 +831,54 @@ impl MemoryBuffer {
         let l = self.logs.read().await.len();
         let s = self.spans.read().await.len();
         (m, l, s)
+    }
+
+    /// Prometheus text for the buffer's occupancy and drop counters.
+    pub fn render_metrics(&self) -> String {
+        let m = self.usage.metric_points.load(Ordering::Relaxed);
+        let l = self.usage.log_rows.load(Ordering::Relaxed);
+        let s = self.usage.span_rows.load(Ordering::Relaxed);
+        let bytes = self.usage.bytes.load(Ordering::Relaxed);
+        let mut out = String::with_capacity(1024);
+        out.push_str("# HELP parqtel_buffer_points Rows held in the query buffer by signal\n");
+        out.push_str("# TYPE parqtel_buffer_points gauge\n");
+        out.push_str(&format!(
+            "parqtel_buffer_points{{signal=\"metrics\"}} {m}\n"
+        ));
+        out.push_str(&format!("parqtel_buffer_points{{signal=\"logs\"}} {l}\n"));
+        out.push_str(&format!("parqtel_buffer_points{{signal=\"traces\"}} {s}\n"));
+        out.push_str("# HELP parqtel_buffer_bytes Estimated bytes held in the query buffer\n");
+        out.push_str("# TYPE parqtel_buffer_bytes gauge\n");
+        out.push_str(&format!("parqtel_buffer_bytes {bytes}\n"));
+        out.push_str(
+            "# HELP parqtel_buffer_limit_points Configured buffer row bound (0 = unlimited)\n",
+        );
+        out.push_str("# TYPE parqtel_buffer_limit_points gauge\n");
+        out.push_str(&format!(
+            "parqtel_buffer_limit_points {}\n",
+            self.limits.max_points
+        ));
+        out.push_str(
+            "# HELP parqtel_buffer_limit_bytes Configured buffer byte bound (0 = unlimited)\n",
+        );
+        out.push_str("# TYPE parqtel_buffer_limit_bytes gauge\n");
+        out.push_str(&format!(
+            "parqtel_buffer_limit_bytes {}\n",
+            self.limits.max_bytes
+        ));
+        out.push_str("# HELP parqtel_buffer_dropped_total Rows dropped from the query buffer\n");
+        out.push_str("# TYPE parqtel_buffer_dropped_total counter\n");
+        for (idx, signal) in ["metrics", "logs", "traces"].iter().enumerate() {
+            let oldest = self.usage.dropped_oldest[idx].load(Ordering::Relaxed);
+            let rejected = self.usage.rejected_new[idx].load(Ordering::Relaxed);
+            out.push_str(&format!(
+                "parqtel_buffer_dropped_total{{signal=\"{signal}\",reason=\"drop_oldest\"}} {oldest}\n"
+            ));
+            out.push_str(&format!(
+                "parqtel_buffer_dropped_total{{signal=\"{signal}\",reason=\"reject_new\"}} {rejected}\n"
+            ));
+        }
+        out
     }
 
     /// Freshest label values for a label name, bounded and prefix-filtered.

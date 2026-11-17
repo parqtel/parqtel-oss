@@ -259,6 +259,14 @@ The L1 pass is bounded (8 sources, 2 groups, 16 M rows per pass) and reserves
 | `label_interner_capacity` | Integer | `1048576` | Distinct label sets the process-wide interner holds before it starts emptying shards. Interning lets every point of a series share one copy of its labels; past this capacity sharing is lost and memory grows with points instead of series. Set it to at least **twice the active series count**, because each series is interned twice (as received, and with `service.name` for the memory buffer). The table only holds sets that were actually seen, so a high value costs nothing on a small deployment |
 | `rotator_shards` | Integer | `4` | Writer shards for the metrics ingest rotator. Every ingest request serialises on one lock per signal and a block flush runs while that lock is held, so one flush stalls every metric request for its encode duration. Sharding lets unrelated metrics be ingested concurrently during a flush. **The shards are not independent blocks** — a flush merges them into one file, so block count and query fan-out are unchanged, and durability is unchanged. Clamped to 1–256. Raise only where `parqtel_ingest_lock_wait_seconds` shows real contention; it costs one writer buffer per shard |
 | `log_wal_enabled` | Boolean | `true` | Enable write-ahead log for logs |
+| `buffer_max_points` | Integer | `5000000` | Max buffered rows across metrics, logs, and traces (`0` disables). The writer and WAL hold the same rows, so eviction shortens the pre-flush query window, not durability |
+| `buffer_max_bytes` | Integer | `2147483648` | Approximate max buffered bytes (`0` disables). Counts record structure plus body and label bytes, not allocator overhead |
+| `buffer_overflow_policy` | String | `drop_oldest` | `drop_oldest` evicts the oldest buffered rows; `reject_new` refuses the incoming batch. Both increment `parqtel_buffer_dropped_total{signal,reason}` |
+
+Buffer occupancy and drops are exported at `/metrics` as
+`parqtel_buffer_points{signal}`, `parqtel_buffer_bytes`,
+`parqtel_buffer_limit_points`, `parqtel_buffer_limit_bytes`, and
+`parqtel_buffer_dropped_total{signal,reason}`.
 
 ### `[ingest.tail_sampling]`
 
