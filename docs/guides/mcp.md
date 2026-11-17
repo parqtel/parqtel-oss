@@ -62,7 +62,7 @@ The MCP server:
 
 ## Tools (`parqtel-mcp-parqtel`)
 
-`parqtel-mcp-parqtel` registers **seven** tools:
+`parqtel-mcp-parqtel` registers **ten** tools:
 
 ### `query_metrics`
 Execute a PromQL expression. Only `query` is required; the mode is chosen by the other parameters:
@@ -95,6 +95,25 @@ Search stored log records. Defaults to the last hour, newest first; returns matc
 | `limit` | number | | Max records returned, capped at 2000 (default 100) |
 | `order` | string | | `asc` or `desc` by timestamp (default `desc` = newest first) |
 | `severity_min` | string | | Minimum severity: `TRACE`…`FATAL`, or a numeric OTLP severity 1–24 |
+
+### `query_traces`
+Search spans with a ParqtelQL predicate. Returns spans with `trace_id`; pass
+`trace_id` to fetch one trace.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `query` | string | | ParqtelQL span predicate |
+| `start` / `end` | number | | Epoch seconds (default now-1h … now) |
+| `limit` | number | | Max spans (default 200) |
+| `trace_id` | string | | Fetch one trace by id |
+
+### `get_storage_stats`
+Storage, buffer, and config snapshot. Pass `dataset=<service.name>` for matching
+blocks/rows/bytes, metric count, sidecar bytes, and compaction lag.
+
+### `get_pipelines`
+Recording-rule and pipeline registry status: generation, definitions, load
+errors, ruler enabled flag, and persisted evaluation state.
 
 ### `ingest_rates`
 Live per-signal ingestion rates (metrics/logs/traces): current + 60s/5m/15m averages, wire bytes/sec, seconds since the last ingested item (gap), lifetime totals, and per-second event counts. Use to detect ingestion spikes, stalls, or gaps.

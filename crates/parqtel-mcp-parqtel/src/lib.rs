@@ -219,3 +219,54 @@ pub fn make_get_noise_statistics_tool() -> McpTool {
         }),
     }
 }
+
+/// Create a parqtel query traces tool
+pub fn make_query_traces_tool() -> McpTool {
+    McpTool {
+        name: "query_traces".to_string(),
+        description: "Search spans with a ParqtelQL predicate (service, operation, status, \
+                      duration, attributes). Returns spans with trace_id so an agent can group \
+                      a waterfall client-side; pass trace_id to fetch one trace."
+            .to_string(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "query": { "type": "string", "description": "ParqtelQL span predicate" },
+                "start": { "type": "number", "description": "Range start, epoch seconds" },
+                "end": { "type": "number", "description": "Range end, epoch seconds" },
+                "limit": { "type": "number", "description": "Max spans (default 200)" },
+                "trace_id": { "type": "string", "description": "Fetch one trace by id" }
+            },
+            "required": []
+        }),
+    }
+}
+
+/// Create a parqtel storage stats tool
+pub fn make_get_storage_stats_tool() -> McpTool {
+    McpTool {
+        name: "get_storage_stats".to_string(),
+        description: "Storage, buffer, and config snapshot. Pass dataset=<service.name> for \
+                      matching block/row/byte counts, metric count, sidecar bytes and \
+                      compaction lag."
+            .to_string(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "dataset": { "type": "string", "description": "service.name to summarize" }
+            },
+            "required": []
+        }),
+    }
+}
+
+/// Create a parqtel pipelines/registry status tool
+pub fn make_get_pipelines_tool() -> McpTool {
+    McpTool {
+        name: "get_pipelines".to_string(),
+        description: "Recording-rule and pipeline registry status: generation, definitions, \
+                      load/validation errors, ruler enabled flag, and persisted evaluation state."
+            .to_string(),
+        input_schema: json!({ "type": "object", "properties": {}, "required": [] }),
+    }
+}

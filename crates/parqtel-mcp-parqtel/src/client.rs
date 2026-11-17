@@ -226,6 +226,40 @@ impl ParqtelClient {
     pub async fn stats(&self) -> Result<Value, McpError> {
         self.get("/api/v1/stats", &[]).await
     }
+
+    /// Span search (`/v1/traces/search`).
+    pub async fn traces(
+        &self,
+        query: &str,
+        start: f64,
+        end: f64,
+        limit: usize,
+        trace_id: Option<&str>,
+    ) -> Result<Value, McpError> {
+        let mut params: Vec<(&str, String)> = vec![
+            ("q", query.to_string()),
+            ("start", format!("{start}")),
+            ("end", format!("{end}")),
+            ("limit", limit.to_string()),
+        ];
+        if let Some(trace_id) = trace_id.filter(|id| !id.is_empty()) {
+            params.push(("trace_id", trace_id.to_string()));
+        }
+        self.get("/v1/traces/search", &params).await
+    }
+
+    /// Storage snapshot, optionally scoped to a service (`dataset`).
+    pub async fn stats_for(&self, dataset: Option<&str>) -> Result<Value, McpError> {
+        let params: Vec<(&str, String)> = dataset
+            .map(|dataset| vec![("dataset", dataset.to_string())])
+            .unwrap_or_default();
+        self.get("/api/v1/stats", &params).await
+    }
+
+    /// Recording-rule and pipeline registry status.
+    pub async fn pipelines(&self) -> Result<Value, McpError> {
+        self.get("/api/v1/rules/status", &[]).await
+    }
 }
 
 /// Percent-encode one URL path segment (RFC 3986 unreserved set passes

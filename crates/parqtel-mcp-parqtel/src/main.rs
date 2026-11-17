@@ -4,14 +4,16 @@ use std::env;
 
 use parqtel_mcp_core::{server::ServerConfig, McpServer};
 use parqtel_mcp_parqtel::handlers::{
-    make_get_alert_history_handler, make_get_noise_statistics_handler, make_get_topology_handler,
-    make_ingest_rates_handler, make_query_logs_handler, make_query_metrics_handler,
-    make_query_metrics_labels_handler,
+    make_get_alert_history_handler, make_get_noise_statistics_handler, make_get_pipelines_handler,
+    make_get_storage_stats_handler, make_get_topology_handler, make_ingest_rates_handler,
+    make_query_logs_handler, make_query_metrics_handler, make_query_metrics_labels_handler,
+    make_query_traces_handler,
 };
 use parqtel_mcp_parqtel::{
-    make_get_alert_history_tool, make_get_noise_statistics_tool, make_get_topology_tool,
-    make_ingest_rates_tool, make_query_logs_tool, make_query_metrics_labels_tool,
-    make_query_metrics_tool, ParqtelClient,
+    make_get_alert_history_tool, make_get_noise_statistics_tool, make_get_pipelines_tool,
+    make_get_storage_stats_tool, make_get_topology_tool, make_ingest_rates_tool,
+    make_query_logs_tool, make_query_metrics_labels_tool, make_query_metrics_tool,
+    make_query_traces_tool, ParqtelClient,
 };
 use tracing_subscriber::EnvFilter;
 
@@ -73,7 +75,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         make_get_noise_statistics_tool(),
         make_get_noise_statistics_handler(client.clone()),
     );
-    server.register_tool_with_handler(make_get_topology_tool(), make_get_topology_handler(client));
+    server.register_tool_with_handler(
+        make_get_topology_tool(),
+        make_get_topology_handler(client.clone()),
+    );
+    server.register_tool_with_handler(
+        make_query_traces_tool(),
+        make_query_traces_handler(client.clone()),
+    );
+    server.register_tool_with_handler(
+        make_get_storage_stats_tool(),
+        make_get_storage_stats_handler(client.clone()),
+    );
+    server.register_tool_with_handler(
+        make_get_pipelines_tool(),
+        make_get_pipelines_handler(client),
+    );
     let tool_count = server.get_tools().len();
 
     // `/health` is owned by the framework router (it reports this tool

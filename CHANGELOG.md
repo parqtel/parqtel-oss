@@ -42,6 +42,9 @@ while measuring. Measurements and method are in
 
 ### Added
 
+- **Three more MCP tools.** `query_traces`, `get_storage_stats`, and
+  `get_pipelines` join the seven existing tools, so an agent can inspect spans,
+  cost drivers, and rule/pipeline health without falling back to raw REST.
 - **Chunked NDJSON log streaming.** `GET /api/v1/logs/stream` runs the normal
   log search in 5-minute slices and streams each record as a JSON line, so a
   large range is bounded by one slice instead of the full result set.

@@ -205,6 +205,55 @@ pub async fn handle_query_logs(client: &ParqtelClient, params: &Value) -> Result
     }))
 }
 
+// ── query_traces ────────────────────────────────────────────────────────
+
+/// Span search with ParqtelQL predicates, bounded by `MAX_LOG_LIMIT`.
+pub async fn handle_query_traces(
+    client: &ParqtelClient,
+    params: &Value,
+) -> Result<Value, McpError> {
+    let query = p_str(params, "query").unwrap_or("");
+    let now = now_secs();
+    let start = p_f64(params, "start")?.unwrap_or(now - 3600.0);
+    let end = p_f64(params, "end")?.unwrap_or(now);
+    if end < start {
+        return Err(McpError::InvalidRequest("'end' must be >= 'start'".into()));
+    }
+    let limit = p_usize(params, "limit")?.unwrap_or(200).min(MAX_LOG_LIMIT);
+    let trace_id = p_str(params, "trace_id");
+    let out = client.traces(query, start, end, limit, trace_id).await?;
+    Ok(json!({
+        "query": query,
+        "start": start,
+        "end": end,
+        "limit": limit,
+        "data": out.get("data").cloned().unwrap_or(Value::Null),
+    }))
+}
+
+// ── get_storage_stats ───────────────────────────────────────────────────
+
+/// Storage/buffer/config snapshot, optionally scoped to a service.
+pub async fn handle_get_storage_stats(
+    client: &ParqtelClient,
+    params: &Value,
+) -> Result<Value, McpError> {
+    let dataset = p_str(params, "dataset");
+    let out = client.stats_for(dataset).await?;
+    Ok(out.get("data").cloned().unwrap_or(Value::Null))
+}
+
+// ── get_pipelines ───────────────────────────────────────────────────────
+
+/// Recording-rule and pipeline registry status.
+pub async fn handle_get_pipelines(
+    client: &ParqtelClient,
+    _params: &Value,
+) -> Result<Value, McpError> {
+    let out = client.pipelines().await?;
+    Ok(out.get("data").cloned().unwrap_or(Value::Null))
+}
+
 // ── ingest_rates ────────────────────────────────────────────────────────
 
 /// Live ingestion rates with the per-second history window clamped to
@@ -473,6 +522,21 @@ pub fn make_get_noise_statistics_handler(client: ParqtelClient) -> ToolHandler {
 /// `get_topology` handler
 pub fn make_get_topology_handler(client: ParqtelClient) -> ToolHandler {
     handler_for!(client, handle_get_topology)
+}
+
+/// `query_traces` handler
+pub fn make_query_traces_handler(client: ParqtelClient) -> ToolHandler {
+    handler_for!(client, handle_query_traces)
+}
+
+/// `get_storage_stats` handler
+pub fn make_get_storage_stats_handler(client: ParqtelClient) -> ToolHandler {
+    handler_for!(client, handle_get_storage_stats)
+}
+
+/// `get_pipelines` handler
+pub fn make_get_pipelines_handler(client: ParqtelClient) -> ToolHandler {
+    handler_for!(client, handle_get_pipelines)
 }
 
 #[cfg(test)]
