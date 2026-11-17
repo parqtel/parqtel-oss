@@ -188,6 +188,11 @@ while measuring. Measurements and method are in
 
 ### Fixed
 
+- **Smaller block-index sidecar.** The shared label-value dictionary moved to a
+  sibling `label_values.json`, so `index.json` no longer rewrites it on every
+  persist or carries it through every index load. Legacy inline dictionaries
+  still load and migrate on first start; autocomplete reads the sibling.
+
 - **Compaction selects a time-adjacent run.** Small blocks are sorted by start
   timestamp and filtered to one signal before the merge cap is applied, so
   compacted outputs are contiguous and row-group pruning stays effective.

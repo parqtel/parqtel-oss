@@ -15,7 +15,6 @@ pub type LabelValueMap = BTreeMap<String, BTreeSet<String>>;
 #[derive(serde::Serialize)]
 struct SidecarRef<'a> {
     blocks: &'a [BlockMetadata],
-    label_values: &'a LabelValueMap,
 }
 
 #[derive(serde::Deserialize)]
@@ -44,6 +43,7 @@ pub struct BlockIndex {
     pub blocks: Vec<BlockMetadata>,
     label_values: LabelValueMap,
     sidecar_path: PathBuf,
+    label_values_path: PathBuf,
 }
 
 impl BlockIndex {
@@ -53,6 +53,7 @@ impl BlockIndex {
             blocks: Vec::new(),
             label_values: LabelValueMap::new(),
             sidecar_path: data_dir.join("index.json"),
+            label_values_path: data_dir.join("label_values.json"),
         }
     }
 
@@ -60,10 +61,29 @@ impl BlockIndex {
     pub fn load(&mut self) -> Result<()> {
         if self.sidecar_path.exists() {
             let content = fs::read_to_string(&self.sidecar_path)?;
+            let legacy = content.trim_start().starts_with('[');
             self.load_serialized(&content)?;
+            // The current format keeps the autocomplete dictionary in a
+            // sibling file; legacy sidecars still carry it inline.
+            if !legacy {
+                if let Ok(values) = fs::read_to_string(&self.label_values_path) {
+                    if let Ok(values) = serde_json::from_str::<LabelValueMap>(&values) {
+                        self.label_values = values;
+                    }
+                }
+            }
         }
         self.blocks.sort_by_key(|b| b.start_timestamp_ns);
         Ok(())
+    }
+
+    /// Serialises the label-value dictionary separately.
+    pub fn serialize_label_values(&self) -> Result<String> {
+        serde_json::to_string(&self.label_values).map_err(Error::Serde)
+    }
+
+    pub fn label_values_path(&self) -> &Path {
+        &self.label_values_path
     }
 
     /// Path of the JSON sidecar this index persists to.
@@ -83,10 +103,16 @@ impl BlockIndex {
         let mut buf = Vec::with_capacity(capacity);
         let sidecar = SidecarRef {
             blocks: &self.blocks,
-            label_values: &self.label_values,
         };
         serde_json::to_writer(&mut buf, &sidecar).map_err(Error::Serde)?;
         String::from_utf8(buf).map_err(|e| Error::Internal(e.to_string()))
+    }
+
+    /// Size of the label-value sibling in bytes, 0 when absent.
+    pub fn label_values_size_bytes(&self) -> u64 {
+        fs::metadata(&self.label_values_path)
+            .map(|m| m.len())
+            .unwrap_or(0)
     }
 
     /// Restores a previously serialised payload, dropping the in-memory
@@ -636,6 +662,27 @@ impl BlockIndexStore {
         &self.path
     }
 
+    /// Path of the label-value sibling written beside the block sidecar.
+    pub fn label_values_path(&self) -> PathBuf {
+        self.path
+            .parent()
+            .map(|parent| parent.join("label_values.json"))
+            .unwrap_or_else(|| PathBuf::from("label_values.json"))
+    }
+
+    /// Writes the label-value dictionary separately. Blocking; same caller
+    /// contract as [`Self::write_payload`].
+    pub fn write_label_values(&self, payload: &str) -> Result<()> {
+        let path = self.label_values_path();
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let tmp = path.with_extension("tmp");
+        fs::write(&tmp, payload)?;
+        fs::rename(tmp, &path)?;
+        Ok(())
+    }
+
     /// Records that the in-memory index changed.
     ///
     /// Cheap and synchronous, so it can be called while the write lock is
@@ -697,6 +744,13 @@ impl BlockIndexStore {
     /// `parqtel_index_bytes` gauge.
     pub fn size_bytes(&self) -> u64 {
         fs::metadata(&self.path).map(|m| m.len()).unwrap_or(0)
+    }
+
+    /// Size of the label-value sibling on disk, 0 when absent.
+    pub fn label_values_size_bytes(&self) -> u64 {
+        fs::metadata(self.label_values_path())
+            .map(|m| m.len())
+            .unwrap_or(0)
     }
 }
 

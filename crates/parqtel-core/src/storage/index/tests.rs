@@ -260,10 +260,14 @@ fn legacy_sidecar_migrates_to_one_value_dictionary() {
     assert_eq!(idx.label_values("pod").unwrap().len(), 2);
 
     let current = idx.serialize().unwrap();
-    assert_eq!(current.matches("api-0").count(), 1, "value stored once");
+    assert_eq!(current.matches("api-0").count(), 0, "values moved out");
+    let labels = idx.serialize_label_values().unwrap();
+    assert_eq!(labels.matches("api-0").count(), 1, "value stored once");
+    std::fs::write(idx.sidecar_path(), &current).unwrap();
+    std::fs::write(idx.label_values_path(), &labels).unwrap();
 
     let mut reloaded = BlockIndex::new(dir.path());
-    reloaded.load_serialized(&current).unwrap();
+    reloaded.load().unwrap();
     assert_eq!(reloaded.blocks.len(), 20);
     assert_eq!(reloaded.label_values("pod"), idx.label_values("pod"));
 }

@@ -602,6 +602,16 @@ impl ServerMetrics {
             ));
         }
 
+        out.push_str("# HELP parqtel_label_values_bytes Size of the per-signal label-value dictionary on disk\n");
+        out.push_str("# TYPE parqtel_label_values_bytes gauge\n");
+        for (i, signal) in SignalType::ALL.iter().enumerate() {
+            out.push_str(&format!(
+                "parqtel_label_values_bytes{{signal=\"{}\"}} {}\n",
+                signal.as_str(),
+                self.index_stores[i].label_values_size_bytes()
+            ));
+        }
+
         out.push_str("# HELP parqtel_index_pending_writes Index sidecars with unwritten changes\n");
         out.push_str("# TYPE parqtel_index_pending_writes gauge\n");
         for (i, signal) in SignalType::ALL.iter().enumerate() {

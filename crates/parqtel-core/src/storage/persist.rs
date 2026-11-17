@@ -64,26 +64,37 @@ pub async fn persist_once(index: &Arc<RwLock<BlockIndex>>, store: &Arc<BlockInde
     if !store.begin() {
         return;
     }
-    let payload = {
+    let (payload, label_payload) = {
         // A read guard is enough: serialisation is pure CPU over `self`, and
         // taking it shared means queries keep running and only other *writers*
         // (the index task, compaction, retention) wait.
         let idx = index.read().await;
-        match idx.serialize_with_capacity(store.payload_capacity_hint()) {
+        let payload = match idx.serialize_with_capacity(store.payload_capacity_hint()) {
             Ok(p) => p,
             Err(e) => {
                 tracing::error!(error = %e, "failed to serialise block index");
                 store.mark_dirty();
                 return;
             }
-        }
+        };
+        let labels = match idx.serialize_label_values() {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::error!(error = %e, "failed to serialise label values");
+                store.mark_dirty();
+                return;
+            }
+        };
+        (payload, labels)
     };
 
     // The closure owns the store and the only copy of the payload; it returns
     // just the length, so the payload is freed as soon as it is written.
     let for_write = Arc::clone(store);
     let write = tokio::task::spawn_blocking(move || {
-        for_write.write_payload(&payload).map(|()| payload.len())
+        for_write.write_payload(&payload)?;
+        for_write.write_label_values(&label_payload)?;
+        Ok::<_, crate::Error>(payload.len())
     })
     .await;
     match write {
@@ -104,6 +115,7 @@ pub async fn persist_once(index: &Arc<RwLock<BlockIndex>>, store: &Arc<BlockInde
 pub fn persist_blocking(index: &BlockIndex, store: &BlockIndexStore) -> Result<()> {
     let payload = index.serialize_with_capacity(store.payload_capacity_hint())?;
     store.write_payload(&payload)?;
+    store.write_label_values(&index.serialize_label_values()?)?;
     store.complete(payload.len());
     Ok(())
 }

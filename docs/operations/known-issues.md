@@ -119,8 +119,9 @@ two on-disk shapes changed with the L0/L1 work:
 
 - New metric blocks keep their labels only in the footer series table; the
   row-level `labels` column is gone. An older binary cannot read them.
-- The block-index sidecar is now `{"blocks": [...], "label_values": {...}}`. An
-  older binary cannot parse it.
+- The block-index sidecar is now `{"blocks": [...]}` and the autocomplete
+  dictionary lives in `label_values.json` beside it. An older binary can parse
+  the block sidecar but will not see the sibling dictionary.
 
 Forward migration is automatic — the loader still accepts the old sidecar
 shape and folds its per-block values in. Rolling back is only safe once the
