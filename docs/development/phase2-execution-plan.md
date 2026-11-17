@@ -218,12 +218,13 @@ Gate: `cargo test -p parqtel-core compaction -- --test-threads=1`,
 
 Files: `docs/development/efficiency-plan.md` (Phase 2 section only).
 
-Run the four T0 steps on the T4 build. Record before/after in a table under Phase 2.
-Then apply the exit check:
+Run the four T0 steps in three fresh processes each, using the same fixture and
+release build for baseline and T4. Record medians for HWM, RSS and time in a table
+under Phase 2. Define `open_growth = open HWM - parse HWM` and
+`select_growth = select HWM - open HWM`. Then apply the exit check:
 
-- **2a passes** if, for `select`: post-open RSS growth (`open` − `parse`) is ≤ 25% of
-  the baseline growth, and `select` adds < 10 MiB over `open`. `select-broad` must not
-  be slower than baseline by more than 20%.
+- **2a passes** if T4 `open_growth` is ≤ 25% of baseline `open_growth`, `select_growth`
+  is < 10 MiB, and `select-broad` median time is no more than 20% slower than baseline.
 - Otherwise, stop: 2b needs approval before any work.
 
 Gate: `make docs-check`.
