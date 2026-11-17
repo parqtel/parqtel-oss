@@ -169,6 +169,13 @@ while measuring. Measurements and method are in
 
 ### Fixed
 
+- **Compaction selects a time-adjacent run.** Small blocks are sorted by start
+  timestamp and filtered to one signal before the merge cap is applied, so
+  compacted outputs are contiguous and row-group pruning stays effective.
+- **Instant-query lookback is overridable.** `GET /api/v1/query` accepts
+  `lookback_delta` (duration or float seconds, positive, max 30d); the default
+  remains the Prometheus 5m. Documented in the OpenAPI spec.
+
 - **Helm chart refuses a multi-writer deployment.** `replicaCount` is capped at
   1 in `values.schema.json` and the Deployment template fails if `replicaCount`
   or `autoscaling.maxReplicas` would create more than one pod. Each replica owns

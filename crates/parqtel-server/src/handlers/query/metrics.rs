@@ -19,6 +19,9 @@ use std::sync::atomic::Ordering;
 pub struct InstantQuery {
     pub query: String,
     pub time: Option<f64>,
+    /// Per-request override for the instant-selector lookback, e.g. `1h`.
+    /// Bounded to 30 days; absent uses `query.lookback_delta_ns`.
+    pub lookback_delta: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -175,10 +178,21 @@ pub async fn query_instant(
         Err(e) => return map_error(e),
     };
 
+    let lookback_ns = match params.lookback_delta.as_deref() {
+        Some(raw) => match parse_step_duration(raw) {
+            Ok(ns) if ns <= 30 * 24 * 3600 * 1_000_000_000 => ns,
+            _ => {
+                return map_error(parqtel_core::Error::Validation(
+                    "lookback_delta must be a positive duration no longer than 30d".into(),
+                ))
+            }
+        },
+        None => state.inner.config.query.lookback_delta_ns,
+    };
     let plan = match QueryPlan::new_full(
         metric_name,
         matchers,
-        (now * 1_000_000_000.0) as i64 - state.inner.config.query.lookback_delta_ns,
+        (now * 1_000_000_000.0) as i64 - lookback_ns,
         (now * 1_000_000_000.0) as i64,
         None,
         state.inner.config.query.max_series,

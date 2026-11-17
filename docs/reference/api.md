@@ -39,7 +39,7 @@ HTTP request bodies may be gzip-compressed; the gRPC server accepts gzip too.
 
 | Method | Endpoint | Description |
 |---|---|---|
-| GET | `/api/v1/query` | Instant query |
+| GET | `/api/v1/query` | Instant query; optional `lookback_delta` overrides the 5m default (max 30d) |
 | GET | `/api/v1/query_range` | Range query |
 | GET | `/api/v1/labels` | List all label names |
 | GET | `/api/v1/label/__name__/values` | List metric names |

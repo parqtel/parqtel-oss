@@ -866,6 +866,14 @@ paths:
           schema:
             type: number
           description: Evaluation timestamp (Unix seconds). Defaults to now.
+        - name: lookback_delta
+          in: query
+          schema:
+            type: string
+          description: >
+            Instant-selector lookback override (duration, e.g. `1h` or float
+            seconds). Positive and at most 30d; defaults to
+            `query.lookback_delta_ns` (5m).
       responses:
         "200":
           description: Query result

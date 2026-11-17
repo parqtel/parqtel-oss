@@ -154,13 +154,21 @@ impl Compactor {
                 tracing::debug!("compaction: fewer than 2 small blocks, skipping");
                 return Ok(());
             }
+            // Merge a time-adjacent run, not whichever blocks happen to be
+            // first in the index. Non-contiguous outputs weaken row-group
+            // pruning on exactly the data that is kept longest.
+            small_blocks.sort_by_key(|b| b.start_timestamp_ns);
+            let signal = small_blocks[0].signal_type;
+            small_blocks.retain(|b| b.signal_type == signal);
+            if small_blocks.len() < 2 {
+                return Ok(());
+            }
             let count = std::cmp::min(
                 config.compaction_max_merge_blocks.max(2),
                 small_blocks.len(),
             );
             small_blocks.truncate(count);
             let paths: Vec<_> = small_blocks.iter().map(|b| b.path.clone()).collect();
-            let signal = small_blocks[0].signal_type;
             (small_blocks, paths, signal)
         };
 
