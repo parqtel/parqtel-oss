@@ -64,7 +64,7 @@ compaction_max_merges_per_pass = 8
 
 [ingest]
 max_body_size = 10485760            # decompressed body limit
-wal_enabled = true                  # metrics WAL + background flush worker
+wal_enabled = true                  # metrics + trace WAL; background flush worker
 log_wal_enabled = true
 wal_sync_mode = "interval"          # none | interval | always
 wal_sync_interval_ms = 1000
@@ -316,7 +316,7 @@ same pass offline.
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `max_body_size` | Integer | `10485760` | Maximum **decompressed** body size. gzip is expanded before this check. |
-| `wal_enabled` | Boolean | `true` | Metrics WAL. Also gates the background flush worker; without it flushing falls back to synchronous. A WAL that cannot open fails startup. |
+| `wal_enabled` | Boolean | `true` | Metrics **and trace** WAL. Also gates the background flush worker; without it flushing falls back to synchronous. A WAL that cannot open fails startup. |
 | `log_wal_enabled` | Boolean | `true` | Log WAL. |
 | `wal_sync_mode` | String | `"interval"` | `none` (process-crash safe only), `interval`, or `always`. |
 | `wal_sync_interval_ms` | Integer | `1000` | fsync period in `interval` mode. |

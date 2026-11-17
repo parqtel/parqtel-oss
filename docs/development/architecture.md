@@ -224,7 +224,7 @@ data/
 └── wal/
     ├── metrics/          metric WAL segments
     ├── logs/             log WAL segments
-    └── traces/           trace WAL segments (when enabled)
+    └── traces/           trace WAL segments (gated by ingest.wal_enabled)
 ```
 
 Trace blocks live under `<data_dir>/traces`; this is required for restart

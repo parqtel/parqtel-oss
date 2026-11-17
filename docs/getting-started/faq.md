@@ -34,8 +34,8 @@ Parqtel does not run a Prometheus scrape loop. It is push-first: use the **OpenT
 Yes — resource attributes like `service.name` are stored in dedicated Parquet columns and injected back as labels, so PromQL matchers like `http_requests_total{service.name="api"}` work for both freshly-buffered and flushed data.
 
 #### What happens if the server crashes?
-Both write-ahead logs are on by default (`ingest.wal_enabled` for metrics,
-`ingest.log_wal_enabled` for logs), so Parqtel recovers any data that wasn't
+Write-ahead logs are on by default (`ingest.wal_enabled` covers metrics and
+traces; `ingest.log_wal_enabled` covers logs), so Parqtel recovers any data that wasn't
 yet written to a Parquet block upon restart. Turning the metrics WAL off also
 disables the background flush worker and makes flushes synchronous.
 
