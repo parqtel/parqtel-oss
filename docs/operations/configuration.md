@@ -624,7 +624,7 @@ name: HTTP error rate high
 signal: metrics                   # metrics | logs | traces (default: metrics)
 query: "rate(http_errors_total[5m])"   # PromQL selector + optional aggregation
 condition:
-  type: threshold                 # only "threshold" is implemented
+  type: threshold                 # threshold; LearnedAnomaly rules use source.sensitivity
   operator: ">"                  # > >= < <= == !=
   value: 0.5                     # errors/sec — see tuning note below
   for_duration_secs: 300         # must hold this long before Pending → Firing
@@ -639,9 +639,12 @@ enabled: true
 noise_suppression_threshold: 0.7  # reserved; no noise detector in 0.3.x
 ```
 
-The evaluation loop parses each enabled rule's `query` every 15s, executes it
-over a trailing 5-minute window, and thresholds the **last sample of every
-result series** — one alert instance per series, fingerprinted by `id` + the
+For a `learned_anomaly` source, the loop queries the configured
+`baseline_window_days`, computes median absolute deviation (MAD) per series, and
+fires when the latest sample is more than `sensitivity` MADs from the median.
+The static `condition` is ignored for that rule type. Threshold rules use the
+trailing 5-minute window and threshold the **last sample of every result
+series** — one alert instance per series, fingerprinted by `id` + the
 series' labels. Two consequences for the queries you can write:
 
 1. **No cross-metric arithmetic** — a rule query is a single selector with an

@@ -30,6 +30,19 @@ impl EvaluationEngine {
         labels: BTreeMap<String, String>,
     ) {
         let condition_met = evaluate_threshold(&rule.condition, value);
+        self.evaluate_rule_with_condition(rule, value, labels, condition_met)
+            .await;
+    }
+
+    /// Apply an externally decided condition (used by the baseline anomaly
+    /// detector, which does not fit the static threshold operator).
+    pub async fn evaluate_rule_with_condition(
+        &self,
+        rule: &AlertRule,
+        value: f64,
+        labels: BTreeMap<String, String>,
+        condition_met: bool,
+    ) {
         let fingerprint = AlertInstance::compute_fingerprint(&rule.id, &labels);
         let existing = self.store.get_by_fingerprint(fingerprint).await;
 

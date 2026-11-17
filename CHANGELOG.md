@@ -42,6 +42,10 @@ while measuring. Measurements and method are in
 
 ### Added
 
+- **Median+MAD baseline anomaly rules.** `LearnedAnomaly` rules now query their
+  configured baseline window and fire when the latest sample deviates from the
+  median by more than `sensitivity` MADs, instead of silently reusing the static
+  threshold. Noise scoring remains reserved.
 - **Three more MCP tools.** `query_traces`, `get_storage_stats`, and
   `get_pipelines` join the seven existing tools, so an agent can inspect spans,
   cost drivers, and rule/pipeline health without falling back to raw REST.

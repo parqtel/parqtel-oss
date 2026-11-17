@@ -132,6 +132,26 @@ async fn record_flush<E: std::fmt::Display>(
 }
 
 /// Evaluates every enabled alert rule on a fixed interval against the same
+/// Median + MAD anomaly decision. `None` means the baseline is too short to
+/// decide; a flat baseline uses a relative floor so a one-off spike still
+/// registers without turning tiny float noise into pages.
+fn anomaly_condition(baseline: &[f64], current: f64, sensitivity: f64) -> Option<bool> {
+    if baseline.len() < 5 {
+        return None;
+    }
+    let mut sorted = baseline.to_vec();
+    sorted.sort_by(f64::total_cmp);
+    let median = sorted[sorted.len() / 2];
+    let mut deviations: Vec<f64> = baseline
+        .iter()
+        .map(|value| (value - median).abs())
+        .collect();
+    deviations.sort_by(f64::total_cmp);
+    let mad = deviations[deviations.len() / 2];
+    let scale = mad.max(1e-9).max(median.abs() * 0.001);
+    Some((current - median).abs() > sensitivity.max(0.1) * scale)
+}
+
 /// lookback window instant queries use, so an alert sees what an operator would
 /// see in the console.
 pub(crate) fn spawn_alert_eval_task(state: AppState, interval_secs: u64) -> JoinHandle<()> {
@@ -160,15 +180,30 @@ pub(crate) fn spawn_alert_eval_task(state: AppState, interval_secs: u64) -> Join
                     Err(_) => continue,
                 };
                 let now_ns = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
-                // Same lookback instant queries use, so an alert sees exactly
-                // the window an operator would see in the UI.
-                let start_ns = now_ns.saturating_sub(state.inner.config.query.lookback_delta_ns);
+                let anomaly = match &rule.source {
+                    Some(parqtel_alert::RuleSource::LearnedAnomaly(source)) => Some(source.clone()),
+                    _ => None,
+                };
+                // A threshold rule sees the instant lookback; an anomaly rule
+                // needs a baseline range, so it scans its configured window.
+                let (start_ns, step_ns) = match &anomaly {
+                    Some(source) => (
+                        now_ns.saturating_sub(
+                            (source.baseline_window_days.max(1) as i64) * 86_400 * 1_000_000_000,
+                        ),
+                        Some(60_000_000_000),
+                    ),
+                    None => (
+                        now_ns.saturating_sub(state.inner.config.query.lookback_delta_ns),
+                        None,
+                    ),
+                };
                 let plan = parqtel_query::QueryPlan::new_full(
                     metric_name,
                     matchers,
                     start_ns,
                     now_ns,
-                    None,
+                    step_ns,
                     100,
                     1000,
                     aggregation,
@@ -192,12 +227,37 @@ pub(crate) fn spawn_alert_eval_task(state: AppState, interval_secs: u64) -> Join
                 };
                 if let Ok(qr) = state.inner.query_executor.execute(plan).await {
                     for series in &qr.series {
-                        if let Some(sample) = series.samples.last() {
-                            let labels = series
-                                .labels
+                        let Some(sample) = series.samples.last() else {
+                            continue;
+                        };
+                        let labels: std::collections::BTreeMap<String, String> = series
+                            .labels
+                            .iter()
+                            .map(|(k, v)| (k.to_string(), v.to_string()))
+                            .collect();
+                        if let Some(source) = &anomaly {
+                            let baseline: Vec<f64> = series
+                                .samples
                                 .iter()
-                                .map(|(k, v)| (k.to_string(), v.to_string()))
+                                .take(series.samples.len().saturating_sub(1))
+                                .map(|sample| sample.value)
                                 .collect();
+                            let Some(condition_met) =
+                                anomaly_condition(&baseline, sample.value, source.sensitivity)
+                            else {
+                                continue;
+                            };
+                            state
+                                .inner
+                                .alert_engine
+                                .evaluate_rule_with_condition(
+                                    &rule,
+                                    sample.value,
+                                    labels,
+                                    condition_met,
+                                )
+                                .await;
+                        } else {
                             state
                                 .inner
                                 .alert_engine
@@ -302,5 +362,24 @@ pub(crate) async fn shutdown_signal() {
     #[cfg(not(unix))]
     {
         tokio::signal::ctrl_c().await.unwrap_or_default();
+    }
+}
+
+#[cfg(test)]
+mod anomaly_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+    use super::anomaly_condition;
+
+    #[test]
+    fn flat_baseline_does_not_fire() {
+        let baseline = vec![1.0; 10];
+        assert_eq!(anomaly_condition(&baseline, 1.0, 3.0), Some(false));
+    }
+
+    #[test]
+    fn spike_fires_and_short_baseline_is_unknown() {
+        let baseline = vec![1.0, 1.0, 1.0, 1.0, 1.0, 1.0];
+        assert_eq!(anomaly_condition(&baseline, 50.0, 3.0), Some(true));
+        assert_eq!(anomaly_condition(&[1.0, 2.0], 3.0, 3.0), None);
     }
 }
