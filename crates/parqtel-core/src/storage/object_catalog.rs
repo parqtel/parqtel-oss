@@ -27,6 +27,9 @@ pub struct CatalogBlock {
     pub signal_type: SignalType,
     #[serde(default)]
     pub wal_range: Option<(u64, u64)>,
+    /// Node that wrote the block; only that node can retire it.
+    #[serde(default)]
+    pub writer: Option<String>,
 }
 
 impl CatalogBlock {
@@ -46,6 +49,7 @@ impl CatalogBlock {
             label_names: meta.label_names.clone(),
             signal_type: meta.signal_type,
             wal_range: meta.wal_range,
+            writer: None,
         })
     }
 
@@ -136,9 +140,16 @@ impl ObjectCatalog {
                 Some((manifest, version)) => (manifest, PutMode::Update(version)),
                 None => (CatalogManifest::default(), PutMode::Create),
             };
+            let local_keys: HashSet<&str> = blocks.iter().map(|block| block.key.as_str()).collect();
             let mut by_key: BTreeMap<String, CatalogBlock> = manifest
                 .blocks
                 .into_iter()
+                .filter(|block| {
+                    // A writer retires only its own missing blocks; another
+                    // node's blocks stay until that node says so.
+                    block.writer.as_deref() != writer_lease.as_deref()
+                        || local_keys.contains(block.key.as_str())
+                })
                 .map(|block| (block.key.clone(), block))
                 .collect();
             for block in &blocks {
@@ -185,6 +196,7 @@ mod tests {
             label_names: HashSet::new(),
             signal_type: SignalType::Metrics,
             wal_range: None,
+            writer: None,
         }
     }
 
@@ -204,5 +216,24 @@ mod tests {
         assert!(manifest.generation >= 2);
         // Both writers observed a complete manifest after their own publish.
         assert!(ra.blocks.len() <= 2 && rb.blocks.len() <= 2);
+    }
+
+    #[tokio::test]
+    async fn a_writer_retires_only_its_own_blocks() {
+        let store = Arc::new(object_store::memory::InMemory::new());
+        let a = ObjectCatalog::new(store.clone(), "p");
+        let b = ObjectCatalog::new(store, "p");
+        let mut a_block = block("a.parquet", 1);
+        a_block.writer = Some("node-a".into());
+        let mut b_block = block("b.parquet", 2);
+        b_block.writer = Some("node-b".into());
+        a.publish(vec![a_block], Some("node-a".into()))
+            .await
+            .unwrap();
+        b.publish(vec![b_block], Some("node-b".into()))
+            .await
+            .unwrap();
+        let manifest = a.publish(Vec::new(), Some("node-a".into())).await.unwrap();
+        assert!(manifest.blocks.iter().all(|block| block.key == "b.parquet"));
     }
 }

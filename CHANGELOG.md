@@ -42,6 +42,10 @@ while measuring. Measurements and method are in
 
 ### Added
 
+- **Object-store compaction and retention.** Compaction opens sources and
+  deletes merged sources through `BlockStore`; retention deletes through it too.
+  Catalog entries are writer-owned, so a node retires only blocks it wrote and
+  deliberately dropped (retention/compaction), never another node's live data.
 - **Shared object-storage catalog.** Writers publish a versioned manifest with
   a CAS update; every node polls it, adopts blocks it has not seen, and marks
   its sidecar dirty. Concurrent writers merge by block key instead of

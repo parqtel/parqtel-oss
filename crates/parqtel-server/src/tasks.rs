@@ -39,11 +39,12 @@ pub(crate) fn spawn_catalog_sync_task(
             for index in &indexes {
                 let idx = index.read().await;
                 for block in &idx.blocks {
-                    let Ok(catalog_block) =
+                    let Ok(mut catalog_block) =
                         parqtel_core::storage::CatalogBlock::from_metadata(block)
                     else {
                         continue;
                     };
+                    catalog_block.writer = std::env::var("HOSTNAME").ok();
                     local_keys.insert(catalog_block.key.clone());
                     local.push(catalog_block);
                 }

@@ -139,7 +139,7 @@ impl LabelCatalog {
 
 impl SourceTable {
     fn load(meta: BlockMetadata) -> Result<Self> {
-        let file = File::open(&meta.path)?;
+        let file = crate::storage::block_store::open(&meta.path)?;
         let builder = ParquetRecordBatchReaderBuilder::try_new(file)
             .map_err(|e| Error::Parquet(e.to_string()))?;
         let row_count = builder.metadata().file_metadata().num_rows().max(0) as u64;
@@ -548,7 +548,7 @@ struct MetricDataCursor<'a> {
 
 impl<'a> MetricDataCursor<'a> {
     fn new(source: &'a SourceTable) -> Result<Self> {
-        let file = File::open(&source.meta.path)?;
+        let file = crate::storage::block_store::open(&source.meta.path)?;
         let builder = ParquetRecordBatchReaderBuilder::try_new(file)
             .map_err(|e| Error::Parquet(e.to_string()))?;
         let schema = builder.parquet_schema();
@@ -1365,7 +1365,7 @@ fn read_normalization_points(
     let source_table = match SourceTable::load(source.clone()) {
         Ok(table) => table,
         Err(index_error) => {
-            let file = File::open(&source.path)?;
+            let file = crate::storage::block_store::open(&source.path)?;
             let builder = ParquetRecordBatchReaderBuilder::try_new(file)
                 .map_err(|e| Error::Parquet(e.to_string()))?;
             if builder.schema().index_of("labels").is_err() {
@@ -1428,9 +1428,9 @@ fn prune_compacted_sources(data_dir: &Path) -> Result<usize> {
             continue;
         }
         for source in read_compacted_sources(&path)? {
-            match fs::remove_file(data_dir.join(source)) {
-                Ok(()) => deleted += 1,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            match crate::storage::block_store::delete(&data_dir.join(source)) {
+                Ok(true) => deleted += 1,
+                Ok(false) => {}
                 Err(error) => {
                     tracing::warn!(path = ?path, error = %error, "cannot remove superseded source block")
                 }

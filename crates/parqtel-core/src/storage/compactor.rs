@@ -10,7 +10,7 @@ use crate::models::traces::Span;
 use crate::storage::{SeriesIndex, SeriesTable, SERIES_INDEX_FOOTER_KEY};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::fs::{self, File};
+use std::fs;
 use std::path::PathBuf;
 
 use std::sync::Arc;
@@ -221,7 +221,7 @@ impl Compactor {
         // rather than a dangling index entry (a query error).
         let _ = tokio::task::spawn_blocking(move || {
             for path in paths_for_merge {
-                let _ = fs::remove_file(path);
+                let _ = crate::storage::block_store::delete(&path);
             }
         })
         .await;
@@ -354,7 +354,7 @@ impl Compactor {
                     // (a query error).
                     let _ = tokio::task::spawn_blocking(move || {
                         for path in merge_paths {
-                            let _ = fs::remove_file(path);
+                            let _ = crate::storage::block_store::delete(&path);
                         }
                     })
                     .await;
@@ -378,13 +378,13 @@ impl Compactor {
         let mut all_spans = Vec::new();
 
         for meta in blocks {
-            let file = match File::open(&meta.path) {
+            let file = match crate::storage::block_store::open(&meta.path) {
                 Ok(f) => f,
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                Err(Error::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
                     tracing::warn!("Compaction source block not found: {:?}", meta.path);
                     continue;
                 }
-                Err(e) => return Err(Error::Io(e)),
+                Err(e) => return Err(e),
             };
 
             let reader_builder = ParquetRecordBatchReaderBuilder::try_new(file)

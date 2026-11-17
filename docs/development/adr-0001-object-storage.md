@@ -46,6 +46,9 @@ P2-03 is implemented: `ObjectBlockStore` uploads on close and serves reads
 from a bounded cache. P2-04 is implemented: `ObjectCatalog` keeps a generation
 and CAS version for the catalog manifest; writers merge by block key, and
 the server's catalog task publishes local blocks and adopts remote ones.
+P2-05 is implemented: compaction and retention read/delete through
+`BlockStore`, and catalog blocks carry a writer field so retirement is scoped
+to the node that owns them.
 
 ## Shared catalog
 
