@@ -11,7 +11,7 @@ docker build -t parqtel:local .
 ```
 
 The Dockerfile uses a multi-stage cargo-chef build:
-- **Builder**: `rust:1.88-slim` (chef → planner → builder) with pkg-config, cmake, make, g++, and protobuf-compiler
+- **Builder**: `rust:1.88-slim` (chef → planner → builder) with pkg-config, cmake, make, g++, protobuf-compiler, and libcurl4-openssl-dev (librdkafka OAuthbearer builds need `<curl/curl.h>`)
 - **Probe**: a std-only Rust `healthcheck` binary used by the image `HEALTHCHECK`
 - **Runtime**: a `runtime-libs` stage collects only the glibc/libgcc the binary needs, then `FROM scratch` ships that minimal rootfs (~15 MB final image, no shell)
 
