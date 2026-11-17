@@ -208,6 +208,10 @@ pub fn build_router(state: AppState) -> Router {
             post(handlers::alerts::resolve_alert),
         )
         .route("/api/v1/rules", get(handlers::alerts::list_rules))
+        .route(
+            "/api/v1/rules/status",
+            get(handlers::pipeline::rules_status),
+        )
         .route("/api/v1/rules", post(handlers::alerts::create_rule))
         .route("/api/v1/rules/:id", put(handlers::alerts::update_rule))
         .route("/api/v1/rules/:id", delete(handlers::alerts::delete_rule))

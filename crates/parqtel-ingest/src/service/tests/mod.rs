@@ -126,60 +126,62 @@ async fn live_log_ingest_applies_pipeline_and_forwards_metrics() {
     let (metric_tx, mut metric_rx) = mpsc::channel(4);
 
     let registry = RuleRegistry::new();
-    registry.add_pipeline(PipelineDefinition {
-        name: "mask-and-count".into(),
-        description: None,
-        match_config: Some(PipelineMatch {
-            signal: "logs".into(),
-            conditions: Vec::new(),
-        }),
-        stages: vec![
-            PipelineStage {
-                stage_type: StageType::Masker,
-                name: "mask".into(),
-                processor: None,
-                source_field: None,
-                pattern: None,
-                target_fields: None,
-                on_parse_failure: None,
-                fields: None,
-                conditions: None,
-                metric_name: None,
-                metric_type: None,
-                value_field: None,
-                dimensions: None,
-                condition: None,
-                histogram_buckets: None,
-                rules: Some(vec![MaskRule {
-                    field: "body".into(),
-                    pattern: "secret-\\d+".into(),
-                    replacement: "[MASKED]".into(),
-                }]),
-                action: None,
-                destination: None,
-            },
-            PipelineStage {
-                stage_type: StageType::MetricExtract,
-                name: "count".into(),
-                processor: None,
-                source_field: None,
-                pattern: None,
-                target_fields: None,
-                on_parse_failure: None,
-                fields: None,
-                conditions: None,
-                metric_name: Some("log_lines_total".into()),
-                metric_type: Some("counter".into()),
-                value_field: Some("constant:1".into()),
-                dimensions: Some(vec!["service_name".into()]),
-                condition: None,
-                histogram_buckets: None,
-                rules: None,
-                action: None,
-                destination: None,
-            },
-        ],
-    });
+    registry
+        .add_pipeline(PipelineDefinition {
+            name: "mask-and-count".into(),
+            description: None,
+            match_config: Some(PipelineMatch {
+                signal: "logs".into(),
+                conditions: Vec::new(),
+            }),
+            stages: vec![
+                PipelineStage {
+                    stage_type: StageType::Masker,
+                    name: "mask".into(),
+                    processor: None,
+                    source_field: None,
+                    pattern: None,
+                    target_fields: None,
+                    on_parse_failure: None,
+                    fields: None,
+                    conditions: None,
+                    metric_name: None,
+                    metric_type: None,
+                    value_field: None,
+                    dimensions: None,
+                    condition: None,
+                    histogram_buckets: None,
+                    rules: Some(vec![MaskRule {
+                        field: "body".into(),
+                        pattern: "secret-\\d+".into(),
+                        replacement: "[MASKED]".into(),
+                    }]),
+                    action: None,
+                    destination: None,
+                },
+                PipelineStage {
+                    stage_type: StageType::MetricExtract,
+                    name: "count".into(),
+                    processor: None,
+                    source_field: None,
+                    pattern: None,
+                    target_fields: None,
+                    on_parse_failure: None,
+                    fields: None,
+                    conditions: None,
+                    metric_name: Some("log_lines_total".into()),
+                    metric_type: Some("counter".into()),
+                    value_field: Some("constant:1".into()),
+                    dimensions: Some(vec!["service_name".into()]),
+                    condition: None,
+                    histogram_buckets: None,
+                    rules: None,
+                    action: None,
+                    destination: None,
+                },
+            ],
+        })
+        .unwrap();
 
     let svc = LogIngestionService::new(LogBlockConfig::default(), tx)
         .with_memory_buffer(buffer.clone())

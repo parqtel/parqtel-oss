@@ -36,12 +36,18 @@ pub async fn create_recording_rule(
         return runtime_updates_forbidden();
     }
     tracing::info!(group = %group.name, rules = group.rules.len(), "creating recording rule");
-    state.inner.pipeline_registry.add_group(group.clone());
-    (
-        StatusCode::CREATED,
-        Json(json!({"status": "success", "data": group})),
-    )
-        .into_response()
+    match state.inner.pipeline_registry.add_group(group.clone()) {
+        Ok(()) => (
+            StatusCode::CREATED,
+            Json(json!({"status": "success", "data": group})),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"status": "error", "error": e.to_string()})),
+        )
+            .into_response(),
+    }
 }
 
 pub async fn create_pipeline(
@@ -52,12 +58,18 @@ pub async fn create_pipeline(
         return runtime_updates_forbidden();
     }
     tracing::info!(name = %pipeline.name, "creating pipeline");
-    state.inner.pipeline_registry.add_pipeline(pipeline.clone());
-    (
-        StatusCode::CREATED,
-        Json(json!({"status": "success", "data": pipeline})),
-    )
-        .into_response()
+    match state.inner.pipeline_registry.add_pipeline(pipeline.clone()) {
+        Ok(()) => (
+            StatusCode::CREATED,
+            Json(json!({"status": "success", "data": pipeline})),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"status": "error", "error": e.to_string()})),
+        )
+            .into_response(),
+    }
 }
 
 pub async fn delete_recording_rule(

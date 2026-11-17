@@ -93,12 +93,15 @@ final partial step is not evaluated — the same as Prometheus.
 | GET | `/api/v1/recording_rules` | List recording rule groups |
 | POST | `/api/v1/recording_rules` | Create a recording rule group |
 | DELETE | `/api/v1/recording_rules/:name` | Delete a recording rule group |
+| GET | `/api/v1/rules/status` | Registry generation, definitions, load errors, and persisted ruler state |
 
 > **Mutation gate.** Route, recording-rule, and pipeline `POST`/`PUT`/`DELETE`
 > endpoints return `403` unless `alerts.allow_runtime_updates = true`. The OSS
 > build has no authentication; enable this only behind an authenticating proxy.
 > Mutations are persisted: routes to `data/alert_routes.json`, definitions to
 > `rules/recording/` and `rules/pipelines/`, and both are reloaded at startup.
+> Creating a definition validates its expressions and compiles pipelines first;
+> a bad definition returns `400` with the stage or rule name and is not stored.
 
 ## Grafana SimpleJSON
 

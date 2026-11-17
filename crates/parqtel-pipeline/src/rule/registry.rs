@@ -21,6 +21,12 @@ pub struct RuleRegistry {
     /// Incremented on every mutation; the ingest path uses it to recompile
     /// pipelines without polling the definition maps per batch.
     generation: Arc<AtomicU64>,
+    /// File each definition came from, so a watcher `Remove` can drop it.
+    group_sources: Arc<RwLock<BTreeMap<String, PathBuf>>>,
+    pipeline_sources: Arc<RwLock<BTreeMap<String, PathBuf>>>,
+    /// Parse/validation errors from the last load, surfaced by the status API
+    /// instead of being only a log line.
+    load_errors: Arc<RwLock<Vec<String>>>,
 }
 
 impl RuleRegistry {
@@ -31,6 +37,27 @@ impl RuleRegistry {
             recording_dir: None,
             pipeline_dir: None,
             generation: Arc::new(AtomicU64::new(0)),
+            group_sources: Arc::new(RwLock::new(BTreeMap::new())),
+            pipeline_sources: Arc::new(RwLock::new(BTreeMap::new())),
+            load_errors: Arc::new(RwLock::new(Vec::new())),
+        }
+    }
+
+    /// Errors recorded while loading rule files. A malformed file is skipped
+    /// so the process can start, but the status API reports it.
+    pub fn load_errors(&self) -> Vec<String> {
+        self.load_errors
+            .read()
+            .map(|errors| errors.clone())
+            .unwrap_or_default()
+    }
+
+    fn record_error(&self, message: String) {
+        if let Ok(mut errors) = self.load_errors.write() {
+            if errors.len() >= 100 {
+                errors.remove(0);
+            }
+            errors.push(message);
         }
     }
 
@@ -64,7 +91,9 @@ impl RuleRegistry {
                 || path.extension().and_then(|e| e.to_str()) == Some("yml")
             {
                 if let Err(e) = self.load_file(&path) {
-                    error!("Failed to load rule file {:?}: {}", path, e);
+                    let message = format!("{}: {e}", path.display());
+                    self.record_error(message.clone());
+                    error!("Failed to load rule file: {}", message);
                 }
             }
         }
@@ -81,18 +110,62 @@ impl RuleRegistry {
 
         for group in rule_set.groups {
             validator.validate_group(&group)?;
+            for rule in &group.rules {
+                crate::expr::PromQlExpr::parse(&rule.expr)?;
+            }
             if let Ok(mut groups) = self.groups.write() {
-                groups.insert(group.name.clone(), group);
+                groups.insert(group.name.clone(), group.clone());
+            }
+            if let Ok(mut sources) = self.group_sources.write() {
+                sources.insert(group.name, path.to_path_buf());
             }
         }
         for pipeline in rule_set.pipelines {
             validator.validate_pipeline(&pipeline)?;
+            crate::pipeline::compile::compile_pipeline(&pipeline)?;
             if let Ok(mut pipelines) = self.pipelines.write() {
-                pipelines.insert(pipeline.name.clone(), pipeline);
+                pipelines.insert(pipeline.name.clone(), pipeline.clone());
+            }
+            if let Ok(mut sources) = self.pipeline_sources.write() {
+                sources.insert(pipeline.name, path.to_path_buf());
             }
         }
         self.bump_generation();
         Ok(())
+    }
+
+    /// Remove every definition whose source file disappeared. Called by the
+    /// directory watcher on a `Remove` event; the definitions map cannot be
+    /// keyed by path because names are user-facing.
+    pub fn remove_path(&self, path: &Path) {
+        let groups: Vec<String> = self
+            .group_sources
+            .read()
+            .map(|sources| {
+                sources
+                    .iter()
+                    .filter(|(_, source)| source.as_path() == path)
+                    .map(|(name, _)| name.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        for name in groups {
+            self.remove_group(&name);
+        }
+        let pipelines: Vec<String> = self
+            .pipeline_sources
+            .read()
+            .map(|sources| {
+                sources
+                    .iter()
+                    .filter(|(_, source)| source.as_path() == path)
+                    .map(|(name, _)| name.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        for name in pipelines {
+            self.remove_pipeline(&name);
+        }
     }
 
     /// Remove a recording rule group by name.
@@ -101,36 +174,67 @@ impl RuleRegistry {
         if let Ok(mut groups) = self.groups.write() {
             groups.remove(name);
         }
+        if let Ok(mut sources) = self.group_sources.write() {
+            sources.remove(name);
+        }
         self.bump_generation();
         remove_definition(&self.recording_dir, name);
     }
 
-    /// Add a recording rule group.
-    pub fn add_group(&self, group: RecordingRuleGroup) {
+    /// Add a recording rule group, validating its expressions first.
+    pub fn add_group(&self, group: RecordingRuleGroup) -> crate::Result<()> {
+        RuleValidator.validate_group(&group)?;
+        for rule in &group.rules {
+            crate::expr::PromQlExpr::parse(&rule.expr)?;
+        }
         tracing::debug!(group = %group.name, rules = %group.rules.len(), "recording rule group added");
         let set = RuleSet {
             groups: vec![group.clone()],
             pipelines: Vec::new(),
         };
+        let path = definition_path(
+            self.recording_dir
+                .as_deref()
+                .unwrap_or_else(|| Path::new(".")),
+            &group.name,
+            "yaml",
+        );
         persist_definition(&self.recording_dir, &group.name, &set);
         if let Ok(mut groups) = self.groups.write() {
-            groups.insert(group.name.clone(), group);
+            groups.insert(group.name.clone(), group.clone());
+        }
+        if let Ok(mut sources) = self.group_sources.write() {
+            sources.insert(group.name, path);
         }
         self.bump_generation();
+        Ok(())
     }
 
-    /// Add a pipeline definition.
-    pub fn add_pipeline(&self, pipeline: PipelineDefinition) {
+    /// Add a pipeline definition, compiling it before it can be stored.
+    pub fn add_pipeline(&self, pipeline: PipelineDefinition) -> crate::Result<()> {
+        RuleValidator.validate_pipeline(&pipeline)?;
+        crate::pipeline::compile::compile_pipeline(&pipeline)?;
         tracing::debug!(name = %pipeline.name, "pipeline added");
         let set = RuleSet {
             groups: Vec::new(),
             pipelines: vec![pipeline.clone()],
         };
+        let path = definition_path(
+            self.pipeline_dir
+                .as_deref()
+                .unwrap_or_else(|| Path::new(".")),
+            &pipeline.name,
+            "yaml",
+        );
         persist_definition(&self.pipeline_dir, &pipeline.name, &set);
         if let Ok(mut pipelines) = self.pipelines.write() {
-            pipelines.insert(pipeline.name.clone(), pipeline);
+            pipelines.insert(pipeline.name.clone(), pipeline.clone());
+        }
+        if let Ok(mut sources) = self.pipeline_sources.write() {
+            sources.insert(pipeline.name, path);
         }
         self.bump_generation();
+        Ok(())
     }
 
     /// Remove a pipeline by name.
@@ -138,6 +242,9 @@ impl RuleRegistry {
         tracing::debug!(name = %name, "pipeline removed");
         if let Ok(mut pipelines) = self.pipelines.write() {
             pipelines.remove(name);
+        }
+        if let Ok(mut sources) = self.pipeline_sources.write() {
+            sources.remove(name);
         }
         self.bump_generation();
         remove_definition(&self.pipeline_dir, name);
@@ -187,7 +294,10 @@ impl RuleRegistry {
                         }
                     }
                     EventKind::Remove(_) => {
-                        info!("Rule file removed: {:?}", event.paths);
+                        for path in &event.paths {
+                            info!("Rule file removed: {:?}", path);
+                            registry.remove_path(path);
+                        }
                     }
                     _ => {}
                 }
@@ -309,8 +419,8 @@ groups:
 pipelines:
   - name: api-logs
     stages:
-      - type: processor
-        name: parse
+      - type: preprocessor
+        name: pre
 "#;
         let path = dir.path().join("pipeline.yaml");
         std::fs::File::create(&path)
@@ -341,35 +451,29 @@ pipelines:
                 expr: "sum(requests)".into(),
                 labels: BTreeMap::new(),
                 description: None,
-                retention_override_days: None,
-                for_duration: None,
-            }],
-        });
-        registry.add_pipeline(PipelineDefinition {
-            name: "api pipeline".into(),
-            description: None,
-            match_config: None,
-            stages: vec![super::super::schema::PipelineStage {
-                stage_type: super::super::schema::StageType::Preprocessor,
-                name: "pre".into(),
-                processor: None,
-                source_field: None,
-                pattern: None,
-                target_fields: None,
-                on_parse_failure: None,
-                fields: None,
-                conditions: None,
-                metric_name: None,
-                metric_type: None,
-                value_field: None,
-                dimensions: None,
-                condition: None,
-                histogram_buckets: None,
-                rules: None,
-                action: None,
-                destination: None,
-            }],
-        });
+                match_config: None,
+                stages: vec![super::super::schema::PipelineStage {
+                    stage_type: super::super::schema::StageType::Preprocessor,
+                    name: "pre".into(),
+                    processor: None,
+                    source_field: None,
+                    pattern: None,
+                    target_fields: None,
+                    on_parse_failure: None,
+                    fields: None,
+                    conditions: None,
+                    metric_name: None,
+                    metric_type: None,
+                    value_field: None,
+                    dimensions: None,
+                    condition: None,
+                    histogram_buckets: None,
+                    rules: None,
+                    action: None,
+                    destination: None,
+                }],
+            })
+            .unwrap();
 
         assert!(recording_dir.join("api_group.yaml").exists());
         assert!(pipeline_dir.join("api_pipeline.yaml").exists());
@@ -408,5 +512,75 @@ groups:
         assert_eq!(registry.get_groups().len(), 1);
         registry.remove_group("to_remove");
         assert_eq!(registry.get_groups().len(), 0);
+    }
+
+    #[test]
+    fn invalid_definitions_are_rejected_before_storage() {
+        let root = tempdir().unwrap();
+        let registry = RuleRegistry::new()
+            .with_dirs(root.path().join("recording"), root.path().join("pipelines"));
+
+        let err = registry
+            .add_group(RecordingRuleGroup {
+                name: "bad".into(),
+                interval: "1m".into(),
+                rules: vec![super::super::schema::RecordingRule {
+                    record: "bad:metric".into(),
+                    expr: "((( unbalanced".into(),
+                    labels: BTreeMap::new(),
+                    description: None,
+                    retention_override_days: None,
+                    for_duration: None,
+                }],
+            })
+            .unwrap_err();
+        assert!(err.to_string().contains("Unbalanced"));
+        assert!(registry.get_groups().is_empty());
+
+        let err = registry
+            .add_pipeline(PipelineDefinition {
+                name: "bad-pipeline".into(),
+                description: None,
+                match_config: None,
+                stages: vec![super::super::schema::PipelineStage {
+                    stage_type: super::super::schema::StageType::Processor,
+                    name: "parse".into(),
+                    processor: Some("regex_extract".into()),
+                    source_field: Some("body".into()),
+                    pattern: Some("(".into()),
+                    target_fields: Some(BTreeMap::from([("target".into(), "capture".into())])),
+                    on_parse_failure: None,
+                    fields: None,
+                    conditions: None,
+                    metric_name: None,
+                    metric_type: None,
+                    value_field: None,
+                    dimensions: None,
+                    condition: None,
+                    histogram_buckets: None,
+                    rules: None,
+                    action: None,
+                    destination: None,
+                }],
+            })
+            .unwrap_err();
+        assert!(err.to_string().contains("invalid regex"));
+        assert!(registry.get_pipelines().is_empty());
+    }
+
+    #[test]
+    fn load_dir_records_bad_file_and_keeps_good_one() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("bad.yaml"), "pipelines: [").unwrap();
+        std::fs::write(
+            dir.path().join("good.yaml"),
+            "groups:\n  - name: good\n    interval: 1m\n    rules:\n      - record: x\n        expr: sum(y)\n",
+        )
+        .unwrap();
+        let registry = RuleRegistry::new();
+        registry.load_dir(dir.path()).unwrap();
+        assert_eq!(registry.get_groups().len(), 1);
+        assert_eq!(registry.load_errors().len(), 1);
+        assert!(registry.load_errors()[0].contains("bad.yaml"));
     }
 }

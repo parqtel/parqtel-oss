@@ -42,6 +42,11 @@ while measuring. Measurements and method are in
 
 ### Added
 
+- **Rule definitions are validated and observable.** API-created recording
+  rules and pipelines are validated/compiled before storage (`400` on failure),
+  watcher deletes now remove the definition, and `GET /api/v1/rules/status`
+  reports the registry generation, definitions, load errors, and persisted
+  ruler state.
 - **Recording rules execute.** `RulerScheduler` now runs in `serve`, evaluates
   `rules/recording/` groups on their intervals against the live query executor,
   and writes results through the metrics ingestion service so they share its

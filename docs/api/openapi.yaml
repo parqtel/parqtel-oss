@@ -1562,6 +1562,47 @@ paths:
                   data:
                     $ref: "#/components/schemas/AlertRule"
 
+  /api/v1/rules/status:
+    get:
+      tags: [Alerts]
+      summary: Recording-rule and pipeline registry status
+      description: >
+        Registry generation, recording-rule groups, pipeline definitions,
+        parse/validation errors from the last load, whether the ruler loop is
+        enabled, and the persisted per-group evaluation timestamps.
+      operationId: getRulesStatus
+      responses:
+        "200":
+          description: Registry status
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                  data:
+                    type: object
+                    properties:
+                      generation:
+                        type: integer
+                      recording_rules:
+                        type: array
+                        items:
+                          type: object
+                      pipelines:
+                        type: array
+                        items:
+                          type: object
+                      load_errors:
+                        type: array
+                        items:
+                          type: string
+                      ruler_enabled:
+                        type: boolean
+                      ruler_state:
+                        type: object
+
   /api/v1/rules/{id}:
     put:
       tags: [Alerts]
