@@ -374,6 +374,18 @@ Generate a hash with `printf %s "$TOKEN" | sha256sum`. Plaintext `token` values
 are hashed at startup and never stored. Enabling auth does not add TLS; pair it
 with a TLS terminator or in-process TLS when the network is not trusted.
 
+### `[audit]`
+
+Append-only JSONL trail for configuration mutations (alert rules, routes,
+silences, recording rules, pipelines). Each line records the timestamp, token
+name (or `anonymous` when auth is off), action, target, and before/after
+values. Webhook URLs are redacted before they reach the file.
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `enabled` | Boolean | `true` | Write mutation records |
+| `path` | String | `"audit.jsonl"` | Relative to `storage.data_dir`, or an absolute path |
+
 ### `[alerts]`
 
 | Key | Type | Default | Description |

@@ -33,6 +33,10 @@ pub struct AuthState {
     broken: bool,
 }
 
+/// Authenticated identity inserted into request extensions for audit records.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Actor(pub String);
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AuthError {
     Missing,
@@ -162,11 +166,15 @@ impl AuthState {
 /// Axum middleware wrapper.
 pub async fn require_auth(
     State(auth): State<Arc<AuthState>>,
-    req: Request<axum::body::Body>,
+    mut req: Request<axum::body::Body>,
     next: Next,
 ) -> Response {
     match auth.authorize(req.headers(), req.method(), req.uri().path()) {
-        Ok(_) => next.run(req).await,
+        Ok(actor) => {
+            req.extensions_mut()
+                .insert(Actor(actor.unwrap_or_else(|| "anonymous".into())));
+            next.run(req).await
+        }
         Err(error) => {
             let (status, message) = match error {
                 AuthError::Missing => (StatusCode::UNAUTHORIZED, "missing bearer token"),

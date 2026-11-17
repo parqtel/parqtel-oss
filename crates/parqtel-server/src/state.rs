@@ -38,6 +38,7 @@ pub struct AppStateInner {
     >,
     pub pipeline_registry: PipelineRegistry,
     pub saved_searches: crate::saved_searches::SavedSearchStore,
+    pub audit: Arc<crate::audit::AuditLog>,
 }
 
 impl AppState {
@@ -57,6 +58,10 @@ impl AppState {
     ) -> Self {
         let data_dir = config.storage.data_dir.clone();
         let saved_search_dir = config.storage.data_dir.clone();
+        let audit = Arc::new(crate::audit::AuditLog::new(
+            &config.audit,
+            &config.storage.data_dir,
+        ));
         let alert_registry = AlertRuleRegistry::new();
         let alert_store = AlertStore::new(Some(data_dir)).await;
         let (alert_tx, alert_event_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -98,6 +103,7 @@ impl AppState {
                 alert_event_rx: tokio::sync::Mutex::new(Some(alert_event_rx)),
                 pipeline_registry,
                 saved_searches: crate::saved_searches::SavedSearchStore::new(saved_search_dir),
+                audit,
             }),
         }
     }

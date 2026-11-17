@@ -42,6 +42,10 @@ while measuring. Measurements and method are in
 
 ### Added
 
+- **Append-only audit trail.** Config mutations (alert rules/routes/silences,
+  recording rules, pipelines) append a JSONL record with timestamp, token
+  actor, action, target, and before/after values. Webhook URLs are redacted.
+  `[audit]` controls the path (default `data/audit.jsonl`) and can disable it.
 - **In-process TLS.** `[server.tls]` takes a PEM certificate/key pair and serves
   the HTTP API/console over HTTPS (no plaintext listener) and OTLP gRPC over
   TLS with the same identity. Verified with a self-signed certificate; plaintext

@@ -1,4 +1,5 @@
 mod alert;
+mod audit;
 mod auth;
 mod ingest;
 mod query;
@@ -11,6 +12,7 @@ pub use alert::{
     AlertConfig, EgressConfig, NotificationConfig, PostmortemConfig, PresetConfig, PresetMode,
     RouteConfig, SilenceConfig,
 };
+pub use audit::AuditConfig;
 pub use auth::{AuthConfig, AuthScope, AuthTokenConfig};
 pub use ingest::{BufferOverflowPolicy, IngestConfig, TailSamplingConfig};
 pub use query::{QueryConfig, UIConfig};
@@ -37,6 +39,8 @@ pub struct Config {
     pub ingest: IngestConfig,
     #[serde(default)]
     pub auth: AuthConfig,
+    #[serde(default)]
+    pub audit: AuditConfig,
     pub query: QueryConfig,
     pub ui: UIConfig,
     pub telemetry: TelemetryConfig,

@@ -1,8 +1,9 @@
+use crate::auth::Actor;
 use axum::{
     extract::{Path, State},
     http::StatusCode,
     response::IntoResponse,
-    Json,
+    Extension, Json,
 };
 use serde::Serialize;
 use ulid::Ulid;
@@ -14,6 +15,13 @@ use parqtel_alert::state::machine::{AlertStateMachine, TransitionEvent};
 struct AlertResponse<T: Serialize> {
     status: &'static str,
     data: T,
+}
+
+fn actor_name(actor: &Option<Extension<Actor>>) -> &str {
+    actor
+        .as_ref()
+        .map(|Extension(actor)| actor.0.as_str())
+        .unwrap_or("anonymous")
 }
 
 fn ok_json<T: Serialize>(data: T) -> impl IntoResponse {
@@ -145,10 +153,21 @@ pub async fn list_rules(State(state): State<AppState>) -> impl IntoResponse {
 }
 
 /// POST /api/v1/rules
-pub async fn create_rule(State(state): State<AppState>, body: String) -> impl IntoResponse {
+pub async fn create_rule(
+    State(state): State<AppState>,
+    actor: Option<Extension<Actor>>,
+    body: String,
+) -> impl IntoResponse {
     match parqtel_alert::rule::yaml::parse_rule(&body) {
         Ok(rule) => {
             state.inner.alert_registry.insert(rule.clone()).await;
+            state.inner.audit.record(
+                actor_name(&actor),
+                "alerts.rule.create",
+                &rule.id,
+                None,
+                serde_json::to_value(&rule).ok(),
+            );
             (StatusCode::CREATED, ok_json(rule)).into_response()
         }
         Err(e) => (
@@ -163,11 +182,19 @@ pub async fn create_rule(State(state): State<AppState>, body: String) -> impl In
 pub async fn update_rule(
     State(state): State<AppState>,
     Path(_id): Path<String>,
+    actor: Option<Extension<Actor>>,
     body: String,
 ) -> impl IntoResponse {
     match parqtel_alert::rule::yaml::parse_rule(&body) {
         Ok(rule) => {
             if state.inner.alert_registry.update(rule.clone()).await {
+                state.inner.audit.record(
+                    actor_name(&actor),
+                    "alerts.rule.update",
+                    &rule.id,
+                    None,
+                    serde_json::to_value(&rule).ok(),
+                );
                 ok_json(rule).into_response()
             } else {
                 (
@@ -189,8 +216,16 @@ pub async fn update_rule(
 pub async fn delete_rule(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    actor: Option<Extension<Actor>>,
 ) -> impl IntoResponse {
     if state.inner.alert_registry.disable(&id).await {
+        state.inner.audit.record(
+            actor_name(&actor),
+            "alerts.rule.disable",
+            &id,
+            None,
+            Some(serde_json::json!({"disabled": true})),
+        );
         ok_json(serde_json::json!({"disabled": true})).into_response()
     } else {
         (
@@ -324,10 +359,29 @@ pub async fn test_route(
     .into_response()
 }
 
+fn route_audit_value(routes: &[parqtel_core::config::RouteConfig]) -> serde_json::Value {
+    serde_json::Value::Array(
+        routes
+            .iter()
+            .map(|route| {
+                serde_json::json!({
+                    "name": route.name,
+                    "match_severity": route.match_severity,
+                    "match_labels": route.match_labels,
+                    // Never write a webhook URL (it often contains a secret).
+                    "webhook_url": if route.webhook_url.is_empty() { "" } else { "***" },
+                    "repeat_minutes": route.repeat_minutes,
+                })
+            })
+            .collect(),
+    )
+}
+
 /// Replace the full routing table (routes are config-driven; this updates
 /// the running router atomically).
 pub async fn set_routes(
     State(state): State<AppState>,
+    actor: Option<Extension<Actor>>,
     axum::Json(routes): axum::Json<Vec<parqtel_core::config::RouteConfig>>,
 ) -> axum::response::Response {
     if !state.inner.config.alerts.allow_runtime_updates {
@@ -341,6 +395,15 @@ pub async fn set_routes(
             .into_response();
     }
     let mut config = state.inner.alert_router.config().await;
+    let before = route_audit_value(&config.routes);
+    let after = route_audit_value(&routes);
+    state.inner.audit.record(
+        actor_name(&actor),
+        "alerts.routes.update",
+        "routes",
+        Some(before),
+        Some(after),
+    );
     config.routes = routes;
     state.inner.alert_router.set_config(config).await;
     axum::Json(serde_json::json!({ "status": "success" })).into_response()
@@ -355,6 +418,7 @@ pub async fn list_silences(State(state): State<AppState>) -> impl IntoResponse {
 /// Create or replace a silence by name.
 pub async fn create_silence(
     State(state): State<AppState>,
+    actor: Option<Extension<Actor>>,
     axum::Json(silence): axum::Json<parqtel_core::config::SilenceConfig>,
 ) -> axum::response::Response {
     if silence.name.trim().is_empty() {
@@ -371,6 +435,13 @@ pub async fn create_silence(
         )
             .into_response();
     }
+    state.inner.audit.record(
+        actor_name(&actor),
+        "alerts.silence.create",
+        &silence.name,
+        None,
+        serde_json::to_value(&silence).ok(),
+    );
     state.inner.alert_router.add_silence(silence).await;
     axum::Json(serde_json::json!({ "status": "success" })).into_response()
 }
@@ -379,9 +450,17 @@ pub async fn create_silence(
 pub async fn delete_silence(
     State(state): State<AppState>,
     Path(name): Path<String>,
+    actor: Option<Extension<Actor>>,
 ) -> axum::response::Response {
     let removed = state.inner.alert_router.remove_silence(&name).await;
     if removed {
+        state.inner.audit.record(
+            actor_name(&actor),
+            "alerts.silence.delete",
+            &name,
+            None,
+            None,
+        );
         axum::Json(serde_json::json!({ "status": "success" })).into_response()
     } else {
         (
@@ -530,7 +609,7 @@ mod tests {
     #[tokio::test]
     async fn set_routes_is_forbidden_by_default_and_persists_when_enabled() {
         let state = AppState::default_for_tests().await;
-        let resp = set_routes(State(state.clone()), axum::Json(Vec::new())).await;
+        let resp = set_routes(State(state.clone()), None, axum::Json(Vec::new())).await;
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
 
         let mut config = parqtel_core::Config::default();
@@ -543,7 +622,7 @@ mod tests {
             webhook_url: "https://example.com/hook".into(),
             repeat_minutes: 240,
         };
-        let resp = set_routes(State(state.clone()), axum::Json(vec![route])).await;
+        let resp = set_routes(State(state.clone()), None, axum::Json(vec![route])).await;
         assert_eq!(resp.status(), StatusCode::OK);
         let routes = state.inner.alert_router.config().await.routes;
         assert_eq!(routes.len(), 1);
