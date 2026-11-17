@@ -44,6 +44,8 @@ impl RulerScheduler {
                     self.evaluate_due_groups().await;
                 }
                 _ = shutdown.changed() => {
+                    // A closed channel (sender dropped during shutdown) also
+                    // ends the loop; `changed()` returns Err in that case.
                     info!("Ruler scheduler shutting down");
                     break;
                 }

@@ -18,17 +18,37 @@ pub trait QueryExecutor: Send + Sync {
     ) -> crate::Result<Vec<(LabelSet, f64)>>;
 }
 
-/// Evaluates recording rules and writes results to storage.
+/// Where recording-rule results go. The server implements this by forwarding
+/// to the live metrics ingestion service, so results share its WAL and buffer;
+/// tests can implement it with an in-memory collector.
+#[async_trait]
+pub trait MetricSink: Send + Sync {
+    async fn write_metrics(&self, metrics: Vec<Metric>) -> crate::Result<()>;
+}
+
+/// Direct Parquet sink used by the backfill tool and tests. The server uses a
+/// channel sink so results share the live WAL, buffer, and index.
+#[async_trait]
+impl MetricSink for parqtel_core::engine::parquet::ParquetStorageEngine {
+    async fn write_metrics(&self, metrics: Vec<Metric>) -> crate::Result<()> {
+        self.write_metrics_batch(metrics)
+            .await
+            .map(|_| ())
+            .map_err(|e| crate::Error::Storage(e.to_string()))
+    }
+}
+
+/// Evaluates recording rules and writes results to a metric sink.
 pub struct RulerEvaluator {
     query_executor: Arc<dyn QueryExecutor>,
-    storage: Arc<dyn StorageEngine>,
+    sink: Arc<dyn MetricSink>,
 }
 
 impl RulerEvaluator {
-    pub fn new(query_executor: Arc<dyn QueryExecutor>, storage: Arc<dyn StorageEngine>) -> Self {
+    pub fn new(query_executor: Arc<dyn QueryExecutor>, sink: Arc<dyn MetricSink>) -> Self {
         Self {
             query_executor,
-            storage,
+            sink,
         }
     }
 
@@ -94,8 +114,8 @@ impl RulerEvaluator {
                 eval_timestamp_ns
             );
 
-            // Write to storage
-            if let Err(e) = self.storage.write_metrics_batch(metrics).await {
+            // Write through the sink so the server path uses its WAL/buffer.
+            if let Err(e) = self.sink.write_metrics(metrics).await {
                 error!("Failed to write rule '{}' results: {}", rule.record, e);
             }
         }
@@ -115,8 +135,22 @@ mod tests {
     use crate::rule::schema::{RecordingRule, RecordingRuleGroup};
     use parqtel_core::config::BlockConfig;
     use parqtel_core::engine::parquet::ParquetStorageEngine;
+    use parqtel_core::StorageEngine;
     use std::collections::BTreeMap;
     use tempfile::tempdir;
+
+    struct ParquetSink(Arc<ParquetStorageEngine>);
+
+    #[async_trait]
+    impl MetricSink for ParquetSink {
+        async fn write_metrics(&self, metrics: Vec<Metric>) -> crate::Result<()> {
+            self.0
+                .write_metrics_batch(metrics)
+                .await
+                .map(|_| ())
+                .map_err(|e| crate::Error::Storage(e.to_string()))
+        }
+    }
 
     struct MockQueryExecutor {
         results: Vec<(LabelSet, f64)>,
@@ -147,7 +181,7 @@ mod tests {
             results: vec![(labels, 0.05)],
         });
 
-        let evaluator = RulerEvaluator::new(executor, storage.clone());
+        let evaluator = RulerEvaluator::new(executor, Arc::new(ParquetSink(storage.clone())));
         let group = RecordingRuleGroup {
             name: "test_group".into(),
             interval: "1m".into(),
@@ -192,7 +226,7 @@ mod tests {
             results: vec![(labels, 1.0)],
         });
 
-        let evaluator = RulerEvaluator::new(executor, storage.clone());
+        let evaluator = RulerEvaluator::new(executor, Arc::new(ParquetSink(storage.clone())));
         let group = RecordingRuleGroup {
             name: "idempotent".into(),
             interval: "1m".into(),
@@ -239,7 +273,7 @@ mod tests {
         let storage = Arc::new(ParquetStorageEngine::new(config));
 
         let executor = Arc::new(MockQueryExecutor { results: vec![] });
-        let evaluator = RulerEvaluator::new(executor, storage);
+        let evaluator = RulerEvaluator::new(executor, Arc::new(ParquetSink(storage)));
 
         let group = RecordingRuleGroup {
             name: "bad".into(),

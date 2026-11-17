@@ -42,6 +42,11 @@ while measuring. Measurements and method are in
 
 ### Added
 
+- **Recording rules execute.** `RulerScheduler` now runs in `serve`, evaluates
+  `rules/recording/` groups on their intervals against the live query executor,
+  and writes results through the metrics ingestion service so they share its
+  WAL, buffer, and index. State is persisted under `data/ruler/state.json`;
+  `alerts.recording_rules_enabled = false` disables the loop.
 - **Pipelines execute on live log ingest.** YAML pipeline definitions are now
   compiled into stages with validation at load time (unknown processors,
   invalid regex, missing fields, unsupported signals) and applied to live logs

@@ -104,6 +104,10 @@ pub struct AlertConfig {
     /// scoped tokens land.
     #[serde(default)]
     pub allow_runtime_updates: bool,
+    /// Evaluate `rules/recording/` groups and write their results back into
+    /// the metrics ingest path.
+    #[serde(default = "default_true")]
+    pub recording_rules_enabled: bool,
 }
 
 impl Default for AlertConfig {
@@ -117,6 +121,7 @@ impl Default for AlertConfig {
             postmortem: Some(PostmortemConfig::default()),
             notifications: Some(NotificationConfig::default()),
             allow_runtime_updates: false,
+            recording_rules_enabled: true,
         }
     }
 }

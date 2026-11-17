@@ -326,6 +326,7 @@ Per-service overrides; each entry fully replaces the global policy for that serv
 | `refinement_enabled` | Boolean | `true` | Enable automatic alert refinement |
 | `noise_suppression_threshold` | Float | `0.7` | Threshold for noise suppression (0.0-1.0) |
 | `allow_runtime_updates` | Boolean | `false` | Permit REST writes to alert routes, recording rules, and pipelines. Keep off unless an authenticating proxy fronts the API. |
+| `recording_rules_enabled` | Boolean | `true` | Evaluate `rules/recording/` groups on their intervals and write results through the metrics ingest path |
 
 ### `[alerts.presets]`
 
@@ -587,13 +588,26 @@ directory is not scanned by default; copy the packs you want into `rules_dir`.
 
 ## Recording Rule YAML Schema
 
+Files under `rules/recording/` contain a `groups:` list. Each group is
+evaluated on its `interval`; every rule runs its PromQL expression over the
+configured instant lookback and writes the resulting series under `record`
+through the normal metrics ingest path (WAL, buffer, index). Set
+`alerts.recording_rules_enabled = false` to disable the scheduler.
+
 ```yaml
-name: http:requests:rate5m
-expression: "rate(http_requests_total[5m])"
-interval_secs: 60
-labels:
-  aggregation: "recording_rule"
+groups:
+  - name: http_service_aggregations
+    interval: 1m
+    rules:
+      - record: service:http_requests:rate5m
+        expr: sum by (service_name) (rate(http_requests_total[5m]))
+        labels:
+          aggregation: rate5m
+        description: "Pre-aggregated request rate per service"
 ```
+
+Invalid expressions are logged and skipped; a group's cadence is tracked in
+`data/ruler/state.json` so a restart does not immediately re-run every group.
 
 ## Pipeline YAML Schema
 

@@ -13,6 +13,8 @@ use flate2::write::GzEncoder;
 use flate2::Compression;
 use parqtel_core::{start_maintenance, BlockIndex, BlockIndexStore, Config, RetentionPolicy};
 use parqtel_ingest::{IngestionService, LogIngestionService, TraceIngestionService};
+use parqtel_pipeline::config::RulerConfig;
+use parqtel_pipeline::ruler::{RulerEvaluator, RulerScheduler};
 use parqtel_query::QueryExecutor;
 use sha2::{Digest, Sha256};
 use std::io::Write;
@@ -304,6 +306,51 @@ pub(crate) async fn run_server(
         "parqtel application state initialized"
     );
 
+    // Recording rules: evaluate on their group intervals and write results
+    // through the same metrics ingestion service as live OTLP data.
+    let ruler_runtime = if config.alerts.recording_rules_enabled {
+        let (ruler_tx, mut ruler_rx) = mpsc::channel::<Vec<parqtel_core::Metric>>(64);
+        let sink = Arc::new(crate::ruler::ChannelMetricSink::new(ruler_tx));
+        let query = Arc::new(crate::ruler::ServerQueryExecutor::new(state.clone()));
+        let evaluator = Arc::new(RulerEvaluator::new(query, sink));
+        let ruler_config = RulerConfig {
+            rules_dir: format!("{}/recording", config.alerts.rules_dir),
+            state_file: config
+                .storage
+                .data_dir
+                .join("ruler/state.json")
+                .to_string_lossy()
+                .into_owned(),
+            ..RulerConfig::default()
+        };
+        let scheduler = Arc::new(RulerScheduler::new(
+            ruler_config,
+            state.inner.pipeline_registry.clone(),
+            evaluator,
+        ));
+        if let Err(e) = scheduler.load_state().await {
+            tracing::warn!(error = %e, "failed to load ruler state");
+        }
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let task_scheduler = scheduler.clone();
+        let task = tokio::spawn(async move {
+            task_scheduler.run(shutdown_rx).await;
+        });
+        let metrics_task = {
+            let state = state.clone();
+            tokio::spawn(async move {
+                while let Some(metrics) = ruler_rx.recv().await {
+                    if let Err(e) = state.inner.ingestion_service.ingest_metrics(metrics).await {
+                        tracing::warn!(error = %e, "failed to ingest recording-rule metrics");
+                    }
+                }
+            })
+        };
+        Some((scheduler, shutdown_tx, task, metrics_task))
+    } else {
+        None
+    };
+
     // Pipeline-extracted metrics enter the metrics WAL/buffer through the same
     // service OTLP metrics use.
     let pipeline_metrics_task = {
@@ -390,6 +437,14 @@ pub(crate) async fn run_server(
     grpc_task.abort();
     span_metrics_task.abort();
     pipeline_metrics_task.abort();
+    if let Some((scheduler, shutdown_tx, task, metrics_task)) = &ruler_runtime {
+        let _ = shutdown_tx.send(true);
+        if let Err(e) = scheduler.save_state().await {
+            tracing::warn!(error = %e, "failed to save ruler state");
+        }
+        task.abort();
+        metrics_task.abort();
+    }
     alert_router_task.abort();
     if let Some(task) = alert_dispatcher_tick_task {
         task.abort();

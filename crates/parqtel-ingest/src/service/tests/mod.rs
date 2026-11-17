@@ -113,3 +113,87 @@ fn one_point_metric(name: &str, ts: i64) -> Metric {
         ..Default::default()
     }
 }
+
+#[tokio::test]
+async fn live_log_ingest_applies_pipeline_and_forwards_metrics() {
+    use parqtel_pipeline::rule::registry::RuleRegistry;
+    use parqtel_pipeline::rule::schema::{
+        MaskRule, PipelineDefinition, PipelineMatch, PipelineStage, StageType,
+    };
+
+    let buffer = parqtel_core::MemoryBuffer::new();
+    let (tx, _rx) = mpsc::unbounded_channel::<PendingIndex>();
+    let (metric_tx, mut metric_rx) = mpsc::channel(4);
+
+    let registry = RuleRegistry::new();
+    registry.add_pipeline(PipelineDefinition {
+        name: "mask-and-count".into(),
+        description: None,
+        match_config: Some(PipelineMatch {
+            signal: "logs".into(),
+            conditions: Vec::new(),
+        }),
+        stages: vec![
+            PipelineStage {
+                stage_type: StageType::Masker,
+                name: "mask".into(),
+                processor: None,
+                source_field: None,
+                pattern: None,
+                target_fields: None,
+                on_parse_failure: None,
+                fields: None,
+                conditions: None,
+                metric_name: None,
+                metric_type: None,
+                value_field: None,
+                dimensions: None,
+                condition: None,
+                histogram_buckets: None,
+                rules: Some(vec![MaskRule {
+                    field: "body".into(),
+                    pattern: "secret-\\d+".into(),
+                    replacement: "[MASKED]".into(),
+                }]),
+                action: None,
+                destination: None,
+            },
+            PipelineStage {
+                stage_type: StageType::MetricExtract,
+                name: "count".into(),
+                processor: None,
+                source_field: None,
+                pattern: None,
+                target_fields: None,
+                on_parse_failure: None,
+                fields: None,
+                conditions: None,
+                metric_name: Some("log_lines_total".into()),
+                metric_type: Some("counter".into()),
+                value_field: Some("constant:1".into()),
+                dimensions: Some(vec!["service_name".into()]),
+                condition: None,
+                histogram_buckets: None,
+                rules: None,
+                action: None,
+                destination: None,
+            },
+        ],
+    });
+
+    let svc = LogIngestionService::new(LogBlockConfig::default(), tx)
+        .with_memory_buffer(buffer.clone())
+        .with_pipelines(registry, metric_tx);
+    svc.ingest_logs_live(vec![log_at(1_000, "token secret-123")])
+        .await
+        .unwrap();
+
+    let stored = buffer.scan_logs(0, i64::MAX).await;
+    assert_eq!(stored.len(), 1);
+    assert_eq!(stored[0].body, "token [MASKED]");
+
+    let metrics = metric_rx.recv().await.unwrap();
+    assert_eq!(metrics.len(), 1);
+    assert_eq!(metrics[0].name, "log_lines_total");
+    assert_eq!(metrics[0].data_points.len(), 1);
+}

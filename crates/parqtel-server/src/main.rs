@@ -8,6 +8,7 @@ mod metrics;
 mod otel_sli;
 mod recovery;
 mod router;
+mod ruler;
 mod saved_searches;
 mod server;
 mod state;

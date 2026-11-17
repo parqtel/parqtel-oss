@@ -220,8 +220,11 @@ Parqtel ships **three query surfaces** over one storage engine (see [PQL_GUIDE.m
    are not duplicated after a crash.
 4. **Output** → Surviving logs continue through the normal WAL/buffer/writer;
    extracted metrics are forwarded to the metrics ingestion service through a
-   bounded channel. Recording-rule evaluation is wired separately from this
-   stream path.
+   bounded channel.
+5. **Recording rules** → `RulerScheduler` runs alongside the stream path,
+   evaluates each group on its interval against the live query executor, and
+   sends results through the same metrics ingestion service. Scheduler state is
+   persisted in `data/ruler/state.json`.
 
 ## Storage Engine
 
