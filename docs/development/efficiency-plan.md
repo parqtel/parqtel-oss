@@ -224,19 +224,38 @@ on these blocks.
 
 ### Phase 2: lazy, compact series index (memory and cold-query CPU)
 
-1. **Binary, sectioned index footer** instead of one JSON blob: a metric
-   directory (name -> row range, postings offset; ~3.4K entries on UAT), a
-   symbol table, a sorted postings section per label name with an offset
-   table, and fixed-width series records (start, len, min/max ts, label-id
-   offset). Keep reading the current JSON/zstd form for old blocks.
-2. **Lazy access.** Load only the offset tables on open; decode the postings for
-   the labels a query uses; build `LabelSet`s only for selected series. Drop
-   eager interning of every series.
-3. **Iterator intersections** over sorted postings (Prometheus-style `Next`/
-   `Seek`) instead of materialising candidate vectors.
+Phase 2a keeps the existing footer format and makes the in-memory query index
+lazy. Opening retains the parsed table and small metric/name directories; label
+sets materialize on demand, while selectors scan compact label IDs and build
+query-local candidate lists. The legacy tiered compactor reads its `SeriesTable`
+directly instead of building a query index.
 
-Exit: cold open of a 283K-series block allocates < 10 MiB for a selective
-query; `indexed_scan_equals_unindexed_scan` still passes.
+Phase 2b would introduce a binary, sectioned footer read lazily from disk. It
+changes the stored format and needs separate approval; do not start it unless
+Phase 2a misses its measured exit target.
+
+#### Phase 2a measurement — T0 baseline vs T4
+
+Same fixture (283,000 series, 3,400 metrics, 14 labels, 4 rows per series) and
+release build; each step ran in three fresh processes. Values are medians; memory
+is MiB and time is ms. T0 baseline uses product source `63a9cf1`; T4 uses `5c9f523`.
+These T5 measurements use a local synthetic fixture and do not constitute UAT
+validation or rollout.
+
+| Step | Baseline HWM | Baseline RSS | Baseline ms | T4 HWM | T4 RSS | T4 ms |
+|---|---:|---:|---:|---:|---:|---:|
+| `parse` | 106.8 | 71.9 | 141.7 | 106.7 | 71.8 | 139.8 |
+| `open` | 626.9 | 605.9 | 774.2 | 106.7 | 76.6 | 188.8 |
+| `select` | 626.9 | 605.8 | 786.9 | 106.7 | 76.7 | 182.5 |
+| `select-broad` | 626.7 | 605.7 | 782.5 | 106.7 | 76.8 | 196.2 |
+
+- Baseline open growth: 626.9 - 106.8 = 520.1 MiB.
+- T4 open growth: 106.7 - 106.7 = 0.0 MiB; 25% of baseline growth = 130.025 MiB.
+- T4 select growth: 106.7 - 106.7 = 0.0 MiB.
+- T4 `select-broad` time: 196.2 / 782.5 = 25.1% of baseline (limit: 120%, or 939.0 ms).
+- **2a passes:** open growth is within 25% of baseline, select growth is below
+  10 MiB, and broad-select time is within 120% of baseline.
+- **2b not started:** its format change still needs approval.
 
 ### Phase 3: streaming query execution (memory bounded by result, not scan)
 
