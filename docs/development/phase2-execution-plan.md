@@ -179,9 +179,8 @@ continues to retain the parsed table.
 4. time-window check from the table arrays, then `filter` on `labels(id)` only for
    survivors.
 
-Lock poisoning: recover with `unwrap_or_else(|e| e.into_inner())`, as
-`scanner/block.rs` does. A label that fails to intern is a corrupt-index error
-(`Error::Internal`), not a panic.
+A label that fails to intern is a corrupt-index error (`Error::Internal`), not a
+panic. The query-local candidate vectors are dropped when `select()` returns.
 
 Tests (add, keep all existing ones passing after mechanical updates from `idx.series[i]`
 to `idx.labels(i)` / `idx.bounds(i)`):
@@ -192,8 +191,8 @@ to `idx.labels(i)` / `idx.bounds(i)`):
   `OnceLock`s is 0 after construction and after a selector-only `select`; a subsequent
   full-filter select materializes only its narrowed candidates;
 - `the_same_series_in_two_blocks_shares_one_label_set` — rewritten via `labels(0)`;
-- `approx_bytes_is_an_upper_bound` — after selecting every label of `sample()`,
-  measured postings + label-cache bytes ≤ `approx_bytes()`.
+- `approx_bytes_is_stable` — `approx_bytes()` covers the table, name directory and
+  lazy label slots, and stays unchanged after candidate scans and label materialization.
 
 Gate: `cargo test -p parqtel-core storage::series_index -- --test-threads=1`,
 `cargo test -p parqtel-core indexed_scan_equals_unindexed_scan`,
