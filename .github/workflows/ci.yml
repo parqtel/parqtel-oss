@@ -171,9 +171,12 @@ jobs:
         with:
           tool: cargo-audit
       - name: Dependency audit
-        run: cargo audit --deny warnings --ignore RUSTSEC-2024-0449
+        run: cargo audit --deny warnings --ignore RUSTSEC-2024-0449 --ignore RUSTSEC-2025-0134 --ignore RUSTSEC-2026-0542 --ignore RUSTSEC-2026-0543
         # RUSTSEC-2024-0449: unsafe-libyaml unmaintained — pulled by serde_yaml_ng
         # (all active serde YAML forks still vendor it; no known exploit)
+        # RUSTSEC-2025-0134: rustls-pemfile unmaintained — no fixed upgrade available
+        # RUSTSEC-2026-0542: humantime unmaintained — no fixed upgrade available
+        # RUSTSEC-2026-0543: chrono unmaintained — no fixed upgrade available
       - name: Trivy filesystem scan
         uses: aquasecurity/trivy-action@master
         with:
