@@ -443,13 +443,23 @@ pipelines:
         let pipeline_dir = root.path().join("pipelines");
         let registry = RuleRegistry::new().with_dirs(recording_dir.clone(), pipeline_dir.clone());
 
-        registry.add_group(RecordingRuleGroup {
-            name: "api/group".into(),
-            interval: "1m".into(),
-            rules: vec![super::super::schema::RecordingRule {
-                record: "generated_metric".into(),
-                expr: "sum(requests)".into(),
-                labels: BTreeMap::new(),
+        registry
+            .add_group(RecordingRuleGroup {
+                name: "api/group".into(),
+                interval: "1m".into(),
+                rules: vec![super::super::schema::RecordingRule {
+                    record: "generated_metric".into(),
+                    expr: "sum(requests)".into(),
+                    labels: BTreeMap::new(),
+                    description: None,
+                    retention_override_days: None,
+                    for_duration: None,
+                }],
+            })
+            .unwrap();
+        registry
+            .add_pipeline(PipelineDefinition {
+                name: "api pipeline".into(),
                 description: None,
                 match_config: None,
                 stages: vec![super::super::schema::PipelineStage {

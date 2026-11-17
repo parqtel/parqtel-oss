@@ -95,3 +95,47 @@ pub async fn delete_pipeline(
     state.inner.pipeline_registry.remove_pipeline(&name);
     Json(json!({"status": "success"})).into_response()
 }
+
+/// GET /api/v1/rules/status — registry generation, definitions, load errors,
+/// and the last persisted ruler evaluation timestamps.
+pub async fn rules_status(State(state): State<AppState>) -> impl IntoResponse {
+    let registry = &state.inner.pipeline_registry;
+    let groups: Vec<serde_json::Value> = registry
+        .get_groups()
+        .into_iter()
+        .map(|group| {
+            json!({
+                "name": group.name,
+                "interval": group.interval,
+                "rules": group.rules.iter().map(|rule| &rule.record).collect::<Vec<_>>(),
+            })
+        })
+        .collect();
+    let pipelines: Vec<serde_json::Value> = registry
+        .get_pipelines()
+        .into_iter()
+        .map(|pipeline| {
+            json!({
+                "name": pipeline.name,
+                "stages": pipeline.stages.iter().map(|stage| &stage.name).collect::<Vec<_>>(),
+            })
+        })
+        .collect();
+    let state_file = state.inner.config.storage.data_dir.join("ruler/state.json");
+    let ruler_state = std::fs::read_to_string(state_file)
+        .ok()
+        .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
+        .unwrap_or_else(|| json!({}));
+
+    Json(json!({
+        "status": "success",
+        "data": {
+            "generation": registry.generation(),
+            "recording_rules": groups,
+            "pipelines": pipelines,
+            "load_errors": registry.load_errors(),
+            "ruler_enabled": state.inner.config.alerts.recording_rules_enabled,
+            "ruler_state": ruler_state,
+        }
+    }))
+}
