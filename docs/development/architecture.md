@@ -226,6 +226,11 @@ Parqtel ships **three query surfaces** over one storage engine (see [PQL_GUIDE.m
    sends results through the same metrics ingestion service. Scheduler state is
    persisted in `data/ruler/state.json`.
 
+## Architecture decisions
+
+- [ADR 0001: object storage uses a block-store seam](adr-0001-object-storage.md)
+- [ADR 0002: measure DataFusion before hand-rolling SQL](adr-0002-sql-surface.md)
+
 ## Storage Engine
 
 ### Block-Based Design

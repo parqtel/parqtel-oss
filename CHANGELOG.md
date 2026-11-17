@@ -247,6 +247,10 @@ while measuring. Measurements and method are in
 
 ### Documentation
 
+- **Architecture decisions recorded.** ADR 0001 defines the `BlockStore` seam
+  and versioned manifest needed for object storage (explicitly not
+  `StorageEngine`); ADR 0002 makes the SQL choice a measured DataFusion-vs-
+  hand-rolled spike with go/no-go criteria.
 - **Agent on-ramps.** `examples/agents/` has tested-shape configurations for OTel
   Collector (gRPC/HTTP), Vector, Fluent Bit, and a Filebeat→Vector path, with
   the exact endpoint and encoding each one uses.
