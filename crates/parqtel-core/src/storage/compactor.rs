@@ -405,18 +405,20 @@ impl Compactor {
                         ))
                     })?;
                 let table = SeriesTable::from_footer_value(footer)?;
-                let index = SeriesIndex::from_table(&table)?;
+                let index = SeriesIndex::from_owned_table(table)?;
                 let rows = reader_builder.metadata().file_metadata().num_rows().max(0) as u64;
                 let mut next_row = 0u64;
-                for entry in &index.series {
-                    if entry.start != next_row {
+                for series_id in 0..index.series_count() {
+                    let (start, series_rows, _, _) = index
+                        .bounds(series_id as u32)
+                        .ok_or_else(|| Error::Internal("series index entry is missing".into()))?;
+                    if start != next_row {
                         return Err(Error::Internal(
                             "series index row ranges are not contiguous".into(),
                         ));
                     }
-                    next_row = entry
-                        .start
-                        .checked_add(u64::from(entry.rows))
+                    next_row = start
+                        .checked_add(u64::from(series_rows))
                         .ok_or_else(|| Error::Internal("series index row range overflow".into()))?;
                 }
                 if next_row != rows || index.total_rows() != rows {
@@ -445,23 +447,28 @@ impl Compactor {
                     match signal_type {
                         SignalType::Metrics => {
                             let point = if let Some(index) = &series_index {
-                                let entry = loop {
-                                    let entry =
-                                        index.series.get(series_cursor).ok_or_else(|| {
+                                let labels = loop {
+                                    let series_id = u32::try_from(series_cursor).map_err(|_| {
+                                        Error::Internal(
+                                            "series index ended before compaction source rows"
+                                                .into(),
+                                        )
+                                    })?;
+                                    let (start, series_rows, _, _) =
+                                        index.bounds(series_id).ok_or_else(|| {
                                             Error::Internal(
                                                 "series index ended before compaction source rows"
                                                     .into(),
                                             )
                                         })?;
-                                    let end = entry
-                                        .start
-                                        .checked_add(u64::from(entry.rows))
+                                    let end = start
+                                        .checked_add(u64::from(series_rows))
                                         .ok_or_else(|| {
                                             Error::Internal(
                                                 "series index row range overflow".into(),
                                             )
                                         })?;
-                                    if block_row < entry.start {
+                                    if block_row < start {
                                         return Err(Error::Internal(
                                             "gap in series index row ranges".into(),
                                         ));
@@ -470,13 +477,9 @@ impl Compactor {
                                         series_cursor += 1;
                                         continue;
                                     }
-                                    break entry;
+                                    break index.labels(series_id)?;
                                 };
-                                StorageModel::row_to_point_with_labels(
-                                    &record_batch,
-                                    row,
-                                    entry.labels.clone(),
-                                )?
+                                StorageModel::row_to_point_with_labels(&record_batch, row, labels)?
                             } else {
                                 StorageModel::row_to_point(&record_batch, row)?
                             };

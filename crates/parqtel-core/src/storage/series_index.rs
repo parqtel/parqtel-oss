@@ -14,8 +14,7 @@
 //! of the metric - one label-JSON dictionary lookup per row - just to keep a few
 //! of them. With the table:
 //!
-//! 1. an *inverted index* (label name -> value -> series ids, built when the table
-//!    is loaded) finds the candidate series without looking at any row;
+//! 1. compact label ids find candidate series without looking at any row;
 //! 2. the candidates' row ranges become a Parquet row selection, so pages that hold
 //!    no candidate row are never read or decoded;
 //! 3. the series' labels come from the table, so the `labels`, `metric_name` and
@@ -23,11 +22,9 @@
 //!
 //! # Exactness
 //!
-//! The postings only ever *narrow* the candidates; the caller's full matcher
-//! still decides each remaining series. A postings bug can therefore cost speed
-//! but not correctness - it could only wrongly drop a series if a posting list
-//! were missing an id, which the construction (every series is listed under every
-//! one of its labels) rules out and the tests pin.
+//! Query-local candidate ids only *narrow* the candidates; the caller's full
+//! matcher still decides each remaining series. Candidate scans use the compact
+//! label ids and never retain per-value postings.
 
 use crate::error::{Error, Result};
 use crate::models::labels::{LabelInterner, LabelSet};
@@ -36,7 +33,7 @@ use base64::Engine;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::Read;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 /// Parquet footer key under which the series table is stored.
 pub const SERIES_INDEX_FOOTER_KEY: &str = "parqtel.series_index";
@@ -174,14 +171,14 @@ impl SeriesTable {
             .strings
             .capacity()
             .saturating_mul(std::mem::size_of::<String>());
-        for string in &self.strings {
-            bytes = bytes.saturating_add(string.capacity());
-        }
-        bytes = bytes.saturating_add(
-            self.metrics
-                .capacity()
-                .saturating_mul(std::mem::size_of::<(u32, u32, u32)>()),
-        );
+        bytes = self.strings.iter().fold(bytes, |bytes, string| {
+            bytes.saturating_add(string.capacity())
+        });
+        bytes = bytes.saturating_add(self.metrics.capacity().saturating_mul(std::mem::size_of::<(
+            u32,
+            u32,
+            u32,
+        )>()));
         bytes = bytes.saturating_add(
             self.start
                 .capacity()
@@ -208,11 +205,7 @@ impl SeriesTable {
                 .saturating_mul(std::mem::size_of::<Vec<u32>>()),
         );
         self.labels.iter().fold(bytes, |bytes, labels| {
-            bytes.saturating_add(
-                labels
-                    .capacity()
-                    .saturating_mul(std::mem::size_of::<u32>()),
-            )
+            bytes.saturating_add(labels.capacity().saturating_mul(std::mem::size_of::<u32>()))
         })
     }
 
@@ -407,11 +400,13 @@ impl SeriesSelector {
 
 /// A block's series, queryable.
 pub struct SeriesIndex {
-    pub series: Vec<SeriesEntry>,
+    table: SeriesTable,
     /// Metric name -> `[lo, hi)` series id ranges, in id order.
     metric_ranges: HashMap<String, Vec<(u32, u32)>>,
-    /// Label name -> value -> ids of the series carrying it (ascending).
-    postings: HashMap<String, HashMap<String, Vec<u32>>>,
+    /// Label name -> compact table string id.
+    label_name_ids: HashMap<String, u32>,
+    /// Materialized label sets, shared globally when first requested.
+    labels: Vec<OnceLock<LabelSet>>,
     total_rows: u64,
     approx_bytes: usize,
 }
@@ -419,7 +414,7 @@ pub struct SeriesIndex {
 impl std::fmt::Debug for SeriesIndex {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SeriesIndex")
-            .field("series", &self.series.len())
+            .field("series", &self.series_count())
             .field("total_rows", &self.total_rows)
             .finish()
     }
@@ -428,43 +423,12 @@ impl std::fmt::Debug for SeriesIndex {
 impl SeriesIndex {
     /// Builds the queryable form of a table.
     pub fn from_table(table: &SeriesTable) -> Result<Self> {
+        Self::from_owned_table(table.clone())
+    }
+
+    /// Builds the queryable form of an owned table without cloning its arrays.
+    pub fn from_owned_table(table: SeriesTable) -> Result<Self> {
         table.validate()?;
-        let interner = LabelInterner::global();
-        let mut series = Vec::with_capacity(table.start.len());
-        let mut postings: HashMap<String, HashMap<String, Vec<u32>>> = HashMap::new();
-        let mut total_rows = 0u64;
-        for i in 0..table.start.len() {
-            let flat = &table.labels[i];
-            let pairs: Vec<(&str, &str)> = flat
-                .as_chunks::<2>()
-                .0
-                .iter()
-                .map(|kv| {
-                    (
-                        table.strings[kv[0] as usize].as_str(),
-                        table.strings[kv[1] as usize].as_str(),
-                    )
-                })
-                .collect();
-            // Shared across blocks: the same series in many blocks is one set.
-            let labels = interner.intern(&pairs)?;
-            for (k, v) in &pairs {
-                postings
-                    .entry((*k).to_string())
-                    .or_default()
-                    .entry((*v).to_string())
-                    .or_default()
-                    .push(i as u32);
-            }
-            total_rows += u64::from(table.len[i]);
-            series.push(SeriesEntry {
-                labels,
-                start: table.start[i],
-                rows: table.len[i],
-                min_ts: table.min_ts[i],
-                max_ts: table.max_ts[i],
-            });
-        }
         let mut metric_ranges: HashMap<String, Vec<(u32, u32)>> = HashMap::new();
         for (name, first, count) in &table.metrics {
             metric_ranges
@@ -472,14 +436,28 @@ impl SeriesIndex {
                 .or_default()
                 .push((*first, first + count));
         }
-        let approx_bytes = table.strings.iter().map(|s| s.len() + 48).sum::<usize>()
-            + series.len() * 160
-            + postings.values().map(|m| m.len() * 72).sum::<usize>()
-            + table.labels.iter().map(|l| l.len() * 8).sum::<usize>();
+        let mut label_name_ids = HashMap::new();
+        for labels in &table.labels {
+            for pair in labels.chunks_exact(2) {
+                let name = &table.strings[pair[0] as usize];
+                if !label_name_ids.contains_key(name.as_str()) {
+                    label_name_ids.insert(name.clone(), pair[0]);
+                }
+            }
+        }
+        let labels: Vec<OnceLock<LabelSet>> =
+            (0..table.series_count()).map(|_| OnceLock::new()).collect();
+        let label_slot_bytes = labels
+            .capacity()
+            .saturating_mul(std::mem::size_of::<OnceLock<LabelSet>>());
+        let total_rows = table.total_rows();
+        let approx_bytes =
+            approximate_index_bytes(&table, &metric_ranges, &label_name_ids, label_slot_bytes);
         Ok(Self {
-            series,
+            table,
             metric_ranges,
-            postings,
+            label_name_ids,
+            labels,
             total_rows,
             approx_bytes,
         })
@@ -493,6 +471,49 @@ impl SeriesIndex {
     /// Rows the table accounts for.
     pub fn total_rows(&self) -> u64 {
         self.total_rows
+    }
+
+    /// Number of series described by this block.
+    pub fn series_count(&self) -> usize {
+        self.table.series_count()
+    }
+
+    /// Row range and time bounds for one series.
+    pub fn bounds(&self, id: u32) -> Option<(u64, u32, i64, i64)> {
+        self.table.series_bounds(id as usize)
+    }
+
+    /// Labels for one series, materialized and globally interned on first use.
+    pub fn labels(&self, id: u32) -> Result<LabelSet> {
+        let corrupt = || Error::Internal("corrupt series index: invalid series labels".into());
+        let cell = self.labels.get(id as usize).ok_or_else(corrupt)?;
+        if let Some(labels) = cell.get() {
+            return Ok(labels.clone());
+        }
+
+        let flat = self.table.label_ids(id as usize).ok_or_else(corrupt)?;
+        if flat.len() % 2 != 0 {
+            return Err(corrupt());
+        }
+        let mut pairs = Vec::with_capacity(flat.len() / 2);
+        for pair in flat.chunks_exact(2) {
+            let name = self.table.string(pair[0]).ok_or_else(corrupt)?;
+            let value = self.table.string(pair[1]).ok_or_else(corrupt)?;
+            pairs.push((name, value));
+        }
+        let labels = LabelInterner::global()
+            .intern(&pairs)
+            .map_err(|error| Error::Internal(format!("corrupt series index: {error}")))?;
+        let _ = cell.set(labels);
+        cell.get().cloned().ok_or_else(corrupt)
+    }
+
+    #[cfg(test)]
+    fn materialized_label_count(&self) -> usize {
+        self.labels
+            .iter()
+            .filter(|labels| labels.get().is_some())
+            .count()
     }
 
     /// Whether the block holds any series of `metric`.
@@ -511,9 +532,9 @@ impl SeriesIndex {
     ) -> Vec<u32> {
         // An empty name means "every metric", as it does for an unindexed scan.
         let every;
-        let ranges: &Vec<(u32, u32)> = if metric.is_empty() {
-            every = vec![(0, self.series.len() as u32)];
-            &every
+        let ranges: &[(u32, u32)] = if metric.is_empty() {
+            every = (0, self.series_count() as u32);
+            std::slice::from_ref(&every)
         } else {
             match self.metric_ranges.get(metric) {
                 Some(r) => r,
@@ -521,34 +542,39 @@ impl SeriesIndex {
             }
         };
 
-        // Candidate lists from the postings; each one is a necessary condition.
+        // Candidate lists are query-local; each matcher only narrows the scan.
         let mut owned_lists: Vec<Vec<u32>> = Vec::new();
         for (label, value) in &selector.equals {
-            let ids = self
-                .postings
-                .get(label)
-                .and_then(|values| values.get(value))
-                .map(|ids| restrict(ids, ranges))
-                .unwrap_or_default();
+            if value.is_empty() {
+                return Vec::new();
+            }
+            let Some(label_id) = self.label_name_ids.get(label) else {
+                return Vec::new();
+            };
+            let Some(value_id) = self
+                .table
+                .strings
+                .iter()
+                .position(|candidate| candidate == value)
+                .and_then(|id| u32::try_from(id).ok())
+            else {
+                return Vec::new();
+            };
+            let ids = self.matching_ids(ranges, *label_id, |candidate| candidate == value_id);
             if ids.is_empty() {
                 return Vec::new();
             }
             owned_lists.push(ids);
         }
         for (label, test) in &selector.value_tests {
-            let Some(values) = self.postings.get(label) else {
+            let Some(label_id) = self.label_name_ids.get(label) else {
                 // No series has the label at all, and the test cannot be met by
                 // an absent one.
                 return Vec::new();
             };
-            let mut union: Vec<u32> = Vec::new();
-            for (value, ids) in values {
-                if test(value) {
-                    union.extend(restrict(ids, ranges));
-                }
-            }
-            union.sort_unstable();
-            union.dedup();
+            let union = self.matching_ids(ranges, *label_id, |value_id| {
+                self.table.string(value_id).is_some_and(|value| test(value))
+            });
             if union.is_empty() {
                 return Vec::new();
             }
@@ -565,17 +591,75 @@ impl SeriesIndex {
         candidates
             .into_iter()
             .filter(|id| {
-                let s = &self.series[*id as usize];
-                s.min_ts <= end_ns
-                    && s.max_ts >= start_ns
-                    && selector.filter.as_ref().is_none_or(|f| f(&s.labels))
+                self.bounds(*id).is_some_and(|(_, _, min_ts, max_ts)| {
+                    min_ts <= end_ns
+                        && max_ts >= start_ns
+                        && selector.filter.as_ref().is_none_or(|filter| {
+                            self.labels(*id).is_ok_and(|labels| filter(&labels))
+                        })
+                })
             })
             .collect()
     }
+
+    fn matching_ids(
+        &self,
+        ranges: &[(u32, u32)],
+        label_id: u32,
+        mut matches: impl FnMut(u32) -> bool,
+    ) -> Vec<u32> {
+        let mut ids = Vec::new();
+        for &(lo, hi) in ranges {
+            for id in lo..hi {
+                let Some(labels) = self.table.label_ids(id as usize) else {
+                    continue;
+                };
+                if labels
+                    .chunks_exact(2)
+                    .any(|pair| pair[0] == label_id && matches(pair[1]))
+                {
+                    ids.push(id);
+                }
+            }
+        }
+        ids
+    }
+}
+
+fn approximate_index_bytes(
+    table: &SeriesTable,
+    metric_ranges: &HashMap<String, Vec<(u32, u32)>>,
+    label_name_ids: &HashMap<String, u32>,
+    label_slot_bytes: usize,
+) -> usize {
+    let metric_bytes = metric_ranges.iter().fold(
+        metric_ranges
+            .capacity()
+            .saturating_mul(std::mem::size_of::<(String, Vec<(u32, u32)>)>().saturating_mul(2)),
+        |bytes, (name, ranges)| {
+            bytes.saturating_add(name.capacity()).saturating_add(
+                ranges
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<(u32, u32)>()),
+            )
+        },
+    );
+    let label_name_bytes = label_name_ids.iter().fold(
+        label_name_ids
+            .capacity()
+            .saturating_mul(std::mem::size_of::<(String, u32)>().saturating_mul(2)),
+        |bytes, (name, _)| bytes.saturating_add(name.capacity()),
+    );
+    table
+        .approx_heap_bytes()
+        .saturating_add(metric_bytes)
+        .saturating_add(label_name_bytes)
+        .saturating_add(label_slot_bytes)
 }
 
 /// Elements of ascending `ids` that fall in any of the ascending `[lo, hi)`
 /// ranges.
+#[cfg(test)]
 fn restrict(ids: &[u32], ranges: &[(u32, u32)]) -> Vec<u32> {
     let mut out = Vec::new();
     for (lo, hi) in ranges {
@@ -620,8 +704,10 @@ fn intersect_all(lists: &mut [&[u32]]) -> Vec<u32> {
 pub fn row_ranges(index: &SeriesIndex, ids: &[u32]) -> Vec<(u64, u64)> {
     let mut out: Vec<(u64, u64)> = Vec::new();
     for id in ids {
-        let s = &index.series[*id as usize];
-        let (a, b) = (s.start, s.start + u64::from(s.rows));
+        let Some((a, rows, _, _)) = index.bounds(*id) else {
+            continue;
+        };
+        let b = a + u64::from(rows);
         match out.last_mut() {
             Some(last) if last.1 == a => last.1 = b,
             _ => out.push((a, b)),

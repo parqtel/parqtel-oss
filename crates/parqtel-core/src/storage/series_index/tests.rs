@@ -42,13 +42,7 @@ fn sample() -> SeriesIndex {
 fn pick(idx: &SeriesIndex, metric: &str, sel: &SeriesSelector) -> Vec<String> {
     idx.select(metric, sel, i64::MIN, i64::MAX)
         .into_iter()
-        .map(|id| {
-            idx.series[id as usize]
-                .labels
-                .get("host")
-                .unwrap()
-                .to_string()
-        })
+        .map(|id| idx.labels(id).unwrap().get("host").unwrap().to_string())
         .collect()
 }
 
@@ -73,7 +67,12 @@ fn table_accessors_expose_strings_labels_counts_and_heap_size() {
     let labels = table.label_ids(0).unwrap();
     let pairs: Vec<_> = labels
         .chunks_exact(2)
-        .map(|pair| (table.string(pair[0]).unwrap(), table.string(pair[1]).unwrap()))
+        .map(|pair| {
+            (
+                table.string(pair[0]).unwrap(),
+                table.string(pair[1]).unwrap(),
+            )
+        })
         .collect();
     assert_eq!(
         pairs,
@@ -267,7 +266,7 @@ fn series_outside_the_time_window_are_dropped() {
     // h2 covers [200, 299].
     let ids = idx.select("cpu", &SeriesSelector::all(), 250, 260);
     assert_eq!(ids.len(), 1);
-    assert_eq!(idx.series[ids[0] as usize].labels.get("host"), Some("h2"));
+    assert_eq!(idx.labels(ids[0]).unwrap().get("host"), Some("h2"));
     assert!(idx
         .select("cpu", &SeriesSelector::all(), 1000, 2000)
         .is_empty());
@@ -288,7 +287,105 @@ fn row_ranges_merge_adjacent_series() {
 fn the_same_series_in_two_blocks_shares_one_label_set() {
     let a = sample();
     let b = sample();
-    assert!(a.series[0].labels.ptr_eq(&b.series[0].labels));
+    let a_labels = a.labels(0).unwrap();
+    let b_labels = b.labels(0).unwrap();
+    assert!(a_labels.ptr_eq(&b_labels));
+}
+
+#[test]
+fn selector_candidates_match_the_full_matcher() {
+    let idx = sample();
+    let filter: crate::storage::scanner::SeriesFilter = Arc::new(|labels: &LabelSet| {
+        labels.get("env") == Some("stage")
+            && labels.get("service.name") == Some("api")
+            && labels.get("host").is_some_and(|host| host.starts_with('h'))
+    });
+    let expected = idx.select(
+        "cpu",
+        &SeriesSelector {
+            filter: Some(filter.clone()),
+            ..Default::default()
+        },
+        i64::MIN,
+        i64::MAX,
+    );
+    let selector = SeriesSelector {
+        equals: vec![
+            ("service.name".into(), "api".into()),
+            ("env".into(), "stage".into()),
+        ],
+        value_tests: vec![(
+            "host".into(),
+            Arc::new(|value: &str| value.starts_with('h')),
+        )],
+        filter: Some(filter),
+        ..Default::default()
+    };
+    assert_eq!(idx.select("cpu", &selector, i64::MIN, i64::MAX), expected);
+
+    for (label, value) in [("missing", "value"), ("host", ""), ("host", "absent")] {
+        assert!(idx
+            .select(
+                "cpu",
+                &SeriesSelector {
+                    equals: vec![(label.into(), value.into())],
+                    ..Default::default()
+                },
+                i64::MIN,
+                i64::MAX,
+            )
+            .is_empty());
+    }
+}
+
+#[test]
+fn labels_are_materialised_lazily() {
+    let idx = sample();
+    assert_eq!(idx.materialized_label_count(), 0);
+
+    let selector = SeriesSelector {
+        equals: vec![("host".into(), "h2".into())],
+        ..Default::default()
+    };
+    assert_eq!(idx.select("cpu", &selector, i64::MIN, i64::MAX), vec![2]);
+    assert_eq!(idx.materialized_label_count(), 0);
+
+    let filtered = SeriesSelector {
+        filter: Some(Arc::new(|labels: &LabelSet| {
+            labels.get("env") == Some("stage")
+        })),
+        ..selector
+    };
+    assert_eq!(idx.select("cpu", &filtered, i64::MIN, i64::MAX), vec![2]);
+    assert_eq!(idx.materialized_label_count(), 1);
+}
+
+#[test]
+fn labels_reject_corrupt_pairs_as_internal_errors() {
+    let mut table = sample_table();
+    table.labels[0][2] = table.labels[0][0];
+    let idx = SeriesIndex::from_owned_table(table).unwrap();
+    assert!(matches!(idx.labels(0), Err(Error::Internal(_))));
+}
+
+#[test]
+fn approx_bytes_is_stable_across_scans_and_materialization() {
+    let table = sample_table();
+    let table_bytes = table.approx_heap_bytes();
+    let idx = SeriesIndex::from_owned_table(table).unwrap();
+    let before = idx.approx_bytes();
+    let label_slots = idx
+        .series_count()
+        .saturating_mul(std::mem::size_of::<OnceLock<LabelSet>>());
+    assert!(before >= table_bytes.saturating_add(label_slots));
+
+    let selector = SeriesSelector {
+        equals: vec![("host".into(), "h2".into())],
+        filter: Some(Arc::new(|_| true)),
+        ..Default::default()
+    };
+    assert_eq!(idx.select("cpu", &selector, i64::MIN, i64::MAX), vec![2]);
+    assert_eq!(idx.approx_bytes(), before);
 }
 
 #[test]
@@ -340,8 +437,7 @@ fn intersect_all_matches_btree_set_intersection_for_seeded_inputs() {
             .collect();
 
         let expected = if let Some(first) = owned.first() {
-            let mut intersection: std::collections::BTreeSet<u32> =
-                first.iter().copied().collect();
+            let mut intersection: std::collections::BTreeSet<u32> = first.iter().copied().collect();
             for list in owned.iter().skip(1) {
                 intersection.retain(|id| list.binary_search(id).is_ok());
             }

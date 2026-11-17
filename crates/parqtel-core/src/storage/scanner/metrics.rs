@@ -514,9 +514,14 @@ impl Scanner {
 
         let mut out = MetricScan::default();
         // Rows arrive in series order, `rows` of them per selected series.
-        let mut series = ids.iter().map(|id| &index.series[*id as usize]);
-        let mut current = series.next();
-        let mut left = current.map_or(0, |s| s.rows as usize);
+        let mut series = ids.iter().map(|id| -> Result<_> {
+            let (_, rows, min_ts, max_ts) = index.bounds(*id).ok_or_else(|| {
+                Error::Internal("selected series id is missing from its table".into())
+            })?;
+            Ok((rows as usize, min_ts, max_ts, index.labels(*id)?))
+        });
+        let mut current = series.next().transpose()?;
+        let mut left = current.as_ref().map_or(0, |(rows, _, _, _)| *rows);
         for batch in reader {
             let batch = batch.map_err(|e| Error::Parquet(e.to_string()))?;
             let schema = batch.schema();
@@ -548,14 +553,16 @@ impl Scanner {
 
             let mut row = 0;
             while row < batch.num_rows() {
-                let Some(entry) = current else {
+                let Some((_, _, _, labels)) = current.as_ref() else {
                     return Err(Error::Internal(
                         "block holds more selected rows than its series table lists".into(),
                     ));
                 };
                 let take = left.min(batch.num_rows() - row);
                 // A series wholly inside the window needs no per-row time check.
-                let inside = entry.min_ts >= start_ns && entry.max_ts <= end_ns;
+                let inside = current
+                    .as_ref()
+                    .is_some_and(|(_, min_ts, max_ts, _)| *min_ts >= start_ns && *max_ts <= end_ns);
                 for r in row..row + take {
                     let t = ts_arr.value(r);
                     if !inside && (t < start_ns || t > end_ns) {
@@ -565,14 +572,14 @@ impl Scanner {
                     out.points.push(DataPoint {
                         timestamp_ns: t,
                         value: decode_value(Some(vf_arr), Some(vi_arr), vc_arr, r)?,
-                        labels: entry.labels.clone(),
+                        labels: labels.clone(),
                     });
                 }
                 row += take;
                 left -= take;
                 if left == 0 {
-                    current = series.next();
-                    left = current.map_or(0, |s| s.rows as usize);
+                    current = series.next().transpose()?;
+                    left = current.as_ref().map_or(0, |(rows, _, _, _)| *rows);
                 }
             }
         }

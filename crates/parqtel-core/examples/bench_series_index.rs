@@ -82,30 +82,31 @@ fn measure(step: &str, path: &str) -> Result<(), Box<dyn Error>> {
     let value = std::fs::read_to_string(path)?;
     let started = Instant::now();
     let mut table = Some(SeriesTable::from_footer_value(&value)?);
-    let parsed = table
-        .as_ref()
-        .ok_or_else(|| io::Error::other("parsed table missing"))?;
     let mut index = None;
     let keep_table = step == "parse";
     let (approx_bytes, selected) = match step {
         "parse" => (0, 0),
         "open" => {
-            let opened = SeriesIndex::from_table(parsed)?;
+            let parsed = table
+                .take()
+                .ok_or_else(|| io::Error::other("parsed table missing"))?;
+            let opened = SeriesIndex::from_owned_table(parsed)?;
             let approx_bytes = opened.approx_bytes();
             index = Some(opened);
             (approx_bytes, 0)
         }
         "select" => {
-            let opened = SeriesIndex::from_table(parsed)?;
+            let parsed = table
+                .take()
+                .ok_or_else(|| io::Error::other("parsed table missing"))?;
+            let opened = SeriesIndex::from_owned_table(parsed)?;
             let selector = SeriesSelector {
                 equals: vec![("pod".to_string(), "pod-0".to_string())],
                 ..Default::default()
             };
             let ids = opened.select("metric_0", &selector, i64::MIN, i64::MAX);
             for id in &ids {
-                if let Some(series) = opened.series.get(*id as usize) {
-                    std::hint::black_box(&series.labels);
-                }
+                std::hint::black_box(opened.labels(*id)?);
             }
             let approx_bytes = opened.approx_bytes();
             let selected = ids.len();
@@ -113,7 +114,10 @@ fn measure(step: &str, path: &str) -> Result<(), Box<dyn Error>> {
             (approx_bytes, selected)
         }
         "select-broad" => {
-            let opened = SeriesIndex::from_table(parsed)?;
+            let parsed = table
+                .take()
+                .ok_or_else(|| io::Error::other("parsed table missing"))?;
+            let opened = SeriesIndex::from_owned_table(parsed)?;
             let selector = SeriesSelector {
                 filter: Some(Arc::new(|_| true)),
                 ..Default::default()
