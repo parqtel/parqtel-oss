@@ -7,7 +7,7 @@ use crate::models::logs::LogRecord;
 use crate::models::metrics::{DataPoint, MetricKind};
 use crate::models::storage::{BlockMetadata, MetricRun, SignalType, StorageModel};
 use crate::models::traces::Span;
-use crate::storage::{SeriesIndex, SeriesTable, SERIES_INDEX_FOOTER_KEY};
+use crate::storage::{SeriesTable, SERIES_INDEX_FOOTER_KEY};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
@@ -389,7 +389,7 @@ impl Compactor {
 
             let reader_builder = ParquetRecordBatchReaderBuilder::try_new(file)
                 .map_err(|e| Error::Parquet(e.to_string()))?;
-            let series_index = if signal_type == SignalType::Metrics
+            let series_table = if signal_type == SignalType::Metrics
                 && reader_builder.schema().index_of("labels").is_err()
             {
                 let footer = reader_builder
@@ -405,12 +405,12 @@ impl Compactor {
                         ))
                     })?;
                 let table = SeriesTable::from_footer_value(footer)?;
-                let index = SeriesIndex::from_owned_table(table)?;
+                let series_count = table.series_count();
                 let rows = reader_builder.metadata().file_metadata().num_rows().max(0) as u64;
                 let mut next_row = 0u64;
-                for series_id in 0..index.series_count() {
-                    let (start, series_rows, _, _) = index
-                        .bounds(series_id as u32)
+                for series_id in 0..series_count {
+                    let (start, series_rows, _, _) = table
+                        .series_bounds(series_id)
                         .ok_or_else(|| Error::Internal("series index entry is missing".into()))?;
                     if start != next_row {
                         return Err(Error::Internal(
@@ -421,12 +421,12 @@ impl Compactor {
                         .checked_add(u64::from(series_rows))
                         .ok_or_else(|| Error::Internal("series index row range overflow".into()))?;
                 }
-                if next_row != rows || index.total_rows() != rows {
+                if next_row != rows || table.total_rows() != rows {
                     return Err(Error::Internal(
                         "series index row count disagrees with compaction source".into(),
                     ));
                 }
-                Some(index)
+                Some(table)
             } else {
                 None
             };
@@ -436,6 +436,7 @@ impl Compactor {
                 .map_err(|e| Error::Parquet(e.to_string()))?;
             let mut block_row = 0u64;
             let mut series_cursor = 0usize;
+            let mut current_series = None;
 
             for record_batch in reader {
                 let record_batch = record_batch.map_err(|e| Error::Parquet(e.to_string()))?;
@@ -446,16 +447,10 @@ impl Compactor {
                 for row in 0..record_batch.num_rows() {
                     match signal_type {
                         SignalType::Metrics => {
-                            let point = if let Some(index) = &series_index {
+                            let point = if let Some(table) = &series_table {
                                 let labels = loop {
-                                    let series_id = u32::try_from(series_cursor).map_err(|_| {
-                                        Error::Internal(
-                                            "series index ended before compaction source rows"
-                                                .into(),
-                                        )
-                                    })?;
                                     let (start, series_rows, _, _) =
-                                        index.bounds(series_id).ok_or_else(|| {
+                                        table.series_bounds(series_cursor).ok_or_else(|| {
                                             Error::Internal(
                                                 "series index ended before compaction source rows"
                                                     .into(),
@@ -475,9 +470,21 @@ impl Compactor {
                                     }
                                     if block_row >= end {
                                         series_cursor += 1;
+                                        current_series = None;
                                         continue;
                                     }
-                                    break index.labels(series_id)?;
+                                    if current_series.is_none() {
+                                        current_series = Some(table.series_entry(series_cursor)?);
+                                    }
+                                    break current_series
+                                        .as_ref()
+                                        .map(|series| series.labels.clone())
+                                        .ok_or_else(|| {
+                                            Error::Internal(
+                                                "series index ended before compaction source rows"
+                                                    .into(),
+                                            )
+                                        })?;
                                 };
                                 StorageModel::row_to_point_with_labels(&record_batch, row, labels)?
                             } else {
@@ -503,8 +510,8 @@ impl Compactor {
                     }
                 }
             }
-            if let Some(index) = &series_index {
-                if block_row != index.total_rows() {
+            if let Some(table) = &series_table {
+                if block_row != table.total_rows() {
                     return Err(Error::Internal(
                         "series index did not cover compaction source rows".into(),
                     ));
