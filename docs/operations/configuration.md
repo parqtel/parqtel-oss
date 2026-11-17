@@ -126,6 +126,47 @@ self_monitoring_failure_threshold = 0.5
 # webhook_url = "https://hooks.slack.com/services/..."
 # repeat_minutes = 240
 
+# Alertmanager-compatible routing, grouping, inhibition and native receivers.
+# Secrets can be injected as "${ENV_VAR}" or "{env:ENV_VAR}".
+[alerting.routing.global]
+resolve_timeout = "5m"
+http_timeout = "10s"
+retry_initial_backoff = "1s"
+retry_max_backoff = "30s"
+retry_max_attempts = 3
+
+[alerting.routing]
+max_active_groups = 10000
+
+[alerting.routing.route]
+receiver = "slack-default"
+group_by = ["service.name"]
+group_wait = "30s"
+group_interval = "5m"
+repeat_interval = "4h"
+
+[[alerting.routing.route.routes]]
+matchers = ["severity = critical"]
+receiver = "pagerduty-oncall"
+continue = true
+
+[[alerting.routing.inhibit_rules]]
+source_matchers = ["severity = critical"]
+target_matchers = ["severity = warning"]
+equal = ["service.name"]
+
+[[alerting.routing.receivers]]
+name = "slack-default"
+[[alerting.routing.receivers.slack_configs]]
+webhook_url = "${SLACK_WEBHOOK_URL}"
+send_resolved = true
+
+[[alerting.routing.receivers]]
+name = "pagerduty-oncall"
+[[alerting.routing.receivers.pagerduty_configs]]
+routing_key = "${PAGERDUTY_ROUTING_KEY}"
+send_resolved = true
+
 [k8s_provider]
 enabled = false
 bind_address = "0.0.0.0:6443"
@@ -323,6 +364,44 @@ PARQTEL__ALERTS__PRESETS__EXCLUDE=service-red          # exclude
 | `match_labels` | Map | `{}` | Exact label matches required |
 | `webhook_url` | String | required | Webhook URL for delivery |
 | `repeat_minutes` | Integer | `240` | Re-notification interval (0 = no repeat) |
+
+### `[alerting.routing]`
+
+Alertmanager-compatible routing. When set, firing **and** resolved alerts flow
+through grouping, inhibition, silences, and the native receivers below. The
+legacy `[alerts.notifications.routes]` webhook table keeps working alongside it.
+Invalid matchers, bad durations, or a `receiver` that names no configured
+receiver fail validation at startup.
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `max_active_groups` | Integer | `10000` | Bound on in-memory alert groups; oldest resolved/idle groups are evicted first |
+| `global` | Table | — | `resolve_timeout` `5m`, `http_timeout` `10s`, `retry_initial_backoff` `1s`, `retry_max_backoff` `30s`, `retry_max_attempts` `3` |
+| `route` | Table | none | Root route (see below) |
+| `inhibit_rules` | Array | `[]` | `source_matchers`, `target_matchers`, `equal` |
+| `receivers` | Array | `[]` | Named receivers with `slack_configs`, `pagerduty_configs`, `teams_configs`, `webhook_configs` |
+
+Durations accept `ms`, `s`, `m`, `h`, `d`, `w` and compound forms (`1h30m`).
+Matchers use `=`, `!=`, `=~` (anchored regex), `!~`; a missing label compares as
+`""`. Any value may be `${ENV_VAR}` or `{env:ENV_VAR}`.
+
+### `[alerting.routing.route]`
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `matchers` | Array | `[]` | Alertmanager matchers; empty matches everything |
+| `continue` | Boolean | `false` | Keep evaluating sibling routes after a match (fan-out) |
+| `group_by` | Array | inherits | Labels to group by; `["..."]` disables grouping |
+| `group_wait` | Duration | `30s` | First-notification buffer for a new group |
+| `group_interval` | Duration | `5m` | Minimum gap when new alerts join an active group |
+| `repeat_interval` | Duration | `4h` | Re-notify an unchanged firing group |
+| `receiver` | String | inherits | Receiver for matched alerts |
+| `routes` | Array | `[]` | Child routes, evaluated depth-first |
+
+`slack_configs` take `webhook_url`, `channel`, `username`, `icon_emoji`,
+`send_resolved`; `pagerduty_configs` take `routing_key`, `url`, `severity`,
+`send_resolved`; `teams_configs` take `webhook_url`, `title`, `send_resolved`;
+`webhook_configs` take `url`, `headers`, `send_resolved`.
 
 ### `[k8s_provider]`
 

@@ -19,11 +19,15 @@ thiserror = { workspace = true }
 ahash = { workspace = true }
 reqwest = { workspace = true }
 notify = { workspace = true }
+regex = { workspace = true }
+async-trait = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 parqtel-query = { workspace = true }
+axum = { workspace = true }
+tracing-subscriber = { workspace = true }
 
 [lints]
 workspace = true

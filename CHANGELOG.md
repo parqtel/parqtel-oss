@@ -77,6 +77,29 @@ while measuring. Measurements and method are in
 - **gzip-compressed OTLP**, which the OpenTelemetry Collector's exporters send by
   default: request bodies on HTTP (limits apply to the decompressed size) and
   gRPC.
+- **Alertmanager-compatible alert routing** in a new `[alerting.routing]`
+  section: a hierarchical `route` tree with `=`, `!=`, `=~`, `!~` matchers,
+  `continue` fan-out, `group_by` (including `"..."`) and inherited
+  `group_wait` / `group_interval` / `repeat_interval`, plus `inhibit_rules`
+  (`source_matchers`, `target_matchers`, `equal`). Alerts are grouped by
+  route and label set, held for `group_wait`, and re-notified on new members
+  (`group_interval`) or on `repeat_interval`; resolved alerts are delivered to
+  receivers with `send_resolved = true`. Active groups are bounded by
+  `max_active_groups`.
+- **Native receivers**: Slack incoming webhooks, PagerDuty Events API v2
+  (`dedup_key` per group, `trigger`/`resolve`), Microsoft Teams Adaptive Cards,
+  and a generic webhook. Transient failures (`429` honoring `Retry-After`,
+  `5xx`, timeouts) retry with exponential backoff and jitter; `400`/`401`/
+  `403`/`404` fail immediately.
+- Secrets and webhook URLs may be written as `${ENV_VAR}` or `{env:ENV_VAR}`
+  so tokens stay out of the config file.
+- `POST /api/v1/alerts/test_route` dry-runs a label set through the routing
+  tree and reports matched routes, receivers, grouping keys, and
+  silence/inhibition status; `GET /api/v1/alerts/routes` now also returns the
+  configured tree with `***REDACTED***` secrets.
+- `/metrics` gains `parqtel_alert_notifications_total{receiver,channel,status}`,
+  `parqtel_alert_notification_duration_seconds{receiver,channel}` and
+  `parqtel_alert_active_groups`.
 
 ### Fixed
 

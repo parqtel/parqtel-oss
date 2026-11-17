@@ -1,6 +1,7 @@
 mod alert;
 mod ingest;
 mod query;
+mod routing;
 mod server;
 mod storage;
 mod telemetry;
@@ -11,6 +12,12 @@ pub use alert::{
 };
 pub use ingest::{IngestConfig, TailSamplingConfig};
 pub use query::{QueryConfig, UIConfig};
+pub use routing::{
+    parse_duration, parse_matcher_str, resolve_secret, resolve_secret_with, AlertRouteConfig,
+    AlertingConfig, AlertmanagerRoutingConfig, InhibitRuleConfig, MatchOp, MatcherSpec,
+    PagerDutyReceiverConfig, ReceiverConfig, RoutingGlobalConfig, SlackReceiverConfig,
+    TeamsReceiverConfig, WebhookReceiverConfig,
+};
 pub use server::ServerConfig;
 pub use storage::{BlockConfig, LogBlockConfig, RetentionConfig};
 pub use telemetry::{K8sProviderConfig, TelemetryConfig};
@@ -31,6 +38,8 @@ pub struct Config {
     pub telemetry: TelemetryConfig,
     pub k8s_provider: K8sProviderConfig,
     pub alerts: AlertConfig,
+    #[serde(default)]
+    pub alerting: AlertingConfig,
 }
 
 impl Config {
@@ -57,6 +66,10 @@ impl Config {
             "ingest.tail_sampling",
             &mut errors,
         );
+
+        if let Some(ref routing) = self.alerting.routing {
+            routing.validate_into("alerting.routing", &mut errors);
+        }
 
         if errors.is_empty() {
             Ok(())

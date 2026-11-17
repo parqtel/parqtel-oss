@@ -1,3 +1,5 @@
+use parqtel_alert::dispatcher::metrics::RoutingMetrics;
+use parqtel_alert::dispatcher::AlertDispatcher;
 use parqtel_alert::evaluator::engine::{EvalConfig, EvaluationEngine};
 use parqtel_alert::router::AlertRouter;
 use parqtel_alert::AlertRuleRegistry;
@@ -29,6 +31,7 @@ pub struct AppStateInner {
     pub alert_store: AlertStore,
     pub alert_engine: Arc<EvaluationEngine>,
     pub alert_router: Arc<AlertRouter>,
+    pub alert_dispatcher: Option<Arc<AlertDispatcher>>,
     /// Receiver for alert firing events (consumed once by the router task).
     pub alert_event_rx: tokio::sync::Mutex<
         Option<tokio::sync::mpsc::UnboundedReceiver<parqtel_alert::AlertFiringEvent>>,
@@ -70,6 +73,16 @@ impl AppState {
                 // Persist silences alongside alerts.json (same data dir).
                 .with_silence_dir(config.storage.data_dir.clone()),
         );
+        let routing_metrics = Arc::new(RoutingMetrics::new());
+        let alert_dispatcher = config.alerting.routing.as_ref().and_then(|routing_cfg| {
+            match AlertDispatcher::from_config(routing_cfg, routing_metrics.clone()) {
+                Ok(d) => Some(Arc::new(d)),
+                Err(e) => {
+                    tracing::error!(error = %e, "failed to initialize Alertmanager dispatcher");
+                    None
+                }
+            }
+        });
 
         Self {
             inner: Arc::new(AppStateInner {
@@ -82,11 +95,13 @@ impl AppState {
                 ui_content,
                 ui_etag,
                 metrics: crate::metrics::ServerMetrics::with_contention(contention)
-                    .with_index_stores(index_stores),
+                    .with_index_stores(index_stores)
+                    .with_routing_metrics(routing_metrics.clone()),
                 alert_registry,
                 alert_store,
                 alert_engine,
                 alert_router,
+                alert_dispatcher,
                 alert_event_rx: tokio::sync::Mutex::new(Some(alert_event_rx)),
                 pipeline_registry: PipelineRegistry::new(),
                 saved_searches: crate::saved_searches::SavedSearchStore::new(saved_search_dir),
@@ -97,11 +112,16 @@ impl AppState {
     #[cfg(test)]
     #[allow(clippy::unwrap_used)]
     pub async fn default_for_tests() -> Self {
+        Self::default_for_tests_with_config(Config::default()).await
+    }
+
+    #[cfg(test)]
+    #[allow(clippy::unwrap_used)]
+    pub async fn default_for_tests_with_config(mut config: Config) -> Self {
         use tokio::sync::mpsc;
         // Kept for the life of the process: the services below flush from
         // background tasks and must not write into the working directory.
         let dir = tempfile::tempdir().unwrap().keep();
-        let mut config = Config::default();
         config.storage.data_dir = dir.clone();
         config.logs.data_dir = dir.join("logs");
         // Blocks now carry a durability handshake, so the index task can

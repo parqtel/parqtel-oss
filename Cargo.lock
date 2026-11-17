@@ -1856,10 +1856,13 @@ name = "parqtel-alert"
 version = "0.3.1"
 dependencies = [
  "ahash",
+ "async-trait",
+ "axum 0.7.9",
  "chrono",
  "notify",
  "parqtel-core",
  "parqtel-query",
+ "regex",
  "reqwest",
  "serde",
  "serde_json",
@@ -1868,6 +1871,7 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "tracing",
+ "tracing-subscriber",
  "ulid",
 ]
 
@@ -1888,6 +1892,7 @@ dependencies = [
  "futures",
  "memchr",
  "parquet",
+ "regex",
  "serde",
  "serde_json",
  "tempfile",

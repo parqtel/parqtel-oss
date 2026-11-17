@@ -285,15 +285,30 @@ pub(crate) async fn run_server(
     let preset_task = activate_alert_presets(&state).await;
     load_alert_rules(&state).await;
 
-    // Alert routing: consume firing events from the eval engine and deliver
-    // to configured webhook sinks (silences + repeat windows honored).
+    // Alert routing: consume firing/resolved events from the eval engine and
+    // deliver via Alertmanager dispatcher (if configured) and legacy routes.
     let router_state = state.clone();
     let alert_router_task = tokio::spawn(async move {
         let rx = router_state.inner.alert_event_rx.lock().await.take();
-        if let Some(rx) = rx {
-            let router = router_state.inner.alert_router.clone();
-            let _ = parqtel_alert::router::spawn_router(router, rx).await;
+        if let Some(mut rx) = rx {
+            while let Some(event) = rx.recv().await {
+                if let Some(ref dispatcher) = router_state.inner.alert_dispatcher {
+                    let silences = router_state.inner.alert_router.silences().await;
+                    let active_alerts = router_state.inner.alert_store.list_active().await;
+                    dispatcher
+                        .ingest_event(event.instance.clone(), &silences, &active_alerts)
+                        .await;
+                }
+                let _ = router_state.inner.alert_router.handle_event(event).await;
+            }
         }
+    });
+
+    let alert_dispatcher_tick_task = state.inner.alert_dispatcher.as_ref().map(|d| {
+        parqtel_alert::dispatcher::AlertDispatcher::spawn_tick_loop(
+            d.clone(),
+            std::time::Duration::from_secs(1),
+        )
     });
 
     let flush_task = spawn_flush_task(state.clone(), config.server.flush_interval_secs);
@@ -336,6 +351,9 @@ pub(crate) async fn run_server(
     grpc_task.abort();
     span_metrics_task.abort();
     alert_router_task.abort();
+    if let Some(task) = alert_dispatcher_tick_task {
+        task.abort();
+    }
     // Every task holding a clone of the app state keeps the ingestion services
     // (and so the index channels below) alive, so none may outlive this point.
     if let Some(task) = preset_task {

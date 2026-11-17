@@ -175,6 +175,11 @@ impl EvaluationEngine {
                             instance.resolved_at = Some(Utc::now());
                             instance.transition_log.push(transition);
                             self.store.save(&instance).await;
+                            if new_state == AlertState::Resolved {
+                                let _ = self.event_tx.send(AlertFiringEvent {
+                                    instance: instance.clone(),
+                                });
+                            }
                         }
                     }
                 }
@@ -259,5 +264,35 @@ mod tests {
 
         let engine = EvaluationEngine::new(test_config(), registry, store, tx);
         engine.evaluate_all().await;
+    }
+
+    #[tokio::test]
+    async fn test_evaluate_rule_with_value_firing_and_resolved_events() {
+        let store = AlertStore::in_memory();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let registry = AlertRuleRegistry::new();
+        let rule = test_rule();
+        let engine = EvaluationEngine::new(test_config(), registry, store.clone(), tx);
+        let labels = BTreeMap::from([("service.name".into(), "api".into())]);
+
+        // 1. Condition met -> Pending (no event yet)
+        engine
+            .evaluate_rule_with_value(&rule, 1.0, labels.clone())
+            .await;
+        assert!(rx.try_recv().is_err());
+
+        // 2. Condition still met (for_duration_secs = 0) -> Firing event emitted
+        engine
+            .evaluate_rule_with_value(&rule, 2.0, labels.clone())
+            .await;
+        let firing_evt = rx.try_recv().expect("expected firing event");
+        assert_eq!(firing_evt.instance.state, AlertState::Firing);
+
+        // 3. Condition cleared -> Resolved event emitted
+        engine
+            .evaluate_rule_with_value(&rule, 0.1, labels.clone())
+            .await;
+        let resolved_evt = rx.try_recv().expect("expected resolved event");
+        assert_eq!(resolved_evt.instance.state, AlertState::Resolved);
     }
 }
