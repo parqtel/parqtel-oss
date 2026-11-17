@@ -39,6 +39,7 @@ pub struct AppStateInner {
     pub pipeline_registry: PipelineRegistry,
     pub saved_searches: crate::saved_searches::SavedSearchStore,
     pub dashboards: crate::dashboards::DashboardStore,
+    pub object_catalog: Option<Arc<parqtel_core::storage::ObjectCatalog>>,
     pub audit: Arc<crate::audit::AuditLog>,
 }
 
@@ -60,6 +61,7 @@ impl AppState {
         let data_dir = config.storage.data_dir.clone();
         // The server owns block I/O for the process. Absolute block paths are
         // unchanged; the store is the seam an object-store backend replaces.
+        let mut object_catalog = None;
         let object_store: std::sync::Arc<dyn parqtel_core::storage::BlockStore> = if config
             .object_store
             .enabled
@@ -80,7 +82,10 @@ impl AppState {
                 config.object_store.cache_bytes,
                 tokio::runtime::Handle::current(),
             ) {
-                Ok(store) => std::sync::Arc::new(store),
+                Ok(store) => {
+                    object_catalog = Some(Arc::new(store.catalog(&config.object_store.prefix)));
+                    std::sync::Arc::new(store)
+                }
                 Err(e) => {
                     tracing::error!(error = %e, "failed to build object store; using local disk");
                     std::sync::Arc::new(parqtel_core::storage::LocalBlockStore::new(
@@ -142,6 +147,7 @@ impl AppState {
                 pipeline_registry,
                 saved_searches: crate::saved_searches::SavedSearchStore::new(saved_search_dir),
                 dashboards: crate::dashboards::DashboardStore::new(dashboard_dir),
+                object_catalog,
                 audit,
             }),
         }

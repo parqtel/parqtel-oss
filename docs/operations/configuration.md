@@ -566,6 +566,7 @@ secret_key = "${AWS_SECRET_ACCESS_KEY}"
 prefix = "parqtel"
 cache_dir = "/var/lib/parqtel/cache" # defaults to <storage.data_dir>/cache
 cache_bytes = 1073741824             # 1 GiB LRU cache
+catalog_interval_secs = 5            # publish/poll the shared manifest
 ```
 
 When enabled, every closed block is uploaded after the local file is durable.

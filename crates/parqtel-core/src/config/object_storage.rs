@@ -21,6 +21,8 @@ pub struct ObjectStoreConfig {
     pub cache_dir: Option<PathBuf>,
     /// Cache byte quota. Least-recently-used files are evicted first.
     pub cache_bytes: u64,
+    /// How often the shared manifest is published and polled.
+    pub catalog_interval_secs: u64,
 }
 
 impl Default for ObjectStoreConfig {
@@ -35,6 +37,7 @@ impl Default for ObjectStoreConfig {
             prefix: "parqtel".into(),
             cache_dir: None,
             cache_bytes: 1 << 30,
+            catalog_interval_secs: 5,
         }
     }
 }
@@ -55,6 +58,9 @@ impl ObjectStoreConfig {
         }
         if self.prefix.trim().is_empty() {
             errors.push("object_store.prefix cannot be empty".into());
+        }
+        if self.catalog_interval_secs == 0 {
+            errors.push("object_store.catalog_interval_secs must be greater than 0".into());
         }
     }
 }

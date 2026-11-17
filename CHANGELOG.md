@@ -42,6 +42,10 @@ while measuring. Measurements and method are in
 
 ### Added
 
+- **Shared object-storage catalog.** Writers publish a versioned manifest with
+  a CAS update; every node polls it, adopts blocks it has not seen, and marks
+  its sidecar dirty. Concurrent writers merge by block key instead of
+  overwriting each other's catalog.
 - **S3-compatible block upload with a bounded read cache.** `[object_store]`
   enables upload on block close and materialises cache files for Parquet seeks;
   the cache is LRU-evicted under `cache_bytes`. Local disk remains the WAL

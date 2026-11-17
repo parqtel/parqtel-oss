@@ -237,6 +237,11 @@ impl ObjectBlockStore {
         Self::new(Arc::new(store), prefix, cache_dir, cache_bytes, handle)
     }
 
+    /// Catalog over the same bucket and prefix.
+    pub fn catalog(&self, prefix: &str) -> crate::storage::ObjectCatalog {
+        crate::storage::ObjectCatalog::new(self.store.clone(), prefix)
+    }
+
     fn key(&self, key: &Path) -> object_store::path::Path {
         let name = key
             .file_name()

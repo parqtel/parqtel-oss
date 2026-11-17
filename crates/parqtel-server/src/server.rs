@@ -6,7 +6,7 @@ use crate::router::build_router;
 use crate::state::AppState;
 use crate::tasks::{
     activate_alert_presets, load_alert_rules, shutdown_signal, spawn_alert_eval_task,
-    spawn_flush_task, spawn_index_task, spawn_span_metrics_consumer,
+    spawn_catalog_sync_task, spawn_flush_task, spawn_index_task, spawn_span_metrics_consumer,
 };
 use crate::{grpc, telemetry};
 use flate2::write::GzEncoder;
@@ -306,6 +306,25 @@ pub(crate) async fn run_server(
         signals = "metrics, logs, traces",
         "parqtel application state initialized"
     );
+
+    // Shared object-storage catalog: publish our blocks and adopt others'.
+    if let Some(catalog) = state.inner.object_catalog.clone() {
+        spawn_catalog_sync_task(
+            catalog,
+            [index.clone(), log_index.clone(), trace_index.clone()],
+            [
+                index_store.clone(),
+                log_index_store.clone(),
+                trace_index_store.clone(),
+            ],
+            [
+                config.storage.data_dir.clone(),
+                config.logs.data_dir.clone(),
+                config.storage.data_dir.join("traces"),
+            ],
+            config.object_store.catalog_interval_secs,
+        );
+    }
 
     // Recording rules: evaluate on their group intervals and write results
     // through the same metrics ingestion service as live OTLP data.

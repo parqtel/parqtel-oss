@@ -40,8 +40,12 @@ pub trait BlockStore: Send + Sync {
 
 P2-02 is implemented: `storage::block_store` defines the trait,
 `LocalBlockStore` implements it, the server installs one at startup, and the
-scanner and retention paths read/delete through it. Object upload and the
-shared catalog remain P2-03/P2-04.
+scanner and retention paths read/delete through it.
+
+P2-03 is implemented: `ObjectBlockStore` uploads on close and serves reads
+from a bounded cache. P2-04 is implemented: `ObjectCatalog` keeps a generation
+and CAS version for the catalog manifest; writers merge by block key, and
+the server's catalog task publishes local blocks and adopts remote ones.
 
 ## Shared catalog
 

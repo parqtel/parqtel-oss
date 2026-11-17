@@ -18,6 +18,67 @@ use tokio::task::JoinHandle;
 /// instead of waiting for the debounce, and the flush is then told it may go on.
 ///
 /// The task ends when every sender is gone.
+/// Pushes local block metadata into the shared manifest and adopts blocks
+/// other nodes published. Local indexes remain authoritative for this node;
+/// the manifest is the cross-node catalog.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn spawn_catalog_sync_task(
+    catalog: Arc<parqtel_core::storage::ObjectCatalog>,
+    indexes: [Arc<RwLock<BlockIndex>>; 3],
+    stores: [Arc<BlockIndexStore>; 3],
+    dirs: [std::path::PathBuf; 3],
+    interval_secs: u64,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(Duration::from_secs(interval_secs.max(1)));
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            ticker.tick().await;
+            let mut local = Vec::new();
+            let mut local_keys = std::collections::HashSet::new();
+            for index in &indexes {
+                let idx = index.read().await;
+                for block in &idx.blocks {
+                    let Ok(catalog_block) =
+                        parqtel_core::storage::CatalogBlock::from_metadata(block)
+                    else {
+                        continue;
+                    };
+                    local_keys.insert(catalog_block.key.clone());
+                    local.push(catalog_block);
+                }
+            }
+            let lease = std::env::var("HOSTNAME").ok();
+            if let Err(e) = catalog.publish(local, lease).await {
+                tracing::warn!(error = %e, "catalog publish failed");
+                continue;
+            }
+            let remote = match catalog.read().await {
+                Ok(Some((manifest, _))) => manifest,
+                Ok(None) => continue,
+                Err(e) => {
+                    tracing::warn!(error = %e, "catalog read failed");
+                    continue;
+                }
+            };
+            for block in remote.blocks {
+                if local_keys.contains(&block.key) {
+                    continue;
+                }
+                let signal = block.signal_type.index();
+                let mut idx = indexes[signal].write().await;
+                let path = dirs[signal].join(&block.key);
+                if idx.blocks.iter().any(|existing| existing.path == path) {
+                    continue;
+                }
+                idx.add(block.to_metadata(&dirs[signal]));
+                stores[signal].mark_dirty();
+                tracing::info!(key = %block.key, "adopted remote block from catalog");
+            }
+        }
+    })
+}
+
 pub(crate) fn spawn_index_task(
     mut rx: mpsc::UnboundedReceiver<parqtel_core::storage::PendingIndex>,
     index: Arc<RwLock<BlockIndex>>,
