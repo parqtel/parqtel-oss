@@ -7,6 +7,7 @@ mod commands;
 mod dashboards;
 mod grpc;
 mod handlers;
+mod kafka;
 mod metrics;
 mod otel_sli;
 mod recovery;

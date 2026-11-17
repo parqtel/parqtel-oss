@@ -54,6 +54,7 @@ tracing-opentelemetry = { workspace = true }
 pprof = { workspace = true }
 jsonwebtoken = { workspace = true }
 base64 = "0.22"
+rdkafka = { workspace = true }
 reqwest = { workspace = true }
 urlencoding = "2"
 

@@ -433,6 +433,8 @@ pub(crate) async fn run_server(
         )
     });
 
+    let _kafka_task = crate::kafka::spawn_kafka_consumer(state.clone());
+
     let flush_task = spawn_flush_task(state.clone(), config.server.flush_interval_secs);
 
     let alert_eval_task = spawn_alert_eval_task(state.clone(), config.server.alert_interval_secs);

@@ -73,6 +73,7 @@ impl Config {
         self.storage.validate_into("storage", &mut errors);
         self.logs.validate_into("logs", &mut errors);
         self.object_store.validate_into(&mut errors);
+        self.ingest.kafka.validate_into(&mut errors);
 
         let valid_formats = ["text", "json"];
         if !valid_formats.contains(&self.telemetry.log_format.as_str()) {

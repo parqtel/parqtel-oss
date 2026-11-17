@@ -322,83 +322,20 @@ pub async fn ingest_generic_json(
         )
             .into_response();
     }
-    let value: serde_json::Value = match serde_json::from_slice(&body) {
-        Ok(value) => value,
-        Err(e) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({ "status": "error", "error": format!("invalid JSON: {e}") })),
-            )
-                .into_response()
-        }
-    };
-    let objects =
-        match value {
-            serde_json::Value::Array(values) => values,
-            object @ serde_json::Value::Object(_) => vec![object],
-            _ => return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({ "status": "error", "error": "body must be a JSON object or array" })),
-            )
-                .into_response(),
-        };
     let service = headers
         .get("x-parqtel-service")
         .and_then(|value| value.to_str().ok())
         .unwrap_or("default");
-    let config = &state.inner.config.ingest;
-    let mut logs = Vec::with_capacity(objects.len());
-    for object in objects {
-        let Some(fields) = object.as_object() else {
+    let logs = match parse_generic_json(&body, service, &state.inner.config.ingest) {
+        Ok(logs) => logs,
+        Err(e) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(json!({ "status": "error", "error": "array entries must be objects" })),
+                Json(json!({ "status": "error", "error": e })),
             )
-                .into_response();
-        };
-        let timestamp_ns = fields
-            .get(&config.json_timestamp_field)
-            .map(parse_json_timestamp)
-            .unwrap_or_else(|| chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0));
-        let body_text = fields
-            .get(&config.json_body_field)
-            .map(json_scalar_string)
-            .unwrap_or_else(|| object.to_string());
-        let level = fields
-            .get(&config.json_severity_field)
-            .map(json_scalar_string)
-            .unwrap_or_else(|| "INFO".to_string());
-        let (severity_number, severity_text) = json_severity(&level);
-        let attributes: Vec<(String, String)> = fields
-            .iter()
-            .filter(|(key, _)| {
-                key.as_str() != config.json_timestamp_field
-                    && key.as_str() != config.json_body_field
-                    && key.as_str() != config.json_severity_field
-            })
-            .map(|(key, value)| (key.clone(), json_scalar_string(value)))
-            .collect();
-        let attributes = parqtel_core::LabelSet::try_from_iter(attributes).unwrap_or_default();
-        let resource_attributes =
-            parqtel_core::LabelSet::try_from_iter(vec![("service.name", service)])
-                .unwrap_or_default();
-        logs.push(parqtel_core::LogRecord::new(
-            timestamp_ns,
-            chrono::Utc::now()
-                .timestamp_nanos_opt()
-                .unwrap_or(timestamp_ns),
-            severity_number,
-            severity_text,
-            body_text,
-            attributes,
-            resource_attributes,
-            [0; 16],
-            [0; 8],
-            0,
-            "generic-json".into(),
-            "1.0".into(),
-        ));
-    }
+                .into_response()
+        }
+    };
     let count = logs.len() as u64;
     match state
         .inner
@@ -470,6 +407,71 @@ fn json_severity(level: &str) -> (i32, String) {
         _ => 9,
     };
     (number, level.to_string())
+}
+
+/// Decodes one generic JSON body into log records. Used by the HTTP handler
+/// and the Kafka consumer so both accept exactly the same shape.
+pub(crate) fn parse_generic_json(
+    body: &[u8],
+    service: &str,
+    config: &parqtel_core::config::IngestConfig,
+) -> Result<Vec<parqtel_core::LogRecord>, String> {
+    let value: serde_json::Value =
+        serde_json::from_slice(body).map_err(|e| format!("invalid JSON: {e}"))?;
+    let objects = match value {
+        serde_json::Value::Array(values) => values,
+        object @ serde_json::Value::Object(_) => vec![object],
+        _ => return Err("body must be a JSON object or array".into()),
+    };
+    let mut logs = Vec::with_capacity(objects.len());
+    for object in objects {
+        let Some(fields) = object.as_object() else {
+            return Err("array entries must be objects".into());
+        };
+        let timestamp_ns = fields
+            .get(&config.json_timestamp_field)
+            .map(parse_json_timestamp)
+            .unwrap_or_else(|| chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0));
+        let body_text = fields
+            .get(&config.json_body_field)
+            .map(json_scalar_string)
+            .unwrap_or_else(|| object.to_string());
+        let level = fields
+            .get(&config.json_severity_field)
+            .map(json_scalar_string)
+            .unwrap_or_else(|| "INFO".to_string());
+        let (severity_number, severity_text) = json_severity(&level);
+        let attributes: Vec<(String, String)> = fields
+            .iter()
+            .filter(|(key, _)| {
+                key.as_str() != config.json_timestamp_field
+                    && key.as_str() != config.json_body_field
+                    && key.as_str() != config.json_severity_field
+            })
+            .map(|(key, value)| (key.clone(), json_scalar_string(value)))
+            .collect();
+        let attributes = parqtel_core::LabelSet::try_from_iter(attributes).unwrap_or_default();
+        let resource_attributes =
+            parqtel_core::LabelSet::try_from_iter(vec![("service.name", service)])
+                .unwrap_or_default();
+        logs.push(parqtel_core::LogRecord::new(
+            timestamp_ns,
+            chrono::Utc::now()
+                .timestamp_nanos_opt()
+                .unwrap_or(timestamp_ns),
+            severity_number,
+            severity_text,
+            body_text,
+            attributes,
+            resource_attributes,
+            [0; 16],
+            [0; 8],
+            0,
+            "generic-json".into(),
+            "1.0".into(),
+        ));
+    }
+    Ok(logs)
 }
 
 #[cfg(test)]

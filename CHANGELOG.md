@@ -42,6 +42,9 @@ while measuring. Measurements and method are in
 
 ### Added
 
+- **Kafka JSON log consumer.** `[ingest.kafka]` polls a topic, decodes each
+  message with the generic-JSON parser, writes through the normal WAL/buffer
+  path, and commits the offset only after the batch is durable.
 - **OIDC login and role mapping.** Optional `[auth.oidc]` adds an
   authorization-code flow at `/auth/login` and `/auth/callback`, an HttpOnly
   session cookie, JWKS/RS256 bearer validation, and role-to-scope mapping

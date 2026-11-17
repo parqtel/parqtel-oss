@@ -55,6 +55,9 @@ pub struct IngestConfig {
     /// Tail-sampling policy for traces (keep-all by default).
     #[serde(default)]
     pub tail_sampling: TailSamplingConfig,
+    /// Optional Kafka consumer feeding the generic JSON log decoder.
+    #[serde(default)]
+    pub kafka: KafkaConfig,
     /// Number of writer shards used by the metrics ingest rotator.
     ///
     /// Every ingest request for a signal serialises on one lock, and a block
@@ -185,6 +188,68 @@ fn default_rotator_shards() -> usize {
     4
 }
 
+/// Kafka consumer configuration (`[ingest.kafka]`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KafkaConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub brokers: String,
+    #[serde(default)]
+    pub topic: String,
+    #[serde(default = "default_kafka_group")]
+    pub group_id: String,
+    #[serde(default = "default_kafka_service")]
+    pub service: String,
+    #[serde(default = "default_kafka_format")]
+    pub format: String,
+}
+
+fn default_kafka_group() -> String {
+    "parqtel".into()
+}
+
+fn default_kafka_service() -> String {
+    "kafka".into()
+}
+
+fn default_kafka_format() -> String {
+    "json".into()
+}
+
+impl Default for KafkaConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            brokers: String::new(),
+            topic: String::new(),
+            group_id: default_kafka_group(),
+            service: default_kafka_service(),
+            format: default_kafka_format(),
+        }
+    }
+}
+
+impl KafkaConfig {
+    pub fn validate_into(&self, errors: &mut Vec<String>) {
+        if !self.enabled {
+            return;
+        }
+        if self.brokers.trim().is_empty() {
+            errors.push("ingest.kafka.brokers is required when enabled".into());
+        }
+        if self.topic.trim().is_empty() {
+            errors.push("ingest.kafka.topic is required when enabled".into());
+        }
+        if self.group_id.trim().is_empty() {
+            errors.push("ingest.kafka.group_id cannot be empty".into());
+        }
+        if self.format != "json" {
+            errors.push("ingest.kafka.format must be 'json'".into());
+        }
+    }
+}
+
 /// Tail-sampling policy for traces: decide per trace (after all spans of a
 /// batch arrive) which traces to persist, controlling storage volume while
 /// keeping the metrics derived by the span-metrics RED bridge unsampled.
@@ -232,6 +297,7 @@ impl Default for IngestConfig {
             max_inflight_flushes: default_max_inflight_flushes(),
             wal_max_segment_bytes: default_wal_max_segment_bytes(),
             tail_sampling: TailSamplingConfig::default(),
+            kafka: KafkaConfig::default(),
             rotator_shards: default_rotator_shards(),
             label_interner_capacity: default_label_interner_capacity(),
             buffer_max_points: default_buffer_max_points(),
@@ -259,6 +325,23 @@ fn default_sampling_ratio() -> f64 {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
+
+    #[test]
+    fn kafka_requires_brokers_topic_and_json() {
+        let mut cfg = KafkaConfig {
+            enabled: true,
+            ..Default::default()
+        };
+        let mut errors = Vec::new();
+        cfg.validate_into(&mut errors);
+        assert_eq!(errors.len(), 2);
+        cfg.brokers = "localhost:9092".into();
+        cfg.topic = "logs".into();
+        cfg.format = "otlp".into();
+        errors.clear();
+        cfg.validate_into(&mut errors);
+        assert_eq!(errors.len(), 1);
+    }
 
     #[test]
     fn default_keeps_everything() {

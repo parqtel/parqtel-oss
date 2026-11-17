@@ -264,6 +264,22 @@ The L1 pass is bounded (8 sources, 2 groups, 16 M rows per pass) and reserves
 | `compaction_max_merge_blocks` | Integer | `12` | Max source blocks merged into one compacted block |
 | `compaction_max_merges_per_pass` | Integer | `8` | Max merges one compaction cycle performs |
 
+### Kafka log consumer
+
+`[ingest.kafka]` feeds JSON records through the same decoder and WAL path as
+`POST /api/v1/ingest`. Offsets commit only after `ingest_logs` returns; a
+failed batch stays uncommitted and is redelivered.
+
+```toml
+[ingest.kafka]
+enabled = true
+brokers = "kafka-1:9092,kafka-2:9092"
+topic = "parqtel-logs"
+group_id = "parqtel"
+service = "kafka-apps"
+format = "json"          # only json is implemented
+```
+
 ### `[ingest]`
 
 | Key | Type | Default | Description |
