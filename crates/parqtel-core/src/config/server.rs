@@ -3,6 +3,10 @@ use serde::{Deserialize, Serialize};
 /// Configuration for the HTTP server.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerConfig {
+    /// Logical dataset this process serves. Non-default values prefix the
+    /// metrics/logs data directories and are enforced by token scopes.
+    #[serde(default = "default_dataset")]
+    pub dataset: String,
     /// TCP address to bind to (e.g. "0.0.0.0:8080").
     pub bind_address: String,
     /// TCP address for the OTLP gRPC server (e.g. "0.0.0.0:4317").
@@ -72,9 +76,14 @@ fn default_index_persist_interval_secs() -> u64 {
     2
 }
 
+fn default_dataset() -> String {
+    "default".into()
+}
+
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
+            dataset: default_dataset(),
             bind_address: "0.0.0.0:8080".into(),
             grpc_bind_address: default_grpc_bind_address(),
             max_connections: 1024,

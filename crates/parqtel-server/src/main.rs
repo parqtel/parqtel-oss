@@ -74,7 +74,13 @@ async fn main() -> anyhow::Result<()> {
         figment = figment.merge(Serialized::default("telemetry.log_level", level));
     }
 
-    let config: Config = figment.extract()?;
+    let mut config: Config = figment.extract()?;
+    if config.server.dataset != "default" {
+        // One dataset per process: every signal lives under a dataset prefix,
+        // so a second instance cannot read or retain this one's blocks.
+        config.storage.data_dir = config.storage.data_dir.join(&config.server.dataset);
+        config.logs.data_dir = config.logs.data_dir.join(&config.server.dataset);
+    }
     config.validate()?;
     tracing::debug!(
         log_level = %config.telemetry.log_level,

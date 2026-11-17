@@ -27,6 +27,7 @@ struct HashedToken {
     name: String,
     hash: [u8; 32],
     scopes: Vec<AuthScope>,
+    datasets: Vec<String>,
 }
 
 /// Immutable credential set used by the middleware.
@@ -38,6 +39,7 @@ pub struct AuthState {
     /// Credentials could not be parsed; fail closed rather than serve open.
     broken: bool,
     oidc: Option<Arc<OidcRuntime>>,
+    dataset: String,
 }
 
 #[derive(Debug)]
@@ -79,7 +81,7 @@ pub enum AuthError {
 }
 
 impl AuthState {
-    pub fn from_config(config: &AuthConfig) -> Result<Self, String> {
+    pub fn from_config(config: &AuthConfig, dataset: String) -> Result<Self, String> {
         let header = HeaderName::from_bytes(config.header.as_bytes())
             .map_err(|e| format!("invalid auth header '{}': {e}", config.header))?;
         let mut tokens = Vec::with_capacity(config.tokens.len());
@@ -100,6 +102,7 @@ impl AuthState {
                         } else {
                             token.actions.clone()
                         },
+                        datasets: token.datasets.clone(),
                     });
                     continue;
                 }
@@ -116,6 +119,7 @@ impl AuthState {
                 } else {
                     token.actions.clone()
                 },
+                datasets: token.datasets.clone(),
             });
         }
         Ok(Self {
@@ -123,6 +127,7 @@ impl AuthState {
             header,
             tokens,
             broken: false,
+            dataset,
             oidc: config.oidc.clone().map(|oidc| {
                 Arc::new(OidcRuntime {
                     config: oidc,
@@ -143,6 +148,7 @@ impl AuthState {
             tokens: Vec::new(),
             broken: true,
             oidc: None,
+            dataset: "default".into(),
         }
     }
 
@@ -213,6 +219,24 @@ impl AuthState {
         } else {
             return Err(AuthError::Invalid);
         };
+        if let Some(token) = token {
+            if !token.datasets.is_empty()
+                && !token
+                    .datasets
+                    .iter()
+                    .any(|pattern| dataset_matches(pattern, &self.dataset))
+            {
+                return Err(AuthError::Forbidden);
+            }
+        }
+        if let Some(requested) = headers
+            .get("x-parqtel-dataset")
+            .and_then(|value| value.to_str().ok())
+        {
+            if requested != self.dataset {
+                return Err(AuthError::Forbidden);
+            }
+        }
         let granted = |scope: AuthScope| scopes.contains(&scope);
         let allowed = match required {
             AuthScope::Read => {
@@ -231,6 +255,35 @@ impl AuthState {
             Err(AuthError::Forbidden)
         }
     }
+}
+
+/// `*` matches any run of characters; a pattern without `*` is exact.
+fn dataset_matches(pattern: &str, dataset: &str) -> bool {
+    if pattern == "*" {
+        return true;
+    }
+    let (pattern, value) = (pattern.as_bytes(), dataset.as_bytes());
+    let (mut p, mut v, mut star, mut resume) = (0usize, 0usize, None, 0usize);
+    while v < value.len() {
+        if p < pattern.len() && (pattern[p] == b'?' || pattern[p] == value[v]) {
+            p += 1;
+            v += 1;
+        } else if p < pattern.len() && pattern[p] == b'*' {
+            star = Some(p);
+            p += 1;
+            resume = v;
+        } else if let Some(star_pos) = star {
+            p = star_pos + 1;
+            resume += 1;
+            v = resume;
+        } else {
+            return false;
+        }
+    }
+    while p < pattern.len() && pattern[p] == b'*' {
+        p += 1;
+    }
+    p == pattern.len()
 }
 
 impl OidcRuntime {
@@ -518,31 +571,37 @@ mod tests {
     use parqtel_core::config::{AuthScope, AuthTokenConfig};
 
     fn state() -> AuthState {
-        AuthState::from_config(&AuthConfig {
-            enabled: true,
-            tokens: vec![
-                AuthTokenConfig {
-                    name: "reader".into(),
-                    token: Some("read-token".into()),
-                    token_sha256: None,
-                    actions: vec![AuthScope::Read],
-                },
-                AuthTokenConfig {
-                    name: "writer".into(),
-                    token: Some("write-token".into()),
-                    token_sha256: None,
-                    actions: vec![AuthScope::Write],
-                },
-                AuthTokenConfig {
-                    name: "admin".into(),
-                    token: Some("admin-token".into()),
-                    token_sha256: None,
-                    actions: vec![AuthScope::Admin],
-                },
-            ],
-            header: "authorization".into(),
-            oidc: None,
-        })
+        AuthState::from_config(
+            &AuthConfig {
+                enabled: true,
+                tokens: vec![
+                    AuthTokenConfig {
+                        name: "reader".into(),
+                        token: Some("read-token".into()),
+                        token_sha256: None,
+                        actions: vec![AuthScope::Read],
+                        datasets: Vec::new(),
+                    },
+                    AuthTokenConfig {
+                        name: "writer".into(),
+                        token: Some("write-token".into()),
+                        token_sha256: None,
+                        actions: vec![AuthScope::Write],
+                        datasets: Vec::new(),
+                    },
+                    AuthTokenConfig {
+                        name: "admin".into(),
+                        token: Some("admin-token".into()),
+                        token_sha256: None,
+                        actions: vec![AuthScope::Admin],
+                        datasets: Vec::new(),
+                    },
+                ],
+                header: "authorization".into(),
+                oidc: None,
+            },
+            "default".into(),
+        )
         .unwrap()
     }
 
@@ -671,6 +730,45 @@ mod tests {
         assert_eq!(subject, "user@example");
         assert!(scopes.contains(&AuthScope::Admin));
         assert!(scopes.contains(&AuthScope::Read));
+    }
+
+    #[tokio::test]
+    async fn token_datasets_are_scope_checked() {
+        let auth = AuthState::from_config(
+            &AuthConfig {
+                enabled: true,
+                tokens: vec![AuthTokenConfig {
+                    name: "tenant-a".into(),
+                    token: Some("tenant-token".into()),
+                    token_sha256: None,
+                    actions: vec![AuthScope::Read],
+                    datasets: vec!["api-*".into()],
+                }],
+                header: "authorization".into(),
+                oidc: None,
+            },
+            "api-prod".into(),
+        )
+        .unwrap();
+        assert!(auth
+            .authorize(
+                &headers("tenant-token"),
+                &axum::http::Method::GET,
+                "/api/v1/query"
+            )
+            .await
+            .is_ok());
+        let mut wrong = HeaderMap::new();
+        wrong.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer tenant-token"),
+        );
+        wrong.insert("x-parqtel-dataset", HeaderValue::from_static("api-staging"));
+        assert_eq!(
+            auth.authorize(&wrong, &axum::http::Method::GET, "/api/v1/query")
+                .await,
+            Err(AuthError::Forbidden)
+        );
     }
 
     #[tokio::test]

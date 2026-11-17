@@ -90,6 +90,10 @@ pub struct AuthTokenConfig {
     /// Permitted actions. Empty defaults to `read`.
     #[serde(default)]
     pub actions: Vec<AuthScope>,
+    /// Datasets this token may access. Empty means every dataset (backward
+    /// compatible with pre-dataset configs).
+    #[serde(default)]
+    pub datasets: Vec<String>,
 }
 
 /// Coarse capability granted to a token.

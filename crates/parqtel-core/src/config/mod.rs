@@ -62,6 +62,18 @@ impl Config {
         if self.server.bind_address.is_empty() {
             errors.push("server.bind_address cannot be empty".to_string());
         }
+        if self.server.dataset.is_empty()
+            || !self
+                .server
+                .dataset
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        {
+            errors.push(
+                "server.dataset must be non-empty and contain only letters, digits, '-', '_' or '.'"
+                    .into(),
+            );
+        }
         if let Some(tls) = &self.server.tls {
             if tls.cert_path.trim().is_empty() || tls.key_path.trim().is_empty() {
                 errors.push("server.tls.cert_path and key_path must both be set".into());

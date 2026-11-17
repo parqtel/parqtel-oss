@@ -112,13 +112,7 @@ pub fn build_router(state: AppState) -> Router {
 
     let query_config = state.inner.config.query.clone();
     let ingest_config = state.inner.config.ingest.clone();
-    let auth = match crate::auth::AuthState::from_config(&state.inner.config.auth) {
-        Ok(auth) => auth,
-        Err(e) => {
-            tracing::error!(error = %e, "invalid auth configuration; rejecting all requests");
-            crate::auth::AuthState::deny_all()
-        }
-    };
+    let auth = state.inner.auth.clone();
     let ingest_guard = IngestGuard {
         permits: Arc::new(Semaphore::new(ingest_config.max_concurrent_requests.max(1))),
         state: state.clone(),
@@ -308,7 +302,7 @@ pub fn build_router(state: AppState) -> Router {
         // Outermost: reject unauthenticated requests before any scan or body
         // work. Disabled by default for the single-user deployment.
         .layer(axum::middleware::from_fn_with_state(
-            std::sync::Arc::new(auth),
+            auth,
             crate::auth::require_auth,
         ))
         .with_state(state)

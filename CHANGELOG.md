@@ -42,6 +42,10 @@ while measuring. Measurements and method are in
 
 ### Added
 
+- **Dataset isolation.** `server.dataset` prefixes the metrics/logs storage
+  trees, token `datasets` accept exact names or `*` globs, and a conflicting
+  `X-Parqtel-Dataset` header is rejected. One process serves one dataset;
+  independent datasets run as separate processes with distinct data roots.
 - **Kafka JSON log consumer.** `[ingest.kafka]` polls a topic, decodes each
   message with the generic-JSON parser, writes through the normal WAL/buffer
   path, and commits the offset only after the batch is durable.

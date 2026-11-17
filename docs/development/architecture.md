@@ -282,6 +282,10 @@ plain-JSON tables. New blocks omit the repeated row-level `labels` column.
 
 The `BlockIndex` is an in-memory structure that tracks all blocks per signal:
 
+- **Dataset boundary**: `server.dataset` is the tenant key. Non-default values
+  prefix every signal's data directory, and auth tokens carry a `datasets`
+  allowlist with `*` globs. The process serves exactly one dataset; independent
+  datasets are separate processes, so no query path can cross the boundary.
 - **Block I/O seam**: scanner reads and retention deletes go through
   `storage::block_store::BlockStore`. Local mode installs `LocalBlockStore`
   rooted at the data directory; absolute block paths behave exactly as before.

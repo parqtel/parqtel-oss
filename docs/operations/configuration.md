@@ -355,6 +355,29 @@ Per-service overrides; each entry fully replaces the global policy for that serv
 
 > **Operational note**: when `otlp_enabled = true` but the OTLP SDK fails to initialise (e.g. an unreachable collector), the server logs a warning and continues with console logs only — ingestion is never blocked by self-telemetry.
 
+### Dataset isolation
+
+`server.dataset` names the dataset this process serves. A non-default value
+prefixes both storage trees (`<storage.data_dir>/<dataset>` and
+`<logs.data_dir>/<dataset>`) and is enforced by token scopes:
+
+```toml
+[server]
+dataset = "api-prod"
+
+[[auth.tokens]]
+name = "api-prod-reader"
+token = "${TENANT_TOKEN}"
+actions = ["read"]
+datasets = ["api-*"]        # exact names or `*` globs
+```
+
+A token with a non-empty `datasets` list may only access matching dataset
+names; requests carrying a conflicting `X-Parqtel-Dataset` header get 403.
+Run one dataset per process: each process owns its WAL, buffers, block indexes,
+retention, and series quota. Two processes on distinct data roots are fully
+isolated; multi-dataset serving from one process is not supported.
+
 ### `[auth]`
 
 Optional scoped bearer-token authentication. Disabled by default; the

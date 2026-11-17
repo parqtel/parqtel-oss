@@ -103,7 +103,7 @@ impl AppState {
         let saved_search_dir = config.storage.data_dir.clone();
         let dashboard_dir = config.storage.data_dir.clone();
         let auth = Arc::new(
-            crate::auth::AuthState::from_config(&config.auth).unwrap_or_else(|e| {
+            crate::auth::AuthState::from_config(&config.auth, config.server.dataset.clone()).unwrap_or_else(|e| {
                 tracing::error!(error = %e, "invalid auth configuration; rejecting all requests");
                 crate::auth::AuthState::deny_all()
             }),
