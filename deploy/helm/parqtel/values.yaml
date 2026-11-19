@@ -2,9 +2,14 @@
 # Parqtel Helm Chart — Default Values
 # ─────────────────────────────────────────────────────────────────────────────
 
-# -- Number of replicas. Parqtel is single-writer: values.schema.json caps this at 1.
-# Shared storage/multi-node is not implemented; >1 would split the dataset.
+# -- Number of replicas. Values above 1 require ha.enabled.
 replicaCount: 1
+
+# -- Run independent replicas with one PVC per pod.
+ha:
+  enabled: false
+  # -- PVC size for each HA replica. Storage class and access mode use storage.* values.
+  storageSize: 30Gi
 
 image:
   # -- Container image repository.
