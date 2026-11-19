@@ -88,8 +88,10 @@ start the next phase until it passes on uat-oman.
    ahead of UI queries. This can delay alert evaluation under sustained query
    saturation; monitor `parqtel_scan_low_priority_skips_total`.
 
-Exit: no OOMKill under the full stream with 4 concurrent UI panels plus alerts
-for 24 h; trace-ID filtering passes a regression test and honors the requested
+Exit (operator decision, 2026-11-19): no OOMKill or container restart under the
+full stream with 4 concurrent UI panels plus alerts for 6 continuous hours. Track
+memory for the same 6-hour window; peak working set must stay below the existing
+4 GiB limit. Trace-ID filtering must pass a regression test and honor the requested
 result limit. Query results can still retain many points before Phase 3 limits.
 
 ### Phase 0 rollout record — uat-oman
@@ -113,8 +115,9 @@ result limit. Query results can still retain many points before Phase 3 limits.
 - UAT has no stored logs or traces, so trace-ID behavior was validated by the
   regression test, not a live trace query.
 
-The required 24-hour stability gate has not passed. The operator approved
-proceeding with Phase 1 while leaving that gate open.
+At this rollout, the original 24-hour stability gate had not passed. The operator
+revised the remaining Phase 0 soak to 6 hours on 2026-11-19; this rollout record is
+historical.
 
 ### Phase 1a: canonical order and 5-minute L1 rollups
 

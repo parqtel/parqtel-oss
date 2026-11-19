@@ -232,9 +232,10 @@ Gate: `make docs-check`.
 ### T6 — Orchestrator only (not delegated)
 
 - Review the full branch diff (`ponytail-review`), then one PR.
-- UAT rollout only after the Phase 0 24-hour gate and the Phase 1 UAT checks pass
-  (see efficiency-plan.md). Rollout is two-way: the footer format is unchanged, so the
-  previous image reads every block this branch writes.
+- The operator approved the Phase 2a UAT rollout on 2026-11-19. Complete the revised
+  six-hour Phase 0 soak and 4 GiB memory check before declaring UAT validation done.
+  The footer format is unchanged, so the previous image reads every block this branch
+  writes. Do not start 2b or make another UAT rollout without approval.
 
 ## 2b outline (gated, do not start)
 
