@@ -371,10 +371,26 @@ pub fn now_secs() -> u64 {
 }
 
 impl ServerMetrics {
+    #[cfg(test)]
     pub async fn render(&self, index: &Arc<RwLock<BlockIndex>>) -> String {
+        self.render_with_replica(index, "").await
+    }
+
+    pub async fn render_with_replica(
+        &self,
+        index: &Arc<RwLock<BlockIndex>>,
+        replica_id: &str,
+    ) -> String {
         let mut out = String::new();
 
         let idx = index.read().await;
+
+        out.push_str("# HELP parqtel_build_info Parqtel build and replica information\n");
+        out.push_str("# TYPE parqtel_build_info gauge\n");
+        out.push_str(&format!(
+            "parqtel_build_info{{replica=\"{}\"}} 1\n",
+            escape_prometheus_label_value(replica_id)
+        ));
 
         out.push_str("# HELP parqtel_ingested_points_total Total data points ingested\n");
         out.push_str("# TYPE parqtel_ingested_points_total counter\n");
@@ -632,6 +648,13 @@ impl ServerMetrics {
     }
 }
 
+fn escape_prometheus_label_value(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+}
+
 /// Reads VmRSS from `/proc/self/status`. Returns 0 on non-Linux or when the
 /// field cannot be parsed, which renders as a zero gauge rather than a gap.
 fn read_rss_bytes() -> u64 {
@@ -700,6 +723,19 @@ mod tests {
         assert!(output.contains("parqtel_ingest_rate_per_sec{signal=\"metrics\"}"));
         assert!(output.contains("parqtel_ingest_gap_secs{signal=\"traces\"}"));
         assert!(output.contains("parqtel_ingested_items_total{signal=\"logs\"}"));
+        assert!(output.contains("parqtel_build_info{replica=\"\"} 1"));
+    }
+
+    #[tokio::test]
+    async fn build_info_escapes_replica_label() {
+        let dir = tempdir().unwrap();
+        let index = Arc::new(RwLock::new(BlockIndex::new(dir.path())));
+        let output = ServerMetrics::default()
+            .render_with_replica(&index, "pod\\\"name\nline")
+            .await;
+
+        assert!(output.contains("parqtel_build_info{replica=\"pod\\\\\\\"name\\nline\"} 1"));
+        assert_eq!(output.matches("replica=").count(), 1);
     }
 
     /// `/metrics` must not read `/proc` — the gauge is sampled by the
