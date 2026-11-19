@@ -55,6 +55,7 @@ Documentation for Parqtel, an open-source SRE telemetry store.
 | [CI/CD](development/ci-cd.md) | Pipelines, gates, release process |
 | [Efficiency plan](development/efficiency-plan.md) | Measured engine performance and optimisation backlog |
 | [Memory backlog](development/memory-backlog.md) | Measured query and ingest memory findings |
+| [Buddy peering plan](development/buddy-peering-plan.md) | Leader/follower HA, peer RPC and object-store block sharing |
 | [Glossary](development/glossary.md) | Terminology |
 
 ## Reference
