@@ -122,6 +122,13 @@ name = "pagerduty-oncall"
 routing_key = "${PAGERDUTY_ROUTING_KEY}"
 severity = "critical"
 send_resolved = true
+
+[[alerting.routing.receivers]]
+name = "alertmanager-ha"
+[[alerting.routing.receivers.alertmanager_configs]]
+url = "http://alertmanager.monitoring.svc:9093"
+# Defaults to 1m: four times the default 15-second alert evaluation interval.
+resend_ttl = "1m"
 ```
 
 | Channel | Fields |
@@ -130,9 +137,20 @@ send_resolved = true
 | PagerDuty | `routing_key`, `url`, `severity`, `send_resolved` |
 | Teams | `webhook_url`, `title`, `send_resolved` |
 | Webhook | `url`, `headers`, `send_resolved` |
+| Alertmanager | `url` (base URL), `resend_ttl` |
 
 PagerDuty uses Events API v2 with a `dedup_key` per group: the first delivery
 triggers, a resolved group sends `resolve`.
+
+Alertmanager uses its v2 push API at `/api/v2/alerts`. It receives identical
+`alertname`, `rule_id`, `severity` and series labels from each replica, so it
+deduplicates matching alerts. Firing alerts expire after `resend_ttl`; resolved
+alerts use their resolution time. Set `resend_ttl` to four times your evaluation
+interval when that interval differs from the 15-second default. Keep the route's
+`repeat_interval` shorter than `resend_ttl` so Alertmanager receives refreshes
+before firing alerts expire. Configuration validation enforces an explicit
+`repeat_interval` shorter than every `resend_ttl` on each route that delivers to
+an Alertmanager receiver, including child routes that inherit that receiver.
 
 Secrets may be `${ENV_VAR}` or `{env:ENV_VAR}`. `GET /api/v1/alerts/routes`
 returns the configured tree with secrets redacted.
