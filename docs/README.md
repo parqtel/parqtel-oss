@@ -37,6 +37,7 @@ Documentation for Parqtel, an open-source SRE telemetry store.
 | [Object storage](operations/object-storage.md) | S3-compatible bucket, shared catalog, cache and failure modes |
 | [Security](operations/security.md) | Auth, OIDC, TLS, datasets, audit, egress |
 | [Alerting](operations/alerting.md) | Rules, routes, silences, receivers and delivery metrics |
+| [High availability](operations/high-availability.md) | Independent two-replica mode, collector fan-out, alert dedupe and rollback |
 | [Edge mode](operations/edge-mode.md) | Single-node topology, sizing and deliberate non-goals |
 | [Performance and sizing](operations/performance-sizing.md) | Memory and disk for your ingest rate |
 | [Head-to-head benchmark](performance/comparison.md) | Reproducible query comparison harness |

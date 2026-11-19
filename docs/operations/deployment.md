@@ -1,11 +1,12 @@
 # Deployment Guide
 
 Parqtel supports multiple deployment methods, from a single Docker container to
-production Kubernetes clusters. It is **single-writer per data root**: every
-process owns its WAL, buffer, indexes and compaction. An optional S3-compatible
-bucket shares a catalog and lets reader nodes adopt blocks, but there is no
-writer fencing — keep one writer per prefix and keep the Helm replica count at
-1.
+production Kubernetes clusters. The default mode is **single-writer per data
+root**: each process owns its WAL, buffer, indexes and compaction. An optional
+S3-compatible bucket shares a catalog and lets reader nodes adopt blocks, but
+there is no writer fencing. Keep one writer per prefix. The Helm chart also
+supports an independent two-replica HA mode with separate PVCs; see the
+[high-availability guide](high-availability.md) before enabling it.
 
 ## Docker (Single Container)
 
@@ -140,8 +141,8 @@ Pre-configured value files for different environments:
 
 The chart (`deploy/helm/parqtel`) includes:
 
-- **Deployment** with configurable resources and probes; `replicaCount` is capped at 1
-- **HorizontalPodAutoscaler** — reserved; >1 replica is rejected because each pod owns a disjoint data directory and object storage has no writer fencing
+- **Deployment** with configurable resources and probes; default mode caps `replicaCount` at 1
+- **Independent HA StatefulSet** — opt in with `ha.enabled: true`; see the [HA guide](high-availability.md) for per-pod ingest and operational requirements
 - **PodDisruptionBudget** — ensures availability during rollouts
 - **NetworkPolicy** — restricts ingress/egress traffic
 - **ServiceMonitor** — Prometheus Operator integration
