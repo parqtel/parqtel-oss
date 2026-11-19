@@ -438,7 +438,7 @@ impl SeriesIndex {
         }
         let mut label_name_ids = HashMap::new();
         for labels in &table.labels {
-            for pair in labels.chunks_exact(2) {
+            for pair in labels.as_chunks::<2>().0 {
                 let name = &table.strings[pair[0] as usize];
                 if !label_name_ids.contains_key(name.as_str()) {
                     label_name_ids.insert(name.clone(), pair[0]);
@@ -496,7 +496,7 @@ impl SeriesIndex {
             return Err(corrupt());
         }
         let mut pairs = Vec::with_capacity(flat.len() / 2);
-        for pair in flat.chunks_exact(2) {
+        for pair in flat.as_chunks::<2>().0 {
             let name = self.table.string(pair[0]).ok_or_else(corrupt)?;
             let value = self.table.string(pair[1]).ok_or_else(corrupt)?;
             pairs.push((name, value));
@@ -615,7 +615,9 @@ impl SeriesIndex {
                     continue;
                 };
                 if labels
-                    .chunks_exact(2)
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
                     .any(|pair| pair[0] == label_id && matches(pair[1]))
                 {
                     ids.push(id);

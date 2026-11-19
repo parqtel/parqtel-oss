@@ -66,7 +66,9 @@ fn table_accessors_expose_strings_labels_counts_and_heap_size() {
 
     let labels = table.label_ids(0).unwrap();
     let pairs: Vec<_> = labels
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| {
             (
                 table.string(pair[0]).unwrap(),
