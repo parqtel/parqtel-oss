@@ -1,247 +1,335 @@
 # Buddy peering plan: two-node leader/follower HA
 
 Status: design only. No product code in this branch. Based on `origin/main` `63a9cf1`.
+Revision 2 (2026-11-19) fixes lease contention, query gaps, rule outputs, alert
+state handoff, demotion data loss and ingest routing found in review.
 
-Goal: run at least two Parqtel instances. One **leader** owns OTLP ingest and serves recent, in-memory data to peers. Each **follower** executes recording and alert rules, serves block-backed queries, publishes compacted blocks to object storage, and downloads blocks from object storage by query time range. Peer health and a shared lease provide failover.
+Goal: run at least two Parqtel instances. One **leader** owns ingest, WAL and block
+writes, and serves its recent window to peers. **Followers** execute recording and
+alert rules, answer queries from blocks, and download blocks from S3/Azure by query
+time range. Two object-store leases drive failover.
+
+**Scope.** This adds availability and offloads queries and rules from the leader.
+It does **not** scale ingest: the leader still takes every write. Ingest scaling
+needs sharding and is out of scope.
 
 ## Invariants
 
-1. Exactly one leader at a time. A follower must never accept external OTLP writes.
-2. Every accepted record is written to the leader WAL before its buffer ACK.
-3. Blocks have one owner (`CatalogBlock.writer`). Only the owner publishes, retires, or compacts them.
-4. A follower never modifies a block it did not write. Remote blocks are read-only via the object-store cache.
-5. A query sees leader buffer data plus local/remote blocks with no double counting. Buffer and blocks are disjoint by `wal_range`.
-6. Rules execute on exactly one node: the follower when one is healthy, otherwise the leader in single-node fallback.
-7. Feature is opt-in. With `[cluster] enabled = false`, behavior is unchanged and 1 replica still works.
+1. One ingest leader at a time, fenced by a lease epoch. Only the leader appends to
+   its WAL and writes blocks. Followers forward writes; they never write WAL.
+2. Every accepted record is in the leader WAL before ACK (unchanged).
+3. Blocks have one owner (`CatalogBlock.writer = node_id`). Only the owner publishes,
+   compacts or retires a block. Followers read remote blocks through the cache.
+4. A query returns each sample once. Data newer than the **cutoff** comes only from
+   the leader; data older than the cutoff comes only from blocks.
+5. Rules evaluate on exactly one node: the holder of the **rules lease**.
+6. A demoted leader flushes and publishes its WAL-backed buffer before it follows.
+7. Opt-in: with `[cluster] enabled = false`, single-node behavior is unchanged.
 
 ## Target architecture
 
 ```text
-                         OTLP / HTTP / gRPC
-                                 |
-                                 v
-                     +------------------------+
-                     |        LEADER          |
-                     |  ingest + WAL + buffer  |
-                     |  block publish          |
-                     |  PeerService (gRPC)     |
-                     +-----------+------------+
-                                 | lease / peer RPC / recent points
-          +----------------------+----------------------+
-          |                                             |
-          v                                             v
-+---------------------------+              +---------------------------+
-|        FOLLOWER A         |<------------>|        FOLLOWER B         |
-| rules (alerts + record)   |  peer health | rules standby / quorum    |
-| block queries             |              | block queries             |
-| object-store sync/load    |              | object-store sync/load    |
-+---------------------------+              +---------------------------+
-                                 |
-                                 v
-                  S3 / Azure bucket: blocks + _catalog/manifest.json
+              OTLP (HTTP + gRPC) via one Service across all pods
+                                  |
+          +-----------------------+------------------------+
+          |                       |                        |
+          v                       v                        v
+   +-------------+  forward   +---------------------+  forward  +-------------+
+   | FOLLOWER A  |----------->|       LEADER        |<----------| FOLLOWER B  |
+   | rules lease |  QueryRecent| ingest lease        |           | (standby    |
+   | block query |<-----------| WAL, buffer, blocks |           |  rules)     |
+   | cache       |            | compaction,retention|           | block query |
+   +------+------+            +----------+----------+           +------+------+
+          |                              | publish                      |
+          +---------------- read --------+------------------------------+
+                                         v
+                 S3 / Azure: blocks, _catalog/manifest.json,
+                 _cluster/ingest-lease.json, _cluster/rules-lease.json,
+                 _cluster/alert-state.json
 ```
 
-Minimum deployment: **2 pods**. Recommended: **3 pods** (leader + 2 followers) so rules keep running after one follower failure. With 2 pods, leader must run rules in fallback when the follower is down.
+Minimum: **2 pods**. Recommended: **3** so rules and queries survive a leader
+failover without falling back onto the new leader.
 
 ## Reuse already in the tree
 
 | Existing | Path | Use |
 |---|---|---|
-| `ObjectCatalog` CAS manifest with `generation` and `writer_lease` | `crates/parqtel-core/src/storage/object_catalog.rs` | leader lease + block catalog |
-| `spawn_catalog_sync_task` publishes local blocks, adopts remote keys | `crates/parqtel-server/src/tasks.rs` | block sync skeleton |
-| `BlockStore::publish` on block close | `writer.rs`, `compactor.rs`, `stream_compactor.rs` | upload compacted block |
-| `ObjectBlockStore` bounded cache + `open` downloads on demand | `crates/parqtel-core/src/storage/block_store.rs` | timestamp-based downloads |
-| `MemoryBuffer` and `QueryExecutor` | `crates/parqtel-core/src/buffer.rs`, `crates/parqtel-query/src/executor` | recent query source |
-| tonic OTLP server | `crates/parqtel-server/src/grpc.rs` | add internal `PeerService` |
-| alert eval and ruler tasks | `tasks.rs`, `server.rs`, `ruler.rs` | gate by role |
-| Helm schema caps replicas at 1 | `deploy/helm/parqtel/values.schema.json` | change to min 2 when cluster enabled |
+| `ObjectCatalog` CAS on `manifest.json` | `crates/parqtel-core/src/storage/object_catalog.rs` | block catalog only (lease moves out) |
+| `spawn_catalog_sync_task` | `crates/parqtel-server/src/tasks.rs` | publish owned blocks, adopt remote ones |
+| `BlockStore::publish` on block close | `writer.rs`, `compactor.rs`, `stream_compactor.rs` | upload L0/L1 blocks |
+| `ObjectBlockStore` bounded cache, on-demand `open` | `crates/parqtel-core/src/storage/block_store.rs` | time-range downloads |
+| `MemoryBuffer`, `QueryExecutor` | `crates/parqtel-core/src/buffer.rs`, `crates/parqtel-query/src/executor` | leader recent window |
+| tonic server | `crates/parqtel-server/src/grpc.rs` | add internal `Peer` service |
+| alert eval, ruler, `ChannelMetricSink` | `tasks.rs`, `server.rs`, `ruler.rs` | gate by rules lease; forward outputs |
+| `AlertStore` (`alerts.json`), silences | `crates/parqtel-alert/src/store/alert_store.rs`, `router.rs` | snapshot to shared state |
+| Helm caps `replicaCount` at 1 | `deploy/helm/parqtel/values.schema.json` | allow ≥2 with cluster |
 
 ## Configuration
 
-Add `[cluster]` to `Config` in `crates/parqtel-core/src/config`:
+New `[cluster]` (env `PARQTEL__CLUSTER__*`):
 
 ```toml
 [cluster]
 enabled = false
-node_id = ""                # defaults HOSTNAME
-role = "auto"               # auto | leader | follower (manual override for tests)
-advertise_addr = ""         # e.g. parqtel-0.parqtel-headless:4318
-peers = []                  # static peer URLs; empty = DNS/service discovery
+node_id = ""                 # default: HOSTNAME
+role = "auto"                # auto | leader | follower (fixed roles: tests only)
+advertise_addr = ""          # pod DNS:port for peer gRPC, e.g. parqtel-0.parqtel-peer:4318
+peer_discovery = "dns"       # dns (headless service) | static
+peers = []                   # used when peer_discovery = static
 bind_addr = "0.0.0.0:4318"
 lease_ttl_secs = 30
 lease_renew_secs = 10
-buffer_lookback_secs = 300  # how far back peers request recent points
-leader_rules_fallback = true
+clock_skew_margin_secs = 5   # a lease is treated as expired only after ttl + margin
+recent_window_secs = 300     # query cutoff = now - recent_window_secs
+recent_max_points = 2000000
+forward_timeout_secs = 10
 ```
 
-Extend `ObjectStoreConfig` with `provider = "s3" | "azure"` plus `azure_account`, `azure_container`, `azure_key` / connection string env fallback. Keep S3 defaults identical.
+HA validation (fail startup when violated, `enabled = true` only):
 
-## Wire protocol (internal, not public OTLP)
+- `object_store.enabled = true` (leases and blocks live there);
+- `storage.block_duration_secs < recent_window_secs` and the same for logs, so every
+  record older than the cutoff is in a published block (see query routing);
+- `lease_renew_secs * 2 < lease_ttl_secs`.
 
-New `crates/parqtel-server/proto/peer.proto` and `build.rs` (tonic). One service:
+`ObjectStoreConfig` gains `provider = "s3" | "azure"` and Azure fields
+(`azure_account`, `azure_container`, key or SAS via env). Requires the `azure`
+feature of `object_store` in the workspace `Cargo.toml`.
 
-```proto
-service Peer {
-  rpc Status(StatusRequest) returns (StatusResponse);
-  rpc QueryRecent(RecentRequest) returns (RecentResponse);
-  rpc GetBlock(BlockRequest) returns (BlockResponse); // streamed bytes, cache hint
-}
+## Leases (separate objects, not the catalog manifest)
 
-message StatusRequest {}
-message StatusResponse {
-  string node_id = 1;
-  string role = 2;        // leader | follower
-  uint64 lease_epoch = 3;
-  int64 lease_expires_ms = 4;
-  uint64 wal_position = 5;
-  uint64 buffered_points = 6;
-  bool ready = 7;
-}
-message RecentRequest {
-  string metric = 1;
-  string matchers_json = 2;
-  int64 start_ns = 3;
-  int64 end_ns = 4;
-}
-message RecentResponse {
-  bytes points_json = 1;   // Vec<DataPoint> JSON, bounded by server limit
-}
-message BlockRequest { string key = 1; }
-message BlockResponse { bytes parquet = 1; }
-```
-
-`QueryRecent` must be read-only and bounded: max points and max bytes from config; reject requests older than `buffer_lookback_secs`.
-
-## Leader lease
-
-Store lease in the object-store catalog manifest:
+Renewing a lease every 10 s on `manifest.json` would race the 5 s catalog sync,
+which already gives up after eight CAS losses. Each lease is its own object:
 
 ```json
-{"generation": 42, "writer_lease": {"node": "parqtel-0", "epoch": 17, "expires_ms": 1794...}, "blocks": [...]}
+// _cluster/ingest-lease.json and _cluster/rules-lease.json
+{"holder": "parqtel-0", "epoch": 17, "renewed_ms": 1795000000000, "ttl_ms": 30000}
 ```
 
-- `try_acquire(node, ttl)`: CAS on generation; succeed only if lease absent or expired.
-- `renew(node, epoch, ttl)`: CAS only if `node` and `epoch` match; bump generation each renew.
-- `release(node, epoch)`: CAS; best effort on shutdown.
-- If no object store configured, support static `role = leader` / `follower` for local tests only. HA requires object storage.
-- Split-brain fence: every block publish and query of recent data checks lease epoch; a demoted leader stops ingest within one renew interval.
+- `acquire(node)`: read with version; if absent, or `now > renewed_ms + ttl + margin`,
+  write `epoch + 1` with `PutMode::Create`/`Update(version)`. One CAS winner.
+- `renew(node, epoch)`: CAS only if holder and epoch match.
+- `release(node, epoch)`: CAS to an expired record on graceful shutdown.
+- The existing `CatalogManifest.writer_lease: Option<String>` is left as is for
+  compatibility and becomes informational.
+
+**Fencing.** The leader re-reads the ingest lease before each block publish and
+before committing a WAL position; a mismatched epoch stops ingest at once. Leases use
+wall-clock time, so the margin covers bounded skew, and fencing covers the rest.
+
+**Prerequisite (B0.5).** CAS needs conditional PUT. Verify `PutMode::Create` and
+`PutMode::Update` against Ceph RGW (UAT), MinIO and Azure Blob with `object_store`
+0.14 before writing lease code. If a backend fails, HA is unsupported there.
 
 ## Role state machine
 
 ```text
-start -> candidate
-candidate --acquire lease--> leader
-candidate --lease held by other--> follower
-leader --renew fails twice--> candidate
-follower --leader Status unhealthy for 3 intervals--> candidate
-manual role override -> fixed leader/follower (no lease writes)
+start -> recover WAL locally (any role) -> candidate
+candidate --acquire ingest lease--> leader
+candidate --held by another--> follower
+leader --renew fails twice or epoch mismatch--> draining
+draining --flush buffer, publish owned blocks, commit WAL--> follower
+follower --ingest lease expired--> candidate
 ```
 
-On transition:
-- to leader: start OTLP handlers, flush task, WAL replay; stop alert eval and ruler unless `leader_rules_fallback` and no healthy follower.
-- to follower: stop OTLP handlers (return 503 with `Retry-After`), stop flush of new data, start alert eval + ruler, start catalog sync and peer status polling.
-- never drop in-flight WAL on demotion; finish the current encode then stop.
+- **Startup:** every pod replays its own WAL first. A pod that was leader before a
+  crash flushes those records into blocks it owns and publishes them before it
+  competes for the lease, so a restarted ex-leader never loses its tail.
+- **Draining:** stop accepting writes (forward instead), seal and flush the buffer,
+  publish, then become follower. A failed publish keeps the blocks local and retries;
+  they stay owned by this node and are adopted by peers once published.
+- **Rules lease** is independent: prefer a follower; the leader takes it only when no
+  follower is healthy, and releases it when one returns (handoff below).
 
-## Query routing
+## Ingest routing: forward to the leader
 
-`QueryExecutor` gains a `PeerBuffer` trait:
+One Kubernetes Service spans all pods (no RBAC, no label patching).
 
-```rust
-#[async_trait]
-trait PeerBuffer {
-    async fn recent(&self, metric: &str, matchers: &SeriesSelector,
-                    start_ns: i64, end_ns: i64) -> Result<Vec<DataPoint>>;
-}
+- HTTP `/v1/*` and OTLP gRPC on a follower forward the raw request to the leader over
+  the peer channel, preserving content type and encoding, and relay the response.
+- When no leader is known, return `503` with `Retry-After`; the OTel collector
+  retries (it already has `retry_on_failure`).
+- Cost: one extra hop for a share of writes; at UAT rate (~4.5 MB/s) this is small.
+- Optional later: point the collector at the leader pod via a `role=leader` label set
+  by the leader (needs a Role/RoleBinding) to remove the hop.
+
+## Query routing: time cutoff, no cross-node dedupe
+
+Followers see the catalog late (sync interval), while the leader drops buffered points
+once their block is durable. Merging buffer and blocks by fingerprint would lose or
+double those points. Instead each range has one source:
+
+```text
+cutoff = now - recent_window_secs        (computed once per query)
+
+[start, min(end, cutoff))  -> local + adopted blocks (follower or leader)
+[max(start, cutoff), end]  -> leader QueryRecent: leader buffer + leader blocks
 ```
 
-Leader: uses local buffer as today; serves `QueryRecent` to followers.
-Follower: queries local blocks (including adopted remote blocks) and calls `PeerBuffer::recent` for the overlap window; merges by `(fingerprint, timestamp)` and applies `max_series` / `max_samples_per_series` after merge. Full row predicate remains the final judge. Block results are already disjoint from leader buffer by WAL commit; dedupe is still required for overlapping adopted blocks during a flush/grace window.
+- Valid because HA validation forces every record older than the cutoff into a
+  published block, and the catalog sync interval is far below `recent_window_secs`.
+- On the leader, the whole query runs locally as today.
+- Series limits (`max_series`, `max_samples_per_series`) apply after joining the two
+  halves; the full matcher still decides every series.
+- Logs and traces use the same split; trace-ID lookups query both halves.
+- If the leader is unreachable, the follower returns block data up to the cutoff with
+  a `warnings` entry (`recent data unavailable`), not an error.
 
-## Block sync and timestamp download
+## Rules on the follower
 
-- Keep `spawn_catalog_sync_task`. Change `writer` from `HOSTNAME` to `cluster.node_id`.
-- Follower adopts remote blocks into its `BlockIndex` but records `path` under `<data_dir>/cache/<key>`; `ObjectBlockStore::open` materialises the file.
-- Add `prefetch_for_query(blocks, start_ns, end_ns)` on follower: for blocks whose time range overlaps the query, call `BlockStore::open` with bounded parallelism, respecting `cache_bytes`. Never download all blocks.
-- Object storage backends: S3 via `Elasticsearch/AmazonS3Builder` unchanged; Azure via `MicrosoftAzureBuilder` with account/container/key. Both expose `ObjectCatalog` and `ObjectBlockStore`.
-- Retention and compaction remain leader-only. Follower must not delete objects; owner-only delete already enforced by `writer` field.
+- Alert evaluation and the ruler start only on the rules-lease holder.
+- **Recording-rule outputs** currently enter the local `ingestion_service`
+  (`server.rs`, ruler sink task). On a follower they are forwarded to the leader
+  through the same path as external writes.
+- **Alert state.** `alerts.json` and silences are per pod. The rules holder snapshots
+  alert state and silences to the object _cluster/alert-state.json after each evaluation cycle
+  (CAS, epoch-fenced by the rules lease). A new holder loads it before its first
+  cycle, so firing alerts keep their state and notifications are not re-sent.
+- **Handoff:** the old holder finishes its cycle, writes the snapshot, releases the
+  lease; the new holder acquires it and loads the snapshot. Missed cycles during a
+  crash are acceptable (bounded by the lease TTL).
+
+## Block sync and time-range download
+
+- Keep `spawn_catalog_sync_task`; set `writer` to `cluster.node_id`.
+- Adopted remote blocks are indexed with paths under `<data_dir>/cache/`; the object
+  store's `open` materializes them on first read.
+- Before a block scan, prefetch only blocks overlapping the query range, with bounded
+  parallelism and the existing `cache_bytes` quota. Never download the whole catalog.
+- Compaction and retention run only on the block owner (normally the leader). A new
+  leader starts compacting only its own blocks; blocks left by a dead ex-leader are
+  read-only until a later "adopt orphan ownership" task (out of scope).
 
 ## Failure semantics
 
-- Leader loss: follower acquires lease after TTL; last unflushed points (≤ `storage.block_duration_secs`, default 2h, configurable to ≤60s in HA) may be lost unless WAL is replicated. Phase 1 documents this as RPO; Phase 5 can add WAL shadowing.
-- Follower loss: leader enables rules fallback; no query loss.
-- Object-store outage: leader keeps ingesting locally; catalog publish errors are logged and retried; follower serves cached blocks only.
-- Split brain: lease epoch check rejects writes from stale leader; metrics expose `parqtel_cluster_epoch`.
+| Event | Outcome |
+|---|---|
+| Leader pod restarts (same PVC) | new leader within lease TTL + margin; restarted pod replays and publishes its WAL tail, then follows. No data loss. |
+| Leader node and PVC lost | records after its last published block are lost (RPO ≤ block duration, < `recent_window_secs`). WAL shadowing to object storage is a later option. |
+| Follower lost | leader takes rules lease when no follower is healthy; queries go to remaining pods. |
+| Object store down | leader keeps ingesting locally; publish and lease renew retry. If renew fails past TTL the leader drains; with no store, HA cannot elect and ingest returns 503 until it recovers. Document this trade-off. |
+| Split brain | epoch fencing stops the stale leader at its next publish or WAL commit. |
 
 ## Metrics and health
 
-Add to `/metrics`: `parqtel_cluster_role{role}`, `parqtel_cluster_lease_epoch`, `parqtel_cluster_lease_expires_ms`, `parqtel_peer_status{peer,state}`, `parqtel_peer_recent_requests_total`, `parqtel_object_download_bytes_total`, `parqtel_object_cache_hits_total`. `/ready` returns 503 on follower for ingest paths; query paths stay ready.
+`parqtel_cluster_role{role}`, `parqtel_cluster_lease_epoch{lease}`,
+`parqtel_cluster_lease_renew_failures_total{lease}`, `parqtel_peer_up{peer}`,
+`parqtel_peer_forwarded_requests_total{kind}`, `parqtel_peer_recent_requests_total`,
+`parqtel_query_recent_unavailable_total`, `parqtel_object_download_bytes_total`,
+`parqtel_object_cache_hits_total`. `/ready` stays per pod (a follower that can forward
+is ready).
 
-## Tasks (ordered; each is one PR, lowest-cost model that passes gates)
+## Tasks
 
-### B0 — Design doc (current task)
-- Files: this document.
-- Gate: `make docs-check` (after adding doc to docs index if required). Done when committed.
+Each task is one PR, delegated to the lowest-cost model that passes its gate,
+reviewed, gated and committed as `sonu202604 <sonu202604@gmail.com>`.
 
-### B1 — Cluster config + validation
-- Files: `crates/parqtel-core/src/config/mod.rs`, new `cluster.rs`, `docs/operations/configuration.md`, config tests.
-- Work: add `ClusterConfig` above; validation; Figment env mapping `PARQTEL__CLUSTER__*`; docs.
+### B0 — Design doc
+This document. Gate: `make docs-check`.
+
+### B0.5 — CAS spike (blocking)
+- Files: `crates/parqtel-core/examples/cas_probe.rs` (new).
+- Work: create/update/conflict against an endpoint from env; report which backends
+  honor conditional PUT. Run against MinIO locally and Ceph RGW on UAT (read-only
+  bucket prefix `parqtel-cas-probe/`). Azure if credentials exist.
+- Gate: probe output recorded in this doc. Stop if Ceph RGW fails.
+
+### B1 — Cluster config and validation
+- Files: `crates/parqtel-core/src/config/mod.rs`, new `config/cluster.rs`,
+  `config/object_storage.rs` (provider field only), `docs/operations/configuration.md`.
+- Work: `ClusterConfig`; HA validation rules above; env mapping.
 - Gate: `cargo test -p parqtel-core config`, `make lint`.
 
-### B2 — Object-store lease on catalog
-- Files: `crates/parqtel-core/src/storage/object_catalog.rs`, tests.
-- Work: `try_acquire`, `renew`, `read_lease`, `release`; CAS; expiry; epoch monotonic. Keep `publish` preserving lease.
-- Gate: `cargo test -p parqtel-core object_catalog`, clippy.
+### B2 — Lease objects
+- Files: new `crates/parqtel-core/src/storage/lease.rs`, `storage/mod.rs`, tests.
+- Work: `Lease::{acquire, renew, release, read}` on any `ObjectStore`; TTL + margin;
+  epoch monotonic; concurrent-acquire test with `InMemory` (one winner).
+- Gate: `cargo test -p parqtel-core lease`, clippy.
 
-### B3 — Peer gRPC skeleton + Status
-- Files: new `crates/parqtel-server/proto/peer.proto`, `crates/parqtel-server/build.rs`, `crates/parqtel-server/Cargo.toml`, `grpc.rs`, new `peer.rs`, tests.
-- Work: generate tonic client/server; register service; `Status` returns role/epoch/WAL/buffer stats.
+### B3 — Peer gRPC skeleton
+- Files: `crates/parqtel-server/proto/peer.proto`, `build.rs`, `Cargo.toml`,
+  `grpc.rs`, new `peer.rs`.
+- Work: `Status`, `Forward` (raw body + content type + signal), `QueryRecent`
+  (stub returning `Unimplemented`). Separate listener on `cluster.bind_addr`.
 - Gate: `cargo test -p parqtel-server peer`, `cargo build -p parqtel-server`.
 
-### B4 — Role manager
-- Files: new `crates/parqtel-server/src/cluster.rs`, `server.rs`, `state.rs`, `metrics.rs`, tests.
-- Work: candidate/leader/follower loop; lease acquire/renew; peer status polling; role in `AppState`; gates for ingest/flush and alert/ruler tasks; manual override.
-- Gate: unit tests with in-memory object store; `cargo test -p parqtel-server cluster`.
+### B4 — Role manager with drain
+- Files: new `crates/parqtel-server/src/cluster.rs`, `server.rs`, `state.rs`,
+  `metrics.rs`.
+- Work: state machine above; startup replay-then-publish; drain on demotion; epoch
+  check hook used by block publish and WAL commit.
+- Gate: tests with `InMemory` store: election, renew loss, drain publishes buffered
+  rows, restarted ex-leader publishes its tail.
 
-### B5 — OTLP ingress gating + forwarding
-- Files: `router.rs`, `handlers/ingest.rs`, `grpc.rs`, `peer.rs`, integration tests.
-- Work: follower rejects or forwards to leader over `PeerService`; leader only writes WAL. Content type preserved. 503 response includes leader address.
-- Gate: `cargo test -p parqtel-server ingest`, `make lint`.
+### B5 — Ingest forwarding
+- Files: `router.rs`, `handlers/ingest.rs`, `handlers/remote_write.rs`, `grpc.rs`,
+  `peer.rs`.
+- Work: follower forwards every write path; 503 + `Retry-After` without a leader;
+  forwarded-request metric.
+- Gate: two in-process nodes; write to follower, read on leader; `make lint`.
 
-### B6 — Recent buffer sharing
-- Files: `crates/parqtel-query/src/executor/mod.rs`, `metrics.rs`, `crates/parqtel-server/src/peer.rs`, tests.
-- Work: `PeerBuffer` trait; `QueryRecent` RPC with bounds; follower merge/dedupe; `max_series` after merge; equivalence test comparing leader-direct vs follower-proxied query.
-- Gate: `cargo test -p parqtel-query executor`, `cargo test -p parqtel-server peer`.
+### B6 — Time-cutoff query split
+- Files: `crates/parqtel-query/src/executor/{mod,metrics,logs,traces}.rs`,
+  `crates/parqtel-server/src/peer.rs`.
+- Work: `RecentSource` trait; `QueryRecent` real implementation with point and byte
+  caps; cutoff split; limits after join; degraded warning path.
+- Gate: equivalence test — same query on leader directly vs via follower gives
+  identical series and samples, including a block flushed during the query.
 
-### B7 — Rules only on follower
-- Files: `server.rs`, `tasks.rs`, `ruler.rs`, tests.
-- Work: start alert eval and ruler only when role=follower or fallback; stop on promote; state persistence unchanged; exactly-one evaluation test via shared alert store counter.
-- Gate: `cargo test -p parqtel-server ruler`, `cargo test -p parqtel-alert`.
+### B7 — Rules lease, forwarded outputs, shared alert state
+- Files: `server.rs`, `tasks.rs`, `ruler.rs`, `crates/parqtel-alert/src/store/alert_store.rs`,
+  `crates/parqtel-alert/src/router.rs` (silence export/import), and a new rules submodule beside the role manager.
+- Work: start/stop eval + ruler on lease; forward ruler sink output to the leader;
+  snapshot/load alert state and silences; handoff.
+- Gate: handoff test — a firing alert stays firing with no second notification.
 
-### B8 — Azure object store + timestamp prefetch
-- Files: `config/object_storage.rs`, `block_store.rs`, `storage/index.rs` (catalog adoption), `tasks.rs`, tests.
-- Work: Azure builder; `prefetch_for_query`; `node_id` writer; adopt remote blocks only into cache paths; retention owner check.
-- Gate: `cargo test -p parqtel-core block_store`, `cargo test -p parqtel-core object_catalog`.
+### B8 — Azure backend and range prefetch
+- Files: `Cargo.toml` (`object_store` `azure` feature), `config/object_storage.rs`,
+  `storage/block_store.rs`, `tasks.rs`, scanner prefetch hook.
+- Work: `ObjectBlockStore::azure`; prefetch overlapping blocks only; writer =
+  `node_id`; owner-only compaction/retention.
+- Gate: `cargo test -p parqtel-core block_store`; prefetch test counts downloads.
 
-### B9 — Deployment manifests
-- Files: `deploy/helm/parqtel/values.yaml`, `values.schema.json`, templates for headless service and anti-affinity, `docs/operations/deployment.md`, `docs/guides/...`.
-- Work: `replicaCount >= 2` when cluster enabled; headless peer service; startup probe `failureThreshold: 120` (matches UAT fix); PVC per pod; env for cluster + object store; HPA validation message.
-- Gate: `helm lint deploy/helm/parqtel`, `make docs-check`.
+### B9 — Helm and docs
+- Files: `deploy/helm/parqtel/{values.yaml,values.schema.json,templates/*}`,
+  `docs/operations/deployment.md`, new `docs/operations/high-availability.md`.
+- Work: allow `replicaCount >= 2` when `cluster.enabled`; headless peer Service;
+  pod anti-affinity; startup probe `failureThreshold: 120`; PVC `30Gi` default for HA;
+  persist the UAT env overrides (alert interval, inflight flushes) as values.
+- Gate: `helm lint` with HA values, `make docs-check`.
 
-### B10 — Chaos/failover tests
-- Files: `tests/e2e/` Go tests or scripted kind/k3d tests under `scripts/checks/`.
-- Work: 3-node local stack; kill leader, assert new leader, ingest resumes, no duplicate alerts; kill follower, assert leader fallback rules; object-store outage; split brain fence.
-- Gate: chosen harness green in CI-like local run.
+### B10 — Failover tests
+- Files: `scripts/checks/ha_failover.sh` or `tests/e2e/` (k3d + MinIO).
+- Work: kill leader (new leader, ingest resumes, tail published, no gap); kill
+  follower (leader takes rules); restart ex-leader; object-store outage; stale-leader
+  fencing; no duplicate notifications.
+- Gate: script green locally.
 
-### B11 — UAT rollout (manual decision)
-- Not a coding task. Requires explicit approval. Validate 6h soak, memory <4Gi, no restarts, catalog parity, query results match across leader/follower.
+### B11 — UAT rollout (manual approval)
+Not delegated. Requires B0.5 to pass on Ceph RGW, a bucket and credentials, and
+approval. Validate 6 h soak, memory < 4 GiB per pod, zero restarts, query parity.
 
-## Suggested goal text for the coding agent
+## Decisions taken
 
-> Implement buddy peering tasks B1–B10 from `docs/development/buddy-peering-plan.md` on branch `feat/buddy-peering` in order. One task per subagent, review each diff, run its gate, commit as `sonu202604 <sonu202604@gmail.com>`. Keep the feature opt-in: with `[cluster] enabled = false`, single-node behavior must be unchanged. Do not deploy to UAT or start B11 without approval.
+- Leader/follower over dual-ingest or active/standby (operator decision).
+- Ingest routing: follower forwarding through one Service.
+- Leases: separate objects with epoch fencing; catalog unchanged.
+- Query merge: time cutoff, not fingerprint dedupe.
 
-## Open decisions before B4
+## Open decisions (before B4)
 
-- 2 vs 3 pods on UAT. 2 satisfies the stated minimum but leaves no follower after a leader failover; `leader_rules_fallback` covers it.
-- RPO for the last unflushed window. Recommend HA config `storage.block_duration_secs = 60`, `flush_interval_secs = 2`.
-- Static peer list vs headless-service DNS. Recommend headless service; static list only for local tests.
-- WAL shadowing to object storage (Phase 5, not in B1–B10).
+- 2 or 3 pods on UAT.
+- `recent_window_secs` (default 300) versus block duration: UAT currently runs
+  `block_duration_secs = 7200`; HA needs ≤ 240 (row-count cuts already make UAT blocks
+  ~2 min, but the bound must hold by config).
+- Whether object-store outage should keep the current leader ingesting past its TTL
+  (availability) or stop it (consistency). The plan chooses consistency.
+
+## Goal text for the coding agent
+
+> Implement buddy peering tasks B0.5–B10 from `docs/development/buddy-peering-plan.md`
+> on branch `feat/buddy-peering`, in order, one task per subagent. Stop after B0.5 if
+> Ceph RGW lacks conditional PUT. Review each diff, run its gate, commit as
+> `sonu202604 <sonu202604@gmail.com>`. With `[cluster] enabled = false`, single-node
+> behavior must stay unchanged. Do not deploy to UAT (B11) without approval.
