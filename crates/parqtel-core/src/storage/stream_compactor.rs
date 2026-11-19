@@ -1603,9 +1603,13 @@ mod tests {
             .and_then(|item| item.value.as_deref())
             .unwrap();
         let index =
-            SeriesIndex::from_table(&SeriesTable::from_footer_value(footer).unwrap()).unwrap();
-        assert_eq!(index.series.len(), 2, "one entry per logical series");
-        assert!(index.series.iter().all(|series| series.rows == 4));
+            SeriesIndex::from_owned_table(SeriesTable::from_footer_value(footer).unwrap()).unwrap();
+        assert_eq!(index.series_count(), 2, "one entry per logical series");
+        assert!((0..index.series_count()).all(|id| {
+            index
+                .bounds(id as u32)
+                .is_some_and(|(_, rows, _, _)| rows == 4)
+        }));
         assert_eq!(
             read_compacted_sources(&merged.path).unwrap(),
             vec![

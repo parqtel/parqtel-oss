@@ -38,6 +38,18 @@ kubectl -n parqtel port-forward svc/parqtel 8080:8080 &
 curl -s http://localhost:8080/health
 ```
 
+### Validate the provider API locally
+
+`examples/argo-rollouts/verify-api.sh` seeds the demo service and checks the
+same smoke gauge, RED ratio and range-query shape that the Argo templates use:
+
+```bash
+PARQTEL_URL=http://localhost:8080 SERVICE=demo \
+  ./examples/argo-rollouts/verify-api.sh
+```
+
+It requires `curl` and `jq` and exits non-zero on an empty/malformed result.
+
 ## 2. Gate a canary on error rate (RED)
 
 See `examples/argo-rollouts/analysis-template-red.yaml`:

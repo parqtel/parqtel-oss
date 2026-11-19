@@ -685,18 +685,17 @@ mod tests {
         // series, covering the rows it occupies, with service.name merged in.
         let table = parqtel_core::storage::SeriesTable::from_footer_value(&footer).unwrap();
         let index = parqtel_core::storage::SeriesIndex::from_table(&table).unwrap();
-        assert_eq!(index.series.len(), 4);
+        assert_eq!(index.series_count(), 4);
         assert_eq!(index.total_rows(), 7);
-        for entry in &index.series {
-            let (a, b) = (
-                entry.start as usize,
-                entry.start as usize + entry.rows as usize,
-            );
+        for id in 0..index.series_count() {
+            let (start, row_count, min_ts, max_ts) = index.bounds(id as u32).unwrap();
+            let labels = index.labels(id as u32).unwrap();
+            let (a, b) = (start as usize, start as usize + row_count as usize);
             for r in &rows[a..b] {
-                assert_eq!(entry.labels.get("host"), Some(r.1.as_str()));
-                assert!(entry.min_ts <= r.2 && r.2 <= entry.max_ts);
+                assert_eq!(labels.get("host"), Some(r.1.as_str()));
+                assert!(min_ts <= r.2 && r.2 <= max_ts);
             }
-            assert!(entry.labels.get("service.name").is_some());
+            assert!(labels.get("service.name").is_some());
         }
     }
 
