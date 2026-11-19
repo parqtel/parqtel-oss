@@ -181,7 +181,7 @@ fn load_block(file: &File) -> Result<LoadedBlock> {
     let rows = md.file_metadata().num_rows().max(0) as u64;
 
     let series = series_text.and_then(|text| {
-        match SeriesTable::from_footer_value(&text).and_then(|t| SeriesIndex::from_table(&t)) {
+        match SeriesTable::from_footer_value(&text).and_then(SeriesIndex::from_owned_table) {
             // The table must account for every row, or it describes some other file.
             Ok(idx) if idx.total_rows() == rows => Some(Arc::new(idx)),
             Ok(_) => {

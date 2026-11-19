@@ -291,8 +291,12 @@ async fn test_compaction_writes_a_series_table_for_the_merged_block() {
         .expect("merged block carries a series table");
     let table = SeriesIndex::from_table(&SeriesTable::from_footer_value(&text).unwrap()).unwrap();
     // One entry per series, not one per source: 2 hosts, 6 rows each.
-    assert_eq!(table.series.len(), 2);
-    assert!(table.series.iter().all(|s| s.rows == 6));
+    assert_eq!(table.series_count(), 2);
+    assert!((0..table.series_count()).all(|id| {
+        table
+            .bounds(id as u32)
+            .is_some_and(|(_, rows, _, _)| rows == 6)
+    }));
 
     let mut sel = SeriesSelector::all()
         .with_filter(Some(Arc::new(|l: &LabelSet| l.get("host") == Some("h1"))));
