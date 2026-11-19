@@ -138,7 +138,8 @@ impl AlertStore {
         };
         let mut instances = self.instances.write().await;
         let mut fp_index = self.fingerprint_index.write().await;
-        for alert in alerts {
+        for mut alert in alerts {
+            alert.fingerprint = AlertInstance::compute_fingerprint(&alert.rule_id, &alert.labels);
             fp_index.insert(alert.fingerprint, alert.id);
             instances.insert(alert.id, alert);
         }
@@ -227,5 +228,27 @@ mod tests {
             .list_by_rule("target", Utc::now() - chrono::Duration::hours(1))
             .await;
         assert_eq!(results.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_reload_recomputes_firing_fingerprint_without_duplicate() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut instance = sample_instance("r1");
+        let expected_fingerprint = instance.fingerprint;
+        instance.fingerprint ^= 1;
+
+        let store = AlertStore::new(Some(dir.path().to_path_buf())).await;
+        store.save(&instance).await;
+        drop(store);
+
+        let reloaded = AlertStore::new(Some(dir.path().to_path_buf())).await;
+        let matched = reloaded
+            .get_by_fingerprint(expected_fingerprint)
+            .await
+            .unwrap();
+
+        assert_eq!(matched.id, instance.id);
+        assert_eq!(matched.fingerprint, expected_fingerprint);
+        assert_eq!(reloaded.list_active().await.len(), 1);
     }
 }
