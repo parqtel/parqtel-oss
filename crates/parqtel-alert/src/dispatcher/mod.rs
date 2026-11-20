@@ -141,7 +141,7 @@ impl AlertDispatcher {
         };
 
         for (route, batch) in batches {
-            self.queue.enqueue(route, batch);
+            self.queue.enqueue(route, batch).await;
         }
     }
 

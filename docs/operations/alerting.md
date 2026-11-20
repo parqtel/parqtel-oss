@@ -217,7 +217,7 @@ trusted context.
 | `parqtel_alert_active_groups` | Current grouped alerts |
 | `parqtel_alert_eval_skipped_total` | Evaluation cycles skipped because the dedicated slot was busy |
 | `parqtel_alert_eval_duration_seconds` | Evaluation cycle duration |
-| `parqtel_alert_dropped_notifications_total` | Batches dropped because a receiver queue was full |
+| `parqtel_alert_dropped_notifications_total` | Batches dropped after a receiver queue stayed full for 1s |
 | `parqtel_alert_evicted_groups_total` | Groups evicted at `max_active_groups` |
 | `parqtel_alert_noise_suppressed_total` | Firings suppressed by the noise policy |
 

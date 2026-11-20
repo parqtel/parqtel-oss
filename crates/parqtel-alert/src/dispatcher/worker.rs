@@ -160,15 +160,25 @@ impl DeliveryQueue {
     }
 
     /// Enqueue a batch onto the target receiver's worker without blocking other receivers.
-    pub fn enqueue(&self, route: ResolvedRoute, batch: NotificationBatch) {
+    pub async fn enqueue(&self, route: ResolvedRoute, batch: NotificationBatch) {
         let Some(tx) = self.senders.get(&route.receiver) else {
             tracing::warn!(receiver = %route.receiver, "no delivery worker registered for receiver");
             return;
         };
 
-        if let Err(err) = tx.try_send((route, batch)) {
-            self.metrics.inc_dropped_notification();
-            tracing::warn!(error = %err, "failed to enqueue notification batch");
+        // Brief backpressure instead of silently dropping a paging batch. A
+        // receiver that stays full for a second is reported and the metric
+        // counts the loss.
+        match tokio::time::timeout(Duration::from_secs(1), tx.send((route, batch))).await {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => {
+                self.metrics.inc_dropped_notification();
+                tracing::warn!(error = %err, "notification worker closed");
+            }
+            Err(_) => {
+                self.metrics.inc_dropped_notification();
+                tracing::warn!("notification queue stayed full for 1s; batch dropped");
+            }
         }
     }
 }
@@ -480,7 +490,7 @@ mod tests {
         }
         queue.enqueue(route.clone(), sample_firing_batch());
         // Third enqueue cannot fit: capacity 1 already holds the second batch.
-        queue.enqueue(route, sample_firing_batch());
+        queue.enqueue(route, sample_firing_batch()).await;
         assert_eq!(
             metrics.get_notification_count("blocked", "webhook", "success"),
             0
@@ -595,7 +605,7 @@ mod tests {
             group_interval: Duration::from_secs(0),
             repeat_interval: Duration::from_secs(60),
         };
-        queue.enqueue(route, sample_firing_batch());
+        queue.enqueue(route, sample_firing_batch()).await;
 
         for _ in 0..50 {
             if calls.load(Ordering::SeqCst) == 1 {
