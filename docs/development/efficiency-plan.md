@@ -335,6 +335,53 @@ The query missed its latency target, but no step-evaluation breakdown was record
 Profile `target` first; propose Phase 3b range-function pushdown for approval if
 step evaluation is the dominant cost.
 
+#### Phase 3 Q7 UAT result — six-hour soak
+
+Image `ofticr.azurecr.io/infra/maria/parqtel:q7-ae9112e` (`sha256:957a5d7f59756a54e933b8ee043dff92bb35bdaaeb255b713664c3b07d7dc189`)
+completed rollout on uat-oman; rollback target was the old digest
+`sha256:14c29d2a…`. UAT overrides remained: `ALERT_INTERVAL_SECS=60`,
+`MAX_INFLIGHT_FLUSHES=1`, `LABEL_INTERNER_CAPACITY=2097152`,
+startupProbe `failureThreshold=120`, and PVC `30Gi`. The dedicated HTTP runtime
+from PR #85 stayed healthy: every sample returned `health=200`, with zero restarts.
+
+The six-hour, four-panel soak recorded 361 one-minute samples and 1,444 panel
+queries with zero failures. It accepted 73 log batches and 73 trace batches; peak
+memory was 3,786 MiB, with zero restarts, zero ingest errors, and a maximum ingest
+gap of 0s. Metrics ingestion stayed near 9.4K points/s; 16 low-priority scans were
+skipped.
+
+| Panel (hours 4–6) | p50 ms | p95 ms |
+|---|---:|---:|
+| `allocators-15m` | 3,706 | 17,315 |
+| `allocators-5m` | 3,426 | 10,265 |
+| `up-5m` | 3,137 | 9,461 |
+| `running-pods-15m` | 3,533 | 16,611 |
+
+Phase 0 `allocators-15m` baseline for hours 4–6 was approximately 11.2–11.8s
+p50 and 13.4–14.3s p95.
+
+| Final UAT measure | Result |
+|---|---:|
+| Blocks scanned | 26,371 |
+| Footer cache hits / misses | 16,862 / 9,293 (35.5% of opens missed) |
+| Footer cache bytes | 102,438,874 |
+| Footer load time | 12,985s |
+| Scan admission wait | 8,684.5s |
+| Metric storage | 313 blocks; 872,327,128 rows; 2,425,619,718 bytes |
+
+| Q7 gate | Target | Result | Status |
+|---|---|---|---|
+| Panel p50 | ≤4s | All four panels: 3.1–3.7s | Pass |
+| Panel p95 | ≤7s | All four panels: 9.461–17.315s | Fail |
+| Peak memory | <4 GiB | 3,786 MiB | Pass |
+| Restarts / ingest errors | 0 / 0 | 0 / 0 | Pass |
+| Footer misses | ≤10% | 35.5% | Fail |
+
+**Q7 failed** on p95 latency and footer misses. The compact table and series-limited
+scan cut p50 substantially, but footer-cache churn still dominates tail latency.
+Recommend Phase 2b (binary lazy footer) for approval; do not start it without
+approval. Phase 3b remains ruled out by N2: step evaluation was 5.45%.
+
 #### Phase 3b decision
 
 Each query ran in three fresh release processes against `/tmp/opencode/phase3-q1-fixture`.
