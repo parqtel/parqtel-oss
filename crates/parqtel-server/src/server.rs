@@ -17,6 +17,7 @@ use parqtel_pipeline::config::RulerConfig;
 use parqtel_pipeline::ruler::{RulerEvaluator, RulerScheduler};
 use parqtel_query::QueryExecutor;
 use sha2::{Digest, Sha256};
+use std::future::Future;
 use std::io::Write;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -33,6 +34,38 @@ fn ui_assets() -> anyhow::Result<(Vec<u8>, String)> {
     hasher.update(UI_HTML.as_bytes());
     let etag = format!("\"{}\"", hex::encode(hasher.finalize()));
     Ok((content, etag))
+}
+
+/// Keeps HTTP probes schedulable when ingest and flush work occupies the main runtime.
+pub(crate) fn spawn_http_server<F>(
+    listener: std::net::TcpListener,
+    router: axum::Router,
+    tls: Option<tokio_rustls::rustls::ServerConfig>,
+    shutdown: F,
+) -> std::io::Result<std::thread::JoinHandle<anyhow::Result<()>>>
+where
+    F: Future<Output = ()> + Send + 'static,
+{
+    listener.set_nonblocking(true)?;
+    std::thread::Builder::new()
+        .name("parqtel-http".into())
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?;
+            runtime.block_on(async move {
+                let listener = tokio::net::TcpListener::from_std(listener)?;
+                match tls {
+                    Some(tls) => crate::tls::serve(listener, router, tls, shutdown).await,
+                    None => {
+                        axum::serve(listener, router)
+                            .with_graceful_shutdown(shutdown)
+                            .await?;
+                        Ok(())
+                    }
+                }
+            })
+        })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -447,7 +480,7 @@ pub(crate) async fn run_server(
 
     let router = build_router(state.clone());
     let addr = config.server.bind_address.clone();
-    let listener = tokio::net::TcpListener::bind(&addr).await?;
+    let listener = std::net::TcpListener::bind(&addr)?;
     for (signal, r) in &wal_replay {
         tracing::info!(
             signal,
@@ -471,15 +504,19 @@ pub(crate) async fn run_server(
         }
     });
 
-    if let Some(tls_config) = config.server.tls.as_ref() {
-        let tls = crate::tls::load(tls_config)?;
+    let tls = config
+        .server
+        .tls
+        .as_ref()
+        .map(crate::tls::load)
+        .transpose()?;
+    if tls.is_some() {
         tracing::info!("HTTP listener using TLS");
-        crate::tls::serve(listener, router, tls, shutdown_signal()).await?;
-    } else {
-        axum::serve(listener, router)
-            .with_graceful_shutdown(shutdown_signal())
-            .await?;
     }
+    let http_thread = spawn_http_server(listener, router, tls, shutdown_signal())?;
+    tokio::task::spawn_blocking(move || http_thread.join())
+        .await?
+        .map_err(|_| anyhow::anyhow!("HTTP server thread panicked"))??;
 
     tracing::info!("Shutting down gracefully...");
     flush_task.abort();

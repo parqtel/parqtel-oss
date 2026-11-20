@@ -25,6 +25,54 @@ async fn setup_test_app() -> axum::Router {
     build_router(setup_test_state().await)
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn health_answers_while_main_runtime_is_blocked() {
+    use std::io::{Read, Write};
+    use std::time::Duration;
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let router = build_router(setup_test_state().await);
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    let server = crate::server::spawn_http_server(listener, router, None, async move {
+        let _ = shutdown_rx.await;
+    })
+    .unwrap();
+
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let (response_tx, response_rx) = std::sync::mpsc::channel();
+    let client = std::thread::spawn(move || {
+        let mut stream =
+            std::net::TcpStream::connect_timeout(&address, Duration::from_secs(2)).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        stream
+            .write_all(b"GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .unwrap();
+        started_tx.send(()).unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        response_tx.send(response).unwrap();
+    });
+
+    started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    let response = response_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("health request must finish while the main runtime is blocked");
+    client.join().unwrap();
+    shutdown_tx.send(()).unwrap();
+    tokio::task::spawn_blocking(move || server.join())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+
+    assert!(response.starts_with("HTTP/1.1 200 OK"));
+    assert!(response.contains(r#"{"status":"ok"}"#));
+}
+
 /// A default configuration whose block directories live in a temporary directory
 /// that outlives the test, so services that flush from background tasks never
 /// write into the working directory.
