@@ -33,6 +33,16 @@ const BASE_NS: i64 = 1_700_000_000_000_000_000;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::builder()
+                .with_default_directive(tracing::Level::DEBUG.into())
+                .from_env_lossy(),
+        )
+        .with_writer(std::io::stderr)
+        .try_init()
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
+
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.as_slice() {
         [mode, dir] if mode == "fixture" => write_fixture(Path::new(dir)),
@@ -171,6 +181,19 @@ async fn measure(query: &str, dir: &Path) -> Result<(), Box<dyn Error>> {
                 TARGET.to_string()
             } else {
                 format!("{TARGET}{{pod=\"pod-7\"}}")
+            };
+            let expr = parqtel_query::parser::parse_expr(&expression)?;
+            let result = executor
+                .execute_ast(&expr, BASE_NS, BASE_NS + WINDOW_NS, Some(STEP_NS))
+                .await?;
+            result_counts(&[result])
+        }
+        "rate-target" | "sum-rate" | "over-time" => {
+            let expression = match query {
+                "rate-target" => format!("rate({TARGET}[5m])"),
+                "sum-rate" => format!("sum by (pod) (rate({TARGET}[5m]))"),
+                "over-time" => format!("max_over_time({TARGET}[5m])"),
+                _ => return Err(format!("unknown query: {query}").into()),
             };
             let expr = parqtel_query::parser::parse_expr(&expression)?;
             let result = executor
