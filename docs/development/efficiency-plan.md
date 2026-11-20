@@ -286,6 +286,55 @@ showed footer-cache churn (33% misses, ~0.93 s each) as the larger latency cost,
 the plan adds a configurable cache budget and a compact in-memory table before the
 series-limited scan, and defers range-function pushdown to Phase 3b.
 
+#### Phase 3 Q6 measurements — synthetic fixture
+
+Q1 baseline and post-Q5 values are three-run medians from fresh release-build
+processes. Deltas compare post-Q5 with baseline; negative values mean lower cost.
+The two-panels post-Q5 latency and HWM were not recorded. Q2 cache-budget results
+are listed separately and are not represented as post-Q5 query timings.
+
+| Query / measure | Q1 baseline | Post-Q5 / Q2 | Delta |
+|---|---:|---:|---:|
+| `target` latency | 201 ms | 176 ms | -25 ms (-12.4%) |
+| `target` HWM | 260.9 MiB | 173.2 MiB | -87.7 MiB (-33.6%) |
+| `target` rows considered | 1,240,000 | 1,240,000 | unchanged |
+| `target` points returned | 30,000 | 30,000 | unchanged |
+| `selective` latency | 131 ms | 132 ms | +1 ms (+0.8%) |
+| `selective` HWM | 229.8 MiB | 173.3 MiB | -56.5 MiB (-24.6%) |
+| `selective` rows considered | 12,400 | 12,400 | unchanged |
+| `selective` points returned | 12,000 | 12,000 | unchanged |
+| `two-panels` latency / HWM | 224 ms / 328.1 MiB | not recorded | not available |
+| `two-panels` footer misses | 4 | 4 at both 192 MiB and 512 MiB budgets | no reduction |
+
+The `target` result remains 30,000 points: `max_series` 1,000 × 30 rows per
+series. Its 1,240,000 scanned rows did not change. HWM fell 33.6%, and latency
+improved 12.4%; neither reaches the 50% target.
+
+Q3's separate series-index `open` benchmark changed from 106.7 to 81.9 MiB HWM
+(-24.8 MiB, -23.2%) and from 83,895,996 to 56,481,268 `approx_bytes`
+(-27,414,728 bytes, -32.7%).
+
+| Q6 exit check | Target | Result | Status |
+|---|---|---|---|
+| `target` points | ≤33,000 (1.1 × 1,000 × 30) | 30,000 | Pass |
+| `target` latency | ≤100.5 ms (50% of 201 ms) | 176 ms; 12.4% lower than baseline | Fail |
+| `target` HWM | ≤130.45 MiB (50% of 260.9 MiB) | 173.2 MiB; 33.6% lower than baseline | Fail |
+| `two-panels` footer misses | ≤10% of block opens | 4 misses / 4 blocks (100%, cold cache) at both budgets | Fail; no reduction |
+| Equivalence tests | All pass | Q4: 864 workspace tests passed, including `indexed_scan_equals_unindexed_scan`; Q5: 21 scanner tests passed, including the same equivalence test | Pass |
+
+**Phase 3 exit did not pass.** The point-count bound and equivalence gates passed,
+but latency and HWM missed their targets, and the synthetic fixture's cold-cache
+miss rate did not improve with a larger budget. The four misses are the four
+fixture blocks opened by a fresh process; the cache has no prior warm entries.
+
+**Follow-ups:** Q3's compact table reduced measured open memory, so no additional
+2a change is justified by these measurements. Q2's four footer misses persisted
+at both 192 MiB and 512 MiB, which warrants proposing Phase 2b (lazy binary footer)
+for approval; validate miss rate on UAT before claiming a production benefit.
+The query missed its latency target, but no step-evaluation breakdown was recorded.
+Profile `target` first; propose Phase 3b range-function pushdown for approval if
+step evaluation is the dominant cost.
+
 ### Phase 4: traces and logs storage
 
 1. **Traces**: sort blocks by (trace_id) or (service, start_time); add bloom
