@@ -154,7 +154,7 @@ impl RoutingMetrics {
             }
         }
 
-        out.push_str("# HELP parqtel_alert_dropped_notifications_total Notification batches dropped because a receiver queue was full.\n");
+        out.push_str("# HELP parqtel_alert_dropped_notifications_total Notification batches dropped after sustained receiver queue backpressure.\n");
         out.push_str("# TYPE parqtel_alert_dropped_notifications_total counter\n");
         out.push_str(&format!(
             "parqtel_alert_dropped_notifications_total {}\n",
