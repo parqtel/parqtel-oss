@@ -273,6 +273,11 @@ validation or rollout.
 
 Exit: memory per query scales with returned series, not scanned rows.
 
+Execution: [phase3-execution-plan.md](phase3-execution-plan.md). The Phase 0 soak
+showed footer-cache churn (33% misses, ~0.93 s each) as the larger latency cost, so
+the plan adds a configurable cache budget and a compact in-memory table before the
+series-limited scan, and defers range-function pushdown to Phase 3b.
+
 ### Phase 4: traces and logs storage
 
 1. **Traces**: sort blocks by (trace_id) or (service, start_time); add bloom
