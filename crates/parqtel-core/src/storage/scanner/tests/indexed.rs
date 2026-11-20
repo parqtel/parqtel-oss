@@ -115,6 +115,33 @@ fn pair(dir: &std::path::Path) -> (BlockMetadata, BlockMetadata) {
     (block_meta(plain), block_meta(indexed))
 }
 
+#[test]
+fn footer_cache_counters_are_recorded_by_block_level() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_, mut indexed) = pair(dir.path());
+    let path = dir.path().join("m_l0_test.parquet");
+    std::fs::rename(&indexed.path, &path).unwrap();
+    indexed.path = path;
+
+    let level = SCAN_BLOCK_LEVELS
+        .iter()
+        .position(|level| *level == "l0")
+        .unwrap();
+    let before = Scanner::scan_metrics_snapshot();
+    super::super::record_scan_block(&indexed.path);
+    assert!(open_block(&indexed.path).unwrap().is_some());
+    assert!(open_block(&indexed.path).unwrap().is_some());
+    let after = Scanner::scan_metrics_snapshot();
+
+    assert!(after.blocks_by_level[level] > before.blocks_by_level[level]);
+    assert!(after.footer_cache_misses_by_level[level] > before.footer_cache_misses_by_level[level]);
+    assert!(after.footer_cache_hits_by_level[level] > before.footer_cache_hits_by_level[level]);
+    assert!(after.footer_load_ns_by_level[level] >= before.footer_load_ns_by_level[level]);
+    assert!(
+        after.index_estimated_bytes_by_level[level] > before.index_estimated_bytes_by_level[level]
+    );
+}
+
 fn canonical(mut points: Vec<DataPoint>) -> Vec<(i64, String, String)> {
     points.sort_by_key(|p| (p.timestamp_ns, p.labels.json_str().to_string()));
     points

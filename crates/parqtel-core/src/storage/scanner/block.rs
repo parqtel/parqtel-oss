@@ -307,7 +307,7 @@ pub(super) fn open_block(path: &std::path::Path) -> Result<Option<OpenedBlock>> 
     let cached = key.as_ref().and_then(cached_block);
     let (parsed, series, log_index) = match cached {
         Some(hit) => {
-            super::record_footer_cache_hit();
+            super::record_footer_cache_hit(path);
             hit
         }
         None => {
@@ -316,10 +316,10 @@ pub(super) fn open_block(path: &std::path::Path) -> Result<Option<OpenedBlock>> 
                 .as_ref()
                 .map(|lock| lock.lock().unwrap_or_else(|e| e.into_inner()));
             if let Some(hit) = key.as_ref().and_then(cached_block) {
-                super::record_footer_cache_hit();
+                super::record_footer_cache_hit(path);
                 hit
             } else {
-                super::record_footer_cache_miss();
+                super::record_footer_cache_miss(path);
                 let started = std::time::Instant::now();
                 let LoadedBlock {
                     meta,
@@ -328,7 +328,7 @@ pub(super) fn open_block(path: &std::path::Path) -> Result<Option<OpenedBlock>> 
                 } = load_block(&file)?;
                 let index_bytes = series.as_ref().map_or(0, |s| s.approx_bytes())
                     + log_index.as_ref().map_or(0, |s| s.approx_bytes());
-                super::record_footer_load(started.elapsed(), index_bytes);
+                super::record_footer_load(path, started.elapsed(), index_bytes);
                 tracing::debug!(
                     path = ?path,
                     index_estimated_bytes = index_bytes,

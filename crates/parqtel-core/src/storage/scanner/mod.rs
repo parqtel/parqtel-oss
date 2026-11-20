@@ -24,6 +24,46 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
+pub const SCAN_BLOCK_LEVELS: [&str; 7] =
+    ["l0", "l1", "l2", "normalized", "other", "logs", "traces"];
+
+fn block_level(path: &std::path::Path) -> &'static str {
+    let filename = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    if path
+        .components()
+        .any(|component| component.as_os_str() == "logs")
+        || filename.starts_with("logs_")
+    {
+        "logs"
+    } else if path
+        .components()
+        .any(|component| component.as_os_str() == "traces")
+        || filename.starts_with("traces_")
+    {
+        "traces"
+    } else if filename.starts_with("m_l0_") {
+        "l0"
+    } else if filename.starts_with("m_l1_") {
+        "l1"
+    } else if filename.starts_with("m_l2_") {
+        "l2"
+    } else if filename.starts_with("m_n_") {
+        "normalized"
+    } else {
+        "other"
+    }
+}
+
+fn block_level_index(path: &std::path::Path) -> usize {
+    SCAN_BLOCK_LEVELS
+        .iter()
+        .position(|level| *level == block_level(path))
+        .unwrap_or(4)
+}
+
 /// Process-wide block-scan admission budget for the 4 GiB UAT pod.
 const MAX_CONCURRENT_BLOCK_SCANS: usize = 4;
 /// Dedicated slot for alert evaluation, so a saturating query load cannot
@@ -62,6 +102,11 @@ struct ScanMetrics {
     footer_cache_misses: AtomicU64,
     footer_load_ns: AtomicU64,
     index_estimated_bytes: AtomicU64,
+    blocks_by_level: [AtomicU64; SCAN_BLOCK_LEVELS.len()],
+    footer_cache_hits_by_level: [AtomicU64; SCAN_BLOCK_LEVELS.len()],
+    footer_cache_misses_by_level: [AtomicU64; SCAN_BLOCK_LEVELS.len()],
+    footer_load_ns_by_level: [AtomicU64; SCAN_BLOCK_LEVELS.len()],
+    index_estimated_bytes_by_level: [AtomicU64; SCAN_BLOCK_LEVELS.len()],
     rows_considered: AtomicU64,
     rows_returned: AtomicU64,
 }
@@ -88,8 +133,17 @@ pub struct ScanMetricsSnapshot {
     pub footer_cache_budget_bytes: u64,
     pub footer_load_ns: u64,
     pub index_estimated_bytes: u64,
+    pub blocks_by_level: [u64; SCAN_BLOCK_LEVELS.len()],
+    pub footer_cache_hits_by_level: [u64; SCAN_BLOCK_LEVELS.len()],
+    pub footer_cache_misses_by_level: [u64; SCAN_BLOCK_LEVELS.len()],
+    pub footer_load_ns_by_level: [u64; SCAN_BLOCK_LEVELS.len()],
+    pub index_estimated_bytes_by_level: [u64; SCAN_BLOCK_LEVELS.len()],
     pub rows_considered: u64,
     pub rows_returned: u64,
+}
+
+impl ScanMetricsSnapshot {
+    pub const BLOCK_LEVELS: [&'static str; SCAN_BLOCK_LEVELS.len()] = SCAN_BLOCK_LEVELS;
 }
 
 pub(crate) struct ScanPermit {
@@ -163,29 +217,38 @@ fn duration_ns(duration: Duration) -> u64 {
     duration.as_nanos().min(u64::MAX as u128) as u64
 }
 
-fn record_scan_block() {
-    scan_metrics().blocks.fetch_add(1, Ordering::Relaxed);
-}
-
-fn record_footer_cache_hit() {
-    scan_metrics()
-        .footer_cache_hits
-        .fetch_add(1, Ordering::Relaxed);
-}
-
-fn record_footer_cache_miss() {
-    scan_metrics()
-        .footer_cache_misses
-        .fetch_add(1, Ordering::Relaxed);
-}
-
-fn record_footer_load(elapsed: Duration, estimated_bytes: usize) {
+fn record_scan_block(path: &std::path::Path) {
     let metrics = scan_metrics();
+    metrics.blocks.fetch_add(1, Ordering::Relaxed);
+    metrics.blocks_by_level[block_level_index(path)].fetch_add(1, Ordering::Relaxed);
+}
+
+fn record_footer_cache_hit(path: &std::path::Path) {
+    let metrics = scan_metrics();
+    let level = block_level_index(path);
+    metrics.footer_cache_hits.fetch_add(1, Ordering::Relaxed);
+    metrics.footer_cache_hits_by_level[level].fetch_add(1, Ordering::Relaxed);
+}
+
+fn record_footer_cache_miss(path: &std::path::Path) {
+    let metrics = scan_metrics();
+    let level = block_level_index(path);
+    metrics.footer_cache_misses.fetch_add(1, Ordering::Relaxed);
+    metrics.footer_cache_misses_by_level[level].fetch_add(1, Ordering::Relaxed);
+}
+
+fn record_footer_load(path: &std::path::Path, elapsed: Duration, estimated_bytes: usize) {
+    let metrics = scan_metrics();
+    let level = block_level_index(path);
+    let elapsed_ns = duration_ns(elapsed);
     metrics
         .footer_load_ns
-        .fetch_add(duration_ns(elapsed), Ordering::Relaxed);
+        .fetch_add(elapsed_ns, Ordering::Relaxed);
     metrics
         .index_estimated_bytes
+        .fetch_add(estimated_bytes as u64, Ordering::Relaxed);
+    metrics.footer_load_ns_by_level[level].fetch_add(elapsed_ns, Ordering::Relaxed);
+    metrics.index_estimated_bytes_by_level[level]
         .fetch_add(estimated_bytes as u64, Ordering::Relaxed);
 }
 
@@ -257,6 +320,21 @@ impl Scanner {
             footer_cache_budget_bytes: block::cache_budget_bytes() as u64,
             footer_load_ns: metrics.footer_load_ns.load(Ordering::Relaxed),
             index_estimated_bytes: metrics.index_estimated_bytes.load(Ordering::Relaxed),
+            blocks_by_level: std::array::from_fn(|i| {
+                metrics.blocks_by_level[i].load(Ordering::Relaxed)
+            }),
+            footer_cache_hits_by_level: std::array::from_fn(|i| {
+                metrics.footer_cache_hits_by_level[i].load(Ordering::Relaxed)
+            }),
+            footer_cache_misses_by_level: std::array::from_fn(|i| {
+                metrics.footer_cache_misses_by_level[i].load(Ordering::Relaxed)
+            }),
+            footer_load_ns_by_level: std::array::from_fn(|i| {
+                metrics.footer_load_ns_by_level[i].load(Ordering::Relaxed)
+            }),
+            index_estimated_bytes_by_level: std::array::from_fn(|i| {
+                metrics.index_estimated_bytes_by_level[i].load(Ordering::Relaxed)
+            }),
             rows_considered: metrics.rows_considered.load(Ordering::Relaxed),
             rows_returned: metrics.rows_returned.load(Ordering::Relaxed),
         }

@@ -60,7 +60,7 @@ impl Scanner {
             admission_wait += waiting.elapsed();
             tasks.push(tokio::task::spawn_blocking(move || {
                 let _permit = permit;
-                record_scan_block();
+                record_scan_block(&block.path);
                 // catch_unwind guards against panics in parquet deserialization
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     Self::scan_trace_block(block.clone(), start_ns, end_ns, limit, trace_id_filter)

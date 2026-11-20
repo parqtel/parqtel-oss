@@ -534,6 +534,41 @@ impl ServerMetrics {
             "parqtel_scan_index_estimated_bytes_total {}\n",
             scans.index_estimated_bytes
         ));
+        out.push_str("# HELP parqtel_scan_blocks_by_level_total Blocks scanned by block level\n");
+        out.push_str("# TYPE parqtel_scan_blocks_by_level_total counter\n");
+        out.push_str("# HELP parqtel_scan_footer_cache_hits_by_level_total Cached block footers used by block level\n");
+        out.push_str("# TYPE parqtel_scan_footer_cache_hits_by_level_total counter\n");
+        out.push_str("# HELP parqtel_scan_footer_cache_misses_by_level_total Block footer cache misses by block level\n");
+        out.push_str("# TYPE parqtel_scan_footer_cache_misses_by_level_total counter\n");
+        out.push_str("# HELP parqtel_scan_footer_load_seconds_by_level_total Time spent loading block footers and indexes by block level\n");
+        out.push_str("# TYPE parqtel_scan_footer_load_seconds_by_level_total counter\n");
+        out.push_str("# HELP parqtel_scan_index_estimated_bytes_by_level_total Estimated index bytes loaded by block level\n");
+        out.push_str("# TYPE parqtel_scan_index_estimated_bytes_by_level_total counter\n");
+        for (i, level) in parqtel_core::ScanMetricsSnapshot::BLOCK_LEVELS
+            .iter()
+            .enumerate()
+        {
+            out.push_str(&format!(
+                "parqtel_scan_blocks_by_level_total{{level=\"{level}\"}} {}\n",
+                scans.blocks_by_level[i]
+            ));
+            out.push_str(&format!(
+                "parqtel_scan_footer_cache_hits_by_level_total{{level=\"{level}\"}} {}\n",
+                scans.footer_cache_hits_by_level[i]
+            ));
+            out.push_str(&format!(
+                "parqtel_scan_footer_cache_misses_by_level_total{{level=\"{level}\"}} {}\n",
+                scans.footer_cache_misses_by_level[i]
+            ));
+            out.push_str(&format!(
+                "parqtel_scan_footer_load_seconds_by_level_total{{level=\"{level}\"}} {:.9}\n",
+                scans.footer_load_ns_by_level[i] as f64 / 1_000_000_000.0
+            ));
+            out.push_str(&format!(
+                "parqtel_scan_index_estimated_bytes_by_level_total{{level=\"{level}\"}} {}\n",
+                scans.index_estimated_bytes_by_level[i]
+            ));
+        }
         out.push_str("# HELP parqtel_scan_rows_considered_total Metric rows read from blocks\n");
         out.push_str("# TYPE parqtel_scan_rows_considered_total counter\n");
         out.push_str(&format!(
@@ -724,6 +759,50 @@ mod tests {
         assert!(output.contains("parqtel_ingest_gap_secs{signal=\"traces\"}"));
         assert!(output.contains("parqtel_ingested_items_total{signal=\"logs\"}"));
         assert!(output.contains("parqtel_build_info{replica=\"\"} 1"));
+    }
+
+    #[tokio::test]
+    async fn test_render_includes_scan_level_series_after_blocks_are_scanned() {
+        let dir = tempdir().unwrap();
+        let index = Arc::new(RwLock::new(BlockIndex::new(dir.path())));
+        let block = |name: &str| parqtel_core::BlockMetadata {
+            path: dir.path().join(name),
+            start_timestamp_ns: 0,
+            end_timestamp_ns: 1,
+            row_count: 0,
+            size_bytes: 0,
+            metric_names: Default::default(),
+            label_names: Default::default(),
+            label_values: Default::default(),
+            signal_type: SignalType::Metrics,
+            wal_range: None,
+        };
+        let before = parqtel_core::Scanner::scan_metrics_snapshot();
+        parqtel_core::Scanner::scan(
+            vec![block("m_l0_metrics.parquet"), block("m_l1_metrics.parquet")],
+            "test".into(),
+            0,
+            1,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let output = ServerMetrics::default().render(&index).await;
+        for (i, level) in ["l0", "l1"].iter().enumerate() {
+            let prefix = format!("parqtel_scan_blocks_by_level_total{{level=\"{level}\"}} ");
+            let value = output
+                .lines()
+                .find_map(|line| line.strip_prefix(&prefix))
+                .unwrap()
+                .parse::<u64>()
+                .unwrap();
+            assert!(value > before.blocks_by_level[i]);
+        }
+        assert!(output.contains("parqtel_scan_footer_cache_hits_by_level_total{level=\"l0\"}"));
+        assert!(output.contains("parqtel_scan_footer_cache_misses_by_level_total{level=\"l1\"}"));
+        assert!(output.contains("parqtel_scan_footer_load_seconds_by_level_total{level=\"l0\"}"));
+        assert!(output.contains("parqtel_scan_index_estimated_bytes_by_level_total{level=\"l1\"}"));
     }
 
     #[tokio::test]
