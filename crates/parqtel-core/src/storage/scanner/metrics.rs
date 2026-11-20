@@ -363,6 +363,7 @@ impl Scanner {
         buffered_points: Vec<DataPoint>,
         buffered_rows: u64,
     ) -> Result<LimitedMetricScan> {
+        let scan_started = std::time::Instant::now();
         let blocks: Vec<_> = blocks.into_iter().take(MAX_BLOCKS).collect();
         let fallback_blocks = blocks.clone();
         let selector = Arc::new(selector);
@@ -548,6 +549,7 @@ impl Scanner {
             points = points.len(),
             series = total_series,
             admission_wait_ms = admission_wait.as_millis(),
+            duration_ms = scan_started.elapsed().as_millis(),
             "limited metrics scan complete"
         );
         Ok(LimitedMetricScan {

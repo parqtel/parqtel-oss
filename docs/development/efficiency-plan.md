@@ -335,6 +335,24 @@ The query missed its latency target, but no step-evaluation breakdown was record
 Profile `target` first; propose Phase 3b range-function pushdown for approval if
 step evaluation is the dominant cost.
 
+#### Phase 3b decision
+
+Each query ran in three fresh release processes against `/tmp/opencode/phase3-q1-fixture`.
+No CPU sampler (`perf` or equivalent) was installed, so phase timings use existing
+DEBUG events. Step-evaluation time is `total_ms - scan_ms - grouping_ms` per run;
+shares are calculated per run before taking medians. Event timings are integer
+milliseconds.
+
+| Query | Total ms (median) | Scan ms (median) | Grouping ms (median) | Step-eval ms (median) | Step-eval share (median) |
+|---|---:|---:|---:|---:|---:|
+| `rate-target` | 189 | 179 | 1 | 6 | 3.51% |
+| `sum-rate` | 257 | 242 | 1 | 14 | 5.45% |
+| `over-time` | 264 | 252 | 1 | 9 | 3.41% |
+
+Decision rule: propose Phase 3b only if step evaluation is at least 40% of
+`sum by (pod) (rate(...))` time. **No proposal:** `sum-rate` step evaluation is
+5.45% of total time, below the 40% threshold.
+
 ### Phase 4: traces and logs storage
 
 1. **Traces**: sort blocks by (trace_id) or (service, start_time); add bloom
