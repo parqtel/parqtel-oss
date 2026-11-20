@@ -2215,6 +2215,124 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
 
+  /api/v1/alerts/{id}/evidence.json:
+    get:
+      tags: [Alerts]
+      summary: Get an alert's evidence and root-cause analysis
+      operationId: getAlertEvidenceJson
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Alert instance ULID.
+      responses:
+        "200":
+          description: Alert evidence snapshot and RCA, when available
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, data]
+                properties:
+                  status:
+                    type: string
+                    example: success
+                  data:
+                    type: object
+                    required: [id, query, evidence, rca]
+                    properties:
+                      id:
+                        type: string
+                        description: Alert instance ULID.
+                      query:
+                        type: string
+                        nullable: true
+                        description: Evidence query, or null when no snapshot exists.
+                      evidence:
+                        type: object
+                        nullable: true
+                        properties:
+                          query: { type: string }
+                          signal: { type: string }
+                          window_start_ns: { type: integer, format: int64 }
+                          window_end_ns: { type: integer, format: int64 }
+                          operator: { type: string, nullable: true }
+                          threshold: { type: number, nullable: true }
+                          observed: { type: number }
+                          points:
+                            type: array
+                            items:
+                              type: object
+                              required: [timestamp_ns, value]
+                              properties:
+                                timestamp_ns: { type: integer, format: int64 }
+                                value: { type: number }
+                          series_count: { type: integer }
+                      rca:
+                        type: object
+                        nullable: true
+                        properties:
+                          method: { type: string }
+                          model: { type: string }
+                          confidence: { type: number, format: float }
+                          primary_cause: { type: string }
+                          evidence:
+                            type: array
+                            items: { type: string }
+                          actions:
+                            type: array
+                            items: { type: string }
+        "400":
+          description: Invalid alert id
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error: { type: string, example: invalid alert id }
+        "404":
+          description: Alert not found
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error: { type: string, example: alert not found }
+
+  /api/v1/alerts/{id}/evidence.svg:
+    get:
+      tags: [Alerts]
+      summary: Render an alert's evidence graph as SVG
+      operationId: getAlertEvidenceSvg
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Alert instance ULID.
+      responses:
+        "200":
+          description: SVG evidence graph
+          content:
+            image/svg+xml:
+              schema:
+                type: string
+        "400":
+          description: Invalid alert id
+          content:
+            text/plain:
+              schema:
+                type: string
+        "404":
+          description: Alert not found or no evidence snapshot exists
+          content:
+            text/plain:
+              schema:
+                type: string
+
   /api/v1/alerts/{id}/acknowledge:
     post:
       tags: [Alerts]
@@ -2299,6 +2417,102 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
+
+  /api/v1/alerts/{id}/noise:
+    post:
+      tags: [Alerts]
+      summary: Mark an alert as noise
+      description: Sets the alert state to noise_flagged and noise_score to 1.
+      operationId: markAlertNoise
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Alert instance ULID.
+      responses:
+        "200":
+          description: Alert marked as noise
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: success }
+                  data: { $ref: "#/components/schemas/AlertInstance" }
+        "400":
+          description: Invalid alert id
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error: { type: string, example: invalid alert id }
+        "404":
+          description: Alert not found
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error: { type: string, example: alert not found }
+        "409":
+          description: Invalid state transition for the current alert state
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error: { type: string, example: invalid state transition }
+
+  /api/v1/alerts/{id}/signal:
+    post:
+      tags: [Alerts]
+      summary: Clear an alert's noise flag
+      description: Restores the alert state and sets noise_score to 0.
+      operationId: markAlertSignal
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Alert instance ULID.
+      responses:
+        "200":
+          description: Alert marked as signal
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: success }
+                  data: { $ref: "#/components/schemas/AlertInstance" }
+        "400":
+          description: Invalid alert id
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error: { type: string, example: invalid alert id }
+        "404":
+          description: Alert not found
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error: { type: string, example: alert not found }
+        "409":
+          description: Invalid state transition for the current alert state
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error: { type: string, example: invalid state transition }
 
   /api/v1/alerts/routes:
     get:

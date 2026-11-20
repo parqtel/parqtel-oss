@@ -7,9 +7,9 @@ per series). `scanner/block.rs` re-parses a table on every query when it exceeds
 
 | # | Item | Expected effect | Status |
 |---|------|-----------------|--------|
-| 1 | Bound concurrent block opens per query; make `FOOTER_CACHE_BUDGET` configurable | Cuts the query peak | backlog |
-| 2 | Build the inverted index only for labels a query uses | Less parse memory and time | backlog |
-| 3 | Compact row-cut blocks so a series table covers many samples per series | Disk density (55-82 B/row now) and query memory | backlog, untested |
+| 1 | Bound concurrent block opens per query; make `FOOTER_CACHE_BUDGET` configurable | Cuts the query peak | done; configurable in Phase 3, PR #82 (`16c068a` on main) |
+| 2 | Build the inverted index only for labels a query uses | Less parse memory and time | done; lazy series index, Phase 2a, PR #80 |
+| 3 | Compact row-cut blocks so a series table covers many samples per series | Disk density (55-82 B/row now) and query memory | implemented; 5-minute L1 rollup, UAT verification pending |
 | 4 | Replay OOM: previous pod OOMKilled 5 min after start at 4 GiB. Lower `max_inflight_flushes`, measure replay with big tables | No OOM loop on restart | backlog, undiagnosed |
 | 5 | Find the client querying parqtel about once a minute | Explains periodic spikes | backlog |
 | 6 | Replay interning for logs and traces (only metrics done) | Smaller replay heap | backlog |
@@ -22,6 +22,9 @@ per series). `scanner/block.rs` re-parses a table on every query when it exceeds
 | 12 | Compaction never runs: summaries with NaN quantiles serialize as `null` in `value_complex`, then `serde_json` fails on read (`invalid type: null, expected f64`). Same error breaks queries on those metrics (`certmanager_http_acme_client_request_duration_seconds`) | Compaction amortizes the series table over 6h/24h blocks; summary queries work | implemented; UAT verification pending |
 | 13 | Metrics blocks store labels twice: `labels` column (5.4 B/row, 71% of column bytes) plus the series table | Up to ~5 B/row more | implemented; UAT verification pending |
 
+Phase 0 six-hour soak passed on the Phase 2a image; see [efficiency-plan.md](efficiency-plan.md).
+
 Done and committed: segment-wise replay, no duplicate replay, replay label sharing,
-`ingest.label_interner_capacity`, jemalloc, the process-wide 4-slot scan budget
-(item 1), and the 5-minute L1 block rollup (item 3).
+`ingest.label_interner_capacity`, jemalloc, and the process-wide 4-slot scan budget
+(item 1). The 5-minute L1 block rollup (item 3) is implemented; UAT verification
+remains pending.
