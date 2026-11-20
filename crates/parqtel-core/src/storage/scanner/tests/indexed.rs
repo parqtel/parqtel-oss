@@ -226,6 +226,61 @@ fn selective_scan_reads_only_the_selected_series() {
     assert!(!got.points.is_empty() && got.points.len() < ROWS / 20);
 }
 
+#[tokio::test]
+async fn limited_indexed_scan_keeps_smallest_fingerprint_and_exact_summary() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_, indexed) = pair(dir.path());
+    let start_ns = 1;
+    let end_ns = ROWS as i64;
+    let window_ns = (end_ns - start_ns) / 60;
+    let reference = Scanner::scan_block_filtered(
+        indexed.clone(),
+        "scan.cpu",
+        start_ns,
+        end_ns,
+        &SeriesSelector::all(),
+    )
+    .unwrap();
+    let mut fingerprints: Vec<_> = reference
+        .points
+        .iter()
+        .map(|point| point.labels.fingerprint())
+        .collect();
+    fingerprints.sort_unstable();
+    fingerprints.dedup();
+    let kept = fingerprints[0];
+    let want: Vec<_> = reference
+        .points
+        .iter()
+        .filter(|point| point.labels.fingerprint() == kept)
+        .cloned()
+        .collect();
+    let mut volume = [0u64; 60];
+    for point in &reference.points {
+        let bucket = ((point.timestamp_ns - start_ns) / window_ns).clamp(0, 59) as usize;
+        volume[bucket] += 1;
+    }
+
+    let got = Scanner::scan_filtered_limited(
+        vec![indexed],
+        "scan.cpu".into(),
+        start_ns,
+        end_ns,
+        SeriesSelector::all(),
+        1,
+        start_ns,
+        window_ns,
+        Vec::new(),
+        0,
+    )
+    .await
+    .unwrap();
+    assert_eq!(canonical(got.points), canonical(want));
+    assert_eq!(got.total_series, fingerprints.len());
+    assert_eq!(got.rows_considered, reference.rows_considered);
+    assert_eq!(got.volume, volume);
+}
+
 #[test]
 fn label_less_block_without_a_valid_series_index_fails_closed() {
     let dir = tempfile::tempdir().unwrap();

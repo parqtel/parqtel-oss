@@ -14,7 +14,9 @@ mod traces;
 
 use crate::error::{Error, Result};
 pub use logs::{LogColumnPrefilter, LogRowFilter, LogScanStats};
-pub use metrics::{metric_scan_indices, MetricScan, SeriesFilter, METRIC_SCAN_COLUMNS};
+pub use metrics::{
+    metric_scan_indices, LimitedMetricScan, MetricScan, SeriesFilter, METRIC_SCAN_COLUMNS,
+};
 pub use pruning::{
     project_present, row_groups_in_range, row_groups_matching_metric, row_groups_matching_value,
 };

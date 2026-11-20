@@ -2,6 +2,12 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 use super::*;
+use crate::executor::series::evaluate_steps_to_series;
+use crate::models::{QueryResult, Sample, TimeSeries};
+use parqtel_core::models::storage::MetricRun;
+use parqtel_core::storage::{FooterIndex, SeriesSelector};
+use parqtel_core::{BlockMetadata, Metric, MetricKind, Scanner, SignalType, StorageModel};
+use std::collections::{BTreeMap, HashSet};
 
 #[tokio::test]
 async fn test_ast_volume_summary_counts_all_matched_points() {
@@ -432,4 +438,402 @@ async fn test_execute_max_samples_per_series() {
     for s in &res.series {
         assert!(s.samples.len() <= 1);
     }
+}
+
+fn write_q4_block(
+    dir: &Path,
+    file_name: &str,
+    mut points: Vec<parqtel_core::DataPoint>,
+    indexed: bool,
+) -> BlockMetadata {
+    points.sort_by(|a, b| {
+        a.labels
+            .fingerprint()
+            .cmp(&b.labels.fingerprint())
+            .then(a.timestamp_ns.cmp(&b.timestamp_ns))
+    });
+    let metric = Metric {
+        name: "q4_metric".into(),
+        kind: MetricKind::Gauge,
+        data_points: points,
+        ..Default::default()
+    };
+    let path = dir.join(file_name);
+    if indexed {
+        let run = MetricRun {
+            name: &metric.name,
+            kind: metric.kind,
+            resource: &metric.resource_attributes,
+            points: metric.data_points.iter().collect(),
+        };
+        let (batch, table) = StorageModel::metric_runs_to_block(&[run]).unwrap();
+        parqtel_core::storage::write_block_file(
+            &path,
+            batch,
+            "zstd",
+            None,
+            1024,
+            None,
+            Some(FooterIndex::Series(&table)),
+        )
+        .unwrap();
+    } else {
+        let batch = StorageModel::metrics_to_chunk(std::slice::from_ref(&metric)).unwrap();
+        parqtel_core::storage::write_block_file(&path, batch, "zstd", None, 1024, None, None)
+            .unwrap();
+    }
+    BlockMetadata {
+        path: path.clone(),
+        start_timestamp_ns: metric
+            .data_points
+            .iter()
+            .map(|point| point.timestamp_ns)
+            .min()
+            .unwrap(),
+        end_timestamp_ns: metric
+            .data_points
+            .iter()
+            .map(|point| point.timestamp_ns)
+            .max()
+            .unwrap(),
+        row_count: metric.data_points.len(),
+        size_bytes: std::fs::metadata(path).unwrap().len(),
+        metric_names: HashSet::from([metric.name]),
+        label_names: HashSet::new(),
+        label_values: Default::default(),
+        signal_type: SignalType::Metrics,
+        wal_range: None,
+    }
+}
+
+async fn q4_executor(
+    blocks: Vec<(bool, Vec<parqtel_core::DataPoint>)>,
+    buffered: Vec<parqtel_core::DataPoint>,
+    max_series: usize,
+    max_samples: usize,
+) -> (QueryExecutor, tempfile::TempDir) {
+    let dir = tempdir().unwrap();
+    let mut index = BlockIndex::new(dir.path());
+    for (number, (indexed, points)) in blocks.into_iter().enumerate() {
+        index.add(write_q4_block(
+            dir.path(),
+            &format!("q4-{number}.parquet"),
+            points,
+            indexed,
+        ));
+    }
+    let exec = QueryExecutor::new(
+        Arc::new(RwLock::new(index)),
+        Arc::new(RwLock::new(BlockIndex::new(&dir.path().join("logs")))),
+        dir.path().join("traces"),
+    )
+    .with_result_limits(max_series, max_samples);
+    if !buffered.is_empty() {
+        exec.memory_buffer()
+            .push_metrics("q4_metric", &buffered)
+            .await;
+    }
+    (exec, dir)
+}
+
+async fn reference_ast(
+    exec: &QueryExecutor,
+    expr: &crate::ast::Expr,
+    start_ns: i64,
+    end_ns: i64,
+    step_ns: i64,
+) -> QueryResult {
+    let metric = "q4_metric";
+    let scan_start = start_ns.saturating_sub(60_000_000_000);
+    let blocks = exec
+        .index
+        .read()
+        .await
+        .query(scan_start, end_ns, Some(metric));
+    let scan = Scanner::scan_filtered(
+        blocks,
+        metric.into(),
+        scan_start,
+        end_ns,
+        SeriesSelector::all(),
+    )
+    .await
+    .unwrap();
+    let (buffered, buffered_rows) = exec
+        .buffer
+        .scan_metrics_filtered(metric, scan_start, end_ns, None)
+        .await;
+    let mut raw = scan.points;
+    raw.extend(buffered);
+    let built = build_series_data(
+        raw,
+        start_ns,
+        (end_ns - start_ns) / 60,
+        exec.max_series,
+        exec.max_samples_per_series,
+    );
+    let mut data = crate::ast::SeriesData::default();
+    data.insert(metric.into(), built.numeric);
+    let mut hist_data = crate::ast::HistData::default();
+    hist_data.insert(metric.into(), built.histograms);
+    QueryResult {
+        series: evaluate_steps_to_series(
+            expr,
+            &data,
+            &hist_data,
+            exec.lookback_ns,
+            start_ns,
+            end_ns,
+            step_ns,
+        )
+        .unwrap(),
+        execution_time: std::time::Duration::ZERO,
+        points_scanned: scan.rows_considered + buffered_rows,
+        total_series_count: built.total_series,
+        volume_summary: built.volume.to_vec(),
+    }
+}
+
+async fn reference_plan(
+    exec: &QueryExecutor,
+    start_ns: i64,
+    end_ns: i64,
+    max_series: usize,
+    max_samples: usize,
+) -> QueryResult {
+    let metric = "q4_metric";
+    let blocks = exec
+        .index
+        .read()
+        .await
+        .query(start_ns, end_ns, Some(metric));
+    let scan = Scanner::scan_filtered(
+        blocks,
+        metric.into(),
+        start_ns,
+        end_ns,
+        SeriesSelector::all(),
+    )
+    .await
+    .unwrap();
+    let (buffered, buffered_rows) = exec
+        .buffer
+        .scan_metrics_filtered(metric, start_ns, end_ns, None)
+        .await;
+    let mut volume_summary = vec![0; 60];
+    let window_ns = (end_ns - start_ns) / 60;
+    let mut grouped: BTreeMap<u64, (LabelSet, Vec<(i64, MetricValue)>)> = BTreeMap::new();
+    for point in scan.points.into_iter().chain(buffered) {
+        if window_ns > 0 {
+            let bucket = ((point.timestamp_ns - start_ns) / window_ns).clamp(0, 59) as usize;
+            volume_summary[bucket] += 1;
+        }
+        grouped
+            .entry(point.labels.fingerprint())
+            .or_insert_with(|| (point.labels.clone(), Vec::new()))
+            .1
+            .push((point.timestamp_ns, point.value));
+    }
+    let total_series_count = grouped.len();
+    let mut series = Vec::new();
+    for (_, (labels, mut points)) in grouped.into_iter().take(max_series) {
+        points.sort_by_key(|(timestamp, _)| *timestamp);
+        points.truncate(max_samples);
+        let labels =
+            labels.merge(&LabelSet::try_from_iter(vec![("__name__", metric.to_string())]).unwrap());
+        series.push(TimeSeries {
+            labels,
+            samples: points
+                .into_iter()
+                .map(|(timestamp_ns, value)| Sample {
+                    timestamp_ns,
+                    value: v_to_f64(&value),
+                })
+                .collect(),
+        });
+    }
+    QueryResult {
+        series,
+        execution_time: std::time::Duration::ZERO,
+        points_scanned: scan.rows_considered + buffered_rows,
+        total_series_count,
+        volume_summary,
+    }
+}
+
+type CanonicalResult = (Vec<(String, Vec<(i64, u64)>)>, usize, Vec<u64>, u64);
+
+fn canonical_result(result: &QueryResult) -> CanonicalResult {
+    let mut series: Vec<_> = result
+        .series
+        .iter()
+        .map(|series| {
+            (
+                series.labels.json_str().to_string(),
+                series
+                    .samples
+                    .iter()
+                    .map(|sample| (sample.timestamp_ns, sample.value.to_bits()))
+                    .collect(),
+            )
+        })
+        .collect();
+    series.sort_by(|a, b| a.0.cmp(&b.0));
+    (
+        series,
+        result.total_series_count,
+        result.volume_summary.clone(),
+        result.points_scanned,
+    )
+}
+
+#[tokio::test]
+async fn series_limited_scans_match_full_scan_across_blocks_and_buffer() {
+    let at = |ts, host, value| point(ts, host, MetricValue::Double(value));
+    let (exec, _dir) = q4_executor(
+        vec![
+            (
+                true,
+                vec![
+                    at(100_000_000_000, "a", 1.0),
+                    at(100_000_000_000, "b", 2.0),
+                    at(100_000_000_000, "c", 3.0),
+                ],
+            ),
+            (
+                true,
+                vec![
+                    at(200_000_000_000, "a", 4.0),
+                    at(200_000_000_000, "b", 5.0),
+                    at(200_000_000_000, "d", 6.0),
+                ],
+            ),
+            (
+                true,
+                vec![
+                    at(300_000_000_000, "a", 7.0),
+                    at(300_000_000_000, "c", 8.0),
+                    at(300_000_000_000, "d", 9.0),
+                ],
+            ),
+        ],
+        vec![
+            at(200_000_000_000, "a", 12.0),
+            at(400_000_000_000, "a", 10.0),
+            at(400_000_000_000, "e", 11.0),
+        ],
+        2,
+        2,
+    )
+    .await;
+    let expr = crate::parser::parse_expr("q4_metric").unwrap();
+    let expected_ast = reference_ast(&exec, &expr, 0, 500_000_000_000, 100_000_000_000).await;
+    let got_ast = exec
+        .execute_ast(&expr, 0, 500_000_000_000, Some(100_000_000_000))
+        .await
+        .unwrap();
+    assert_eq!(canonical_result(&got_ast), canonical_result(&expected_ast));
+
+    let expected_plan = reference_plan(&exec, 0, 500_000_000_000, 2, 2).await;
+    let plan = QueryPlan::new(
+        "q4_metric".into(),
+        vec![],
+        0,
+        500_000_000_000,
+        None,
+        2,
+        2,
+        None,
+        None,
+    )
+    .unwrap();
+    let got_plan = exec.execute(plan).await.unwrap();
+    assert_eq!(
+        canonical_result(&got_plan),
+        canonical_result(&expected_plan)
+    );
+}
+
+#[tokio::test]
+async fn series_limited_scan_matches_full_scan_below_the_limit() {
+    let (exec, _dir) = q4_executor(
+        vec![(
+            true,
+            vec![
+                point(10, "a", MetricValue::Double(1.0)),
+                point(20, "b", MetricValue::Double(2.0)),
+            ],
+        )],
+        Vec::new(),
+        10,
+        10,
+    )
+    .await;
+    let expr = crate::parser::parse_expr("q4_metric").unwrap();
+    let expected = reference_ast(&exec, &expr, 0, 100, 10).await;
+    let got = exec.execute_ast(&expr, 0, 100, Some(10)).await.unwrap();
+    assert_eq!(canonical_result(&got), canonical_result(&expected));
+}
+
+#[tokio::test]
+async fn histogram_series_survive_series_limited_scan() {
+    let dir = tempdir().unwrap();
+    let mut index = BlockIndex::new(dir.path());
+    let points = ["a", "b"]
+        .into_iter()
+        .map(|host| {
+            parqtel_core::DataPoint::new(
+                100_000_000_000,
+                MetricValue::histogram(3, 6.0, None, None, vec![1.0], vec![1, 2]),
+                LabelSet::try_from_iter(vec![("host", host)]).unwrap(),
+            )
+            .unwrap()
+        })
+        .collect();
+    let block = write_q4_block(dir.path(), "q4-hist.parquet", points, true);
+    index.add(block);
+    let exec = QueryExecutor::new(
+        Arc::new(RwLock::new(index)),
+        Arc::new(RwLock::new(BlockIndex::new(&dir.path().join("logs")))),
+        dir.path().join("traces"),
+    )
+    .with_result_limits(1, 10);
+    let expr = crate::parser::parse_expr("histogram_count(q4_metric)").unwrap();
+    let expected = reference_ast(&exec, &expr, 0, 200_000_000_000, 10_000_000_000).await;
+    let got = exec
+        .execute_ast(&expr, 0, 200_000_000_000, Some(10_000_000_000))
+        .await
+        .unwrap();
+    assert_eq!(canonical_result(&got), canonical_result(&expected));
+    assert_eq!(got.series.len(), 1);
+}
+
+#[tokio::test]
+async fn series_limited_scan_matches_full_scan_with_legacy_block() {
+    let (exec, _dir) = q4_executor(
+        vec![
+            (
+                true,
+                vec![
+                    point(100, "a", MetricValue::Double(1.0)),
+                    point(200, "b", MetricValue::Double(2.0)),
+                ],
+            ),
+            (
+                false,
+                vec![
+                    point(300, "a", MetricValue::Double(3.0)),
+                    point(400, "c", MetricValue::Double(4.0)),
+                ],
+            ),
+        ],
+        Vec::new(),
+        2,
+        10,
+    )
+    .await;
+    let expr = crate::parser::parse_expr("q4_metric").unwrap();
+    let expected = reference_ast(&exec, &expr, 0, 500, 10).await;
+    let got = exec.execute_ast(&expr, 0, 500, Some(10)).await.unwrap();
+    assert_eq!(canonical_result(&got), canonical_result(&expected));
 }
