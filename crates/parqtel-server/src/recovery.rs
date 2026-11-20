@@ -99,15 +99,16 @@ fn finish_replay(
 /// Deserialising builds a fresh set for every point, so a replayed backlog held
 /// one copy of the same labels per sample, and each carried its own cached JSON.
 /// The live OTLP path already interns; this gives replay the same sharing.
-fn intern_labels(metric: &mut parqtel_core::Metric) {
+fn intern_set(labels: &parqtel_core::LabelSet) -> parqtel_core::LabelSet {
     let interner = parqtel_core::LabelInterner::global();
-    let share = |labels: &parqtel_core::LabelSet| {
-        let pairs: Vec<(&str, &str)> = labels.iter().collect();
-        interner.intern(&pairs).unwrap_or_else(|_| labels.clone())
-    };
-    metric.resource_attributes = share(&metric.resource_attributes);
+    let pairs: Vec<(&str, &str)> = labels.iter().collect();
+    interner.intern(&pairs).unwrap_or_else(|_| labels.clone())
+}
+
+fn intern_labels(metric: &mut parqtel_core::Metric) {
+    metric.resource_attributes = intern_set(&metric.resource_attributes);
     for dp in &mut metric.data_points {
-        dp.labels = share(&dp.labels);
+        dp.labels = intern_set(&dp.labels);
     }
 }
 
@@ -184,7 +185,9 @@ async fn replay_logs(
         truncated += stats.truncated_bytes;
         for v in pending.drain(..) {
             match serde_json::from_value::<parqtel_core::LogRecord>(v) {
-                Ok(l) => {
+                Ok(mut l) => {
+                    l.attributes = intern_set(&l.attributes);
+                    l.resource_attributes = intern_set(&l.resource_attributes);
                     if let Err(e) = logs.ingest_logs(vec![l]).await {
                         tracing::error!(signal = "logs", "WAL replay: re-ingest failed: {e}");
                     }
@@ -227,7 +230,14 @@ async fn replay_traces(
         truncated += stats.truncated_bytes;
         for v in pending.drain(..) {
             match serde_json::from_value::<parqtel_core::Span>(v) {
-                Ok(s) => {
+                Ok(mut s) => {
+                    s.attributes = intern_set(&s.attributes);
+                    for event in &mut s.events {
+                        event.attributes = intern_set(&event.attributes);
+                    }
+                    for link in &mut s.links {
+                        link.attributes = intern_set(&link.attributes);
+                    }
                     if let Err(e) = traces.ingest_spans(vec![s]).await {
                         tracing::error!(signal = "traces", "WAL replay: re-ingest failed: {e}");
                     }
@@ -296,7 +306,83 @@ pub(crate) async fn replay_all_wals(
 mod tests {
     #![allow(clippy::unwrap_used)]
     use super::*;
-    use parqtel_core::{DataPoint, LabelSet, Metric, MetricValue};
+    use parqtel_core::{
+        BlockConfig, DataPoint, LabelSet, LogBlockConfig, LogRecord, Metric, MetricValue, Span,
+        SpanEvent, SpanLink, SpanStatus,
+    };
+    use std::time::Duration;
+
+    fn labels(value: &str) -> LabelSet {
+        LabelSet::try_from_iter([("attribute", value)]).unwrap()
+    }
+
+    fn write_wal<T: serde::Serialize>(data_dir: &std::path::Path, signal: &str, records: &[T]) {
+        let mut wal = parqtel_core::wal::WalWriter::open(
+            data_dir,
+            signal,
+            parqtel_core::wal::WalSyncMode::None,
+            Duration::ZERO,
+        )
+        .unwrap();
+        for record in records {
+            wal.append(record).unwrap();
+        }
+    }
+
+    fn test_log(
+        timestamp_ns: i64,
+        attributes: LabelSet,
+        resource_attributes: LabelSet,
+    ) -> LogRecord {
+        LogRecord::new(
+            timestamp_ns,
+            timestamp_ns + 1,
+            9,
+            "INFO".into(),
+            format!("log-{timestamp_ns}"),
+            attributes,
+            resource_attributes,
+            [0; 16],
+            [0; 8],
+            0,
+            "recovery-test".into(),
+            "1".into(),
+        )
+    }
+
+    fn test_span(
+        start_time_ns: i64,
+        attributes: LabelSet,
+        event_attributes: LabelSet,
+        link_attributes: LabelSet,
+    ) -> Span {
+        Span::new(
+            [0; 16],
+            [0; 8],
+            String::new(),
+            format!("span-{start_time_ns}"),
+            1,
+            start_time_ns,
+            start_time_ns + 10,
+            attributes,
+            vec![SpanEvent {
+                time_ns: start_time_ns + 1,
+                name: "event".into(),
+                attributes: event_attributes,
+            }],
+            vec![SpanLink {
+                trace_id: [1; 16],
+                span_id: [1; 8],
+                attributes: link_attributes,
+            }],
+            SpanStatus {
+                code: 0,
+                message: String::new(),
+            },
+            [0; 8],
+            0,
+        )
+    }
 
     #[test]
     fn replayed_points_with_equal_labels_share_one_set() {
@@ -323,5 +409,97 @@ mod tests {
             m.data_points[0].labels.get("pod"),
             Some("recovery-test-pod")
         );
+    }
+
+    #[tokio::test]
+    async fn replayed_logs_preserve_records_and_intern_attribute_sets() {
+        let dir = tempfile::tempdir().unwrap();
+        let attributes = labels("shared-log-attributes");
+        let resource_attributes = labels("shared-log-resource");
+        let originals = vec![
+            test_log(10, attributes.clone(), resource_attributes.clone()),
+            test_log(20, attributes.clone(), resource_attributes.clone()),
+            test_log(
+                30,
+                labels("distinct-log-attributes"),
+                resource_attributes.clone(),
+            ),
+        ];
+        write_wal(dir.path(), "logs", &originals);
+
+        let (tx, _) = tokio::sync::mpsc::unbounded_channel();
+        let buffer = parqtel_core::MemoryBuffer::new();
+        let service = LogIngestionService::new(
+            LogBlockConfig {
+                data_dir: dir.path().join("log-blocks"),
+                ..Default::default()
+            },
+            tx,
+        )
+        .with_memory_buffer(buffer.clone());
+
+        assert_eq!(replay_logs(dir.path(), &service).await.unwrap(), (3, 0, 0));
+        let replayed = buffer.scan_logs(0, 100).await;
+        assert_eq!(replayed, originals);
+        assert!(replayed[0].attributes.ptr_eq(&replayed[1].attributes));
+        assert!(!replayed[0].attributes.ptr_eq(&replayed[2].attributes));
+        assert!(replayed[0]
+            .resource_attributes
+            .ptr_eq(&replayed[1].resource_attributes));
+    }
+
+    #[tokio::test]
+    async fn replayed_spans_preserve_records_and_intern_all_attribute_sets() {
+        let dir = tempfile::tempdir().unwrap();
+        let shared = labels("shared-span-attributes");
+        let event_attributes = labels("shared-event-attributes");
+        let link_attributes = labels("shared-link-attributes");
+        let originals = vec![
+            test_span(
+                10,
+                shared.clone(),
+                event_attributes.clone(),
+                link_attributes.clone(),
+            ),
+            test_span(
+                30,
+                shared.clone(),
+                event_attributes.clone(),
+                link_attributes.clone(),
+            ),
+            test_span(
+                50,
+                labels("distinct-span-attributes"),
+                event_attributes.clone(),
+                link_attributes.clone(),
+            ),
+        ];
+        write_wal(dir.path(), "traces", &originals);
+
+        let (tx, _) = tokio::sync::mpsc::unbounded_channel();
+        let buffer = parqtel_core::MemoryBuffer::new();
+        let service = TraceIngestionService::new(
+            BlockConfig {
+                data_dir: dir.path().join("trace-blocks"),
+                ..Default::default()
+            },
+            tx,
+        )
+        .with_memory_buffer(buffer.clone());
+
+        assert_eq!(
+            replay_traces(dir.path(), &service).await.unwrap(),
+            (3, 0, 0)
+        );
+        let replayed = buffer.scan_spans(0, 100).await;
+        assert_eq!(replayed, originals);
+        assert!(replayed[0].attributes.ptr_eq(&replayed[1].attributes));
+        assert!(!replayed[0].attributes.ptr_eq(&replayed[2].attributes));
+        assert!(replayed[0].events[0]
+            .attributes
+            .ptr_eq(&replayed[1].events[0].attributes));
+        assert!(replayed[0].links[0]
+            .attributes
+            .ptr_eq(&replayed[1].links[0].attributes));
     }
 }
