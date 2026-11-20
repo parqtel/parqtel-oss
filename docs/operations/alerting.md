@@ -18,8 +18,9 @@ through an Alertmanager-compatible route tree.
 - Learned anomaly rules query a baseline window, require at least five samples,
   and fire when the latest sample deviates from the median by more than
   `sensitivity` MADs.
-- State transitions: `Inactive → Pending → Firing → Resolved`.
-  `for_duration_secs` is the sustain window before Pending → Firing.
+- State transitions: `Inactive → Pending → Firing → Resolved`, plus
+  `Acknowledged`, `Suppressed` and `NoiseFlagged`. `for_duration_secs` is the
+  sustain window before Pending → Firing; a re-fire starts a new sustain window.
 - Each alert carries a bounded evidence snapshot: query, signal, evaluation
   window, threshold, observed value, and at most 120 downsampled points.
 - The engine also stores a deterministic analysis (`rca`) derived from that
@@ -90,8 +91,8 @@ receiver = "slack-api"
 - The exact group-label map is part of the key; a 64-bit hash collision cannot
   merge two groups.
 - Resolved alerts are delivered to receivers with `send_resolved = true`.
-- Active groups are bounded by `max_active_groups`; oldest resolved/idle
-  groups are evicted first.
+- Active groups are bounded by `max_active_groups`; resolved groups are evicted
+  first, then the oldest group. `parqtel_alert_evicted_groups_total` records it.
 - Transient failures (`429` honoring `Retry-After`, `5xx`, timeouts) retry with
   exponential backoff and jitter.
 - `400`, `401`, `403` and `404` fail immediately.
