@@ -327,10 +327,10 @@ but latency and HWM missed their targets, and the synthetic fixture's cold-cache
 miss rate did not improve with a larger budget. The four misses are the four
 fixture blocks opened by a fresh process; the cache has no prior warm entries.
 
-**Follow-ups:** Q3's compact table reduced measured open memory, so no additional
-2a change is justified by these measurements. Q2's four footer misses persisted
-at both 192 MiB and 512 MiB, which warrants proposing Phase 2b (lazy binary footer)
-for approval; validate miss rate on UAT before claiming a production benefit.
+**Follow-ups:** Q3's compact table reduced measured open memory. Q2's four footer
+misses persisted at both 192 MiB and 512 MiB, but its four-block fixture could not
+reproduce UAT cache churn; that result is not evidence against a cache-size fix.
+Validate miss rate on UAT before claiming a production benefit.
 The query missed its latency target, but no step-evaluation breakdown was recorded.
 Profile `target` first; propose Phase 3b range-function pushdown for approval if
 step evaluation is the dominant cost.
@@ -352,6 +352,14 @@ milliseconds.
 Decision rule: propose Phase 3b only if step evaluation is at least 40% of
 `sum by (pod) (rate(...))` time. **No proposal:** `sum-rate` step evaluation is
 5.45% of total time, below the 40% threshold.
+
+#### Revised diagnosis
+
+Q7 observed 16.1 blocks per query and 35.5% footer misses. At about 46.7 MB of
+index bytes per miss, that implies a roughly 750 MB working set against the
+192 MiB cache. Phase 3 returned only 3.4% of rows read. Q2's 192-vs-512 MiB
+synthetic test used only four blocks, so it could not reproduce UAT churn; its
+"no difference" result is not evidence against a cache-size fix.
 
 ### Phase 4: traces and logs storage
 

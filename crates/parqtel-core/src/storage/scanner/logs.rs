@@ -322,7 +322,7 @@ impl Scanner {
             let prefilter = prefilter.clone();
             tasks.push(tokio::task::spawn_blocking(move || {
                 let _permit = permit;
-                record_scan_block();
+                record_scan_block(&block.path);
                 Self::scan_log_block_filtered(
                     block,
                     start_ns,

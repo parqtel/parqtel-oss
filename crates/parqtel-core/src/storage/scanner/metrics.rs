@@ -320,7 +320,7 @@ impl Scanner {
             admission_wait += waiting.elapsed();
             tasks.push(tokio::task::spawn_blocking(move || {
                 let _permit = permit;
-                record_scan_block();
+                record_scan_block(&block.path);
                 Self::scan_block_filtered(block, &m_name, start_ns, end_ns, &selector)
             }));
         }
@@ -379,7 +379,7 @@ impl Scanner {
             admission_wait += waiting.elapsed();
             tasks.push(tokio::task::spawn_blocking(move || {
                 let _permit = permit;
-                record_scan_block();
+                record_scan_block(&block.path);
                 Self::plan_limited_block(
                     block,
                     &metric,
