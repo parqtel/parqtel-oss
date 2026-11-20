@@ -149,6 +149,9 @@ impl AlertDispatcher {
             for _ in 0..groups.take_evicted_groups() {
                 self.metrics.inc_evicted_group();
             }
+            for _ in 0..groups.take_rejected_groups() {
+                self.metrics.inc_rejected_group();
+            }
             self.metrics.set_active_groups(groups.active_count());
             batches
         };

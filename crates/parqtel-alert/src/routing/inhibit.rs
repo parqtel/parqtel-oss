@@ -53,7 +53,7 @@ impl InhibitionEvaluator {
                 continue;
             }
             let matched = firing_alerts.iter().any(|src| {
-                src.state == AlertState::Firing
+                matches!(src.state, AlertState::Firing | AlertState::Acknowledged)
                     && src.fingerprint != target_fingerprint
                     && rule.source_matchers.matches(&src.labels)
                     && rule
@@ -207,6 +207,26 @@ mod tests {
                 &[non_firing],
             ));
         }
+    }
+
+    #[test]
+    fn test_acknowledged_source_still_inhibits() {
+        let eval = InhibitionEvaluator::compile(&[InhibitRuleConfig {
+            source_matchers: vec!["severity = critical".to_string()],
+            target_matchers: vec!["severity = warning".to_string()],
+            equal: vec!["service".to_string()],
+        }])
+        .unwrap();
+        let source = make_alert(
+            1,
+            AlertState::Acknowledged,
+            &[("severity", "critical"), ("service", "api")],
+        );
+        assert!(eval.is_inhibited(
+            &labels(&[("severity", "warning"), ("service", "api")]),
+            2,
+            &[source],
+        ));
     }
 
     #[test]

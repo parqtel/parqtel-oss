@@ -27,6 +27,7 @@ pub struct RoutingMetrics {
     active_groups: AtomicUsize,
     dropped_notifications: AtomicU64,
     evicted_groups: AtomicU64,
+    rejected_groups: AtomicU64,
     suppressed_noise: AtomicU64,
 }
 
@@ -78,6 +79,10 @@ impl RoutingMetrics {
 
     pub fn inc_evicted_group(&self) {
         self.evicted_groups.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn inc_rejected_group(&self) {
+        self.rejected_groups.fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn inc_suppressed_noise(&self) {
@@ -166,6 +171,12 @@ impl RoutingMetrics {
             "parqtel_alert_evicted_groups_total {}\n",
             self.evicted_groups.load(Ordering::Relaxed)
         ));
+        out.push_str("# HELP parqtel_alert_rejected_groups_total New groups rejected because max_active_groups was full of active groups.\n");
+        out.push_str("# TYPE parqtel_alert_rejected_groups_total counter\n");
+        out.push_str(&format!(
+            "parqtel_alert_rejected_groups_total {}\n",
+            self.rejected_groups.load(Ordering::Relaxed)
+        ));
         out.push_str("# HELP parqtel_alert_noise_suppressed_total Notifications suppressed by the noise policy.\n");
         out.push_str("# TYPE parqtel_alert_noise_suppressed_total counter\n");
         out.push_str(&format!(
@@ -233,10 +244,12 @@ mod tests {
         metrics.inc_dropped_notification();
         metrics.inc_dropped_notification();
         metrics.inc_evicted_group();
+        metrics.inc_rejected_group();
         metrics.inc_suppressed_noise();
         let rendered = metrics.render_prometheus();
         assert!(rendered.contains("parqtel_alert_dropped_notifications_total 2"));
         assert!(rendered.contains("parqtel_alert_evicted_groups_total 1"));
+        assert!(rendered.contains("parqtel_alert_rejected_groups_total 1"));
         assert!(rendered.contains("parqtel_alert_noise_suppressed_total 1"));
     }
 

@@ -92,7 +92,8 @@ receiver = "slack-api"
   merge two groups.
 - Resolved alerts are delivered to receivers with `send_resolved = true`.
 - Active groups are bounded by `max_active_groups`; resolved groups are evicted
-  first, then the oldest group. `parqtel_alert_evicted_groups_total` records it.
+  first. If every slot holds an active group, a new group is rejected instead
+  of evicting a live alert. `parqtel_alert_rejected_groups_total` records it.
 - Transient failures (`429` honoring `Retry-After`, `5xx`, timeouts) retry with
   exponential backoff and jitter.
 - `400`, `401`, `403` and `404` fail immediately.
@@ -104,8 +105,8 @@ receiver = "slack-api"
 
 ## Inhibition and silences
 
-Inhibition suppresses a target when an active source matches and every `equal`
-label agrees:
+Inhibition suppresses a target when a firing or acknowledged source matches and
+every `equal` label agrees:
 
 ```toml
 [[alerting.routing.inhibit_rules]]
@@ -224,7 +225,8 @@ trusted context.
 | `parqtel_alert_eval_skipped_total` | Evaluation cycles skipped because the dedicated slot was busy |
 | `parqtel_alert_eval_duration_seconds` | Evaluation cycle duration |
 | `parqtel_alert_dropped_notifications_total` | Batches dropped after a receiver queue stayed full for 1s |
-| `parqtel_alert_evicted_groups_total` | Groups evicted at `max_active_groups` |
+| `parqtel_alert_evicted_groups_total` | Resolved groups evicted at `max_active_groups` |
+| `parqtel_alert_rejected_groups_total` | New groups rejected because the active-group budget was full |
 | `parqtel_alert_noise_suppressed_total` | Firings suppressed by the noise policy |
 
 Alert instances, evidence and transition history are available at

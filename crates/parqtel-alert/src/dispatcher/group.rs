@@ -195,6 +195,7 @@ pub struct GroupManager {
     max_active_groups: usize,
     resolve_retention: Duration,
     evicted_groups: usize,
+    rejected_groups: usize,
 }
 
 impl GroupManager {
@@ -204,6 +205,7 @@ impl GroupManager {
             max_active_groups,
             resolve_retention,
             evicted_groups: 0,
+            rejected_groups: 0,
         }
     }
 
@@ -213,6 +215,10 @@ impl GroupManager {
 
     pub fn take_evicted_groups(&mut self) -> usize {
         std::mem::take(&mut self.evicted_groups)
+    }
+
+    pub fn take_rejected_groups(&mut self) -> usize {
+        std::mem::take(&mut self.rejected_groups)
     }
 
     pub fn get(&self, key: &GroupKey) -> Option<&AlertGroup> {
@@ -254,10 +260,14 @@ impl GroupManager {
         }
 
         if self.max_active_groups == 0 {
+            self.rejected_groups += 1;
             return;
         }
-        if self.groups.len() >= self.max_active_groups {
-            self.evict_one();
+        if self.groups.len() >= self.max_active_groups && !self.evict_resolved() {
+            // Never silently drop an active alert to make room. New groups are
+            // rejected and counted; the operator can raise max_active_groups.
+            self.rejected_groups += 1;
+            return;
         }
 
         let mut members = HashMap::with_capacity(1);
@@ -385,23 +395,19 @@ impl GroupManager {
         }
     }
 
-    fn evict_one(&mut self) {
+    fn evict_resolved(&mut self) -> bool {
         let victim = self
             .groups
             .iter()
             .filter(|(_, g)| g.phase == GroupPhase::Resolved)
             .min_by_key(|(_, g)| g.resolved_at.unwrap_or(g.last_updated))
-            .map(|(k, _)| k.clone())
-            .or_else(|| {
-                self.groups
-                    .iter()
-                    .min_by_key(|(_, g)| g.last_updated)
-                    .map(|(k, _)| k.clone())
-            });
-
+            .map(|(k, _)| k.clone());
         if let Some(k) = victim {
             self.groups.remove(&k);
             self.evicted_groups += 1;
+            true
+        } else {
+            false
         }
     }
 }
@@ -857,15 +863,17 @@ mod tests {
         assert!(mgr.get(&k2).is_none());
         assert!(mgr.get(&k3).is_some());
 
-        // Both s1 and s3 are active; inserting s4 evicts oldest active (s1)
+        // Both s1 and s3 are active; s4 is rejected rather than evicting a
+        // live alert.
         tokio::time::advance(Duration::from_secs(5)).await;
         let a4 = sample_alert(4, AlertState::Firing, &[("service", "s4")]);
         let (k4, _) = compute_group_key(&route, &a4);
         mgr.ingest(route, a4, Instant::now());
 
         assert_eq!(mgr.active_count(), 2);
-        assert!(mgr.get(&k1).is_none());
+        assert!(mgr.get(&k1).is_some());
         assert!(mgr.get(&k3).is_some());
-        assert!(mgr.get(&k4).is_some());
+        assert!(mgr.get(&k4).is_none());
+        assert_eq!(mgr.take_rejected_groups(), 1);
     }
 }
