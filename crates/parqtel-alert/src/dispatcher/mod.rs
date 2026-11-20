@@ -1,4 +1,5 @@
 pub mod group;
+pub mod ledger;
 pub mod metrics;
 pub mod worker;
 
@@ -14,6 +15,7 @@ use crate::{AlertInstance, AlertState};
 use parqtel_core::config::{parse_duration, AlertmanagerRoutingConfig, SilenceConfig};
 
 use self::group::GroupManager;
+use self::ledger::DeliveryLedger;
 use self::metrics::RoutingMetrics;
 use self::worker::{DeliveryQueue, RetryPolicy};
 
@@ -59,7 +61,13 @@ impl AlertDispatcher {
         };
 
         let groups = Mutex::new(GroupManager::new(cfg.max_active_groups, resolve_retention));
-        let queue = DeliveryQueue::new(notifiers, policy, Arc::clone(&metrics), 256);
+        let queue = DeliveryQueue::new(
+            notifiers,
+            policy,
+            Arc::clone(&metrics),
+            Arc::new(DeliveryLedger::in_memory()),
+            256,
+        );
 
         Ok(Self {
             evaluator,
@@ -67,6 +75,11 @@ impl AlertDispatcher {
             queue,
             metrics,
         })
+    }
+
+    pub fn with_delivery_ledger(mut self, ledger: DeliveryLedger) -> Self {
+        self.queue = self.queue.with_ledger(ledger);
+        self
     }
 
     pub fn metrics(&self) -> &Arc<RoutingMetrics> {

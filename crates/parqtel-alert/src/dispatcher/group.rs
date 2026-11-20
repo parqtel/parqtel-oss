@@ -113,6 +113,7 @@ pub struct AlertGroup {
     pub last_notified: Option<Instant>,
     pub dirty: bool,
     pub resolved_at: Option<Instant>,
+    pub generation: u64,
 }
 
 impl AlertGroup {
@@ -139,7 +140,7 @@ impl AlertGroup {
             .any(|m| matches!(m.state, AlertState::Firing | AlertState::Pending))
     }
 
-    fn to_notification_batch(&self) -> NotificationBatch {
+    fn to_notification_batch(&self, reason: &str) -> NotificationBatch {
         let mut members: Vec<&AlertInstance> = self.members.values().collect();
         members.sort_by_key(|m| m.fingerprint);
 
@@ -180,6 +181,8 @@ impl AlertGroup {
             ),
             status,
             group_labels: self.group_labels.clone(),
+            generation: self.generation,
+            reason: reason.to_string(),
             alerts,
         }
     }
@@ -230,6 +233,7 @@ impl GroupManager {
             };
             if state_changed {
                 group.dirty = true;
+                group.generation = group.generation.saturating_add(1);
             }
 
             let incoming_state = alert.state;
@@ -239,6 +243,7 @@ impl GroupManager {
                 group.phase = GroupPhase::Active;
                 group.resolved_at = None;
                 group.dirty = true;
+                group.generation = group.generation.saturating_add(1);
             } else if group.all_resolved() {
                 if group.resolved_at.is_none() {
                     group.resolved_at = Some(now);
@@ -271,6 +276,7 @@ impl GroupManager {
                 last_notified: None,
                 dirty: true,
                 resolved_at: None,
+                generation: 0,
             },
         );
     }
@@ -294,7 +300,7 @@ impl GroupManager {
             match group.phase {
                 GroupPhase::WaitingInitial => {
                     if now >= group.created_at + group.route.group_wait {
-                        due.push((group.route.clone(), group.to_notification_batch()));
+                        due.push((group.route.clone(), group.to_notification_batch("initial")));
                         group.last_notified = Some(now);
                         group.dirty = false;
                         if group.all_resolved() {
@@ -313,7 +319,7 @@ impl GroupManager {
                             .last_notified
                             .is_none_or(|t| now >= t + group.route.group_interval);
                         if ready {
-                            due.push((group.route.clone(), group.to_notification_batch()));
+                            due.push((group.route.clone(), group.to_notification_batch("update")));
                             group.last_notified = Some(now);
                             group.dirty = false;
                         }
@@ -322,7 +328,7 @@ impl GroupManager {
                             .last_notified
                             .is_none_or(|t| now >= t + group.route.repeat_interval);
                         if ready {
-                            due.push((group.route.clone(), group.to_notification_batch()));
+                            due.push((group.route.clone(), group.to_notification_batch("repeat")));
                             group.last_notified = Some(now);
                         }
                     }
@@ -333,7 +339,10 @@ impl GroupManager {
                             .last_notified
                             .is_none_or(|t| now >= t + group.route.group_interval);
                         if ready {
-                            due.push((group.route.clone(), group.to_notification_batch()));
+                            due.push((
+                                group.route.clone(),
+                                group.to_notification_batch("resolved"),
+                            ));
                             group.last_notified = Some(now);
                             group.dirty = false;
                         }
@@ -362,6 +371,9 @@ impl GroupManager {
             };
             let state_changed = member.state != alert.state;
             *member = alert.clone();
+            if state_changed && notify_state_change {
+                group.generation = group.generation.saturating_add(1);
+            }
             group.last_updated = now;
             if notify_state_change && state_changed {
                 group.dirty = true;
@@ -734,7 +746,7 @@ mod tests {
         let group = mgr.get(&key).unwrap();
         assert!(!group.all_resolved());
         assert!(!group.has_unresolved());
-        let batch = group.to_notification_batch();
+        let batch = group.to_notification_batch("resolved");
         assert_eq!(batch.status, "resolved");
         assert!(batch.alerts.is_empty());
     }

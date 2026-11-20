@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
+use crate::dispatcher::ledger::DeliveryLedger;
 use crate::dispatcher::metrics::RoutingMetrics;
 use crate::error::NotificationError;
 use crate::notifier::{NotificationBatch, Notifier};
@@ -119,6 +120,7 @@ pub async fn deliver_with_retry(
 pub struct DeliveryQueue {
     senders: HashMap<String, mpsc::Sender<(ResolvedRoute, NotificationBatch)>>,
     metrics: Arc<RoutingMetrics>,
+    ledger: Arc<DeliveryLedger>,
 }
 
 impl DeliveryQueue {
@@ -127,6 +129,7 @@ impl DeliveryQueue {
         notifiers: HashMap<String, Vec<Arc<dyn Notifier>>>,
         policy: RetryPolicy,
         metrics: Arc<RoutingMetrics>,
+        ledger: Arc<DeliveryLedger>,
         channel_capacity: usize,
     ) -> Self {
         let cap = channel_capacity.max(1);
@@ -136,18 +139,49 @@ impl DeliveryQueue {
             let (tx, mut rx) = mpsc::channel::<(ResolvedRoute, NotificationBatch)>(cap);
             let policy_clone = policy.clone();
             let metrics_clone = Arc::clone(&metrics);
+            let ledger_clone = Arc::clone(&ledger);
             let receiver_name = receiver.clone();
 
             tokio::spawn(async move {
-                while let Some((_route, batch)) = rx.recv().await {
+                while let Some((route, batch)) = rx.recv().await {
+                    let min_interval = match batch.reason.as_str() {
+                        "repeat" => route.repeat_interval.as_secs(),
+                        "resolved" => 0,
+                        _ => route.group_interval.as_secs(),
+                    };
                     for notifier in &receiver_notifiers {
-                        let _ = deliver_with_retry(
+                        if !ledger_clone.should_send(
+                            &receiver_name,
+                            &batch.group_key,
+                            batch.generation,
+                            &batch.reason,
+                            notifier.name(),
+                            min_interval,
+                        ) {
+                            metrics_clone.inc_notification(
+                                notifier.name(),
+                                notifier.channel_type(),
+                                "suppressed_duplicate",
+                            );
+                            continue;
+                        }
+                        if deliver_with_retry(
                             notifier.as_ref(),
                             &batch,
                             &policy_clone,
                             &metrics_clone,
                         )
-                        .await;
+                        .await
+                        .is_ok()
+                        {
+                            ledger_clone.mark_sent(
+                                &receiver_name,
+                                &batch.group_key,
+                                batch.generation,
+                                &batch.reason,
+                                notifier.name(),
+                            );
+                        }
                     }
                 }
                 tracing::debug!(receiver = %receiver_name, "delivery worker exited");
@@ -156,7 +190,16 @@ impl DeliveryQueue {
             senders.insert(receiver, tx);
         }
 
-        Self { senders, metrics }
+        Self {
+            senders,
+            metrics,
+            ledger,
+        }
+    }
+
+    pub fn with_ledger(mut self, ledger: DeliveryLedger) -> Self {
+        self.ledger = Arc::new(ledger);
+        self
     }
 
     /// Enqueue a batch onto the target receiver's worker without blocking other receivers.
@@ -420,7 +463,13 @@ mod tests {
         let mut map = HashMap::new();
         // Receiver with no notifiers: the worker exits as soon as the queue closes.
         map.insert("empty".to_string(), Vec::new());
-        let queue = DeliveryQueue::new(map, RetryPolicy::default(), Arc::clone(&metrics), 1);
+        let queue = DeliveryQueue::new(
+            map,
+            RetryPolicy::default(),
+            Arc::clone(&metrics),
+            Arc::new(DeliveryLedger::in_memory()),
+            1,
+        );
 
         let route = |receiver: &str| ResolvedRoute {
             route_path_id: "root".to_string(),
@@ -433,15 +482,21 @@ mod tests {
         };
 
         // Unknown receiver -> warn + drop.
-        queue.enqueue(route("nope"), sample_firing_batch());
+        queue.enqueue(route("nope"), sample_firing_batch()).await;
 
         // The lone capacity-1 slot is taken by the worker immediately (it has no
         // notifiers), so this send is either queued or dropped, never panicking.
-        queue.enqueue(route("empty"), sample_firing_batch());
+        queue.enqueue(route("empty"), sample_firing_batch()).await;
 
         // A non-zero capacity clamps to at least one slot, so `new(.., 0)` is legal.
-        let zero = DeliveryQueue::new(HashMap::new(), RetryPolicy::default(), metrics, 0);
-        zero.enqueue(route("nope"), sample_firing_batch());
+        let zero = DeliveryQueue::new(
+            HashMap::new(),
+            RetryPolicy::default(),
+            metrics,
+            Arc::new(DeliveryLedger::in_memory()),
+            0,
+        );
+        zero.enqueue(route("nope"), sample_firing_batch()).await;
     }
 
     #[tokio::test]
@@ -472,7 +527,13 @@ mod tests {
             "blocked".to_string(),
             vec![Arc::new(BlockingNotifier) as Arc<dyn Notifier>],
         );
-        let queue = DeliveryQueue::new(map, RetryPolicy::default(), Arc::clone(&metrics), 1);
+        let queue = DeliveryQueue::new(
+            map,
+            RetryPolicy::default(),
+            Arc::clone(&metrics),
+            Arc::new(DeliveryLedger::in_memory()),
+            1,
+        );
         let route = ResolvedRoute {
             route_path_id: "root".to_string(),
             receiver: "blocked".to_string(),
@@ -483,12 +544,12 @@ mod tests {
             repeat_interval: Duration::from_secs(60),
         };
 
-        queue.enqueue(route.clone(), sample_firing_batch());
+        queue.enqueue(route.clone(), sample_firing_batch()).await;
         // Let the worker pick up the first batch before filling the channel.
         for _ in 0..10 {
             tokio::task::yield_now().await;
         }
-        queue.enqueue(route.clone(), sample_firing_batch());
+        queue.enqueue(route.clone(), sample_firing_batch()).await;
         // Third enqueue cannot fit: capacity 1 already holds the second batch.
         queue.enqueue(route, sample_firing_batch()).await;
         assert_eq!(
@@ -526,7 +587,13 @@ mod tests {
         let metrics = Arc::new(RoutingMetrics::new());
         let mut map = HashMap::new();
         map.insert("empty".to_string(), Vec::new());
-        let queue = DeliveryQueue::new(map, RetryPolicy::default(), Arc::clone(&metrics), 1);
+        let queue = DeliveryQueue::new(
+            map,
+            RetryPolicy::default(),
+            Arc::clone(&metrics),
+            Arc::new(DeliveryLedger::in_memory()),
+            1,
+        );
         // Dropping the queue closes every sender, so the worker's recv() returns None
         // and the exit branch runs.
         drop(queue);
@@ -595,7 +662,13 @@ mod tests {
         let mut map = HashMap::new();
         map.insert("ops".to_string(), vec![notifier]);
 
-        let queue = DeliveryQueue::new(map, RetryPolicy::default(), Arc::clone(&metrics), 8);
+        let queue = DeliveryQueue::new(
+            map,
+            RetryPolicy::default(),
+            Arc::clone(&metrics),
+            Arc::new(DeliveryLedger::in_memory()),
+            8,
+        );
         let route = ResolvedRoute {
             route_path_id: "root".to_string(),
             receiver: "ops".to_string(),

@@ -128,7 +128,15 @@ impl AppState {
         let routing_metrics = Arc::new(RoutingMetrics::new());
         let alert_dispatcher = config.alerting.routing.as_ref().and_then(|routing_cfg| {
             match AlertDispatcher::from_config(routing_cfg, routing_metrics.clone()) {
-                Ok(d) => Some(Arc::new(d)),
+                Ok(d) => {
+                    let d = d.with_delivery_ledger(
+                        parqtel_alert::dispatcher::ledger::DeliveryLedger::new(Some(
+                            std::path::PathBuf::from(&config.storage.data_dir)
+                                .join("alert_delivery_ledger.json"),
+                        )),
+                    );
+                    Some(Arc::new(d))
+                }
                 Err(e) => {
                     tracing::error!(error = %e, "failed to initialize Alertmanager dispatcher");
                     None

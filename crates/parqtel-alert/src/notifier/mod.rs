@@ -52,6 +52,13 @@ pub struct NotificationBatch {
     /// `"firing"` if any alert is firing, else `"resolved"`.
     pub status: String,
     pub group_labels: BTreeMap<String, String>,
+    /// Monotonic per-group revision. A new incident gets a new generation;
+    /// repeats of an unchanged group keep the same one.
+    #[serde(default)]
+    pub generation: u64,
+    /// `initial`, `update`, `repeat` or `resolved`.
+    #[serde(default)]
+    pub reason: String,
     pub alerts: Vec<AlertPayload>,
 }
 
@@ -360,6 +367,8 @@ pub(crate) mod test_util {
                 ("env".to_string(), "prod".to_string()),
                 ("service.name".to_string(), "checkout".to_string()),
             ]),
+            generation: 1,
+            reason: "initial".into(),
             alerts: vec![AlertPayload {
                 status: "firing".to_string(),
                 rule_id: "high-error-rate".to_string(),

@@ -95,6 +95,11 @@ receiver = "slack-api"
 - Transient failures (`429` honoring `Retry-After`, `5xx`, timeouts) retry with
   exponential backoff and jitter.
 - `400`, `401`, `403` and `404` fail immediately.
+- A bounded local ledger (`alert_delivery_ledger.json`) records successful
+  `(receiver, group, generation, reason, notifier)` deliveries. It prevents a
+  restart from immediately re-paging the same group and suppresses duplicate
+  resolved notifications. The ledger is node-local; use Alertmanager for
+  cross-replica fan-out deduplication.
 
 ## Inhibition and silences
 
@@ -238,7 +243,8 @@ workflows.
 ## Not implemented
 
 - Automatic postmortem generation (`[alerts.postmortem]` is inert).
-- A distributed delivery ledger. Direct receivers (Slack/Teams) can duplicate
-  across replicas; use the Alertmanager receiver for HA fan-out.
+- A distributed delivery ledger across replicas. The local ledger prevents
+  restart duplicates on one node; direct receivers can still duplicate across
+  replicas, so use the Alertmanager receiver for HA fan-out.
 - A Kubernetes custom-metrics provider (`[k8s_provider]` is inert).
 - Email and SMS receivers. Use a webhook bridge if required.
