@@ -44,6 +44,8 @@ pub(crate) async fn run_server(
     log_index_store: Arc<BlockIndexStore>,
     telemetry_guard: telemetry::TelemetryGuard,
 ) -> anyhow::Result<()> {
+    parqtel_core::Scanner::configure_footer_cache_budget(config.query.footer_cache_bytes)
+        .map_err(anyhow::Error::msg)?;
     let (ui_content, ui_etag) = ui_assets()?;
     parqtel_core::LabelInterner::set_capacity(config.ingest.label_interner_capacity);
 

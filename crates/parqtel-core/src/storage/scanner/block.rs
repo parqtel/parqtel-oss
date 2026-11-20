@@ -36,13 +36,15 @@ type CachedBlockParts = (
 struct FooterCache {
     entries: HashMap<BlockKey, CachedBlock>,
     bytes: usize,
+    budget_bytes: usize,
+    started: bool,
+    configured: bool,
     tick: u64,
 }
 
 /// Memory the footer cache may hold, counted in bytes rather than entries: a
 /// footer with page indexes and a series table for a hundred thousand series is
 /// orders of magnitude larger than one for a small log block.
-const FOOTER_CACHE_BUDGET: usize = 192 * 1024 * 1024;
 const LOAD_LOCK_CLEANUP_THRESHOLD: usize = 1024;
 
 fn footer_cache() -> &'static std::sync::Mutex<FooterCache> {
@@ -51,9 +53,28 @@ fn footer_cache() -> &'static std::sync::Mutex<FooterCache> {
         std::sync::Mutex::new(FooterCache {
             entries: HashMap::new(),
             bytes: 0,
+            budget_bytes: crate::config::QueryConfig::DEFAULT_FOOTER_CACHE_BYTES,
+            started: false,
+            configured: false,
             tick: 0,
         })
     })
+}
+
+pub(super) fn configure_footer_cache_budget(bytes: usize) -> std::result::Result<(), &'static str> {
+    if bytes == 0 {
+        return Err("footer cache budget must be greater than 0");
+    }
+    let mut cache = footer_cache().lock().unwrap_or_else(|e| e.into_inner());
+    if cache.configured {
+        return Err("footer cache budget is already configured");
+    }
+    if cache.started {
+        return Err("footer cache budget must be configured before the first scan");
+    }
+    cache.budget_bytes = bytes;
+    cache.configured = true;
+    Ok(())
 }
 
 fn block_load_locks() -> &'static std::sync::Mutex<HashMap<BlockKey, Weak<std::sync::Mutex<()>>>> {
@@ -78,6 +99,7 @@ fn block_load_lock(key: &BlockKey) -> Arc<std::sync::Mutex<()>> {
 
 fn cached_block(key: &BlockKey) -> Option<CachedBlockParts> {
     let mut cache = footer_cache().lock().unwrap_or_else(|e| e.into_inner());
+    cache.started = true;
     cache.tick += 1;
     let tick = cache.tick;
     cache.entries.get_mut(key).map(|entry| {
@@ -97,11 +119,19 @@ pub(super) fn cached_bytes() -> usize {
         .bytes
 }
 
+pub(super) fn cache_budget_bytes() -> usize {
+    footer_cache()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .budget_bytes
+}
+
 impl FooterCache {
     /// Inserts `block`, evicting the least recently used entries until the cache
     /// is back under budget. An entry larger than the whole budget is not kept.
     pub(super) fn insert(&mut self, key: BlockKey, mut block: CachedBlock) {
-        if block.bytes > FOOTER_CACHE_BUDGET {
+        self.started = true;
+        if block.bytes > self.budget_bytes {
             return;
         }
         self.tick += 1;
@@ -111,7 +141,7 @@ impl FooterCache {
             self.bytes -= old.bytes;
         }
         self.bytes += added;
-        if self.bytes <= FOOTER_CACHE_BUDGET {
+        if self.bytes <= self.budget_bytes {
             return;
         }
         // Drop the least recently used until a quarter of the budget is free, so
@@ -122,7 +152,7 @@ impl FooterCache {
             .map(|(k, e)| (e.used, k.clone()))
             .collect();
         by_age.sort_unstable_by_key(|(used, _)| *used);
-        let target = FOOTER_CACHE_BUDGET / 4 * 3;
+        let target = self.budget_bytes / 4 * 3;
         for (_, k) in by_age {
             if self.bytes <= target {
                 break;
@@ -364,6 +394,70 @@ fn dictionary_labels_schema(schema: &arrow_schema::SchemaRef) -> Option<arrow_sc
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
+
+    fn cached_block(bytes: usize) -> CachedBlock {
+        let schema = Arc::new(parquet::schema::types::SchemaDescriptor::new(Arc::new(
+            parquet::schema::parser::parse_message_type("message test {}").unwrap(),
+        )));
+        let file_metadata =
+            parquet::file::metadata::FileMetaData::new(1, 0, None, None, schema, None);
+        CachedBlock {
+            meta: Arc::new(ParquetMetaData::new(file_metadata, Vec::new())),
+            series: None,
+            log_index: None,
+            bytes,
+            used: 0,
+        }
+    }
+
+    fn test_cache(budget_bytes: usize) -> FooterCache {
+        FooterCache {
+            entries: HashMap::new(),
+            bytes: 0,
+            budget_bytes,
+            started: false,
+            configured: false,
+            tick: 0,
+        }
+    }
+
+    fn test_key(name: &str) -> BlockKey {
+        (name.into(), 0, 0)
+    }
+
+    #[test]
+    fn footer_cache_respects_budget_and_evicts_lru_entries() {
+        let mut cache = test_cache(8);
+        cache.insert(test_key("oldest"), cached_block(3));
+        cache.insert(test_key("newer"), cached_block(3));
+        assert!(cached_block_for_test(&mut cache, &test_key("oldest")));
+        cache.insert(test_key("newest"), cached_block(3));
+
+        assert_eq!(cache.bytes, 6);
+        assert!(cache.entries.contains_key(&test_key("oldest")));
+        assert!(!cache.entries.contains_key(&test_key("newer")));
+        assert!(cache.entries.contains_key(&test_key("newest")));
+    }
+
+    #[test]
+    fn footer_cache_does_not_keep_oversized_entries() {
+        let mut cache = test_cache(8);
+        cache.insert(test_key("oversized"), cached_block(9));
+
+        assert!(cache.entries.is_empty());
+        assert_eq!(cache.bytes, 0);
+    }
+
+    fn cached_block_for_test(cache: &mut FooterCache, key: &BlockKey) -> bool {
+        cache.tick += 1;
+        let tick = cache.tick;
+        if let Some(entry) = cache.entries.get_mut(key) {
+            entry.used = tick;
+            true
+        } else {
+            false
+        }
+    }
 
     #[test]
     fn concurrent_misses_for_one_block_share_load_lock() {

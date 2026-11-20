@@ -136,6 +136,21 @@ fn push_series(points: &mut Vec<DataPoint>, labels: LabelSet, base_ns: i64, seri
 }
 
 async fn measure(query: &str, dir: &Path) -> Result<(), Box<dyn Error>> {
+    match std::env::var("PARQTEL_QUERY_FOOTER_CACHE_BYTES") {
+        Ok(value) => {
+            let bytes = value.parse::<usize>()?;
+            if let Err(error) = Scanner::configure_footer_cache_budget(bytes) {
+                if error != "footer cache budget is already configured"
+                    || Scanner::scan_metrics_snapshot().footer_cache_budget_bytes != bytes as u64
+                {
+                    return Err(error.into());
+                }
+            }
+        }
+        Err(std::env::VarError::NotPresent) => {}
+        Err(error) => return Err(error.into()),
+    }
+
     let mut index = BlockIndex::new(dir);
     index.load()?;
     let index = Arc::new(RwLock::new(index));
@@ -179,8 +194,9 @@ async fn measure(query: &str, dir: &Path) -> Result<(), Box<dyn Error>> {
     let after = Scanner::scan_metrics_snapshot();
     let hwm_mib = peak_hwm_bytes()? as f64 / (1024.0 * 1024.0);
     println!(
-        "query={query} ms={elapsed_ms} hwm_mib={hwm_mib:.1} rows_considered={rows_considered} points={points} footer_misses={} series={series} total_series={total_series}",
+        "query={query} ms={elapsed_ms} hwm_mib={hwm_mib:.1} rows_considered={rows_considered} points={points} footer_misses={} footer_budget_bytes={} series={series} total_series={total_series}",
         after.footer_cache_misses.saturating_sub(before.footer_cache_misses),
+        before.footer_cache_budget_bytes,
     );
     Ok(())
 }

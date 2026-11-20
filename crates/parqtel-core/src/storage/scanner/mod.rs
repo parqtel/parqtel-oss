@@ -83,6 +83,7 @@ pub struct ScanMetricsSnapshot {
     pub footer_cache_hits: u64,
     pub footer_cache_misses: u64,
     pub footer_cache_bytes: u64,
+    pub footer_cache_budget_bytes: u64,
     pub footer_load_ns: u64,
     pub index_estimated_bytes: u64,
     pub rows_considered: u64,
@@ -200,6 +201,11 @@ fn record_scan_output(rows_considered: u64, rows_returned: usize) {
 pub struct Scanner;
 
 impl Scanner {
+    /// Installs the process-wide footer cache budget before the first scan.
+    pub fn configure_footer_cache_budget(bytes: usize) -> std::result::Result<(), &'static str> {
+        block::configure_footer_cache_budget(bytes)
+    }
+
     /// Reserves one query scan slot without waiting, for best-effort background
     /// work that may compete with queries.
     pub fn try_reserve_scan_slot() -> Option<impl Send> {
@@ -246,6 +252,7 @@ impl Scanner {
             footer_cache_hits: metrics.footer_cache_hits.load(Ordering::Relaxed),
             footer_cache_misses: metrics.footer_cache_misses.load(Ordering::Relaxed),
             footer_cache_bytes: block::cached_bytes() as u64,
+            footer_cache_budget_bytes: block::cache_budget_bytes() as u64,
             footer_load_ns: metrics.footer_load_ns.load(Ordering::Relaxed),
             index_estimated_bytes: metrics.index_estimated_bytes.load(Ordering::Relaxed),
             rows_considered: metrics.rows_considered.load(Ordering::Relaxed),
