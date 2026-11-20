@@ -1,3 +1,4 @@
+pub mod alertmanager;
 pub mod pagerduty;
 pub mod slack;
 pub mod teams;
@@ -14,6 +15,7 @@ use std::time::Duration;
 use crate::error::NotificationError;
 use crate::Severity;
 
+use self::alertmanager::AlertmanagerNotifier;
 use self::pagerduty::PagerDutyNotifier;
 use self::slack::SlackNotifier;
 use self::teams::TeamsNotifier;
@@ -202,6 +204,19 @@ pub fn build_notifiers(
                     url,
                     wh_cfg.send_resolved,
                     headers,
+                    client.clone(),
+                )?),
+                egress.clone(),
+            )));
+        }
+
+        for am_cfg in &receiver.alertmanager_configs {
+            let url = resolve_secret(&am_cfg.url).map_err(NotificationError::Config)?;
+            notifiers.push(Arc::new(crate::egress::EgressCheckedNotifier::new(
+                Arc::new(AlertmanagerNotifier::new(
+                    receiver.name.clone(),
+                    url,
+                    &am_cfg.resend_ttl,
                     client.clone(),
                 )?),
                 egress.clone(),
@@ -543,11 +558,15 @@ mod tests {
                 send_resolved: true,
                 headers: BTreeMap::from([("X-Token".to_string(), "${PATH}".to_string())]),
             }],
+            alertmanager_configs: vec![parqtel_core::config::AlertmanagerReceiverConfig {
+                url: "https://alertmanager.example.com".to_string(),
+                ..Default::default()
+            }],
         });
 
         let built = build_notifiers(&cfg, reqwest::Client::new()).unwrap();
         let list = built.get("multi").unwrap();
-        assert_eq!(list.len(), 4);
+        assert_eq!(list.len(), 5);
         assert_eq!(list[0].channel_type(), "slack");
         assert_eq!(list[0].name(), "multi");
         assert!(list[0].send_resolved());
@@ -555,6 +574,8 @@ mod tests {
         assert!(!list[1].send_resolved());
         assert_eq!(list[2].channel_type(), "teams");
         assert_eq!(list[3].channel_type(), "webhook");
+        assert_eq!(list[4].channel_type(), "alertmanager");
+        assert!(list[4].send_resolved());
     }
 
     #[tokio::test]

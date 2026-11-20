@@ -50,14 +50,27 @@ pub struct AlertInstance {
 impl AlertInstance {
     /// Compute a stable fingerprint from rule_id and sorted labels.
     pub fn compute_fingerprint(rule_id: &str, labels: &BTreeMap<String, String>) -> u64 {
-        use std::hash::{Hash, Hasher};
-        let mut hasher = ahash::AHasher::default();
-        rule_id.hash(&mut hasher);
-        for (k, v) in labels {
-            k.hash(&mut hasher);
-            v.hash(&mut hasher);
+        const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
+        const FNV_PRIME: u64 = 0x100000001b3;
+        const SEPARATOR: u8 = 0xff;
+
+        fn update(hash: &mut u64, bytes: &[u8]) {
+            for byte in bytes {
+                *hash ^= u64::from(*byte);
+                *hash = hash.wrapping_mul(FNV_PRIME);
+            }
         }
-        hasher.finish()
+
+        let mut hash = FNV_OFFSET_BASIS;
+        update(&mut hash, rule_id.as_bytes());
+        update(&mut hash, &[SEPARATOR]);
+        for (k, v) in labels {
+            update(&mut hash, k.as_bytes());
+            update(&mut hash, &[SEPARATOR]);
+            update(&mut hash, v.as_bytes());
+            update(&mut hash, &[SEPARATOR]);
+        }
+        hash
     }
 }
 
@@ -109,6 +122,30 @@ mod tests {
         let fp1 = AlertInstance::compute_fingerprint("rule1", &l1);
         let fp2 = AlertInstance::compute_fingerprint("rule1", &l2);
         assert_ne!(fp1, fp2);
+    }
+
+    #[test]
+    fn test_compute_fingerprint_golden_value() {
+        let labels = BTreeMap::from([
+            ("env".to_string(), "prod".to_string()),
+            ("host".to_string(), "h1".to_string()),
+        ]);
+
+        assert_eq!(
+            AlertInstance::compute_fingerprint("rule1", &labels),
+            0xb18789b205ebeb66
+        );
+    }
+
+    #[test]
+    fn test_compute_fingerprint_separates_label_name_and_value() {
+        let first = BTreeMap::from([("ab".to_string(), "c".to_string())]);
+        let second = BTreeMap::from([("a".to_string(), "bc".to_string())]);
+
+        assert_ne!(
+            AlertInstance::compute_fingerprint("rule1", &first),
+            AlertInstance::compute_fingerprint("rule1", &second)
+        );
     }
 
     #[test]

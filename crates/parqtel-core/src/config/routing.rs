@@ -29,7 +29,7 @@ pub struct AlertmanagerRoutingConfig {
     /// Inhibition rules suppressing lower-priority alerts when a source fires.
     #[serde(default)]
     pub inhibit_rules: Vec<InhibitRuleConfig>,
-    /// Named receiver definitions (Slack, PagerDuty, Teams, generic webhook).
+    /// Named receiver definitions (Slack, PagerDuty, Teams, Alertmanager, generic webhook).
     #[serde(default)]
     pub receivers: Vec<ReceiverConfig>,
     /// Outbound destination policy for every receiver.
@@ -150,6 +150,8 @@ pub struct ReceiverConfig {
     pub teams_configs: Vec<TeamsReceiverConfig>,
     #[serde(default)]
     pub webhook_configs: Vec<WebhookReceiverConfig>,
+    #[serde(default)]
+    pub alertmanager_configs: Vec<AlertmanagerReceiverConfig>,
 }
 
 /// Slack incoming-webhook receiver configuration.
@@ -197,6 +199,29 @@ pub struct WebhookReceiverConfig {
     pub send_resolved: bool,
     #[serde(default)]
     pub headers: BTreeMap<String, String>,
+}
+
+/// Alertmanager v2 push API receiver configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AlertmanagerReceiverConfig {
+    /// Alertmanager base URL, without `/api/v2/alerts`.
+    pub url: String,
+    /// Firing-alert expiry. Defaults to four times the default 15-second evaluation interval.
+    #[serde(default = "default_alertmanager_resend_ttl")]
+    pub resend_ttl: String,
+}
+
+impl Default for AlertmanagerReceiverConfig {
+    fn default() -> Self {
+        Self {
+            url: String::new(),
+            resend_ttl: default_alertmanager_resend_ttl(),
+        }
+    }
+}
+
+fn default_alertmanager_resend_ttl() -> String {
+    "1m".to_string()
 }
 
 /// Supported Alertmanager label matcher operators.
@@ -414,6 +439,13 @@ impl AlertmanagerRoutingConfig {
                     recv.name
                 ));
             }
+            for (config_idx, config) in recv.alertmanager_configs.iter().enumerate() {
+                if let Err(e) = parse_duration(&config.resend_ttl) {
+                    errors.push(format!(
+                        "{prefix}.receivers[{idx}].alertmanager_configs[{config_idx}].resend_ttl: {e}"
+                    ));
+                }
+            }
         }
 
         if let Some(ref route) = self.route {
@@ -421,7 +453,8 @@ impl AlertmanagerRoutingConfig {
                 route,
                 &format!("{prefix}.route"),
                 &receiver_names,
-                false,
+                None,
+                &self.receivers,
                 errors,
             );
         }
@@ -448,7 +481,8 @@ impl AlertmanagerRoutingConfig {
         route: &AlertRouteConfig,
         path: &str,
         receivers: &HashSet<String>,
-        has_inherited_receiver: bool,
+        inherited_receiver: Option<&str>,
+        receiver_configs: &[ReceiverConfig],
         errors: &mut Vec<String>,
     ) {
         for (idx, m) in route.matchers.iter().enumerate() {
@@ -469,16 +503,48 @@ impl AlertmanagerRoutingConfig {
             }
         }
 
-        let has_receiver = if let Some(ref recv) = route.receiver {
+        if let Some(ref recv) = route.receiver {
             if !receivers.contains(recv) {
                 errors.push(format!(
                     "{path}.receiver '{recv}' does not match any defined receiver"
                 ));
             }
-            true
-        } else {
-            has_inherited_receiver
-        };
+        }
+        let effective_receiver = route.receiver.as_deref().or(inherited_receiver);
+        let has_receiver = effective_receiver.is_some();
+
+        if let Some(receiver_name) = effective_receiver {
+            if let Some(receiver) = receiver_configs
+                .iter()
+                .find(|receiver| receiver.name == receiver_name)
+            {
+                for alertmanager in &receiver.alertmanager_configs {
+                    let Some(resend_ttl) = parse_duration(&alertmanager.resend_ttl).ok() else {
+                        continue;
+                    };
+                    let Some(repeat_interval) = route
+                        .repeat_interval
+                        .as_deref()
+                        .and_then(|value| parse_duration(value).ok())
+                    else {
+                        if route.repeat_interval.is_none() {
+                            errors.push(format!(
+                                "{path} routes to Alertmanager receiver '{receiver_name}' with resend_ttl '{}' but has no repeat_interval; set one shorter than each resend_ttl",
+                                alertmanager.resend_ttl
+                            ));
+                        }
+                        continue;
+                    };
+                    if repeat_interval >= resend_ttl {
+                        errors.push(format!(
+                            "{path}.repeat_interval '{}' must be shorter than Alertmanager receiver '{receiver_name}' resend_ttl '{}'",
+                            route.repeat_interval.as_deref().unwrap_or_default(),
+                            alertmanager.resend_ttl
+                        ));
+                    }
+                }
+            }
+        }
 
         if route.routes.is_empty() && !has_receiver {
             errors.push(format!(
@@ -491,7 +557,8 @@ impl AlertmanagerRoutingConfig {
                 child,
                 &format!("{path}.routes[{idx}]"),
                 receivers,
-                has_receiver,
+                effective_receiver,
+                receiver_configs,
                 errors,
             );
         }
@@ -524,6 +591,11 @@ impl AlertmanagerRoutingConfig {
                     *val = REDACTED.to_string();
                 }
             }
+            for a in &mut recv.alertmanager_configs {
+                if !a.url.is_empty() {
+                    a.url = REDACTED.to_string();
+                }
+            }
         }
         clone
     }
@@ -533,6 +605,25 @@ impl AlertmanagerRoutingConfig {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
+
+    fn alertmanager_route(repeat_interval: Option<&str>) -> AlertmanagerRoutingConfig {
+        AlertmanagerRoutingConfig {
+            receivers: vec![ReceiverConfig {
+                name: "am".into(),
+                alertmanager_configs: vec![AlertmanagerReceiverConfig {
+                    url: "http://alertmanager:9093".into(),
+                    resend_ttl: "1m".into(),
+                }],
+                ..Default::default()
+            }],
+            route: Some(AlertRouteConfig {
+                receiver: Some("am".into()),
+                repeat_interval: repeat_interval.map(str::to_string),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
 
     #[test]
     fn test_parse_duration_variants() {
@@ -575,6 +666,57 @@ mod tests {
         assert!(parse_matcher_str("no_operator").is_err());
         assert!(parse_matcher_str("=val").is_err());
         assert!(parse_matcher_str("service =~ [invalid").is_err());
+    }
+
+    #[test]
+    fn alertmanager_receiver_requires_repeat_interval() {
+        let mut errors = Vec::new();
+        alertmanager_route(None).validate_into("alerting.routing", &mut errors);
+
+        assert_eq!(errors.len(), 1, "unexpected errors: {errors:?}");
+        assert!(errors[0].contains("alerting.routing.route"));
+        assert!(errors[0].contains("receiver 'am'"));
+        assert!(errors[0].contains("resend_ttl '1m'"));
+        assert!(errors[0].contains("no repeat_interval"));
+    }
+
+    #[test]
+    fn alertmanager_repeat_interval_must_be_shorter_than_resend_ttl() {
+        let mut errors = Vec::new();
+        alertmanager_route(Some("1m")).validate_into("alerting.routing", &mut errors);
+
+        assert_eq!(errors.len(), 1, "unexpected errors: {errors:?}");
+        assert!(errors[0].contains("alerting.routing.route"));
+        assert!(errors[0].contains("receiver 'am'"));
+        assert!(errors[0].contains("'1m'"));
+        assert!(errors[0].contains("resend_ttl '1m'"));
+    }
+
+    #[test]
+    fn alertmanager_repeat_interval_shorter_than_resend_ttl_passes() {
+        let mut errors = Vec::new();
+        alertmanager_route(Some("59s")).validate_into("alerting.routing", &mut errors);
+
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+    }
+
+    #[test]
+    fn child_route_inheriting_alertmanager_receiver_requires_repeat_interval() {
+        let mut config = alertmanager_route(Some("30s"));
+        config
+            .route
+            .as_mut()
+            .unwrap()
+            .routes
+            .push(AlertRouteConfig::default());
+
+        let mut errors = Vec::new();
+        config.validate_into("alerting.routing", &mut errors);
+
+        assert_eq!(errors.len(), 1, "unexpected errors: {errors:?}");
+        assert!(errors[0].contains("alerting.routing.route.routes[0]"));
+        assert!(errors[0].contains("receiver 'am'"));
+        assert!(errors[0].contains("no repeat_interval"));
     }
 
     #[test]
@@ -626,13 +768,19 @@ mod tests {
                     headers: BTreeMap::from([("Authorization".into(), "Bearer tok".into())]),
                     ..Default::default()
                 }],
+                alertmanager_configs: vec![AlertmanagerReceiverConfig {
+                    url: "http://alertmanager:9093".into(),
+                    ..Default::default()
+                }],
             }],
             route: Some(AlertRouteConfig {
                 receiver: Some("slack-ops".into()),
                 matchers: vec!["severity =~ critical|warning".into()],
                 group_wait: Some("10s".into()),
+                repeat_interval: Some("30s".into()),
                 routes: vec![AlertRouteConfig {
                     matchers: vec!["team = platform".into()],
+                    repeat_interval: Some("30s".into()),
                     ..Default::default()
                 }],
                 ..Default::default()
@@ -654,6 +802,7 @@ mod tests {
         assert_eq!(red.receivers[0].pagerduty_configs[0].routing_key, REDACTED);
         assert_eq!(red.receivers[0].teams_configs[0].webhook_url, REDACTED);
         assert_eq!(red.receivers[0].webhook_configs[0].url, REDACTED);
+        assert_eq!(red.receivers[0].alertmanager_configs[0].url, REDACTED);
         assert_eq!(
             red.receivers[0].webhook_configs[0].headers["Authorization"],
             REDACTED

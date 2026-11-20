@@ -118,6 +118,7 @@ pub async fn stats(State(state): State<AppState>, Query(params): Query<StatsPara
     Json(serde_json::json!({
         "status": "success",
         "data": {
+            "replica_id": cfg.server.replica_id,
             "storage": {
                 "metrics": metrics,
                 "logs": logs,
@@ -204,7 +205,11 @@ pub async fn ingest_rates(
 
 /// Handler for GET /metrics (Prometheus text format).
 pub async fn metrics(State(state): State<AppState>) -> (StatusCode, String) {
-    let mut body = state.inner.metrics.render(&state.inner.index).await;
+    let mut body = state
+        .inner
+        .metrics
+        .render_with_replica(&state.inner.index, &state.inner.config.server.replica_id)
+        .await;
     body.push_str(&state.inner.query_executor.memory_buffer().render_metrics());
     body.push_str(&state.inner.ingestion_service.render_series_metrics());
     (StatusCode::OK, body)
@@ -249,4 +254,24 @@ pub async fn openapi_spec() -> Response {
         OPENAPI_SPEC,
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+    use super::*;
+    use axum::body::to_bytes;
+
+    #[tokio::test]
+    async fn stats_includes_replica_identity() {
+        let mut config = parqtel_core::Config::default();
+        config.server.replica_id = "parqtel-1".into();
+        let state = AppState::default_for_tests_with_config(config).await;
+        let response = stats(State(state), Query(StatsParams { dataset: None })).await;
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(json["data"]["replica_id"], "parqtel-1");
+    }
 }

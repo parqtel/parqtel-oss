@@ -1,0 +1,155 @@
+{{- if .Values.ha.enabled -}}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "parqtel.fullname" . }}
+  labels:
+    {{- include "parqtel.labels" . | nindent 4 }}
+spec:
+  serviceName: {{ printf "%s-headless" (include "parqtel.fullname" . | trunc 54 | trimSuffix "-") }}
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "parqtel.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ include "parqtel.configChecksum" . }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "parqtel.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.image.pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "parqtel.serviceAccountName" . }}
+      automountServiceAccountToken: {{ .Values.serviceAccount.create }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      {{- with .Values.initContainers }}
+      initContainers:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: {{ .Chart.Name }}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          image: {{ include "parqtel.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.service.port }}
+              protocol: TCP
+            {{- if .Values.ingestion.grpc.enabled }}
+            - name: grpc
+              containerPort: {{ .Values.ingestion.grpc.port }}
+              protocol: TCP
+            {{- end }}
+            {{- if .Values.provider.enabled }}
+            - name: https-provider
+              containerPort: {{ .Values.provider.port }}
+              protocol: TCP
+            {{- end }}
+          env:
+            - name: PARQTEL_DATA_DIR
+              value: "/data"
+            - name: PARQTEL_CONFIG
+              value: "/etc/parqtel/parqtel.toml"
+            - name: RUST_LOG
+              value: {{ .Values.parqtel.telemetry.logLevel | quote }}
+            - name: MALLOC_ARENA_MAX
+              value: {{ .Values.parqtel.mallocArenaMax | default 2 | quote }}
+            - name: K8S_POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: K8S_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: K8S_NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- with .Values.livenessProbe }}
+          livenessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.readinessProbe }}
+          readinessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- $probe := mergeOverwrite (dict "httpGet" (dict "path" "/health" "port" "http") "periodSeconds" 5) (deepCopy .Values.startupProbe) }}
+          startupProbe:
+            {{- $_ := set $probe "failureThreshold" 120 }}
+            {{- toYaml $probe | nindent 12 }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          {{- with .Values.lifecycle }}
+          lifecycle:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: config
+              mountPath: /etc/parqtel
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+            {{- with .Values.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+        {{- with .Values.sidecars }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "parqtel.fullname" . }}
+        - name: tmp
+          emptyDir:
+            sizeLimit: 100Mi
+        {{- with .Values.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      affinity:
+        {{- $requiredAntiAffinity := dict "requiredDuringSchedulingIgnoredDuringExecution" (list (dict "labelSelector" (dict "matchLabels" (include "parqtel.selectorLabels" . | fromYaml)) "topologyKey" "kubernetes.io/hostname")) }}
+        {{- $affinity := mergeOverwrite (deepCopy .Values.affinity) (dict "podAntiAffinity" $requiredAntiAffinity) }}
+        {{- toYaml $affinity | nindent 8 }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          {{- include "parqtel.labels" . | nindent 10 }}
+      spec:
+        accessModes:
+          - {{ .Values.storage.accessMode | quote }}
+        resources:
+          requests:
+            storage: {{ .Values.ha.storageSize | quote }}
+        {{- if .Values.storage.storageClassName }}
+        storageClassName: {{ .Values.storage.storageClassName | quote }}
+        {{- end }}
+{{- end }}

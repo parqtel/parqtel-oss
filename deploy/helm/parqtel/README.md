@@ -43,7 +43,9 @@ Refer to [values.yaml](values.yaml) for a full list of configuration options.
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `image.repository` | string | `ghcr.io/parqtel/parqtel` | Container image repository |
-| `replicaCount` | int | `1` | Number of replicas. Single-writer: the schema rejects >1 because shared storage is not implemented |
+| `replicaCount` | int | `1` | Number of replicas. Values above 1 require `ha.enabled: true` |
+| `ha.enabled` | bool | `false` | Use independent StatefulSet replicas with per-pod storage, anti-affinity, and disruption protection |
+| `ha.storageSize` | string | `30Gi` | PVC size per HA replica; storage class and access mode use `storage.*` values |
 | `storage.size` | string | `10Gi` | Size of the persistent volume |
 | `storage.storageClassName` | string | `""` | Storage class (empty = cluster default) |
 | `service.port` | int | `8080` | HTTP service port |
@@ -61,6 +63,11 @@ Refer to [values.yaml](values.yaml) for a full list of configuration options.
 | `parqtel.telemetry.profilingFrequency` | int | `99` | CPU sampling frequency (Hz) |
 | `parqtel.ingest.walEnabled` | bool | `false` | Enable WAL for metrics |
 | `parqtel.ingest.logWalEnabled` | bool | `true` | Enable WAL for logs |
+
+Enable HA with `ha.enabled: true` and `replicaCount: 2` or more. HA mode creates
+one PVC per pod, requires replicas to schedule on separate nodes, and always keeps
+one pod available during voluntary disruptions. The regular Service selects both
+replicas for queries; the headless Service provides per-pod DNS for direct ingest.
 
 ### Parqtel Engine Configuration (under `parqtel.`)
 

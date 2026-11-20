@@ -15,8 +15,24 @@
     "replicaCount": {
       "type": "integer",
       "minimum": 1,
-      "maximum": 1,
-      "description": "Number of pod replicas. Parqtel is single-writer; >1 is rejected because each pod would own a disjoint local data directory."
+      "description": "Number of pod replicas. Values above 1 require ha.enabled."
+    },
+    "ha": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "enabled",
+        "storageSize"
+      ],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "storageSize": {
+          "type": "string",
+          "pattern": "^[0-9]+(Mi|Gi|Ti)$"
+        }
+      }
     },
     "image": {
       "type": "object",
@@ -1215,6 +1231,41 @@
       }
     }
   },
+  "allOf": [
+    {
+      "if": {
+        "required": ["ha"],
+        "properties": {
+          "ha": {
+            "properties": {
+              "enabled": { "const": true }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "replicaCount": { "minimum": 2 },
+          "storage": {
+            "properties": {
+              "enabled": { "const": true },
+              "existingClaim": { "const": "" }
+            }
+          },
+          "autoscaling": {
+            "properties": {
+              "enabled": { "const": false }
+            }
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "replicaCount": { "maximum": 1 }
+        }
+      }
+    }
+  ],
   "$defs": {
     "mcpServer": {
       "type": "object",

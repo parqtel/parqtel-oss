@@ -1,4 +1,16 @@
-{{- if .Values.podDisruptionBudget.enabled -}}
+{{- if .Values.ha.enabled -}}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "parqtel.fullname" . }}
+  labels:
+    {{- include "parqtel.labels" . | nindent 4 }}
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      {{- include "parqtel.selectorLabels" . | nindent 6 }}
+{{- else if .Values.podDisruptionBudget.enabled -}}
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:

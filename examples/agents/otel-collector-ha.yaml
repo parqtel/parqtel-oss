@@ -1,0 +1,57 @@
+# OTel Collector -> both Parqtel replicas over OTLP/gRPC.
+extensions:
+  file_storage:
+    directory: /var/lib/otelcol/ha-queue
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+      http:
+
+processors:
+  batch:
+    send_batch_size: 1000
+    send_batch_max_size: 1000
+
+exporters:
+  otlp_grpc/parqtel-0:
+    endpoint: parqtel-0.parqtel-headless:4317
+    tls:
+      insecure: true
+    sending_queue:
+      enabled: true
+      storage: file_storage
+      # 6,000 batches × up to 1,000 points covers about 10 minutes per replica at ~9.5K points/s.
+      queue_size: 6000
+    retry_on_failure:
+      enabled: true
+      max_elapsed_time: 0s
+  otlp_grpc/parqtel-1:
+    endpoint: parqtel-1.parqtel-headless:4317
+    tls:
+      insecure: true
+    sending_queue:
+      enabled: true
+      storage: file_storage
+      # 6,000 batches × up to 1,000 points covers about 10 minutes per replica at ~9.5K points/s.
+      queue_size: 6000
+    retry_on_failure:
+      enabled: true
+      max_elapsed_time: 0s
+
+service:
+  extensions: [file_storage]
+  pipelines:
+    metrics:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlp_grpc/parqtel-0, otlp_grpc/parqtel-1]
+    logs:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlp_grpc/parqtel-0, otlp_grpc/parqtel-1]
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlp_grpc/parqtel-0, otlp_grpc/parqtel-1]

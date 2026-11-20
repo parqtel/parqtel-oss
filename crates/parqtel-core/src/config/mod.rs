@@ -20,9 +20,9 @@ pub use object_storage::ObjectStoreConfig;
 pub use query::{QueryConfig, UIConfig};
 pub use routing::{
     parse_duration, parse_matcher_str, resolve_secret, resolve_secret_with, AlertRouteConfig,
-    AlertingConfig, AlertmanagerRoutingConfig, InhibitRuleConfig, MatchOp, MatcherSpec,
-    PagerDutyReceiverConfig, ReceiverConfig, RoutingGlobalConfig, SlackReceiverConfig,
-    TeamsReceiverConfig, WebhookReceiverConfig,
+    AlertingConfig, AlertmanagerReceiverConfig, AlertmanagerRoutingConfig, InhibitRuleConfig,
+    MatchOp, MatcherSpec, PagerDutyReceiverConfig, ReceiverConfig, RoutingGlobalConfig,
+    SlackReceiverConfig, TeamsReceiverConfig, WebhookReceiverConfig,
 };
 pub use server::{ServerConfig, TlsConfig};
 pub use storage::{BlockConfig, LogBlockConfig, RetentionConfig};

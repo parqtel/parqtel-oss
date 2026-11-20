@@ -7,6 +7,9 @@ pub struct ServerConfig {
     /// metrics/logs data directories and are enforced by token scopes.
     #[serde(default = "default_dataset")]
     pub dataset: String,
+    /// Operator-visible identity for this server replica.
+    #[serde(default = "default_replica_id")]
+    pub replica_id: String,
     /// TCP address to bind to (e.g. "0.0.0.0:8080").
     pub bind_address: String,
     /// TCP address for the OTLP gRPC server (e.g. "0.0.0.0:4317").
@@ -80,10 +83,15 @@ fn default_dataset() -> String {
     "default".into()
 }
 
+fn default_replica_id() -> String {
+    std::env::var("HOSTNAME").unwrap_or_default()
+}
+
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             dataset: default_dataset(),
+            replica_id: default_replica_id(),
             bind_address: "0.0.0.0:8080".into(),
             grpc_bind_address: default_grpc_bind_address(),
             max_connections: 1024,
@@ -118,6 +126,7 @@ mod tests {
     #[test]
     fn serde_round_trips_new_knobs() {
         let c = ServerConfig {
+            replica_id: "parqtel-0".into(),
             flush_interval_secs: 30,
             alert_interval_secs: 60,
             retention_interval_secs: 900,
@@ -127,6 +136,7 @@ mod tests {
         };
         let json = serde_json::to_string(&c).unwrap();
         let back: ServerConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.replica_id, "parqtel-0");
         assert_eq!(back.flush_interval_secs, 30);
         assert_eq!(back.alert_interval_secs, 60);
         assert_eq!(back.retention_interval_secs, 900);
@@ -145,5 +155,6 @@ mod tests {
         assert_eq!(c.retention_interval_secs, 3600);
         assert_eq!(c.grpc_concurrency_limit, 64);
         assert_eq!(c.index_persist_interval_secs, 2);
+        assert_eq!(c.replica_id, default_replica_id());
     }
 }
