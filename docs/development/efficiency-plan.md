@@ -119,6 +119,14 @@ At this rollout, the original 24-hour stability gate had not passed. The operato
 revised the remaining Phase 0 soak to 6 hours on 2026-11-19; this rollout record is
 historical.
 
+Final six-hour exit record: the operator-approved 6-hour revision passed on image
+`sha256:14c29d2a…`. The four-panel soak recorded 361 one-minute samples and 1,444
+concurrent panel queries with zero failures. Peak RSS was 2,736 MiB, with zero
+restarts. Metrics stayed near 9.1–9.3K points/s with a maximum 1-second gap and
+zero ingest errors. All 73 tagged log batches and 73 tagged span batches were
+accepted. Low-priority alerts skipped 44 evaluations over six hours. Phase 0 gate
+passed under the revised soak duration.
+
 ### Phase 1a: canonical order and 5-minute L1 rollups
 
 Phase 0 showed index churn, not a missing index. A 15-minute query still loaded
