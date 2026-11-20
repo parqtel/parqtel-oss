@@ -1,14 +1,14 @@
 //! Metric queries: PromQL ASTs and the legacy query plan.
 
 use super::series::{
-    apply_post_processing, build_series_data, collect_metric_refs, evaluate_steps_to_series,
-    max_range_ns, series_filter, series_selector, v_to_f64,
+    apply_post_processing, build_limited_series_data, collect_metric_refs,
+    evaluate_steps_to_series, max_range_ns, series_filter, series_selector, v_to_f64,
 };
 use super::QueryExecutor;
 use crate::models::{QueryResult, Sample, TimeSeries};
 use crate::plan::QueryPlan;
 use parqtel_core::{LabelSet, MetricValue, Result, Scanner};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 use std::time::Instant;
 
 impl QueryExecutor {
@@ -59,34 +59,31 @@ impl QueryExecutor {
                 // the scan, so rows of series that cannot match never become
                 // points. The service matcher additionally prunes row groups.
                 let filter = series_filter(matchers, name);
-                let mut raw = Vec::new();
-                if !blocks.is_empty() {
-                    let scan = Scanner::scan_filtered(
-                        blocks,
-                        name.clone(),
-                        scan_start,
-                        end_ns,
-                        series_selector(matchers, name),
-                    )
-                    .await?;
-                    points_scanned += scan.rows_considered;
-                    raw = scan.points;
-                }
                 // Buffer
                 let (buffered, buffered_rows) = self
                     .buffer
                     .scan_metrics_filtered(name, scan_start, end_ns, filter.as_ref())
                     .await;
-                points_scanned += buffered_rows;
-                raw.extend(buffered);
+                let scan = Scanner::scan_filtered_limited(
+                    blocks,
+                    name.clone(),
+                    scan_start,
+                    end_ns,
+                    series_selector(matchers, name),
+                    self.max_series,
+                    start_ns,
+                    window_ns,
+                    buffered,
+                    buffered_rows,
+                )
+                .await?;
+                points_scanned += scan.rows_considered;
 
-                // Grouping, limiting and value conversion are pure CPU over every
-                // point of the metric, so they run on the blocking pool rather
-                // than on the async worker that would otherwise be parked for
-                // the length of a large scan.
-                let (max_series, max_samples) = (self.max_series, self.max_samples_per_series);
+                // Grouping and value conversion run on the blocking pool.
+                let (max_samples, total, volume) =
+                    (self.max_samples_per_series, scan.total_series, scan.volume);
                 let built = tokio::task::spawn_blocking(move || {
-                    build_series_data(raw, start_ns, window_ns, max_series, max_samples)
+                    build_limited_series_data(scan.points, max_samples, total, volume)
                 })
                 .await
                 .map_err(|e| {
@@ -149,126 +146,13 @@ impl QueryExecutor {
     pub async fn execute(&self, plan: QueryPlan) -> Result<QueryResult> {
         let start_time = Instant::now();
 
-        // 1. Find candidate blocks
+        // Find candidate blocks.
         let blocks = {
             let idx = self.index.read().await;
             idx.query(plan.start_ns, plan.end_ns, Some(&plan.metric_name))
         };
-
-        if blocks.is_empty() {
-            // Even with no disk blocks, check the in-memory buffer
-            let filter = series_filter(&plan.matchers, &plan.metric_name);
-            let (buffered, considered) = self
-                .buffer
-                .scan_metrics_filtered(
-                    &plan.metric_name,
-                    plan.start_ns,
-                    plan.end_ns,
-                    filter.as_ref(),
-                )
-                .await;
-            if considered == 0 {
-                return Ok(QueryResult {
-                    series: Vec::new(),
-                    execution_time: start_time.elapsed(),
-                    points_scanned: 0,
-                    total_series_count: 0,
-                    volume_summary: vec![0; 60],
-                });
-            }
-            // Process buffered data through the same pipeline below
-            let raw_points = buffered;
-            let points_scanned = considered;
-            let mut series_map: BTreeMap<u64, (LabelSet, Vec<(i64, MetricValue)>)> =
-                BTreeMap::new();
-            let mut matched_series_fps = HashSet::new();
-            let mut volume_summary = vec![0u64; 60];
-            let window_ns = (plan.end_ns - plan.start_ns) / 60;
-            for dp in raw_points {
-                if window_ns > 0 {
-                    let bucket =
-                        ((dp.timestamp_ns - plan.start_ns) / window_ns).clamp(0, 59) as usize;
-                    volume_summary[bucket] += 1;
-                }
-                let fp = dp.labels.fingerprint();
-                matched_series_fps.insert(fp);
-                if series_map.contains_key(&fp) || series_map.len() < plan.max_series {
-                    let entry = series_map
-                        .entry(fp)
-                        .or_insert_with(|| (dp.labels.clone(), Vec::new()));
-                    if entry.1.len() < plan.max_samples_per_series {
-                        entry.1.push((dp.timestamp_ns, dp.value));
-                    }
-                }
-            }
-            let total_series_count = matched_series_fps.len();
-            let mut results = Vec::new();
-            for (_, (mut labels, points)) in series_map {
-                labels = labels.merge(&LabelSet::try_from_iter(vec![(
-                    "__name__",
-                    plan.metric_name.clone(),
-                )])?);
-                let samples = if let Some(step) = plan.step_ns {
-                    if let Some(op) = plan.aggregation {
-                        crate::aggregation::downsample_plan(
-                            points,
-                            plan.start_ns,
-                            plan.end_ns,
-                            step,
-                            plan.range_ns,
-                            op,
-                            plan.quantile,
-                            plan.scalar_param,
-                            plan.clamp,
-                        )
-                    } else {
-                        points
-                            .into_iter()
-                            .map(|(t, v)| Sample {
-                                timestamp_ns: t,
-                                value: v_to_f64(&v),
-                            })
-                            .collect()
-                    }
-                } else {
-                    points
-                        .into_iter()
-                        .map(|(t, v)| Sample {
-                            timestamp_ns: t,
-                            value: v_to_f64(&v),
-                        })
-                        .collect()
-                };
-                results.push(TimeSeries { labels, samples });
-            }
-            results = apply_post_processing(results, &plan);
-            return Ok(QueryResult {
-                series: results,
-                execution_time: start_time.elapsed(),
-                points_scanned,
-                total_series_count,
-                volume_summary,
-            });
-        }
-
-        // 2. Scan blocks concurrently
         let blocks_count = blocks.len();
         let filter = series_filter(&plan.matchers, &plan.metric_name);
-        let scan = Scanner::scan_filtered(
-            blocks,
-            plan.metric_name.clone(),
-            plan.start_ns,
-            plan.end_ns,
-            series_selector(&plan.matchers, &plan.metric_name),
-        )
-        .await?;
-        let mut points_scanned = scan.rows_considered;
-        // Block points in time order, as a series' samples must be (the oldest
-        // `max_samples_per_series` are kept); the buffer's points follow.
-        let mut raw_points = scan.points;
-        raw_points.sort_by_key(|p| p.timestamp_ns);
-
-        // 2b. Merge in-memory buffer data (not yet flushed to disk)
         let (buffered, buffered_rows) = self
             .buffer
             .scan_metrics_filtered(
@@ -278,42 +162,37 @@ impl QueryExecutor {
                 filter.as_ref(),
             )
             .await;
-        points_scanned += buffered_rows;
-        raw_points.extend(buffered);
-
-        // 3. Group by series + Calculate Volume
-        let mut series_map: BTreeMap<u64, (LabelSet, Vec<(i64, MetricValue)>)> = BTreeMap::new();
-        let mut matched_series_fps = HashSet::new();
-        let mut volume_summary = vec![0u64; 60];
         let window_ns = (plan.end_ns - plan.start_ns) / 60;
-
-        for dp in raw_points {
-            // Update volume histogram regardless of truncation
-            if window_ns > 0 {
-                let bucket = ((dp.timestamp_ns - plan.start_ns) / window_ns).clamp(0, 59) as usize;
-                volume_summary[bucket] += 1;
-            }
-
+        let scan = Scanner::scan_filtered_limited(
+            blocks,
+            plan.metric_name.clone(),
+            plan.start_ns,
+            plan.end_ns,
+            series_selector(&plan.matchers, &plan.metric_name),
+            plan.max_series,
+            plan.start_ns,
+            window_ns,
+            buffered,
+            buffered_rows,
+        )
+        .await?;
+        let points_scanned = scan.rows_considered;
+        let total_series_count = scan.total_series;
+        let volume_summary = scan.volume.to_vec();
+        let mut series_map: BTreeMap<u64, (LabelSet, Vec<(i64, MetricValue)>)> = BTreeMap::new();
+        for dp in scan.points {
             let fp = dp.labels.fingerprint();
-            matched_series_fps.insert(fp);
-
-            // Check if we already have this series or if we can add a new one
-            if series_map.contains_key(&fp) || series_map.len() < plan.max_series {
-                let entry = series_map
-                    .entry(fp)
-                    .or_insert_with(|| (dp.labels.clone(), Vec::new()));
-
-                if entry.1.len() < plan.max_samples_per_series {
-                    entry.1.push((dp.timestamp_ns, dp.value));
-                }
-            }
+            let entry = series_map
+                .entry(fp)
+                .or_insert_with(|| (dp.labels.clone(), Vec::new()));
+            entry.1.push((dp.timestamp_ns, dp.value));
         }
 
-        let total_series_count = matched_series_fps.len();
-
-        // 4. Downsample and format results
+        // Downsample and format results.
         let mut results = Vec::new();
-        for (_, (mut labels, points)) in series_map {
+        for (_, (mut labels, mut points)) in series_map {
+            points.sort_by_key(|(timestamp, _)| *timestamp);
+            points.truncate(plan.max_samples_per_series);
             labels = labels.merge(&LabelSet::try_from_iter(vec![(
                 "__name__",
                 plan.metric_name.clone(),

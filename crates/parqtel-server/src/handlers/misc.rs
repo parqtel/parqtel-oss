@@ -153,6 +153,7 @@ pub async fn stats(State(state): State<AppState>, Query(params): Query<StatsPara
                     "max_series": cfg.query.max_series,
                     "max_samples_per_series": cfg.query.max_samples_per_series,
                     "timeout_secs": cfg.query.timeout_secs,
+                    "footer_cache_bytes": cfg.query.footer_cache_bytes,
                 },
             },
         }
@@ -212,6 +213,11 @@ pub async fn metrics(State(state): State<AppState>) -> (StatusCode, String) {
         .await;
     body.push_str(&state.inner.query_executor.memory_buffer().render_metrics());
     body.push_str(&state.inner.ingestion_service.render_series_metrics());
+    let scans = parqtel_core::Scanner::scan_metrics_snapshot();
+    body.push_str(&format!(
+        "# HELP parqtel_scan_footer_cache_budget_bytes Maximum estimated bytes held by the block footer cache\n# TYPE parqtel_scan_footer_cache_budget_bytes gauge\nparqtel_scan_footer_cache_budget_bytes {}\n",
+        scans.footer_cache_budget_bytes
+    ));
     (StatusCode::OK, body)
 }
 
@@ -273,5 +279,17 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
 
         assert_eq!(json["data"]["replica_id"], "parqtel-1");
+        assert_eq!(
+            json["data"]["config"]["query"]["footer_cache_bytes"],
+            parqtel_core::config::QueryConfig::DEFAULT_FOOTER_CACHE_BYTES
+        );
+    }
+
+    #[tokio::test]
+    async fn metrics_exposes_footer_cache_budget() {
+        let state = AppState::default_for_tests().await;
+        let (_, body) = metrics(State(state)).await;
+
+        assert!(body.contains("parqtel_scan_footer_cache_budget_bytes"));
     }
 }

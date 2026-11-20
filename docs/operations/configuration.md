@@ -106,6 +106,7 @@ max_series = 1000
 max_samples_per_series = 10000
 timeout_secs = 30
 lookback_delta_ns = 300000000000    # 5 minutes
+footer_cache_bytes = 201326592      # 192 MiB; must be greater than 0
 
 [ui]
 enabled = true
@@ -375,6 +376,7 @@ ingest path; a failed batch remains uncommitted and is redelivered.
 | `query.max_samples_per_series` | Integer | `10000` | Maximum samples per series. |
 | `query.timeout_secs` | Integer | `30` | Scan-endpoint timeout. Ingest is excluded. |
 | `query.lookback_delta_ns` | Integer | `300000000000` | Instant-query lookback (5 minutes). |
+| `query.footer_cache_bytes` | Integer | `201326592` | Process-wide LRU budget for cached block footers and indexes; must be greater than 0. |
 | `ui.enabled` | Boolean | `true` | Serve the embedded console at `/ui`. |
 
 `GET /api/v1/query` accepts `lookback_delta` as a duration or float seconds
@@ -683,6 +685,7 @@ export PARQTEL__INGEST__TAIL_SAMPLING__SAMPLING_RATIO=0.5
 export PARQTEL__QUERY__TIMEOUT_SECS=60
 export PARQTEL__QUERY__MAX_SERIES=5000
 export PARQTEL__QUERY__LOOKBACK_DELTA_NS=300000000000
+export PARQTEL__QUERY__FOOTER_CACHE_BYTES=536870912
 
 # Object storage
 export PARQTEL__OBJECT_STORE__ENABLED=true
@@ -858,6 +861,7 @@ they are validated and compiled before storage.
 | `server.tls` | Both `cert_path` and `key_path` set |
 | `storage` / `logs` | `data_dir` non-empty; codec in `zstd`, `snappy`, `lz4`, `none`; zstd level 1–22; `row_group_size` > 0 and ≤ `max_rows_per_block` |
 | `object_store` | Enabled requires bucket, region, prefix, `cache_bytes > 0`, `catalog_interval_secs > 0` |
+| `query` | `footer_cache_bytes > 0` |
 | `ingest.kafka` | Enabled requires brokers, topic, non-empty group, format `json` |
 | `ingest.tail_sampling` | Every ratio in `[0.0, 1.0]` |
 | `telemetry` | `log_format` is `text` or `json` |

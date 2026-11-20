@@ -18,12 +18,49 @@ pub(super) struct BuiltSeries {
 ///
 /// Series come out in fingerprint order, so series ids are deterministic across
 /// runs. Matchers were already applied by the scan.
+#[cfg(test)]
 pub(super) fn build_series_data(
     raw: Vec<parqtel_core::DataPoint>,
     start_ns: i64,
     window_ns: i64,
     max_series: usize,
     max_samples_per_series: usize,
+) -> BuiltSeries {
+    build_series_data_with_summary(
+        raw,
+        start_ns,
+        window_ns,
+        max_series,
+        max_samples_per_series,
+        None,
+    )
+}
+
+/// Builds the already-selected series without recounting dropped fingerprints
+/// or volume rows from the scan.
+pub(super) fn build_limited_series_data(
+    raw: Vec<parqtel_core::DataPoint>,
+    max_samples_per_series: usize,
+    total_series: usize,
+    volume: [u64; 60],
+) -> BuiltSeries {
+    build_series_data_with_summary(
+        raw,
+        0,
+        0,
+        usize::MAX,
+        max_samples_per_series,
+        Some((total_series, volume)),
+    )
+}
+
+fn build_series_data_with_summary(
+    raw: Vec<parqtel_core::DataPoint>,
+    start_ns: i64,
+    window_ns: i64,
+    max_series: usize,
+    max_samples_per_series: usize,
+    summary: Option<(usize, [u64; 60])>,
 ) -> BuiltSeries {
     use ahash::AHashMap;
     let started = std::time::Instant::now();
@@ -66,8 +103,8 @@ pub(super) fn build_series_data(
     let mut out = BuiltSeries {
         numeric: Vec::new(),
         histograms: Vec::new(),
-        total_series: 0,
-        volume: [0; 60],
+        total_series: summary.as_ref().map_or(0, |(total, _)| *total),
+        volume: summary.as_ref().map_or([0; 60], |(_, volume)| *volume),
     };
     // Series kept so far; a series counts once whether numeric or histogram.
     let mut kept = 0usize;
@@ -76,11 +113,13 @@ pub(super) fn build_series_data(
         // Counted as a matched series regardless of truncation, and before it,
         // so `total_series_count` reports what matched rather than what
         // survived.
-        out.total_series += 1;
+        if summary.is_none() {
+            out.total_series += 1;
+        }
         // Count into the volume histogram regardless of series truncation.
         // Lookback samples timestamped before `start_ns` feed range-selector
         // windows, not the visible timeline, so they are excluded.
-        if window_ns > 0 {
+        if summary.is_none() && window_ns > 0 {
             for (ts, _) in &group.points {
                 if *ts >= start_ns {
                     let bucket = ((*ts - start_ns) / window_ns).clamp(0, 59) as usize;

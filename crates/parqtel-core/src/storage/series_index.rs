@@ -30,8 +30,11 @@ use crate::error::{Error, Result};
 use crate::models::labels::{LabelInterner, LabelSet};
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
-use serde::{Deserialize, Serialize};
+use serde::de::{Error as DeError, SeqAccess, Visitor};
+use serde::ser::{Error as SerError, SerializeSeq, SerializeStruct};
+use serde::{Deserialize, Serialize, Serializer};
 use std::collections::HashMap;
+use std::fmt;
 use std::io::Read;
 use std::sync::{Arc, OnceLock};
 
@@ -47,10 +50,11 @@ const MAX_DECOMPRESSED_FOOTER_BYTES: u64 = 512 * 1024 * 1024;
 /// Columnar (parallel arrays) so it stays compact and parses quickly even for
 /// blocks with a hundred thousand series. Strings - metric names, label names and
 /// values - are stored once and referred to by id.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SeriesTable {
     v: u32,
-    strings: Vec<String>,
+    string_bytes: Vec<u8>,
+    string_offsets: Vec<u32>,
     /// `(metric name id, first series id, series count)` per run of series. A
     /// metric appears once per `(kind, resource)` group, so it can have several.
     metrics: Vec<(u32, u32, u32)>,
@@ -63,7 +67,221 @@ pub struct SeriesTable {
     /// Per series: flat `[name id, value id, name id, value id, ...]`, sorted by
     /// label name. Includes the `service.name` label merged in from the
     /// resource, exactly as a scan reports it.
-    labels: Vec<Vec<u32>>,
+    label_ids: Vec<u32>,
+    label_offsets: Vec<u32>,
+}
+
+impl Default for SeriesTable {
+    fn default() -> Self {
+        Self {
+            v: 0,
+            string_bytes: Vec::new(),
+            string_offsets: vec![0],
+            metrics: Vec::new(),
+            start: Vec::new(),
+            len: Vec::new(),
+            min_ts: Vec::new(),
+            max_ts: Vec::new(),
+            label_ids: Vec::new(),
+            label_offsets: vec![0],
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct SeriesTableSerde {
+    v: u32,
+    strings: StringArena,
+    metrics: Vec<(u32, u32, u32)>,
+    start: Vec<u64>,
+    len: Vec<u32>,
+    min_ts: Vec<i64>,
+    max_ts: Vec<i64>,
+    labels: LabelArena,
+}
+
+struct StringArena {
+    bytes: Vec<u8>,
+    offsets: Vec<u32>,
+}
+
+impl Default for StringArena {
+    fn default() -> Self {
+        Self {
+            bytes: Vec::new(),
+            offsets: vec![0],
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for StringArena {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct StringArenaVisitor;
+
+        impl<'de> Visitor<'de> for StringArenaVisitor {
+            type Value = StringArena;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("an array of series-index strings")
+            }
+
+            fn visit_seq<A>(self, mut seq: A) -> std::result::Result<Self::Value, A::Error>
+            where
+                A: SeqAccess<'de>,
+            {
+                let mut arena = StringArena::default();
+                if let Some(size) = seq.size_hint() {
+                    arena.offsets.reserve(size);
+                }
+                while let Some(string) = seq.next_element::<String>()? {
+                    arena.bytes.extend_from_slice(string.as_bytes());
+                    arena
+                        .offsets
+                        .push(u32::try_from(arena.bytes.len()).map_err(A::Error::custom)?);
+                }
+                arena.bytes.shrink_to_fit();
+                arena.offsets.shrink_to_fit();
+                Ok(arena)
+            }
+        }
+
+        deserializer.deserialize_seq(StringArenaVisitor)
+    }
+}
+
+struct LabelArena {
+    ids: Vec<u32>,
+    offsets: Vec<u32>,
+}
+
+impl Default for LabelArena {
+    fn default() -> Self {
+        Self {
+            ids: Vec::new(),
+            offsets: vec![0],
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for LabelArena {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct LabelArenaVisitor;
+
+        impl<'de> Visitor<'de> for LabelArenaVisitor {
+            type Value = LabelArena;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("an array of series label-id arrays")
+            }
+
+            fn visit_seq<A>(self, mut seq: A) -> std::result::Result<Self::Value, A::Error>
+            where
+                A: SeqAccess<'de>,
+            {
+                let mut arena = LabelArena::default();
+                if let Some(size) = seq.size_hint() {
+                    arena.offsets.reserve(size);
+                }
+                while let Some(labels) = seq.next_element::<Vec<u32>>()? {
+                    arena.ids.extend(labels);
+                    arena
+                        .offsets
+                        .push(u32::try_from(arena.ids.len()).map_err(A::Error::custom)?);
+                }
+                arena.ids.shrink_to_fit();
+                arena.offsets.shrink_to_fit();
+                Ok(arena)
+            }
+        }
+
+        deserializer.deserialize_seq(LabelArenaVisitor)
+    }
+}
+
+impl<'de> Deserialize<'de> for SeriesTable {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = SeriesTableSerde::deserialize(deserializer)?;
+        let table = Self {
+            v: wire.v,
+            string_bytes: wire.strings.bytes,
+            string_offsets: wire.strings.offsets,
+            metrics: wire.metrics,
+            start: wire.start,
+            len: wire.len,
+            min_ts: wire.min_ts,
+            max_ts: wire.max_ts,
+            label_ids: wire.labels.ids,
+            label_offsets: wire.labels.offsets,
+        };
+        Ok(table)
+    }
+}
+
+struct StringValues<'a>(&'a SeriesTable);
+
+impl Serialize for StringValues<'_> {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let count = self.0.string_offsets.len().saturating_sub(1);
+        let mut seq = serializer.serialize_seq(Some(count))?;
+        for id in 0..count {
+            let value = self
+                .0
+                .string(u32::try_from(id).map_err(S::Error::custom)?)
+                .ok_or_else(|| S::Error::custom("corrupt series index string offsets"))?;
+            seq.serialize_element(value)?;
+        }
+        seq.end()
+    }
+}
+
+struct LabelValues<'a>(&'a SeriesTable);
+
+impl Serialize for LabelValues<'_> {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let count = self.0.label_offsets.len().saturating_sub(1);
+        let mut seq = serializer.serialize_seq(Some(count))?;
+        for series in 0..count {
+            let labels = self
+                .0
+                .label_ids(series)
+                .ok_or_else(|| S::Error::custom("corrupt series index label offsets"))?;
+            seq.serialize_element(labels)?;
+        }
+        seq.end()
+    }
+}
+
+impl Serialize for SeriesTable {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut state = serializer.serialize_struct("SeriesTable", 8)?;
+        state.serialize_field("v", &self.v)?;
+        state.serialize_field("strings", &StringValues(self))?;
+        state.serialize_field("metrics", &self.metrics)?;
+        state.serialize_field("start", &self.start)?;
+        state.serialize_field("len", &self.len)?;
+        state.serialize_field("min_ts", &self.min_ts)?;
+        state.serialize_field("max_ts", &self.max_ts)?;
+        state.serialize_field("labels", &LabelValues(self))?;
+        state.end()
+    }
 }
 
 /// One contiguous metric/kind/resource run in a stored series table.
@@ -97,8 +315,11 @@ impl SeriesTableBuilder {
         if let Some(id) = self.ids.get(s) {
             return *id;
         }
-        let id = self.table.strings.len() as u32;
-        self.table.strings.push(s.to_string());
+        let id = self.table.string_offsets.len().saturating_sub(1) as u32;
+        self.table.string_bytes.extend_from_slice(s.as_bytes());
+        self.table
+            .string_offsets
+            .push(self.table.string_bytes.len() as u32);
         self.ids.insert(s.to_string(), id);
         id
     }
@@ -130,7 +351,10 @@ impl SeriesTableBuilder {
         self.table.len.push(rows);
         self.table.min_ts.push(min_ts);
         self.table.max_ts.push(max_ts);
-        self.table.labels.push(flat);
+        self.table.label_ids.extend(flat);
+        self.table
+            .label_offsets
+            .push(self.table.label_ids.len() as u32);
         if let Some(run) = self.table.metrics.last_mut() {
             run.2 += 1;
         }
@@ -149,31 +373,42 @@ impl SeriesTableBuilder {
 impl SeriesTable {
     /// String at `id`, or `None` when out of bounds.
     pub fn string(&self, id: u32) -> Option<&str> {
-        self.strings.get(id as usize).map(String::as_str)
+        let id = usize::try_from(id).ok()?;
+        let start = *self.string_offsets.get(id)? as usize;
+        let end = *self.string_offsets.get(id.checked_add(1)?)? as usize;
+        std::str::from_utf8(self.string_bytes.get(start..end)?).ok()
+    }
+
+    fn string_id(&self, value: &str) -> Option<u32> {
+        for id in 0..self.string_offsets.len().saturating_sub(1) {
+            let id = u32::try_from(id).ok()?;
+            if self.string(id) == Some(value) {
+                return Some(id);
+            }
+        }
+        None
     }
 
     /// Flat label id pairs for `series`, or `None` when out of bounds.
     pub fn label_ids(&self, series: usize) -> Option<&[u32]> {
-        self.labels.get(series).map(Vec::as_slice)
+        let start = *self.label_offsets.get(series)? as usize;
+        let end = *self.label_offsets.get(series.checked_add(1)?)? as usize;
+        self.label_ids.get(start..end)
     }
 
     /// Total label pairs across all series.
     pub fn label_pair_count(&self) -> usize {
-        self.labels
-            .iter()
-            .fold(0usize, |count, labels| count.saturating_add(labels.len()))
-            / 2
+        self.label_ids.len() / 2
     }
 
     /// Approximate heap allocation size, including vector headers and payload capacity.
     pub fn approx_heap_bytes(&self) -> usize {
-        let mut bytes = self
-            .strings
-            .capacity()
-            .saturating_mul(std::mem::size_of::<String>());
-        bytes = self.strings.iter().fold(bytes, |bytes, string| {
-            bytes.saturating_add(string.capacity())
-        });
+        let mut bytes = self.string_bytes.capacity();
+        bytes = bytes.saturating_add(
+            self.string_offsets
+                .capacity()
+                .saturating_mul(std::mem::size_of::<u32>()),
+        );
         bytes = bytes.saturating_add(self.metrics.capacity().saturating_mul(std::mem::size_of::<(
             u32,
             u32,
@@ -200,13 +435,15 @@ impl SeriesTable {
                 .saturating_mul(std::mem::size_of::<i64>()),
         );
         bytes = bytes.saturating_add(
-            self.labels
+            self.label_ids
                 .capacity()
-                .saturating_mul(std::mem::size_of::<Vec<u32>>()),
+                .saturating_mul(std::mem::size_of::<u32>()),
         );
-        self.labels.iter().fold(bytes, |bytes, labels| {
-            bytes.saturating_add(labels.capacity().saturating_mul(std::mem::size_of::<u32>()))
-        })
+        bytes.saturating_add(
+            self.label_offsets
+                .capacity()
+                .saturating_mul(std::mem::size_of::<u32>()),
+        )
     }
 
     /// Number of metric runs in table order.
@@ -219,7 +456,7 @@ impl SeriesTable {
         let (name, first, count) = *self.metrics.get(index)?;
         let first_series = first as usize;
         Some(SeriesTableRun {
-            metric_name: self.strings.get(name as usize)?,
+            metric_name: self.string(name)?,
             first_series,
             series_count: count as usize,
             first_row: *self.start.get(first_series)?,
@@ -245,7 +482,7 @@ impl SeriesTable {
     /// label interner. Compaction uses this to keep source-index memory bounded.
     pub fn series_entry(&self, index: usize) -> Result<SeriesEntry> {
         let bad = || Error::Internal("corrupt series index: series entry out of range".into());
-        let flat = self.labels.get(index).ok_or_else(bad)?;
+        let flat = self.label_ids(index).ok_or_else(bad)?;
         if flat.len() % 2 != 0 {
             return Err(Error::Internal(
                 "corrupt series index: odd label id count".into(),
@@ -254,8 +491,8 @@ impl SeriesTable {
         let (pairs, _rest) = flat.as_chunks::<2>();
         let mut labels = Vec::with_capacity(pairs.len());
         for kv in pairs {
-            let name = self.strings.get(kv[0] as usize).map(String::as_str);
-            let value = self.strings.get(kv[1] as usize).map(String::as_str);
+            let name = self.string(kv[0]);
+            let value = self.string(kv[1]);
             labels.push((name.ok_or_else(bad)?, value.ok_or_else(bad)?));
         }
         Ok(SeriesEntry {
@@ -320,15 +557,31 @@ impl SeriesTable {
         if self.len.len() != n
             || self.min_ts.len() != n
             || self.max_ts.len() != n
-            || self.labels.len() != n
+            || self.label_offsets.len() != n + 1
+            || self.label_offsets.first() != Some(&0)
+            || self.label_offsets.last().copied() != u32::try_from(self.label_ids.len()).ok()
+            || self
+                .label_offsets
+                .windows(2)
+                .any(|offsets| offsets[0] > offsets[1])
+            || self.string_offsets.is_empty()
+            || self.string_offsets.first() != Some(&0)
+            || self.string_offsets.last().copied() != u32::try_from(self.string_bytes.len()).ok()
+            || self
+                .string_offsets
+                .windows(2)
+                .any(|offsets| offsets[0] > offsets[1])
         {
             return Err(bad("array lengths differ"));
         }
-        let strings = self.strings.len() as u32;
-        if self
-            .labels
-            .iter()
-            .any(|l| l.len() % 2 != 0 || l.iter().any(|id| *id >= strings))
+        if self.string_offsets.windows(2).any(|offsets| {
+            std::str::from_utf8(&self.string_bytes[offsets[0] as usize..offsets[1] as usize])
+                .is_err()
+        }) {
+            return Err(bad("invalid string encoding"));
+        }
+        let strings = u32::try_from(self.string_offsets.len() - 1).map_err(|_| bad("overflow"))?;
+        if !self.label_ids.len().is_multiple_of(2) || self.label_ids.iter().any(|id| *id >= strings)
         {
             return Err(bad("label id out of range"));
         }
@@ -431,17 +684,31 @@ impl SeriesIndex {
         table.validate()?;
         let mut metric_ranges: HashMap<String, Vec<(u32, u32)>> = HashMap::new();
         for (name, first, count) in &table.metrics {
+            let Some(name) = table.string(*name) else {
+                return Err(Error::Internal(
+                    "corrupt series index: invalid metric name".into(),
+                ));
+            };
             metric_ranges
-                .entry(table.strings[*name as usize].clone())
+                .entry(name.to_string())
                 .or_default()
                 .push((*first, first + count));
         }
         let mut label_name_ids = HashMap::new();
-        for labels in &table.labels {
+        for series in 0..table.series_count() {
+            let Some(labels) = table.label_ids(series) else {
+                return Err(Error::Internal(
+                    "corrupt series index: invalid label offsets".into(),
+                ));
+            };
             for pair in labels.as_chunks::<2>().0 {
-                let name = &table.strings[pair[0] as usize];
-                if !label_name_ids.contains_key(name.as_str()) {
-                    label_name_ids.insert(name.clone(), pair[0]);
+                let Some(name) = table.string(pair[0]) else {
+                    return Err(Error::Internal(
+                        "corrupt series index: invalid label name".into(),
+                    ));
+                };
+                if !label_name_ids.contains_key(name) {
+                    label_name_ids.insert(name.to_string(), pair[0]);
                 }
             }
         }
@@ -551,13 +818,7 @@ impl SeriesIndex {
             let Some(label_id) = self.label_name_ids.get(label) else {
                 return Vec::new();
             };
-            let Some(value_id) = self
-                .table
-                .strings
-                .iter()
-                .position(|candidate| candidate == value)
-                .and_then(|id| u32::try_from(id).ok())
-            else {
+            let Some(value_id) = self.table.string_id(value) else {
                 return Vec::new();
             };
             let ids = self.matching_ids(ranges, *label_id, |candidate| candidate == value_id);

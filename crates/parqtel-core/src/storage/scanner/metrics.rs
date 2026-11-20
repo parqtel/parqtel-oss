@@ -16,7 +16,7 @@ use crate::storage::series_index::{row_ranges, SeriesIndex, SeriesSelector};
 use arrow_array::{Array, TimestampNanosecondArray};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::arrow::ProjectionMask;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 /// Columns the metrics scan decodes, in schema order.
@@ -137,6 +137,108 @@ impl SeriesResolver {
 /// Columns an indexed scan decodes: labels come from the series table.
 const INDEXED_SCAN_COLUMNS: [&str; 4] =
     ["timestamp_ns", "value_float", "value_int", "value_complex"];
+const INDEXED_TIMESTAMP_COLUMN: [&str; 1] = ["timestamp_ns"];
+
+/// A metrics scan that has applied the per-query series limit before decoding values.
+#[derive(Debug)]
+pub struct LimitedMetricScan {
+    /// Points from the smallest matching fingerprints, in block order.
+    pub points: Vec<DataPoint>,
+    /// Rows considered by the disk scan and memory buffer.
+    pub rows_considered: u64,
+    /// Distinct matching fingerprints before the series limit.
+    pub total_series: usize,
+    /// Counts every matched point in the visible timeline.
+    pub volume: [u64; 60],
+}
+
+impl Default for LimitedMetricScan {
+    fn default() -> Self {
+        Self {
+            points: Vec::new(),
+            rows_considered: 0,
+            total_series: 0,
+            volume: [0; 60],
+        }
+    }
+}
+
+struct IndexedBlockPlan {
+    opened: OpenedBlock,
+    matched: Vec<(u32, u64)>,
+    rows_considered: u64,
+    volume: [u64; 60],
+}
+
+enum LimitedBlockPlan {
+    Indexed(Box<IndexedBlockPlan>),
+    Fallback(MetricScan),
+}
+
+struct TimestampScan {
+    matched_ids: Vec<u32>,
+    rows_considered: u64,
+    volume: [u64; 60],
+}
+
+impl Default for TimestampScan {
+    fn default() -> Self {
+        Self {
+            matched_ids: Vec::new(),
+            rows_considered: 0,
+            volume: [0; 60],
+        }
+    }
+}
+
+fn add_volume(volume: &mut [u64; 60], timestamp_ns: i64, start_ns: i64, window_ns: i64) {
+    if window_ns > 0 && timestamp_ns >= start_ns {
+        let bucket = ((timestamp_ns - start_ns) / window_ns).clamp(0, 59) as usize;
+        volume[bucket] += 1;
+    }
+}
+
+fn limit_full_scan(
+    scan: MetricScan,
+    buffered_points: Vec<DataPoint>,
+    buffered_rows: u64,
+    max_series: usize,
+    volume_start_ns: i64,
+    volume_window_ns: i64,
+) -> LimitedMetricScan {
+    let mut fingerprints: HashSet<_> = scan
+        .points
+        .iter()
+        .chain(&buffered_points)
+        .map(|point| point.labels.fingerprint())
+        .collect();
+    let total_series = fingerprints.len();
+    let mut ordered: Vec<_> = fingerprints.drain().collect();
+    ordered.sort_unstable();
+    ordered.truncate(max_series);
+    let kept: HashSet<_> = ordered.into_iter().collect();
+    let mut volume = [0; 60];
+    let points = scan
+        .points
+        .into_iter()
+        .chain(buffered_points)
+        .filter(|point| {
+            add_volume(
+                &mut volume,
+                point.timestamp_ns,
+                volume_start_ns,
+                volume_window_ns,
+            );
+            kept.contains(&point.labels.fingerprint())
+        })
+        .collect();
+    LimitedMetricScan {
+        points,
+        rows_considered: scan.rows_considered + buffered_rows,
+        total_series,
+        volume,
+    }
+}
 
 /// Decodes a MetricValue from the three value columns without re-downcasting.
 fn decode_value(
@@ -246,6 +348,216 @@ impl Scanner {
         Ok(out)
     }
 
+    /// Scans matched series while decoding values only for the smallest
+    /// `max_series` fingerprints. The buffer points participate in that limit.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn scan_filtered_limited(
+        blocks: Vec<BlockMetadata>,
+        metric_name: String,
+        start_ns: i64,
+        end_ns: i64,
+        selector: SeriesSelector,
+        max_series: usize,
+        volume_start_ns: i64,
+        volume_window_ns: i64,
+        buffered_points: Vec<DataPoint>,
+        buffered_rows: u64,
+    ) -> Result<LimitedMetricScan> {
+        let blocks: Vec<_> = blocks.into_iter().take(MAX_BLOCKS).collect();
+        let fallback_blocks = blocks.clone();
+        let selector = Arc::new(selector);
+        let mut plans = Vec::with_capacity(blocks.len());
+        let mut tasks = Vec::with_capacity(blocks.len());
+        let mut admission_wait = std::time::Duration::ZERO;
+
+        for block in blocks {
+            let metric = metric_name.clone();
+            let selector = Arc::clone(&selector);
+            let waiting = std::time::Instant::now();
+            let permit = acquire_scan_slot().await?;
+            admission_wait += waiting.elapsed();
+            tasks.push(tokio::task::spawn_blocking(move || {
+                let _permit = permit;
+                record_scan_block();
+                Self::plan_limited_block(
+                    block,
+                    &metric,
+                    start_ns,
+                    end_ns,
+                    &selector,
+                    volume_start_ns,
+                    volume_window_ns,
+                )
+            }));
+        }
+
+        for task in tasks {
+            if let Some(plan) = task.await.map_err(|e| Error::Internal(e.to_string()))?? {
+                plans.push(plan);
+            }
+        }
+
+        let mut fingerprints = HashSet::new();
+        for plan in &plans {
+            match plan {
+                LimitedBlockPlan::Indexed(plan) => {
+                    fingerprints.extend(plan.matched.iter().map(|(_, fingerprint)| *fingerprint));
+                }
+                LimitedBlockPlan::Fallback(scan) => {
+                    fingerprints.extend(scan.points.iter().map(|point| point.labels.fingerprint()));
+                }
+            }
+        }
+        fingerprints.extend(
+            buffered_points
+                .iter()
+                .map(|point| point.labels.fingerprint()),
+        );
+        let total_series = fingerprints.len();
+        let mut kept: Vec<_> = fingerprints.into_iter().collect();
+        kept.sort_unstable();
+        kept.truncate(max_series);
+        let kept: HashSet<_> = kept.into_iter().collect();
+
+        let mut block_points: Vec<Vec<DataPoint>> = (0..plans.len()).map(|_| Vec::new()).collect();
+        let mut rows_considered = buffered_rows;
+        let mut disk_rows_considered = 0;
+        let mut disk_points_returned = 0;
+        let mut volume = [0; 60];
+
+        for point in &buffered_points {
+            add_volume(
+                &mut volume,
+                point.timestamp_ns,
+                volume_start_ns,
+                volume_window_ns,
+            );
+        }
+        for (block_index, plan) in plans.iter_mut().enumerate() {
+            match plan {
+                LimitedBlockPlan::Fallback(scan) => {
+                    rows_considered += scan.rows_considered;
+                    disk_rows_considered += scan.rows_considered;
+                    for point in scan.points.drain(..) {
+                        add_volume(
+                            &mut volume,
+                            point.timestamp_ns,
+                            volume_start_ns,
+                            volume_window_ns,
+                        );
+                        if kept.contains(&point.labels.fingerprint()) {
+                            disk_points_returned += 1;
+                            block_points[block_index].push(point);
+                        }
+                    }
+                }
+                LimitedBlockPlan::Indexed(plan) => {
+                    rows_considered += plan.rows_considered;
+                    disk_rows_considered += plan.rows_considered;
+                    for (bucket, count) in volume.iter_mut().zip(plan.volume) {
+                        *bucket += count;
+                    }
+                }
+            }
+        }
+
+        let mut read_tasks = Vec::new();
+        for (block_index, plan) in plans.into_iter().enumerate() {
+            let LimitedBlockPlan::Indexed(plan) = plan else {
+                continue;
+            };
+            let kept_ids: Vec<_> = plan
+                .matched
+                .iter()
+                .filter_map(|(id, fingerprint)| kept.contains(fingerprint).then_some(*id))
+                .collect();
+            let waiting = std::time::Instant::now();
+            let permit = acquire_scan_slot().await?;
+            admission_wait += waiting.elapsed();
+            read_tasks.push((
+                block_index,
+                tokio::task::spawn_blocking(move || {
+                    let _permit = permit;
+                    if kept_ids.is_empty() {
+                        Ok(MetricScan::default())
+                    } else {
+                        Self::scan_block_indexed(
+                            &plan.opened,
+                            plan.opened.series.as_deref().ok_or_else(|| {
+                                Error::Internal(
+                                    "planned indexed block lost its series table".into(),
+                                )
+                            })?,
+                            &kept_ids,
+                            start_ns,
+                            end_ns,
+                        )
+                    }
+                }),
+            ));
+        }
+
+        let mut indexed_scans = Vec::with_capacity(read_tasks.len());
+        let mut read_error = None;
+        for (block_index, task) in read_tasks {
+            match task.await {
+                Ok(Ok(scan)) => indexed_scans.push((block_index, scan)),
+                Ok(Err(error)) => read_error = Some(error),
+                Err(error) => read_error = Some(Error::Internal(error.to_string())),
+            }
+        }
+        if let Some(error) = read_error {
+            tracing::warn!("limited indexed scan failed; retrying with the full scan: {error}");
+            let scan = Self::scan_filtered(
+                fallback_blocks,
+                metric_name,
+                start_ns,
+                end_ns,
+                (*selector).clone(),
+            )
+            .await?;
+            return Ok(limit_full_scan(
+                scan,
+                buffered_points.clone(),
+                buffered_rows,
+                max_series,
+                volume_start_ns,
+                volume_window_ns,
+            ));
+        }
+
+        for (block_index, kept_scan) in indexed_scans {
+            disk_points_returned += kept_scan.points.len();
+            block_points[block_index] = kept_scan.points;
+        }
+
+        let points = block_points
+            .into_iter()
+            .flatten()
+            .chain(
+                buffered_points
+                    .into_iter()
+                    .filter(|point| kept.contains(&point.labels.fingerprint())),
+            )
+            .collect::<Vec<_>>();
+
+        record_scan_output(disk_rows_considered, disk_points_returned);
+        tracing::debug!(
+            metric = %metric_name,
+            rows_considered,
+            points = points.len(),
+            series = total_series,
+            admission_wait_ms = admission_wait.as_millis(),
+            "limited metrics scan complete"
+        );
+        Ok(LimitedMetricScan {
+            points,
+            rows_considered,
+            total_series,
+            volume,
+        })
+    }
+
     pub fn scan_block(
         meta: BlockMetadata,
         metric_name: String,
@@ -270,8 +582,8 @@ impl Scanner {
         };
         let has_labels_column = opened.meta.schema().index_of("labels").is_ok();
         if let Some(index) = &opened.series {
-            match Self::scan_block_indexed(&opened, index, metric_name, start_ns, end_ns, selector)
-            {
+            let ids = index.select(metric_name, selector, start_ns, end_ns);
+            match Self::scan_block_indexed(&opened, index, &ids, start_ns, end_ns) {
                 Ok(scan) => return Ok(scan),
                 // A table that disagrees with its file costs speed, not
                 // correctness: the rows are still there to be scanned.
@@ -479,6 +791,161 @@ impl Scanner {
         Ok(out)
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn plan_limited_block(
+        meta: BlockMetadata,
+        metric_name: &str,
+        start_ns: i64,
+        end_ns: i64,
+        selector: &SeriesSelector,
+        volume_start_ns: i64,
+        volume_window_ns: i64,
+    ) -> Result<Option<LimitedBlockPlan>> {
+        let opened = match open_block(&meta.path) {
+            Ok(Some(opened)) => opened,
+            Ok(None) => return Ok(None),
+            Err(error) => {
+                tracing::warn!(path = ?meta.path, "limited scan planning failed; retrying block normally: {error}");
+                return Self::scan_block_filtered(meta, metric_name, start_ns, end_ns, selector)
+                    .map(|scan| Some(LimitedBlockPlan::Fallback(scan)));
+            }
+        };
+        let Some(index) = &opened.series else {
+            return Self::scan_block_filtered(meta, metric_name, start_ns, end_ns, selector)
+                .map(|scan| Some(LimitedBlockPlan::Fallback(scan)));
+        };
+
+        let planned = (|| {
+            let candidates = index.select(metric_name, selector, start_ns, end_ns);
+            let candidates: Vec<_> = candidates
+                .into_iter()
+                .map(|id| Ok((id, index.labels(id)?.fingerprint())))
+                .collect::<Result<_>>()?;
+            let timestamps = Self::scan_block_indexed_timestamps(
+                &opened,
+                index,
+                &candidates.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+                start_ns,
+                end_ns,
+                volume_start_ns,
+                volume_window_ns,
+            )?;
+            let matched_ids: HashSet<_> = timestamps.matched_ids.iter().copied().collect();
+            let matched = candidates
+                .into_iter()
+                .filter(|(id, _)| matched_ids.contains(id))
+                .collect();
+            Ok::<_, Error>((matched, timestamps.rows_considered, timestamps.volume))
+        })();
+
+        match planned {
+            Ok((matched, rows_considered, volume)) => Ok(Some(LimitedBlockPlan::Indexed(
+                Box::new(IndexedBlockPlan {
+                    opened,
+                    matched,
+                    rows_considered,
+                    volume,
+                }),
+            ))),
+            Err(error) => {
+                tracing::warn!(path = ?meta.path, "limited scan planning failed; retrying block normally: {error}");
+                Self::scan_block_filtered(meta, metric_name, start_ns, end_ns, selector)
+                    .map(|scan| Some(LimitedBlockPlan::Fallback(scan)))
+            }
+        }
+    }
+
+    fn scan_block_indexed_timestamps(
+        opened: &OpenedBlock,
+        index: &SeriesIndex,
+        ids: &[u32],
+        start_ns: i64,
+        end_ns: i64,
+        volume_start_ns: i64,
+        volume_window_ns: i64,
+    ) -> Result<TimestampScan> {
+        if ids.is_empty() {
+            return Ok(TimestampScan::default());
+        }
+        let file = opened.file.try_clone().map_err(Error::Io)?;
+        let builder = ParquetRecordBatchReaderBuilder::new_with_metadata(file, opened.meta.clone());
+        let (groups, selection) = plan_row_selection(builder.metadata(), &row_ranges(index, ids));
+        let mask = ProjectionMask::leaves(
+            builder.parquet_schema(),
+            project_present(builder.parquet_schema(), &INDEXED_TIMESTAMP_COLUMN),
+        );
+        let reader = builder
+            .with_row_groups(groups)
+            .with_row_selection(selection)
+            .with_projection(mask)
+            .with_batch_size(SCAN_BATCH_ROWS)
+            .build()
+            .map_err(|e| Error::Parquet(e.to_string()))?;
+
+        let mut out = TimestampScan::default();
+        let mut series = ids.iter().map(|id| -> Result<_> {
+            let (_, rows, min_ts, max_ts) = index.bounds(*id).ok_or_else(|| {
+                Error::Internal("selected series id is missing from its table".into())
+            })?;
+            Ok((*id, rows as usize, min_ts, max_ts))
+        });
+        let mut current = series.next().transpose()?;
+        let mut left = current.as_ref().map_or(0, |(_, rows, _, _)| *rows);
+        let mut current_matched = false;
+        for batch in reader {
+            let batch = batch.map_err(|e| Error::Parquet(e.to_string()))?;
+            let ts_idx = batch.schema().index_of("timestamp_ns").map_err(|_| {
+                Error::Arrow("metrics scan is missing the timestamp_ns column".into())
+            })?;
+            let ts_arr = batch
+                .column(ts_idx)
+                .as_any()
+                .downcast_ref::<TimestampNanosecondArray>()
+                .ok_or_else(|| Error::Arrow("Invalid timestamp column".into()))?;
+            let mut row = 0;
+            while row < batch.num_rows() {
+                let Some((_, _, min_ts, max_ts)) = current else {
+                    return Err(Error::Internal(
+                        "block holds more selected rows than its series table lists".into(),
+                    ));
+                };
+                let take = left.min(batch.num_rows() - row);
+                let inside = min_ts >= start_ns && max_ts <= end_ns;
+                for r in row..row + take {
+                    let timestamp = ts_arr.value(r);
+                    if inside || (timestamp >= start_ns && timestamp <= end_ns) {
+                        out.rows_considered += 1;
+                        current_matched = true;
+                        add_volume(
+                            &mut out.volume,
+                            timestamp,
+                            volume_start_ns,
+                            volume_window_ns,
+                        );
+                    }
+                }
+                row += take;
+                left -= take;
+                if left == 0 {
+                    if current_matched {
+                        if let Some((id, _, _, _)) = current {
+                            out.matched_ids.push(id);
+                        }
+                    }
+                    current = series.next().transpose()?;
+                    left = current.as_ref().map_or(0, |(_, rows, _, _)| *rows);
+                    current_matched = false;
+                }
+            }
+        }
+        if current.is_some() {
+            return Err(Error::Internal(
+                "block holds fewer selected rows than its series table lists".into(),
+            ));
+        }
+        Ok(out)
+    }
+
     /// Reads one block through its series table.
     ///
     /// The table names the series that qualify and the rows each occupies, so
@@ -488,18 +955,16 @@ impl Scanner {
     fn scan_block_indexed(
         opened: &OpenedBlock,
         index: &SeriesIndex,
-        metric_name: &str,
+        ids: &[u32],
         start_ns: i64,
         end_ns: i64,
-        selector: &SeriesSelector,
     ) -> Result<MetricScan> {
-        let ids = index.select(metric_name, selector, start_ns, end_ns);
         if ids.is_empty() {
             return Ok(MetricScan::default());
         }
         let file = opened.file.try_clone().map_err(Error::Io)?;
         let builder = ParquetRecordBatchReaderBuilder::new_with_metadata(file, opened.meta.clone());
-        let (groups, selection) = plan_row_selection(builder.metadata(), &row_ranges(index, &ids));
+        let (groups, selection) = plan_row_selection(builder.metadata(), &row_ranges(index, ids));
         let mask = ProjectionMask::leaves(
             builder.parquet_schema(),
             project_present(builder.parquet_schema(), &INDEXED_SCAN_COLUMNS),

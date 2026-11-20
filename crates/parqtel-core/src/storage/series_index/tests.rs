@@ -58,6 +58,58 @@ fn table_round_trips_through_the_footer_text() {
 }
 
 #[test]
+fn footer_bytes_and_sample_accessors_are_unchanged() {
+    let table = sample_table();
+    let footer = table.to_footer_value().unwrap();
+    let parsed = SeriesTable::from_footer_value(&footer).unwrap();
+    assert_eq!(
+        parsed.to_footer_value().unwrap().as_bytes(),
+        footer.as_bytes()
+    );
+
+    for id in 0..table.string_offsets.len() - 1 {
+        assert_eq!(parsed.string(id as u32), table.string(id as u32));
+    }
+    for series in 0..table.series_count() {
+        assert_eq!(parsed.label_ids(series), table.label_ids(series));
+        let expected = table.series_entry(series).unwrap();
+        let actual = parsed.series_entry(series).unwrap();
+        assert_eq!(actual.labels, expected.labels);
+        assert_eq!(
+            (actual.start, actual.rows, actual.min_ts, actual.max_ts),
+            (
+                expected.start,
+                expected.rows,
+                expected.min_ts,
+                expected.max_ts
+            )
+        );
+    }
+}
+
+#[test]
+fn footer_serialization_keeps_legacy_field_bytes() {
+    let mut builder = SeriesTableBuilder::new();
+    builder.begin_metric("m");
+    builder.push_series(&ls(&[("a", "1")]), 0, 3, 5, 9);
+    builder.push_series(&ls(&[("a", "2")]), 3, 2, 1, 4);
+    let table = builder.finish();
+    let expected = r#"{"v":1,"strings":["m","a","1","2"],"metrics":[[0,0,2]],"start":[0,3],"len":[3,2],"min_ts":[5,1],"max_ts":[9,4],"labels":[[1,2],[1,3]]}"#;
+    assert_eq!(
+        table.to_footer_value().unwrap().as_bytes(),
+        expected.as_bytes()
+    );
+    assert_eq!(
+        SeriesTable::from_footer_value(expected)
+            .unwrap()
+            .to_footer_value()
+            .unwrap()
+            .as_bytes(),
+        expected.as_bytes()
+    );
+}
+
+#[test]
 fn table_accessors_expose_strings_labels_counts_and_heap_size() {
     let table = sample_table();
 
@@ -84,10 +136,14 @@ fn table_accessors_expose_strings_labels_counts_and_heap_size() {
     assert_eq!(table.label_pair_count(), 13);
 
     let expected_heap_bytes = table
-        .strings
+        .string_bytes
         .capacity()
-        .saturating_mul(std::mem::size_of::<String>())
-        .saturating_add(table.strings.iter().map(String::capacity).sum::<usize>())
+        .saturating_add(
+            table
+                .string_offsets
+                .capacity()
+                .saturating_mul(std::mem::size_of::<u32>()),
+        )
         .saturating_add(
             table
                 .metrics
@@ -120,16 +176,15 @@ fn table_accessors_expose_strings_labels_counts_and_heap_size() {
         )
         .saturating_add(
             table
-                .labels
+                .label_ids
                 .capacity()
-                .saturating_mul(std::mem::size_of::<Vec<u32>>()),
+                .saturating_mul(std::mem::size_of::<u32>()),
         )
         .saturating_add(
             table
-                .labels
-                .iter()
-                .map(|labels| labels.capacity().saturating_mul(std::mem::size_of::<u32>()))
-                .sum::<usize>(),
+                .label_offsets
+                .capacity()
+                .saturating_mul(std::mem::size_of::<u32>()),
         );
     assert_eq!(table.approx_heap_bytes(), expected_heap_bytes);
 }
@@ -190,7 +245,7 @@ fn corrupt_tables_are_rejected() {
         "array length mismatch"
     );
     let mut t = good.clone();
-    t.labels[0][0] = 99;
+    t.label_ids[0] = 99;
     assert!(SeriesIndex::from_table(&t).is_err(), "id out of range");
     let mut t = good.clone();
     t.metrics[0].2 = 5;
@@ -365,7 +420,7 @@ fn labels_are_materialised_lazily() {
 #[test]
 fn labels_reject_corrupt_pairs_as_internal_errors() {
     let mut table = sample_table();
-    table.labels[0][2] = table.labels[0][0];
+    table.label_ids[2] = table.label_ids[0];
     let idx = SeriesIndex::from_owned_table(table).unwrap();
     assert!(matches!(idx.labels(0), Err(Error::Internal(_))));
 }

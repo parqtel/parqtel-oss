@@ -15,7 +15,8 @@ use crate::models::storage::{BlockMetadata, StorageModel};
 use arrow_array::{Array, TimestampNanosecondArray};
 use parquet::arrow::arrow_reader::{ArrowPredicateFn, ParquetRecordBatchReaderBuilder, RowFilter};
 use parquet::arrow::ProjectionMask;
-use std::collections::HashMap;
+use std::cmp::Ordering;
+use std::collections::{BinaryHeap, HashMap};
 use std::sync::Arc;
 
 /// Row predicate pushed down into blocking scan tasks.
@@ -60,6 +61,110 @@ impl LogColumnPrefilter {
 pub struct LogScanStats {
     pub total_matched: usize,
     pub volume_buckets: Vec<u64>,
+}
+
+#[derive(Debug)]
+struct RankedLog {
+    timestamp_ns: i64,
+    order: usize,
+    log: LogRecord,
+}
+
+impl PartialEq for RankedLog {
+    fn eq(&self, other: &Self) -> bool {
+        (self.timestamp_ns, self.order) == (other.timestamp_ns, other.order)
+    }
+}
+
+impl Eq for RankedLog {}
+
+impl PartialOrd for RankedLog {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for RankedLog {
+    fn cmp(&self, other: &Self) -> Ordering {
+        (self.timestamp_ns, self.order).cmp(&(other.timestamp_ns, other.order))
+    }
+}
+
+struct LogResultMerger {
+    keep: usize,
+    keep_newest: bool,
+    newest: BinaryHeap<std::cmp::Reverse<RankedLog>>,
+    oldest: BinaryHeap<RankedLog>,
+    next_order: usize,
+    stats: LogScanStats,
+}
+
+impl LogResultMerger {
+    fn new(keep: usize, keep_newest: bool) -> Self {
+        Self {
+            keep,
+            keep_newest,
+            newest: BinaryHeap::new(),
+            oldest: BinaryHeap::new(),
+            next_order: 0,
+            stats: LogScanStats {
+                total_matched: 0,
+                volume_buckets: vec![0; 60],
+            },
+        }
+    }
+
+    fn add(&mut self, logs: Vec<LogRecord>, matched: usize, buckets: Vec<u64>) {
+        self.stats.total_matched += matched;
+        for (acc, bucket) in self.stats.volume_buckets.iter_mut().zip(buckets) {
+            *acc += bucket;
+        }
+
+        for log in logs {
+            let candidate = RankedLog {
+                timestamp_ns: log.timestamp_ns,
+                order: self.next_order,
+                log,
+            };
+            self.next_order += 1;
+
+            if self.keep == 0 {
+                continue;
+            }
+            if self.keep_newest {
+                if self.newest.len() < self.keep {
+                    self.newest.push(std::cmp::Reverse(candidate));
+                } else if self.newest.peek().is_some_and(|worst| candidate > worst.0) {
+                    let _ = self.newest.pop();
+                    self.newest.push(std::cmp::Reverse(candidate));
+                }
+            } else if self.oldest.len() < self.keep {
+                self.oldest.push(candidate);
+            } else if self.oldest.peek().is_some_and(|worst| candidate < *worst) {
+                let _ = self.oldest.pop();
+                self.oldest.push(candidate);
+            }
+        }
+    }
+
+    fn finish(self) -> (Vec<LogRecord>, LogScanStats) {
+        let mut retained: Vec<RankedLog> = if self.keep_newest {
+            self.newest
+                .into_iter()
+                .map(|std::cmp::Reverse(log)| log)
+                .collect()
+        } else {
+            self.oldest.into_vec()
+        };
+        retained.sort_unstable();
+        (
+            retained
+                .into_iter()
+                .map(|candidate| candidate.log)
+                .collect(),
+            self.stats,
+        )
+    }
 }
 
 /// Row mask for a [`LogColumnPrefilter`] over a batch holding exactly
@@ -232,31 +337,13 @@ impl Scanner {
             blocks_scheduled += 1;
         }
 
-        let mut all_logs = Vec::new();
-        let mut stats = LogScanStats {
-            total_matched: 0,
-            volume_buckets: vec![0; 60],
-        };
+        let mut results = LogResultMerger::new(keep, keep_newest);
         for task in tasks {
             let (logs, matched, buckets) =
                 task.await.map_err(|e| Error::Internal(e.to_string()))??;
-            stats.total_matched += matched;
-            for (acc, b) in stats.volume_buckets.iter_mut().zip(buckets) {
-                *acc += b;
-            }
-            all_logs.extend(logs);
-            // Incremental trim keeps the working set at ~`keep` records
-            // even when many blocks are in range.
-            all_logs.sort_by_key(|l| l.timestamp_ns);
-            if all_logs.len() > keep {
-                if keep_newest {
-                    let excess = all_logs.len() - keep;
-                    all_logs.drain(..excess);
-                } else {
-                    all_logs.truncate(keep);
-                }
-            }
+            results.add(logs, matched, buckets);
         }
+        let (all_logs, stats) = results.finish();
         record_scan_output(0, all_logs.len());
         tracing::debug!(
             blocks = blocks_scheduled,
@@ -531,5 +618,122 @@ impl Scanner {
             }
         }
         Ok(Some((logs, matched, buckets)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn log(timestamp_ns: i64, body: &str) -> LogRecord {
+        LogRecord::new(
+            timestamp_ns,
+            timestamp_ns,
+            9,
+            "INFO".into(),
+            body.into(),
+            crate::LabelSet::default(),
+            crate::LabelSet::default(),
+            [0; 16],
+            [0; 8],
+            0,
+            "test".into(),
+            "1".into(),
+        )
+    }
+
+    fn reference_merge(
+        blocks: &[(Vec<LogRecord>, usize, Vec<u64>)],
+        keep: usize,
+        keep_newest: bool,
+    ) -> (Vec<LogRecord>, LogScanStats) {
+        let mut logs = Vec::new();
+        let mut stats = LogScanStats {
+            total_matched: 0,
+            volume_buckets: vec![0; 60],
+        };
+        for (block_logs, matched, buckets) in blocks {
+            logs.extend(block_logs.iter().cloned());
+            logs.sort_by_key(|record| record.timestamp_ns);
+            if logs.len() > keep {
+                if keep_newest {
+                    let excess = logs.len() - keep;
+                    logs.drain(..excess);
+                } else {
+                    logs.truncate(keep);
+                }
+            }
+            stats.total_matched += matched;
+            for (acc, bucket) in stats.volume_buckets.iter_mut().zip(buckets) {
+                *acc += bucket;
+            }
+        }
+        (logs, stats)
+    }
+
+    fn assert_matches_reference(blocks: Vec<Vec<LogRecord>>, keep: usize, keep_newest: bool) {
+        let results: Vec<_> = blocks
+            .into_iter()
+            .enumerate()
+            .map(|(i, logs)| {
+                let matched = logs.len() + i + 1;
+                let buckets = vec![i as u64 + 1; 60];
+                (logs, matched, buckets)
+            })
+            .collect();
+        let expected = reference_merge(&results, keep, keep_newest);
+        let mut merger = LogResultMerger::new(keep, keep_newest);
+        for (logs, matched, buckets) in results {
+            merger.add(logs, matched, buckets);
+        }
+        let actual = merger.finish();
+        assert_eq!(actual.0, expected.0);
+        assert_eq!(actual.1.total_matched, expected.1.total_matched);
+        assert_eq!(actual.1.volume_buckets, expected.1.volume_buckets);
+    }
+
+    #[test]
+    fn bounded_merge_matches_reference_for_oldest_and_newest() {
+        let blocks = vec![
+            vec![log(5, "a"), log(1, "b"), log(9, "c")],
+            vec![log(3, "d"), log(8, "e")],
+            vec![log(2, "f"), log(7, "g")],
+        ];
+        assert_matches_reference(blocks.clone(), 3, true);
+        assert_matches_reference(blocks, 3, false);
+    }
+
+    #[test]
+    fn bounded_merge_matches_reference_for_timestamp_ties() {
+        let blocks = vec![
+            vec![log(10, "first"), log(10, "second")],
+            vec![log(10, "third"), log(9, "earlier")],
+            vec![log(10, "fourth")],
+        ];
+        assert_matches_reference(blocks.clone(), 2, true);
+        assert_matches_reference(blocks, 2, false);
+    }
+
+    #[test]
+    fn bounded_merge_matches_reference_when_keep_is_zero() {
+        assert_matches_reference(
+            vec![vec![log(2, "a"), log(1, "b")], vec![log(3, "c")]],
+            0,
+            true,
+        );
+        assert_matches_reference(
+            vec![vec![log(2, "a"), log(1, "b")], vec![log(3, "c")]],
+            0,
+            false,
+        );
+    }
+
+    #[test]
+    fn bounded_merge_matches_reference_with_more_blocks_than_keep() {
+        let blocks: Vec<Vec<LogRecord>> = (0..6)
+            .map(|block| vec![log(block, &format!("block-{block}"))])
+            .collect();
+        assert_matches_reference(blocks.clone(), 2, true);
+        assert_matches_reference(blocks, 2, false);
     }
 }
