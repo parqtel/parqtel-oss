@@ -20,6 +20,9 @@ fn fnv1a_update(hash: &mut u64, bytes: &[u8]) {
 #[derive(Eq, PartialEq, Hash, Clone, Debug)]
 pub struct GroupKey {
     pub route_path_id: String,
+    /// Exact grouping labels. Keeping the map in the key avoids merging two
+    /// unrelated alerts on a 64-bit hash collision.
+    pub group_labels: BTreeMap<String, String>,
     pub group_key_hash: u64,
 }
 
@@ -41,6 +44,7 @@ pub fn compute_group_key(
         return (
             GroupKey {
                 route_path_id: route.route_path_id.clone(),
+                group_labels: alert.labels.clone(),
                 group_key_hash: hash,
             },
             alert.labels.clone(),
@@ -62,9 +66,26 @@ pub fn compute_group_key(
         }
     }
 
+    if group_labels.is_empty() {
+        // Alertmanager's default is `group_by: [alertname]`. Parqtel rules do
+        // not carry an alertname label, so derive one from the rule name
+        // rather than collapsing every alert on the route into one group.
+        let alertname = if alert.rule_name.is_empty() {
+            alert.rule_id.clone()
+        } else {
+            alert.rule_name.clone()
+        };
+        fnv1a_update(&mut hash, b"alertname");
+        fnv1a_update(&mut hash, &[0xff]);
+        fnv1a_update(&mut hash, alertname.as_bytes());
+        fnv1a_update(&mut hash, &[0xfe]);
+        group_labels.insert("alertname".to_string(), alertname);
+    }
+
     (
         GroupKey {
             route_path_id: route.route_path_id.clone(),
+            group_labels: group_labels.clone(),
             group_key_hash: hash,
         },
         group_labels,
@@ -103,17 +124,26 @@ impl AlertGroup {
                 .all(|m| m.state == AlertState::Resolved)
     }
 
-    fn has_firing(&self) -> bool {
+    fn has_unresolved(&self) -> bool {
         self.members
             .values()
             .any(|m| m.state != AlertState::Resolved)
+    }
+
+    /// Only an unacknowledged firing alert should drive repeat notifications.
+    /// An acknowledged alert remains visible and queryable, but nagging the
+    /// receiver every repeat_interval is noise.
+    fn has_notifiable_firing(&self) -> bool {
+        self.members
+            .values()
+            .any(|m| matches!(m.state, AlertState::Firing | AlertState::Pending))
     }
 
     fn to_notification_batch(&self) -> NotificationBatch {
         let mut members: Vec<&AlertInstance> = self.members.values().collect();
         members.sort_by_key(|m| m.fingerprint);
 
-        let status = if self.has_firing() {
+        let status = if self.has_unresolved() {
             "firing".to_string()
         } else {
             "resolved".to_string()
@@ -136,6 +166,9 @@ impl AlertGroup {
                 starts_at: m.started_at,
                 ends_at: m.resolved_at,
                 fingerprint: m.fingerprint,
+                evidence_url: Some(format!("/api/v1/alerts/{}/evidence.svg", m.id)),
+                evidence: m.evidence.clone(),
+                rca: m.rca.clone(),
             })
             .collect();
 
@@ -158,6 +191,7 @@ pub struct GroupManager {
     groups: HashMap<GroupKey, AlertGroup>,
     max_active_groups: usize,
     resolve_retention: Duration,
+    evicted_groups: usize,
 }
 
 impl GroupManager {
@@ -166,11 +200,16 @@ impl GroupManager {
             groups: HashMap::new(),
             max_active_groups,
             resolve_retention,
+            evicted_groups: 0,
         }
     }
 
     pub fn active_count(&self) -> usize {
         self.groups.len()
+    }
+
+    pub fn take_evicted_groups(&mut self) -> usize {
+        std::mem::take(&mut self.evicted_groups)
     }
 
     pub fn get(&self, key: &GroupKey) -> Option<&AlertGroup> {
@@ -278,7 +317,7 @@ impl GroupManager {
                             group.last_notified = Some(now);
                             group.dirty = false;
                         }
-                    } else if group.has_firing() {
+                    } else if group.has_notifiable_firing() {
                         let ready = group
                             .last_notified
                             .is_none_or(|t| now >= t + group.route.repeat_interval);
@@ -313,6 +352,27 @@ impl GroupManager {
         due
     }
 
+    /// Synchronize a state change made outside the evaluation loop (manual
+    /// acknowledge/resolve). A manual resolve marks the group dirty so the
+    /// resolved notification still goes out; a manual acknowledge does not.
+    pub fn sync_alert(&mut self, alert: &AlertInstance, notify_state_change: bool, now: Instant) {
+        for group in self.groups.values_mut() {
+            let Some(member) = group.members.get_mut(&alert.fingerprint) else {
+                continue;
+            };
+            let state_changed = member.state != alert.state;
+            *member = alert.clone();
+            group.last_updated = now;
+            if notify_state_change && state_changed {
+                group.dirty = true;
+            }
+            if group.all_resolved() {
+                group.phase = GroupPhase::Resolved;
+                group.resolved_at.get_or_insert(now);
+            }
+        }
+    }
+
     fn evict_one(&mut self) {
         let victim = self
             .groups
@@ -329,6 +389,7 @@ impl GroupManager {
 
         if let Some(k) = victim {
             self.groups.remove(&k);
+            self.evicted_groups += 1;
         }
     }
 }
@@ -376,6 +437,10 @@ mod tests {
             transition_log: Vec::new(),
             notification_sent: false,
             source_rule_type: RuleType::Static,
+
+            evidence: None,
+
+            rca: None,
         }
     }
 
@@ -486,6 +551,72 @@ mod tests {
         tokio::time::advance(Duration::from_secs(1)).await;
         assert!(mgr.collect_due_batches(Instant::now()).is_empty());
         assert_eq!(mgr.active_count(), 0);
+    }
+
+    #[test]
+    fn test_empty_group_by_falls_back_to_alert_name() {
+        let route = sample_route("ops", &[], false);
+        let a = sample_alert(1, AlertState::Firing, &[("service", "api")]);
+        let b = sample_alert(2, AlertState::Firing, &[("service", "web")]);
+        let (ka, la) = compute_group_key(&route, &a);
+        let (kb, lb) = compute_group_key(&route, &b);
+        assert_eq!(ka, kb);
+        assert_eq!(la.get("alertname"), Some(&"High Latency".to_string()));
+        assert_eq!(lb.get("alertname"), Some(&"High Latency".to_string()));
+    }
+
+    #[test]
+    fn test_exact_group_labels_participate_in_equality() {
+        let route = sample_route("ops", &["service"], false);
+        let a = sample_alert(1, AlertState::Firing, &[("service", "api")]);
+        let b = sample_alert(2, AlertState::Firing, &[("service", "web")]);
+        let (ka, _) = compute_group_key(&route, &a);
+        let (kb, _) = compute_group_key(&route, &b);
+        assert_ne!(ka, kb);
+        if ka.group_key_hash == kb.group_key_hash {
+            assert_ne!(ka, kb, "hash collision must not merge groups");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_acknowledged_alert_stops_repeat_notifications() {
+        tokio::time::pause();
+        let mut mgr = GroupManager::new(10, Duration::from_secs(600));
+        let route = sample_route("ops", &["service"], false);
+        let firing = sample_alert(1, AlertState::Firing, &[("service", "api")]);
+        let (key, _) = compute_group_key(&route, &firing);
+        mgr.ingest(route, firing.clone(), Instant::now());
+        tokio::time::advance(Duration::from_secs(30)).await;
+        assert_eq!(mgr.collect_due_batches(Instant::now()).len(), 1);
+
+        let mut acked = firing.clone();
+        acked.state = AlertState::Acknowledged;
+        mgr.sync_alert(&acked, false, Instant::now());
+
+        // The old implementation repeated acknowledged alerts forever.
+        tokio::time::advance(Duration::from_secs(301)).await;
+        assert!(mgr.collect_due_batches(Instant::now()).is_empty());
+        assert_eq!(mgr.get(&key).unwrap().phase, GroupPhase::Active);
+    }
+
+    #[tokio::test]
+    async fn test_manual_resolve_emits_resolved_batch() {
+        tokio::time::pause();
+        let mut mgr = GroupManager::new(10, Duration::from_secs(600));
+        let route = sample_route("ops", &["service"], false);
+        let firing = sample_alert(1, AlertState::Firing, &[("service", "api")]);
+        mgr.ingest(route, firing.clone(), Instant::now());
+        tokio::time::advance(Duration::from_secs(30)).await;
+        assert_eq!(mgr.collect_due_batches(Instant::now()).len(), 1);
+
+        let mut resolved = firing;
+        resolved.state = AlertState::Resolved;
+        resolved.resolved_at = Some(Utc::now());
+        mgr.sync_alert(&resolved, true, Instant::now());
+        tokio::time::advance(Duration::from_secs(60)).await;
+        let batches = mgr.collect_due_batches(Instant::now());
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].1.status, "resolved");
     }
 
     #[tokio::test]
@@ -602,7 +733,7 @@ mod tests {
         mgr.groups.get_mut(&key).unwrap().members.clear();
         let group = mgr.get(&key).unwrap();
         assert!(!group.all_resolved());
-        assert!(!group.has_firing());
+        assert!(!group.has_unresolved());
         let batch = group.to_notification_batch();
         assert_eq!(batch.status, "resolved");
         assert!(batch.alerts.is_empty());

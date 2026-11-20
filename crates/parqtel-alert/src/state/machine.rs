@@ -65,6 +65,17 @@ impl AlertStateMachine {
                 AlertState::Suppressed,
                 "auto-suppressed after repeated noise flags",
             ),
+            (AlertState::NoiseFlagged, TransitionEvent::NoiseScoreDropped) => {
+                (AlertState::Firing, "manually reclassified as signal")
+            }
+            (AlertState::NoiseFlagged, TransitionEvent::ConditionCleared) => (
+                AlertState::Resolved,
+                "condition no longer met while flagged as noise",
+            ),
+            (AlertState::Suppressed, TransitionEvent::ConditionCleared) => (
+                AlertState::Resolved,
+                "condition no longer met while suppressed",
+            ),
             (AlertState::Acknowledged, TransitionEvent::ConditionCleared) => (
                 AlertState::Resolved,
                 "condition no longer met after acknowledgement",

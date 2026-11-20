@@ -11,15 +11,15 @@ use super::{
 };
 
 #[derive(Debug, Serialize)]
-struct AlertmanagerAlert<'a> {
+struct AlertmanagerAlert {
     labels: BTreeMap<String, String>,
-    annotations: &'a BTreeMap<String, String>,
+    annotations: BTreeMap<String, String>,
     #[serde(rename = "startsAt")]
     starts_at: DateTime<Utc>,
     #[serde(rename = "endsAt")]
     ends_at: DateTime<Utc>,
     #[serde(rename = "generatorURL")]
-    generator_url: &'static str,
+    generator_url: String,
 }
 
 /// Pushes alerts to the Alertmanager v2 API.
@@ -82,7 +82,7 @@ impl Notifier for AlertmanagerNotifier {
 
     async fn send(&self, batch: &NotificationBatch) -> Result<(), NotificationError> {
         let now = Utc::now();
-        let mut alerts = Vec::with_capacity(batch.alerts.len());
+        let mut alerts: Vec<AlertmanagerAlert> = Vec::with_capacity(batch.alerts.len());
         for alert in &batch.alerts {
             let mut labels = alert.labels.clone();
             labels.insert("alertname".into(), alert.rule_name.clone());
@@ -97,12 +97,23 @@ impl Notifier for AlertmanagerNotifier {
                 })?
             };
 
+            let mut annotations = alert.annotations.clone();
+            if let Some(evidence) = alert.evidence.as_ref() {
+                annotations.insert("parqtel.query".into(), evidence.query.clone());
+                annotations.insert(
+                    "parqtel.evidence_url".into(),
+                    alert.evidence_url.clone().unwrap_or_default(),
+                );
+            }
+            if let Some(rca) = alert.rca.as_ref() {
+                annotations.insert("parqtel.analysis".into(), rca.primary_cause.clone());
+            }
             alerts.push(AlertmanagerAlert {
                 labels,
-                annotations: &alert.annotations,
+                annotations,
                 starts_at: alert.starts_at,
                 ends_at,
-                generator_url: "",
+                generator_url: alert.evidence_url.clone().unwrap_or_default(),
             });
         }
 
@@ -192,7 +203,14 @@ mod tests {
             "Error rate exceeded 5%"
         );
         assert_eq!(firing[0]["startsAt"], "2026-11-17T10:00:00Z");
-        assert_eq!(firing[0]["generatorURL"], "");
+        assert_eq!(
+            firing[0]["generatorURL"],
+            "/api/v1/alerts/01JTEST/evidence.svg"
+        );
+        assert!(firing[0]["annotations"]["parqtel.query"]
+            .as_str()
+            .unwrap()
+            .contains("rate(errors_total"));
         let firing_ends_at = DateTime::parse_from_rfc3339(firing[0]["endsAt"].as_str().unwrap())
             .unwrap()
             .with_timezone(&Utc);

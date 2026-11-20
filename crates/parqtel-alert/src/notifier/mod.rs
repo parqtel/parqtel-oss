@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::error::NotificationError;
-use crate::Severity;
+use crate::{AlertEvidence, RcaSummary, Severity};
 
 use self::alertmanager::AlertmanagerNotifier;
 use self::pagerduty::PagerDutyNotifier;
@@ -35,6 +35,13 @@ pub struct AlertPayload {
     pub starts_at: DateTime<Utc>,
     pub ends_at: Option<DateTime<Utc>>,
     pub fingerprint: u64,
+    /// Relative path to the server-rendered evidence graph.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<AlertEvidence>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rca: Option<RcaSummary>,
 }
 
 /// Grouped alert batch dispatched to a receiver.
@@ -372,6 +379,44 @@ pub(crate) mod test_util {
                     .with_timezone(&Utc),
                 ends_at: None,
                 fingerprint: 42,
+                evidence_url: Some("/api/v1/alerts/01JTEST/evidence.svg".to_string()),
+                evidence: Some(AlertEvidence {
+                    query: "rate(errors_total[5m]) / rate(requests_total[5m])".to_string(),
+                    signal: "metrics".to_string(),
+                    window_start_ns: 0,
+                    window_end_ns: 2,
+                    operator: Some(">".to_string()),
+                    threshold: Some(0.05),
+                    observed: 0.125,
+                    points: vec![
+                        crate::EvidencePoint {
+                            timestamp_ns: 1,
+                            value: 0.02,
+                        },
+                        crate::EvidencePoint {
+                            timestamp_ns: 2,
+                            value: 0.125,
+                        },
+                    ],
+                    series_count: 1,
+                }),
+                rca: Some(RcaSummary::threshold(
+                    "High Error Rate",
+                    0.125,
+                    ">",
+                    0.05,
+                    60,
+                    &[
+                        crate::EvidencePoint {
+                            timestamp_ns: 1,
+                            value: 0.02,
+                        },
+                        crate::EvidencePoint {
+                            timestamp_ns: 2,
+                            value: 0.125,
+                        },
+                    ],
+                )),
             }],
         }
     }

@@ -5,6 +5,7 @@ pub mod dispatcher;
 pub mod egress;
 pub mod error;
 pub mod evaluator;
+pub mod evidence;
 pub mod notifier;
 pub mod router;
 pub mod routing;
@@ -12,6 +13,7 @@ pub mod rule;
 pub mod state;
 pub mod store;
 
+pub use evidence::{AlertEvidence, EvidencePoint, RcaSummary, MAX_EVIDENCE_POINTS};
 pub use rule::registry::AlertRuleRegistry;
 pub use rule::types::{AlertRule, Condition, RuleSource, RuleType, Severity};
 pub use state::machine::{AlertState, AlertStateMachine, StateTransition};
@@ -45,6 +47,12 @@ pub struct AlertInstance {
     pub transition_log: Vec<StateTransition>,
     pub notification_sent: bool,
     pub source_rule_type: RuleType,
+    /// Query and bounded points captured when the alert was evaluated.
+    #[serde(default)]
+    pub evidence: Option<AlertEvidence>,
+    /// Deterministic analysis derived from the evidence snapshot.
+    #[serde(default)]
+    pub rca: Option<RcaSummary>,
 }
 
 impl AlertInstance {
@@ -74,7 +82,8 @@ impl AlertInstance {
     }
 }
 
-/// Event emitted when an alert transitions to Firing.
+/// Event emitted for a firing transition or a noise suppression outcome.
+/// The dispatcher counts suppressed events but does not deliver them.
 #[derive(Debug, Clone)]
 pub struct AlertFiringEvent {
     pub instance: AlertInstance,
@@ -168,6 +177,10 @@ mod tests {
             transition_log: vec![],
             notification_sent: false,
             source_rule_type: RuleType::Static,
+
+            evidence: None,
+
+            rca: None,
         };
         let json = serde_json::to_string(&instance).unwrap();
         let decoded: AlertInstance = serde_json::from_str(&json).unwrap();

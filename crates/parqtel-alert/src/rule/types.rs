@@ -50,6 +50,19 @@ pub struct Condition {
     pub for_duration_secs: u64,
 }
 
+impl Operator {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Gt => ">",
+            Self::Gte => ">=",
+            Self::Lt => "<",
+            Self::Lte => "<=",
+            Self::Eq => "==",
+            Self::Ne => "!=",
+        }
+    }
+}
+
 impl Condition {
     /// Evaluate whether a metric value meets this condition.
     pub fn evaluate(&self, metric_value: f64) -> bool {
@@ -109,8 +122,8 @@ pub struct AlertRule {
     pub annotations: BTreeMap<String, String>,
     #[serde(default = "default_true")]
     pub enabled: bool,
-    #[serde(default = "default_noise_threshold")]
-    pub noise_suppression_threshold: f32,
+    #[serde(default)]
+    pub noise_suppression_threshold: Option<f32>,
     #[serde(default)]
     pub source: Option<RuleSource>,
 }
@@ -139,10 +152,6 @@ fn default_signal() -> String {
 
 fn default_true() -> bool {
     true
-}
-
-fn default_noise_threshold() -> f32 {
-    0.7
 }
 
 #[cfg(test)]
@@ -228,7 +237,7 @@ mod tests {
             labels: BTreeMap::new(),
             annotations: BTreeMap::new(),
             enabled: true,
-            noise_suppression_threshold: 0.7,
+            noise_suppression_threshold: None,
             source: None,
         };
         assert_eq!(rule.rule_type(), RuleType::Static);
@@ -252,7 +261,7 @@ mod tests {
             labels: BTreeMap::new(),
             annotations: BTreeMap::new(),
             enabled: true,
-            noise_suppression_threshold: 0.7,
+            noise_suppression_threshold: None,
             source: Some(RuleSource::AiDerived(AiDerivedSource {
                 derived_from_rule: "r1".into(),
                 ai_model: "gpt-4".into(),

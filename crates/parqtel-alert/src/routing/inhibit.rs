@@ -103,6 +103,10 @@ mod tests {
             transition_log: vec![],
             notification_sent: false,
             source_rule_type: RuleType::Static,
+
+            evidence: None,
+
+            rca: None,
         }
     }
 

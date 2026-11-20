@@ -10,7 +10,7 @@ use tokio::task::JoinHandle;
 use crate::error::NotificationError;
 use crate::notifier::build_notifiers;
 use crate::routing::RoutingEvaluator;
-use crate::AlertInstance;
+use crate::{AlertInstance, AlertState};
 use parqtel_core::config::{parse_duration, AlertmanagerRoutingConfig, SilenceConfig};
 
 use self::group::GroupManager;
@@ -84,6 +84,13 @@ impl AlertDispatcher {
         silences: &[SilenceConfig],
         firing_alerts: &[AlertInstance],
     ) {
+        if matches!(
+            alert.state,
+            AlertState::Suppressed | AlertState::NoiseFlagged
+        ) {
+            self.metrics.inc_suppressed_noise();
+            return;
+        }
         let now_unix = chrono::Utc::now().timestamp();
         let eval = self.evaluator.evaluate(
             &alert.labels,
@@ -112,11 +119,23 @@ impl AlertDispatcher {
         self.metrics.set_active_groups(groups.active_count());
     }
 
+    /// Apply a manual state change to groups that already contain this alert.
+    /// Acknowledges stay quiet; a manual resolve still emits the resolved
+    /// notification on the next flush.
+    pub async fn sync_alert_state(&self, alert: &AlertInstance, notify_state_change: bool) {
+        let mut groups = self.groups.lock().await;
+        groups.sync_alert(alert, notify_state_change, tokio::time::Instant::now());
+        self.metrics.set_active_groups(groups.active_count());
+    }
+
     /// Collect all due batches from `GroupManager` and enqueue them onto `DeliveryQueue`.
     pub async fn flush_due(&self) {
         let batches = {
             let mut groups = self.groups.lock().await;
             let batches = groups.collect_due_batches(tokio::time::Instant::now());
+            for _ in 0..groups.take_evicted_groups() {
+                self.metrics.inc_evicted_group();
+            }
             self.metrics.set_active_groups(groups.active_count());
             batches
         };
@@ -197,6 +216,10 @@ mod tests {
             transition_log: Vec::new(),
             notification_sent: false,
             source_rule_type: RuleType::Static,
+
+            evidence: None,
+
+            rca: None,
         }
     }
 

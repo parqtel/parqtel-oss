@@ -118,6 +118,7 @@ pub async fn deliver_with_retry(
 #[derive(Debug)]
 pub struct DeliveryQueue {
     senders: HashMap<String, mpsc::Sender<(ResolvedRoute, NotificationBatch)>>,
+    metrics: Arc<RoutingMetrics>,
 }
 
 impl DeliveryQueue {
@@ -155,7 +156,7 @@ impl DeliveryQueue {
             senders.insert(receiver, tx);
         }
 
-        Self { senders }
+        Self { senders, metrics }
     }
 
     /// Enqueue a batch onto the target receiver's worker without blocking other receivers.
@@ -166,6 +167,7 @@ impl DeliveryQueue {
         };
 
         if let Err(err) = tx.try_send((route, batch)) {
+            self.metrics.inc_dropped_notification();
             tracing::warn!(error = %err, "failed to enqueue notification batch");
         }
     }

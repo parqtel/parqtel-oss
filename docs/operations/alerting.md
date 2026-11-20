@@ -20,10 +20,18 @@ through an Alertmanager-compatible route tree.
   `sensitivity` MADs.
 - State transitions: `Inactive → Pending → Firing → Resolved`.
   `for_duration_secs` is the sustain window before Pending → Firing.
-- `noise_score` is derived from transition history: unacknowledged firings
-  that later resolve raise it; acknowledged or still-firing alerts keep it low.
-  It is an observability signal, not a delivery suppression input in this
-  build.
+- Each alert carries a bounded evidence snapshot: query, signal, evaluation
+  window, threshold, observed value, and at most 120 downsampled points.
+- The engine also stores a deterministic analysis (`rca`) derived from that
+  evidence. Threshold and MAD rules use explicit, explainable summaries; no
+  external model is required.
+- `noise_score` is derived from the recent transition window
+  (`alerts.noise_window_firings`): unacknowledged firings that resolve raise it,
+  acknowledged or still-firing firings keep it low. Once a rule has at least
+  three firing cycles and the score reaches
+  `alerts.noise_suppression_threshold` (or the per-rule
+  `noise_suppression_threshold`), the firing is recorded as `suppressed` and is
+  not delivered. Suppressed alerts remain queryable and resolve normally.
 
 Rule schema details are in
 [Configuration](configuration.md#alert-rule-yaml). Built-in packs are embedded
@@ -74,7 +82,13 @@ receiver = "slack-api"
 
 - A new group waits `group_wait` before its first notification.
 - New alerts joining an active group wait at least `group_interval`.
-- An unchanged firing group repeats every `repeat_interval`.
+- An unchanged, unacknowledged firing group repeats every `repeat_interval`.
+  Acknowledged alerts do not drive repeats.
+- If `group_by` is empty or matches no labels, the group falls back to the
+  rule name as `alertname`, matching Alertmanager's default rather than
+  collapsing every alert on a route into one group.
+- The exact group-label map is part of the key; a 64-bit hash collision cannot
+  merge two groups.
 - Resolved alerts are delivered to receivers with `send_resolved = true`.
 - Active groups are bounded by `max_active_groups`; oldest resolved/idle
   groups are evicted first.
@@ -203,15 +217,28 @@ trusted context.
 | `parqtel_alert_active_groups` | Current grouped alerts |
 | `parqtel_alert_eval_skipped_total` | Evaluation cycles skipped because the dedicated slot was busy |
 | `parqtel_alert_eval_duration_seconds` | Evaluation cycle duration |
+| `parqtel_alert_dropped_notifications_total` | Batches dropped because a receiver queue was full |
+| `parqtel_alert_evicted_groups_total` | Groups evicted at `max_active_groups` |
+| `parqtel_alert_noise_suppressed_total` | Firings suppressed by the noise policy |
 
-Alert instances and transition history are available at `/api/v1/alerts` and
-through the console. `parqtel-mcp-parqtel` exposes `get_alert_history` and
-topology tools for agent workflows.
+Alert instances, evidence and transition history are available at
+`/api/v1/alerts` and through the console. The evidence tab uses the captured
+snapshot when present and falls back to a live query for older alerts.
+
+| Endpoint | Meaning |
+|---|---|
+| `GET /api/v1/alerts/{id}/evidence.json` | Captured query, points and analysis |
+| `GET /api/v1/alerts/{id}/evidence.svg` | Server-rendered evidence graph |
+| `POST /api/v1/alerts/{id}/noise` | Flag as noise and stop delivery |
+| `POST /api/v1/alerts/{id}/signal` | Undo a noise flag and restore firing |
+
+`parqtel-mcp-parqtel` exposes `get_alert_history` and topology tools for agent
+workflows.
 
 ## Not implemented
 
 - Automatic postmortem generation (`[alerts.postmortem]` is inert).
-- Global noise suppression thresholds (`alerts.noise_suppression_threshold` is
-  parsed but not read).
+- A distributed delivery ledger. Direct receivers (Slack/Teams) can duplicate
+  across replicas; use the Alertmanager receiver for HA fan-out.
 - A Kubernetes custom-metrics provider (`[k8s_provider]` is inert).
 - Email and SMS receivers. Use a webhook bridge if required.

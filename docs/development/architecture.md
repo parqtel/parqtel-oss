@@ -320,9 +320,11 @@ See [Security](../operations/security.md) for the full model.
 3. Threshold rules evaluate the last sample of every result series. Learned
    anomaly rules compute a median + MAD baseline and require at least five
    samples.
-4. The state machine is `Inactive → Pending → Firing → Resolved`. Transition
-   history is persisted; `noise_score` is derived from unacknowledged firings
-   that resolved.
+4. The state machine is `Inactive → Pending → Firing → Resolved`, with
+   acknowledged, suppressed and noise-flagged states. Transition history is
+   persisted. Each firing captures a bounded evidence snapshot (query, window,
+   points) and deterministic analysis. `noise_score` comes from the recent
+   firing window and suppresses delivery after repeated unacknowledged clears.
 5. When `[alerting.routing]` is configured, firing and resolved alerts go
    through the hierarchical route tree, grouping, inhibition and silences, then
    to native Slack, PagerDuty, Teams or webhook receivers. The legacy

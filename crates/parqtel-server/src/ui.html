@@ -1488,7 +1488,7 @@ function renderOverview(a,body){
   // RCA section
   if(a.rca){renderRCA(a.rca,body);}
   else if(a.state==='Firing'||a.state==='firing'){
-    const ai=document.createElement('div');ai.className='rca-box';ai.innerHTML='<div class="rca-header"><span style="font-size:12px;display:flex;align-items:center;gap:6px;"><svg class="tab-ic"><use href="#i-bot"/></svg> Root Cause Analysis</span><span class="rca-model">Analysing…</span></div><div class="rca-conf"><div class="rca-conf-fill" style="width:0%;animation:sweep 2s infinite;"></div></div><p style="font-size:11px;color:var(--text-muted);">AI is investigating this alert…</p>';
+    const ai=document.createElement('div');ai.className='rca-box';ai.innerHTML='<div class="rca-header"><span style="font-size:12px;display:flex;align-items:center;gap:6px;"><svg class="tab-ic"><use href="#i-bot"/></svg> Root Cause Analysis</span><span class="rca-model">Not captured</span></div><p style="font-size:11px;color:var(--text-muted);">This alert predates evidence capture or the evaluation produced no evidence snapshot. Open the Evidence tab for the live query.</p>';
     body.appendChild(ai);
   }
 }
@@ -1509,8 +1509,9 @@ function renderRCA(rca,body){
 }
 async function renderEvidence(a,body){
   body.innerHTML='<div class="skel skel-chart"></div><div class="skel skel-row"></div><div class="skel skel-row" style="width:90%"></div>';
-  // Fetch the rule to get its query
-  let query=a.query||'';
+  // Prefer the snapshot captured with the alert; fall back to the rule only
+  // for alerts created before evidence capture existed.
+  let query=(a.evidence&&a.evidence.query)||a.query||('');
   if(!query&&a.rule_id){
     try{const r=await fetch('/api/v1/rules');const j=await r.json();const rules=j.data||[];const rule=rules.find(x=>x.id===a.rule_id);if(rule)query=rule.query||'';}catch{}
   }
@@ -1522,12 +1523,18 @@ async function renderEvidence(a,body){
   mPanel.innerHTML='<div class="rca-section-title">Metric</div>';
   if(query){
     try{
-      const r=await fetch(`/api/v1/query_range?query=${encodeURIComponent(query)}&start=${s}&end=${e}&step=30s`);
-      const j=await r.json();const series=(j.data||{}).result||[];
+      let series=[];
+      if(a.evidence&&a.evidence.points&&a.evidence.points.length){
+        series=[{values:a.evidence.points.map(p=>[p.timestamp_ns/1e9,p.value])}];
+      }else{
+        const r=await fetch(`/api/v1/query_range?query=${encodeURIComponent(query)}&start=${s}&end=${e}&step=30s`);
+        const j=await r.json();series=(j.data||{}).result||[];
+      }
       if(series.length){
         const cv=document.createElement('canvas');cv.style.cssText='width:100%;height:180px;flex-shrink:0;';mPanel.appendChild(cv);
         drawMiniChart(cv,series);
         const qEl=document.createElement('div');qEl.style.cssText='font-family:var(--mono);font-size:10px;color:var(--text-muted);margin-top:6px;word-break:break-all;';qEl.textContent=query;mPanel.appendChild(qEl);
+        if(a.evidence&&a.evidence.points&&a.evidence.points.length){const note=document.createElement('div');note.style.cssText='font-size:10px;color:var(--text-muted);';note.textContent='Captured with the alert';mPanel.appendChild(note);}
       }else{
         mPanel.innerHTML+='<div style="flex:1;display:flex;align-items:center;justify-content:center;color:var(--text-muted);font-size:11px;background:var(--bg-raised);border-radius:4px;">No data in incident window</div>';
       }

@@ -188,6 +188,14 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/v1/alerts", get(handlers::alerts::list_alerts))
         .route("/api/v1/alerts/:id", get(handlers::alerts::get_alert))
         .route(
+            "/api/v1/alerts/:id/evidence.json",
+            get(handlers::alerts::get_alert_evidence),
+        )
+        .route(
+            "/api/v1/alerts/:id/evidence.svg",
+            get(handlers::alerts::get_alert_evidence_svg),
+        )
+        .route(
             "/api/v1/alerts/:id/acknowledge",
             post(handlers::alerts::acknowledge_alert),
         )
@@ -232,6 +240,14 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/api/v1/alerts/:id/resolve",
             post(handlers::alerts::resolve_alert),
+        )
+        .route(
+            "/api/v1/alerts/:id/noise",
+            post(handlers::alerts::mark_alert_noise),
+        )
+        .route(
+            "/api/v1/alerts/:id/signal",
+            post(handlers::alerts::mark_alert_signal),
         )
         .route("/api/v1/rules", get(handlers::alerts::list_rules))
         .route(

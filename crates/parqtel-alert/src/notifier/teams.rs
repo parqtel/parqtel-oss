@@ -99,6 +99,29 @@ impl TeamsNotifier {
             .collect::<Vec<_>>()
             .join("; ");
 
+        let analysis = batch
+            .alerts
+            .iter()
+            .find_map(|alert| alert.rca.as_ref())
+            .map(|rca| rca.primary_cause.clone())
+            .unwrap_or_else(|| "No analysis captured".to_string());
+        let evidence = batch
+            .alerts
+            .iter()
+            .find_map(|alert| alert.evidence_url.clone())
+            .unwrap_or_else(|| "No evidence snapshot".to_string());
+        let query = batch
+            .alerts
+            .iter()
+            .find_map(|alert| alert.evidence.as_ref().map(|e| e.query.clone()))
+            .unwrap_or_else(|| "n/a".to_string());
+        let graph = batch
+            .alerts
+            .iter()
+            .find_map(|alert| alert.evidence.as_ref().map(|e| e.sparkline(30)))
+            .filter(|graph| !graph.is_empty())
+            .unwrap_or_else(|| "n/a".to_string());
+
         let facts = vec![
             CardFact {
                 title: "Severity",
@@ -119,6 +142,22 @@ impl TeamsNotifier {
                 } else {
                     alert_summary
                 },
+            },
+            CardFact {
+                title: "Query",
+                value: query,
+            },
+            CardFact {
+                title: "Graph",
+                value: graph,
+            },
+            CardFact {
+                title: "Analysis",
+                value: analysis,
+            },
+            CardFact {
+                title: "Evidence",
+                value: evidence,
             },
         ];
 
@@ -226,6 +265,10 @@ mod tests {
         assert_eq!(card["body"][1]["facts"][0]["value"], "critical");
         assert_eq!(card["body"][1]["facts"][1]["title"], "Status");
         assert_eq!(card["body"][1]["facts"][1]["value"], "firing");
+        assert_eq!(card["body"][1]["facts"][4]["title"], "Query");
+        assert_eq!(card["body"][1]["facts"][5]["title"], "Graph");
+        assert_eq!(card["body"][1]["facts"][6]["title"], "Analysis");
+        assert_eq!(card["body"][1]["facts"][7]["title"], "Evidence");
 
         notifier.send(&sample_resolved_batch()).await.unwrap();
         let (_headers, body) = rx.recv().await.unwrap();

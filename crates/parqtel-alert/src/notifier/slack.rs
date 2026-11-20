@@ -119,6 +119,35 @@ impl SlackNotifier {
             })
             .unwrap_or_else(|| "n/a".to_string());
         let labels = format_labels(&batch.group_labels);
+        let analysis = batch
+            .alerts
+            .iter()
+            .find_map(|alert| alert.rca.as_ref())
+            .map(|rca| {
+                let mut text = rca.primary_cause.clone();
+                if !rca.evidence.is_empty() {
+                    text.push('\n');
+                    text.push_str(&rca.evidence.join("\n"));
+                }
+                text
+            })
+            .unwrap_or_else(|| "No analysis captured".to_string());
+        let evidence = batch
+            .alerts
+            .iter()
+            .find_map(|alert| alert.evidence_url.clone())
+            .unwrap_or_else(|| "No evidence snapshot".to_string());
+        let query = batch
+            .alerts
+            .iter()
+            .find_map(|alert| alert.evidence.as_ref().map(|e| e.query.clone()))
+            .unwrap_or_else(|| "n/a".to_string());
+        let graph = batch
+            .alerts
+            .iter()
+            .find_map(|alert| alert.evidence.as_ref().map(|e| e.sparkline(30)))
+            .filter(|graph| !graph.is_empty())
+            .unwrap_or_else(|| "n/a".to_string());
 
         let fields = vec![
             SlackField {
@@ -139,6 +168,26 @@ impl SlackNotifier {
             SlackField {
                 title: "Labels",
                 value: labels,
+                short: false,
+            },
+            SlackField {
+                title: "Query",
+                value: query,
+                short: false,
+            },
+            SlackField {
+                title: "Graph",
+                value: graph,
+                short: false,
+            },
+            SlackField {
+                title: "Analysis",
+                value: analysis,
+                short: false,
+            },
+            SlackField {
+                title: "Evidence",
+                value: evidence,
                 short: false,
             },
         ];
@@ -234,6 +283,23 @@ mod tests {
         assert_eq!(att["fields"][2]["title"], "Value");
         assert_eq!(att["fields"][2]["value"], "12.5");
         assert_eq!(att["fields"][3]["title"], "Labels");
+        assert_eq!(att["fields"][4]["title"], "Query");
+        assert!(att["fields"][4]["value"]
+            .as_str()
+            .unwrap()
+            .contains("rate(errors_total"));
+        assert_eq!(att["fields"][5]["title"], "Graph");
+        assert!(!att["fields"][5]["value"].as_str().unwrap().is_empty());
+        assert_eq!(att["fields"][6]["title"], "Analysis");
+        assert!(att["fields"][6]["value"]
+            .as_str()
+            .unwrap()
+            .contains("crossed its threshold"));
+        assert_eq!(att["fields"][7]["title"], "Evidence");
+        assert!(att["fields"][7]["value"]
+            .as_str()
+            .unwrap()
+            .ends_with("evidence.svg"));
 
         let resolved = sample_resolved_batch();
         notifier.send(&resolved).await.unwrap();

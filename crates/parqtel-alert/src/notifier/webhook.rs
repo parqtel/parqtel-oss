@@ -108,6 +108,14 @@ mod tests {
         assert_eq!(body["group_labels"]["service.name"], "checkout");
         assert_eq!(body["alerts"][0]["rule_id"], "high-error-rate");
         assert_eq!(body["alerts"][0]["fingerprint"], 42);
+        assert_eq!(
+            body["alerts"][0]["evidence"]["query"],
+            "rate(errors_total[5m]) / rate(requests_total[5m])"
+        );
+        assert!(body["alerts"][0]["rca"]["primary_cause"]
+            .as_str()
+            .unwrap()
+            .contains("crossed its threshold"));
 
         let resolved = sample_resolved_batch();
         notifier.send(&resolved).await.unwrap();

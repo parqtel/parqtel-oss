@@ -70,7 +70,11 @@ impl AlertStore {
             .filter(|i| {
                 matches!(
                     i.state,
-                    AlertState::Firing | AlertState::Acknowledged | AlertState::Pending
+                    AlertState::Firing
+                        | AlertState::Acknowledged
+                        | AlertState::Pending
+                        | AlertState::Suppressed
+                        | AlertState::NoiseFlagged
                 )
             })
             .cloned()
@@ -174,6 +178,10 @@ mod tests {
             transition_log: vec![],
             notification_sent: false,
             source_rule_type: RuleType::Static,
+
+            evidence: None,
+
+            rca: None,
         }
     }
 

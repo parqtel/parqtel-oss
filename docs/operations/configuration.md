@@ -161,9 +161,9 @@ path = "audit.jsonl"                # relative to storage.data_dir, or absolute
 
 [alerts]
 rules_dir = "rules"
-noise_window_firings = 30           # parsed; not read by this build
+noise_window_firings = 30           # recent firing cycles used by noise_score
 refinement_enabled = true           # parsed; not read by this build
-noise_suppression_threshold = 0.7   # parsed; not read by this build
+noise_suppression_threshold = 0.7   # default for rules without an override
 allow_runtime_updates = false       # gate routes, recording rules, pipelines
 recording_rules_enabled = true
 
@@ -484,16 +484,15 @@ before/after values. Webhook URLs and secrets are redacted.
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `rules_dir` | String | `"rules"` | Alert rule YAML directory. |
-| `noise_window_firings` | Integer | `30` | Parsed; not read by this build. |
+| `noise_window_firings` | Integer | `30` | Recent firing cycles used by `noise_score`. |
 | `refinement_enabled` | Boolean | `true` | Parsed; not read by this build. |
-| `noise_suppression_threshold` | Float | `0.7` | Parsed; not read by this build. |
+| `noise_suppression_threshold` | Float | `0.7` | Default suppression threshold for rules that do not override it. |
 | `allow_runtime_updates` | Boolean | `false` | Permit REST mutations of notification routes, recording rules and pipelines. Alert-rule and silence endpoints are not gated by this key. |
 | `recording_rules_enabled` | Boolean | `true` | Evaluate `rules/recording/` groups and write results through ingest. |
 
-`noise_score` is **implemented**: it is derived from an alert instance's
-transition history (unacknowledged firing→resolved events raise it). The
-global suppression knobs above are not wired into delivery; use routing
-matchers, silences or per-rule tuning instead.
+`noise_score` is **implemented**: it is derived from the recent window of an alert instance's
+transition history (unacknowledged firing→resolved events raise it). The global
+threshold and window above apply when a rule does not override them.
 
 ### `[alerts.presets]`
 
@@ -759,6 +758,8 @@ annotations:
   description: "Tune to your traffic profile."
   runbook: "https://wiki.example.com/runbooks/http-errors"
 enabled: true
+# Optional override; defaults to alerts.noise_suppression_threshold.
+# noise_suppression_threshold: 0.7
 ```
 
 Threshold rules evaluate the last sample of every result series. Rule queries
@@ -768,8 +769,9 @@ are a single selector with optional aggregation; cross-metric arithmetic and
 Learned anomaly rules use a `source` block with `type: learned_anomaly`,
 `baseline_window_days` and `sensitivity`. The loop queries the baseline, computes
 median + MAD per series, and requires at least five samples. `noise_score` is
-reported on alert instances from transition history; it is not a suppression
-input.
+computed over the recent `alerts.noise_window_firings` window. After at least
+three firing cycles, a score at or above the global or per-rule threshold
+suppresses delivery and records the alert as `suppressed`; it remains queryable.
 
 Presets ship under `rules/presets/` (embedded). See
 [its README](../../rules/presets/README.md).

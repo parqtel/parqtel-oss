@@ -2,6 +2,7 @@
 
 use crate::otel_sli;
 use crate::state::AppState;
+use parqtel_alert::{AlertEvidence, RcaSummary, MAX_EVIDENCE_POINTS};
 use parqtel_core::{BlockIndex, BlockIndexStore, MemoryBuffer};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -204,7 +205,7 @@ async fn record_flush<E: std::fmt::Display>(
 /// Median + MAD anomaly decision. `None` means the baseline is too short to
 /// decide; a flat baseline uses a relative floor so a one-off spike still
 /// registers without turning tiny float noise into pages.
-fn anomaly_condition(baseline: &[f64], current: f64, sensitivity: f64) -> Option<bool> {
+fn mad_stats(baseline: &[f64]) -> Option<(f64, f64)> {
     if baseline.len() < 5 {
         return None;
     }
@@ -217,6 +218,11 @@ fn anomaly_condition(baseline: &[f64], current: f64, sensitivity: f64) -> Option
         .collect();
     deviations.sort_by(f64::total_cmp);
     let mad = deviations[deviations.len() / 2];
+    Some((median, mad))
+}
+
+fn anomaly_condition(baseline: &[f64], current: f64, sensitivity: f64) -> Option<bool> {
+    let (median, mad) = mad_stats(baseline)?;
     let scale = mad.max(1e-9).max(median.abs() * 0.001);
     Some((current - median).abs() > sensitivity.max(0.1) * scale)
 }
@@ -304,6 +310,13 @@ pub(crate) fn spawn_alert_eval_task(state: AppState, interval_secs: u64) -> Join
                             .iter()
                             .map(|(k, v)| (k.to_string(), v.to_string()))
                             .collect();
+                        let points = AlertEvidence::bounded_points(
+                            series
+                                .samples
+                                .iter()
+                                .map(|sample| (sample.timestamp_ns, sample.value)),
+                            MAX_EVIDENCE_POINTS,
+                        );
                         if let Some(source) = &anomaly {
                             let baseline: Vec<f64> = series
                                 .samples
@@ -316,21 +329,70 @@ pub(crate) fn spawn_alert_eval_task(state: AppState, interval_secs: u64) -> Join
                             else {
                                 continue;
                             };
+                            let (median, mad) = mad_stats(&baseline).unwrap_or((0.0, 0.0));
+                            let evidence = AlertEvidence {
+                                query: rule.query.clone(),
+                                signal: rule.signal.clone(),
+                                window_start_ns: start_ns,
+                                window_end_ns: now_ns,
+                                operator: None,
+                                threshold: None,
+                                observed: sample.value,
+                                points: points.clone(),
+                                series_count: qr.series.len(),
+                            };
+                            let rca = RcaSummary::mad(
+                                &rule.name,
+                                sample.value,
+                                median,
+                                mad,
+                                source.sensitivity,
+                                &points,
+                            );
                             state
                                 .inner
                                 .alert_engine
-                                .evaluate_rule_with_condition(
+                                .evaluate_rule_with_evidence(
                                     &rule,
                                     sample.value,
                                     labels,
                                     condition_met,
+                                    Some(evidence),
+                                    Some(rca),
                                 )
                                 .await;
                         } else {
+                            let condition_met = rule.condition.evaluate(sample.value);
+                            let evidence = AlertEvidence {
+                                query: rule.query.clone(),
+                                signal: rule.signal.clone(),
+                                window_start_ns: start_ns,
+                                window_end_ns: now_ns,
+                                operator: Some(rule.condition.operator.as_str().to_string()),
+                                threshold: Some(rule.condition.value),
+                                observed: sample.value,
+                                points: points.clone(),
+                                series_count: qr.series.len(),
+                            };
+                            let rca = RcaSummary::threshold(
+                                &rule.name,
+                                sample.value,
+                                rule.condition.operator.as_str(),
+                                rule.condition.value,
+                                rule.condition.for_duration_secs,
+                                &points,
+                            );
                             state
                                 .inner
                                 .alert_engine
-                                .evaluate_rule_with_value(&rule, sample.value, labels)
+                                .evaluate_rule_with_evidence(
+                                    &rule,
+                                    sample.value,
+                                    labels,
+                                    condition_met,
+                                    Some(evidence),
+                                    Some(rca),
+                                )
                                 .await;
                         }
                     }

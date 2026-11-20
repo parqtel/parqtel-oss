@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Mutex;
 
 /// Prometheus histogram buckets (in seconds) for notification delivery latency.
@@ -25,6 +25,9 @@ struct MetricsInner {
 pub struct RoutingMetrics {
     inner: Mutex<MetricsInner>,
     active_groups: AtomicUsize,
+    dropped_notifications: AtomicU64,
+    evicted_groups: AtomicU64,
+    suppressed_noise: AtomicU64,
 }
 
 impl RoutingMetrics {
@@ -67,6 +70,22 @@ impl RoutingMetrics {
     /// Return the current number of active alert groups.
     pub fn active_groups(&self) -> usize {
         self.active_groups.load(Ordering::Relaxed)
+    }
+
+    pub fn inc_dropped_notification(&self) {
+        self.dropped_notifications.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn inc_evicted_group(&self) {
+        self.evicted_groups.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn inc_suppressed_noise(&self) {
+        self.suppressed_noise.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn dropped_notifications(&self) -> u64 {
+        self.dropped_notifications.load(Ordering::Relaxed)
     }
 
     /// Return the recorded notification count for `(receiver, channel, status)`.
@@ -135,6 +154,24 @@ impl RoutingMetrics {
             }
         }
 
+        out.push_str("# HELP parqtel_alert_dropped_notifications_total Notification batches dropped because a receiver queue was full.\n");
+        out.push_str("# TYPE parqtel_alert_dropped_notifications_total counter\n");
+        out.push_str(&format!(
+            "parqtel_alert_dropped_notifications_total {}\n",
+            self.dropped_notifications.load(Ordering::Relaxed)
+        ));
+        out.push_str("# HELP parqtel_alert_evicted_groups_total Groups evicted to respect max_active_groups.\n");
+        out.push_str("# TYPE parqtel_alert_evicted_groups_total counter\n");
+        out.push_str(&format!(
+            "parqtel_alert_evicted_groups_total {}\n",
+            self.evicted_groups.load(Ordering::Relaxed)
+        ));
+        out.push_str("# HELP parqtel_alert_noise_suppressed_total Notifications suppressed by the noise policy.\n");
+        out.push_str("# TYPE parqtel_alert_noise_suppressed_total counter\n");
+        out.push_str(&format!(
+            "parqtel_alert_noise_suppressed_total {}\n",
+            self.suppressed_noise.load(Ordering::Relaxed)
+        ));
         out.push_str("# HELP parqtel_alert_active_groups Current number of active alert groups.\n");
         out.push_str("# TYPE parqtel_alert_active_groups gauge\n");
         out.push_str(&format!(
@@ -188,6 +225,19 @@ mod tests {
             1
         );
         assert_eq!(metrics.active_groups(), 7);
+    }
+
+    #[test]
+    fn test_loss_and_noise_counters_render() {
+        let metrics = RoutingMetrics::new();
+        metrics.inc_dropped_notification();
+        metrics.inc_dropped_notification();
+        metrics.inc_evicted_group();
+        metrics.inc_suppressed_noise();
+        let rendered = metrics.render_prometheus();
+        assert!(rendered.contains("parqtel_alert_dropped_notifications_total 2"));
+        assert!(rendered.contains("parqtel_alert_evicted_groups_total 1"));
+        assert!(rendered.contains("parqtel_alert_noise_suppressed_total 1"));
     }
 
     #[test]

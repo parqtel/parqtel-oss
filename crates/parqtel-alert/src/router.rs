@@ -380,6 +380,10 @@ mod tests {
             transition_log: Vec::new(),
             notification_sent: false,
             source_rule_type: crate::RuleType::Static,
+
+            evidence: None,
+
+            rca: None,
         };
         AlertFiringEvent { instance }
     }

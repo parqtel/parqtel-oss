@@ -115,7 +115,11 @@ impl AppState {
         let alert_registry = AlertRuleRegistry::new();
         let alert_store = AlertStore::new(Some(data_dir)).await;
         let (alert_tx, alert_event_rx) = tokio::sync::mpsc::unbounded_channel();
-        let alert_engine = Arc::new(EvaluationEngine::new(alert_store.clone(), alert_tx));
+        let alert_engine = Arc::new(
+            EvaluationEngine::new(alert_store.clone(), alert_tx)
+                .with_noise_threshold(config.alerts.noise_suppression_threshold)
+                .with_noise_window(config.alerts.noise_window_firings),
+        );
         let alert_router = Arc::new(
             AlertRouter::new(config.alerts.notifications.clone().unwrap_or_default())
                 // Persist silences alongside alerts.json (same data dir).
