@@ -55,8 +55,8 @@ Documentation for Parqtel, an open-source SRE telemetry store.
 | [Test plan](development/test-plan.md) | End-to-end scenarios |
 | [CI/CD](development/ci-cd.md) | Pipelines, gates, release process |
 | [Efficiency plan](development/efficiency-plan.md) | Measured engine performance and optimisation backlog |
-| [R2 alternate plan](development/r2-alternate-plan.md) | Reduce blocks per query before sizing the footer cache |
-| [Memory backlog](development/memory-backlog.md) | Measured query and ingest memory findings |
+| [R3 findings and Phase 2b design](development/r3-findings.md) | R3 probe evidence, memory conclusion and gated binary-footer design |
+| [Memomainry backlog](development/memory-backlog.md) | Measured query and ingest memory findings |
 | [HA pair plan](development/ha-pair-plan.md) | Two independent replicas with collector fan-out and alert dedupe |
 | [Glossary](development/glossary.md) | Terminology |
 
