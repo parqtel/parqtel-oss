@@ -68,6 +68,7 @@ Phase 2b code was attempted and discarded. The binary footer cut memory by only
 12% and grew footers by 2.8x; the raw-string cache regressed warm queries by 81%.
 No stored-format change ships.
 
-HA H8 and memory-backlog items 4, 5, 9, and 10 remain open. Open questions remain
-unchanged; see the [efficiency plan](efficiency-plan.md#open-questions),
-[memory backlog](memory-backlog.md), and [HA pair plan](ha-pair-plan.md#h8--uat-rollout-manual-approval).
+HA H8 steady-state UAT passed; alert deduplication and mid-soak failover remain untested.
+Memory-backlog items 4, 5, 9, and 10 remain open. Open questions remain unchanged; see
+the [efficiency plan](efficiency-plan.md#open-questions), [memory backlog](memory-backlog.md),
+and [HA pair plan](ha-pair-plan.md#h8--uat-rollout-result).
