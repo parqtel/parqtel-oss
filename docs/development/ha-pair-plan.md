@@ -165,18 +165,51 @@ This document. Gate: `make docs-check`.
   the restarted pod catches up from the collector queue.
 - Gate: script passes on local k3d (`make local-k3d-up`) with an Alertmanager.
 
-### H8 — UAT rollout (manual approval)
-Not delegated. Steps, each needing approval:
-1. Ship an image with H1 (and H2 if Alertmanager is used).
-2. Scale `odin-parqtel` to 2. The new pod's PVC `data-odin-parqtel-1` comes from the
-   template at 10Gi; expand it to 30Gi right after creation.
-3. Change the UAT collector (`otel-collector-ksm`) to the two per-pod exporters.
-4. Point alert routing at UAT Alertmanager (`kube-prometheus-stack-alertmanager`) and
-   allowlist it in egress policy.
-5. Validate for 6 h: both replicas ingest ~9.5K points/s, zero restarts, memory below
-   4 GiB each, one notification per alert, queries succeed from both.
+### H8 — UAT rollout result
 
-Rollback: scale to 1 and restore the single collector exporter; replica 0 keeps its data.
+#### Outcome
+
+**PASS for steady-state HA.** Both independent replicas ingested the full stream, queries
+succeeded from both, neither restarted, and memory stayed well below the 6Gi limit.
+
+The rollout used image digest `sha256:54f4a7be…`, based on main `2b2ce43` with per-level
+counters. The old PVC `data-odin-parqtel-0` was deleted for a fresh start. The StatefulSet
+was recreated with two replicas and separate 10Gi PVCs. Required pod anti-affinity
+(`component=parqtel`) placed pod 0 on `worker-03` and pod 1 on `worker-01`. Both pods had
+6Gi/2 CPU limits; memory requests were lowered to 1Gi/500m because cluster memory requests
+were overcommitted. Startup probe `failureThreshold` was 120. UAT environment overrides
+were preserved, including the 1GiB footer cache.
+
+Collector `otel-collector-ksm` was reconfigured with two exporters targeting the per-pod
+DNS names for `parqtel-0` and `parqtel-1`, both in the metrics pipeline. It restarted
+cleanly. Both replicas received the full stream at about 9,438 points/s (`avg_60s`), with
+zero ingest errors and distinct replica IDs in `parqtel_build_info`.
+
+The operator shortened the planned soak to one hour. It recorded 61 one-minute samples and
+244 panel queries, with zero query failures. It accepted 13 log batches and 13 trace
+batches. Pod 0 peaked at 2,765 MiB; both pods had zero restarts and zero ingest errors.
+Maximum ingest gap was 1s.
+
+| Panel | p50 ms | p95 ms |
+|---|---:|---:|
+| `allocators-15m` | 1,038 | 1,774 |
+| `allocators-5m` | 976 | 1,754 |
+| `up-5m` | 711 | 1,454 |
+| `running-pods-15m` | 859 | 1,547 |
+
+| Replica | Footer misses | Footer cache bytes | Ingest errors |
+|---|---:|---:|---:|
+| Pod 0 | 81 | 1,025,314,186 | 0 |
+| Pod 1 | 78 | 922,081,322 | 0 |
+
+#### Coverage limits and rollback
+
+This result does not cover Alertmanager deduplication: fresh instances had no alert routes
+configured. It also does not cover mid-soak failover. `scripts/checks/ha_pair.sh` covers
+failover locally; run it before claiming full HA.
+
+Rollback: restore the single collector exporter and scale to one replica. Replica 0 keeps
+its PVC and data.
 
 ## Open decisions
 
