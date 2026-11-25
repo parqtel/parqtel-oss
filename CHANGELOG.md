@@ -11,6 +11,14 @@ build cannot reach a registry or the release page.
 
 ## [Unreleased]
 
+### Changed
+
+- **Faster builds.** The default `release` profile now uses thin LTO with 16
+  codegen units — cold build 5m34s → 2m30s and a one-file relink 3m48s → 1m01s
+  on 16 cores, for a +24% binary. Published release artifacts use the new
+  `release-dist` profile (fat LTO, one codegen unit); `make release-dist`
+  builds it locally. The `dev` profile now emits `line-tables-only` debug info.
+
 ### Documentation (current refresh)
 
 - **README hero and current positioning.** Added an animated SVG hero, corrected

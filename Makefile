@@ -1,4 +1,4 @@
-.PHONY: help dev-setup build release test lint bench docker docker-smoke \
+.PHONY: help dev-setup build release release-dist test lint bench docker docker-smoke \
         mcp-image mcp-up mcp-smoke \
         local-up local-down local-purge local-logs local-ps local-rebuild \
         local-verify test-api test-aggregations test-functions test-builder \
@@ -82,8 +82,11 @@ dev-setup: ## First-time setup: copy .env.example → .env, then start the full 
 build: | tools ## Debug build (auto-fetches protoc into .tools/ if missing)
 	cargo build
 
-release: | tools ## Optimised release build (LTO, stripped)
+release: | tools ## Optimised release build (thin LTO, stripped — fast)
 	cargo build --release
+
+release-dist: | tools ## Shipped-artifact build (fat LTO, matches .github/workflows/release.yml)
+	cargo build --profile release-dist -p parqtel-server
 
 test: | tools ## Run all workspace tests
 	cargo test --workspace

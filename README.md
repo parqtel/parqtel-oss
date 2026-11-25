@@ -424,7 +424,7 @@ make perf-audit     # Full performance audit
 - **No panics** — `unwrap`, `expect`, and `panic` are denied by clippy
 - **Error handling** — `thiserror` for library errors, `anyhow` at the binary level
 - **Async runtime** — Tokio with full features
-- **Release binary** — LTO, single codegen unit, symbols stripped, unwinding (reported as 500s)
+- **Release binaries** — default `release` profile: thin LTO, symbols stripped, unwinding; published artifacts use `release-dist` (fat LTO, single codegen unit)
 
 ## Brand
 

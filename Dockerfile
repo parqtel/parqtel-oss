@@ -50,6 +50,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Build dependencies only (cached unless Cargo.toml/lock change).
+# `--release` here is the thin-LTO profile from Cargo.toml (fast); the published
+# tarballs use `--profile release-dist` (fat LTO) instead.
 # Cache mounts keep the cargo registry / git index / target between runs so
 # incremental CI builds don't re-download or recompile from scratch.
 COPY --link --from=planner /app/recipe.json recipe.json

@@ -98,7 +98,9 @@ Parqtel's AI-native capabilities come from its MCP servers. To add a new tool (e
 - `protoc` (for OTLP protobuf compilation; `make build`/`make test` auto-fetch it via the `tools` target, or install `protobuf-compiler`)
 
 ### Build Commands
-- `cargo build`: Standard debug build.
+- `cargo build`: Standard debug build (`debug = "line-tables-only"` — file:line backtraces, smaller target).
+- `cargo build --release` (`make release`): thin-LTO release build for local work, CI and the container image.
+- `cargo build --profile release-dist` (`make release-dist`): fat-LTO build that matches the published release artifacts.
 - `cargo test --workspace`: Run the entire test suite.
 - `cargo clippy --workspace -- -D warnings`: Ensure code follows project standards (no panics, no unsafe).
 - `make local-rebuild`: Rebuild the Docker compose stack after source changes (required — a stale image silently runs old code).

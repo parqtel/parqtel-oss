@@ -44,7 +44,7 @@ For the full local stack with Grafana, Prometheus and a load generator, use
 make help          # list every target
 make dev-setup     # first-time local stack: copies .env, starts Compose
 make build         # debug build (auto-fetches protoc into .tools/)
-make release       # optimised build (LTO, stripped)
+make release       # optimised build (thin LTO, stripped)
 make test          # cargo test --workspace
 make lint          # rustfmt check + clippy -D warnings
 make run           # start the server from source
@@ -64,7 +64,7 @@ Run `make` with no target for the annotated list.
 - **No panics** — `unwrap`, `expect` and `panic` are denied by clippy.
 - **Errors** — `thiserror` in libraries, `anyhow` at the binary boundary.
 - **Async** — Tokio; blocking Parquet work runs on `spawn_blocking`.
-- **Release profile** — LTO, single codegen unit, symbols stripped, abort on panic.
+- **Release profiles** — `release` (thin LTO, symbols stripped, unwinding) for local, CI and container builds; `release-dist` (fat LTO, single codegen unit) for published artifacts.
 
 ## 4. Pull Request Process
 1. **Fork and Clone**: Create your own fork and clone it locally.

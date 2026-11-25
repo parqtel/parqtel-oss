@@ -105,9 +105,25 @@ expect_used = "deny"
 panic = "deny"
 todo = "warn"
 
+# Local, CI and container builds use thin LTO: measured on 16 cores, cold build
+# 5m34s → 2m30s and a one-file relink 3m48s → 1m01s, for a +24% binary.
+# Shipped artifacts keep the fat-LTO profile below.
 [profile.release]
-lto = "fat"
-codegen-units = 1
+lto = "thin"
+codegen-units = 16
 strip = "symbols"
 panic = "unwind"
 opt-level = 3
+
+# Release binaries published by .github/workflows/release.yml.
+# Fat LTO + one codegen unit: smallest binary, slowest build. Tag builds only.
+[profile.release-dist]
+inherits = "release"
+lto = "fat"
+codegen-units = 1
+
+# `debug = 2` for every dependency costs ~11% of a cold build, 1.6 GB of target
+# and a ~500 MB larger debug binary (i.e. slower links) for locals nobody
+# inspects. Line tables still give file:line backtraces.
+[profile.dev]
+debug = "line-tables-only"
