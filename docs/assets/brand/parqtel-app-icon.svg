@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="parqtel-app-icon-title parqtel-app-icon-desc">
+  <title id="parqtel-app-icon-title">Parqtel app icon</title>
+  <desc id="parqtel-app-icon-desc">The Parqtel geodesic sphere in cyan and blue on a midnight navy rounded square.</desc>
+  <defs>
+    <linearGradient id="parqtel-app-brand" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#06B6D4"/>
+      <stop offset="1" stop-color="#2563EB"/>
+    </linearGradient>
+    <radialGradient id="parqtel-app-glow" cx="50%" cy="42%" r="55%">
+      <stop offset="0" stop-color="#2563EB" stop-opacity=".35"/>
+      <stop offset="1" stop-color="#2563EB" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect width="512" height="512" rx="112" fill="#0B1530"/>
+  <rect width="512" height="512" rx="112" fill="url(#parqtel-app-glow)"/>
+  <rect x=".75" y=".75" width="510.5" height="510.5" rx="111.25" fill="none" stroke="#E2E8F0" stroke-opacity=".08"/>
+  <g transform="translate(106 106) scale(3)" fill="none" stroke="url(#parqtel-app-brand)" stroke-width="3.5" stroke-linejoin="round" stroke-linecap="round">
+    <path d="M50 4 88 22 94 62 66 94 28 90 6 58 12 20Z"/>
+    <path d="M50 28 71 43 63 68 37 68 29 43Z"/>
+    <path d="M50 28V4M71 43 88 22M71 43 94 62M63 68 66 94M37 68 28 90M29 43 6 58M29 43 12 20"/>
+  </g>
+</svg>

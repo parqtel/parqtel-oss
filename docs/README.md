@@ -72,6 +72,12 @@ Documentation for Parqtel, an open-source SRE telemetry store.
 | [Hot path](performance/hot-path.md) | Measured hot-path optimisations |
 | [Compaction](performance/compaction.md) | Compaction behaviour and tuning |
 
+## Brand
+
+| | |
+|---|---|
+| [Brand identity](brand/README.md) | Logo system, colour palette, typography, voice, hero copy and asset index |
+
 ## Scope
 
 Parqtel is a **metrics, logs and traces store with an SRE console, alerting and

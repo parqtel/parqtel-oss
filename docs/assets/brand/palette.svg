@@ -1,0 +1,66 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 420" role="img" aria-labelledby="palette-title palette-desc">
+  <title id="palette-title">Parqtel colour palette</title>
+  <desc id="palette-desc">Eight colour tokens: Midnight Navy, Electric Blue, Signal Cyan, Intelligence Violet, Cloud White, White, Slate and Border Gray, with their hex values.</desc>
+  <defs>
+    <style>
+      .kicker{fill:#64748B;font:600 12px/1 ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:3px}
+      .name{fill:#0B1530;font:600 13.5px/1 Inter,system-ui,sans-serif}
+      .hex{fill:#64748B;font:500 11px/1 ui-monospace,SFMono-Regular,Menlo,monospace}
+      .note{fill:#64748B;font:400 11.5px/1 Inter,system-ui,sans-serif}
+    </style>
+  </defs>
+  <rect width="1000" height="420" fill="#FFFFFF"/>
+  <text x="40" y="36" class="kicker">COLOUR PALETTE</text>
+
+  <g>
+    <rect x="40" y="56" width="212" height="150" rx="14" fill="#FFFFFF" stroke="#E2E8F0"/>
+    <circle cx="74" cy="98" r="22" fill="#0B1530"/>
+    <text x="70" y="152" class="name">Midnight Navy</text>
+    <text x="70" y="174" class="hex">#0B1530</text>
+  </g>
+  <g>
+    <rect x="272" y="56" width="212" height="150" rx="14" fill="#FFFFFF" stroke="#E2E8F0"/>
+    <circle cx="306" cy="98" r="22" fill="#2563EB"/>
+    <text x="302" y="152" class="name">Electric Blue</text>
+    <text x="302" y="174" class="hex">#2563EB</text>
+  </g>
+  <g>
+    <rect x="504" y="56" width="212" height="150" rx="14" fill="#FFFFFF" stroke="#E2E8F0"/>
+    <circle cx="538" cy="98" r="22" fill="#06B6D4"/>
+    <text x="534" y="152" class="name">Signal Cyan</text>
+    <text x="534" y="174" class="hex">#06B6D4</text>
+  </g>
+  <g>
+    <rect x="736" y="56" width="212" height="150" rx="14" fill="#FFFFFF" stroke="#E2E8F0"/>
+    <circle cx="770" cy="98" r="22" fill="#8B5CF6"/>
+    <text x="766" y="152" class="name">Intelligence Violet</text>
+    <text x="766" y="174" class="hex">#8B5CF6</text>
+  </g>
+
+  <g>
+    <rect x="40" y="230" width="212" height="150" rx="14" fill="#FFFFFF" stroke="#E2E8F0"/>
+    <circle cx="74" cy="272" r="22" fill="#F8FAFC" stroke="#E2E8F0"/>
+    <text x="70" y="326" class="name">Cloud White</text>
+    <text x="70" y="348" class="hex">#F8FAFC</text>
+  </g>
+  <g>
+    <rect x="272" y="230" width="212" height="150" rx="14" fill="#FFFFFF" stroke="#E2E8F0"/>
+    <circle cx="306" cy="272" r="22" fill="#FFFFFF" stroke="#E2E8F0"/>
+    <text x="302" y="326" class="name">White</text>
+    <text x="302" y="348" class="hex">#FFFFFF</text>
+  </g>
+  <g>
+    <rect x="504" y="230" width="212" height="150" rx="14" fill="#FFFFFF" stroke="#E2E8F0"/>
+    <circle cx="538" cy="272" r="22" fill="#64748B"/>
+    <text x="534" y="326" class="name">Slate</text>
+    <text x="534" y="348" class="hex">#64748B</text>
+  </g>
+  <g>
+    <rect x="736" y="230" width="212" height="150" rx="14" fill="#FFFFFF" stroke="#E2E8F0"/>
+    <circle cx="770" cy="272" r="22" fill="#E2E8F0"/>
+    <text x="766" y="326" class="name">Border Gray</text>
+    <text x="766" y="348" class="hex">#E2E8F0</text>
+  </g>
+
+  <text x="40" y="404" class="note">Use 60 % Midnight Navy, 30 % white and slate, 10 % blue, cyan and violet accent.</text>
+</svg>

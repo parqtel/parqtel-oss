@@ -33,7 +33,11 @@ in a staggered wave, and frames lift to separate planes. Motion stops under
 | Argo Rollouts flow | [`argo-rollouts-flow.svg`](../assets/diagrams/argo-rollouts-flow.svg) | [Argo Rollouts](../guides/argo-rollouts.md) |
 | Release pipeline | [`ci-release-pipeline.svg`](../assets/diagrams/ci-release-pipeline.svg) | [CI/CD](ci-cd.md) |
 
-The README hero is [`hero.svg`](../assets/hero.svg).
+The README hero is [`hero.svg`](../assets/hero.svg): a brand banner, not an
+architecture diagram. The runtime picture is
+[`architecture-overview.svg`](../assets/diagrams/architecture-overview.svg).
+Logo, palette and typography rules live in the
+[brand identity guide](../brand/README.md).
 
 ## Contract for a new diagram
 

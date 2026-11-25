@@ -1,139 +1,112 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 430" role="img" aria-labelledby="hero-title hero-desc">
-  <title id="hero-title">Parqtel — OpenTelemetry metrics, logs and traces in Parquet</title>
-  <desc id="hero-desc">Animated hero showing OTLP metrics, logs and traces flowing into a single Rust binary, landing as compressed Parquet blocks and returning through the query, alert and console surfaces.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 420" role="img" aria-labelledby="hero-title hero-desc">
+  <title id="hero-title">Parqtel — One platform. Complete visibility. Built for what's next.</title>
+  <desc id="hero-desc">Parqtel brand banner over midnight navy with a cyan and blue geodesic sphere, the parqtel wordmark, the tagline One platform. Complete visibility. Built for what's next., and proof points: 25 times cheaper storage, under 20 MB binary footprint, AI-native incident response, open source and enterprise ready.</desc>
   <defs>
-    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#07111f"/>
-      <stop offset="0.55" stop-color="#0b1b2e"/>
-      <stop offset="1" stop-color="#061018"/>
+    <linearGradient id="navy" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0B1530"/>
+      <stop offset=".55" stop-color="#0A1B3A"/>
+      <stop offset="1" stop-color="#050B1C"/>
     </linearGradient>
-    <linearGradient id="teal" x1="0" y1="0" x2="1" y2="0">
-      <stop offset="0" stop-color="#2dd4bf"/>
-      <stop offset="1" stop-color="#38bdf8"/>
-    </linearGradient>
-    <linearGradient id="warm" x1="0" y1="0" x2="1" y2="0">
-      <stop offset="0" stop-color="#fbbf24"/>
-      <stop offset="1" stop-color="#fb7185"/>
+    <linearGradient id="parqtel-brand" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#06B6D4"/>
+      <stop offset="1" stop-color="#2563EB"/>
     </linearGradient>
     <radialGradient id="glow" cx="50%" cy="50%" r="50%">
-      <stop offset="0" stop-color="#2dd4bf" stop-opacity=".30"/>
-      <stop offset="1" stop-color="#2dd4bf" stop-opacity="0"/>
+      <stop offset="0" stop-color="#2563EB" stop-opacity=".46"/>
+      <stop offset=".55" stop-color="#8B5CF6" stop-opacity=".18"/>
+      <stop offset="1" stop-color="#8B5CF6" stop-opacity="0"/>
     </radialGradient>
-    <pattern id="grid" width="36" height="36" patternUnits="userSpaceOnUse">
-      <path d="M36 0H0V36" fill="none" stroke="#7dd3fc" stroke-opacity=".07" stroke-width="1"/>
+    <radialGradient id="mark-glow" cx="50%" cy="50%" r="50%">
+      <stop offset="0" stop-color="#06B6D4" stop-opacity=".28"/>
+      <stop offset="1" stop-color="#06B6D4" stop-opacity="0"/>
+    </radialGradient>
+    <pattern id="grid" width="48" height="48" patternUnits="userSpaceOnUse">
+      <path d="M48 0H0V48" fill="none" stroke="#E2E8F0" stroke-opacity=".05" stroke-width="1"/>
     </pattern>
-    <filter id="soft" x="-30%" y="-30%" width="160%" height="160%">
-      <feGaussianBlur stdDeviation="7"/>
-    </filter>
     <style>
-      .eyebrow{fill:#5eead4;font:600 13px/1 ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:2.4px}
-      .title{fill:#f8fafc;font:800 92px/1 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;letter-spacing:-4px}
-      .tag{fill:#cbd5e1;font:400 21px/1.35 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif}
-      .chip{fill:#e2e8f0;font:600 13px/1 ui-sans-serif,system-ui,sans-serif}
-      .label{fill:#a7f3d0;font:600 11px/1 ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:1.4px}
-      .small{fill:#94a3b8;font:500 11px/1 ui-sans-serif,system-ui,sans-serif}
-      .node{fill:#0f2138;stroke:#2dd4bf;stroke-opacity:.5;stroke-width:1.2}
-      .rail{stroke:#2dd4bf;stroke-opacity:.25;stroke-width:1.2;fill:none}
-      .flow{stroke:url(#teal);stroke-width:2;fill:none;stroke-dasharray:5 9;animation:flow 1.1s linear infinite}
-      .flow2{stroke:url(#warm);stroke-width:2;fill:none;stroke-dasharray:5 9;animation:flow 1.6s linear infinite}
-      .pulse{animation:pulse 3.2s ease-in-out infinite}
-      .pulse2{animation:pulse 3.2s ease-in-out .7s infinite}
-      .pulse3{animation:pulse 3.2s ease-in-out 1.4s infinite}
-      .drift{animation:drift 6s ease-in-out infinite}
-      @keyframes flow{to{stroke-dashoffset:-28}}
-      @keyframes pulse{0%,100%{stroke-opacity:.35}50%{stroke-opacity:1}}
-      @keyframes drift{0%,100%{transform:translateY(0)}50%{transform:translateY(-4px)}}
-      @media (prefers-reduced-motion: reduce){*{animation:none!important}.flow,.flow2{stroke-dasharray:none}}
+      .sub{fill:#94A3B8;font:500 11.5px/1 Inter,system-ui,sans-serif;letter-spacing:4.2px}
+      .tagline{fill:#F8FAFC;font:600 29px/1 Inter,system-ui,-apple-system,"Segoe UI",sans-serif;letter-spacing:-.4px}
+      .accent{fill:#06B6D4}
+      .subline{fill:#94A3B8;font:400 14.5px/1 Inter,system-ui,-apple-system,"Segoe UI",sans-serif}
+      .stat{fill:#F8FAFC;font:700 25px/1 Inter,system-ui,-apple-system,"Segoe UI",sans-serif}
+      .stat-label{fill:#94A3B8;font:400 12.5px/1 Inter,system-ui,-apple-system,"Segoe UI",sans-serif}
+      .legal{fill:#E2E8F0;font:500 14px/1 Inter,system-ui,-apple-system,"Segoe UI",sans-serif}
+      .star{animation:twinkle 9s ease-in-out infinite}
+      .star2{animation:twinkle 11s ease-in-out 1.2s infinite}
+      .glow{animation:breathe 9s ease-in-out infinite}
+      @keyframes twinkle{0%,100%{opacity:.25}50%{opacity:.9}}
+      @keyframes breathe{0%,100%{opacity:.65}50%{opacity:1}}
+      @media (prefers-reduced-motion: reduce){*{animation:none!important}}
     </style>
+    <path id="parqtel-wordmark" fill="#F8FAFC" d="M3.1 773.2C1.1 771.5 1.1 771.5 0.9 487.0C0.8 330.5 1.1 201.7 1.5 200.8C2.6 198.0 5.0 197.8 31.3 197.7C53.5 197.6 56.4 197.8 57.5 199.3C59.0 201.4 60.1 231.6 59.4 256.7C58.9 279.5 60.3 281.3 67.5 266.9C79.5 243.1 104.9 218.5 129.0 207.4C160.4 192.8 205.6 190.1 244.0 200.5C331.5 224.2 381.6 310.8 371.0 420.1C364.3 488.7 326.4 549.8 273.5 577.2C221.1 604.4 142.8 604.4 96.7 577.2C94.6 576.0 92.6 575.0 92.4 575.0C92.1 575.0 90.0 573.7 87.7 572.2C85.4 570.6 81.0 567.6 77.9 565.6C74.8 563.5 70.5 560.1 68.4 557.9C64.6 554.0 61.7 553.0 60.5 555.1C60.1 555.7 59.7 604.8 59.5 664.3C59.2 766.9 59.1 772.4 57.4 773.7C54.3 775.9 5.9 775.5 3.1 773.2ZM1458.4 773.8C1456.6 773.4 1454.9 772.3 1454.6 771.5C1454.3 770.6 1454.0 717.8 1454.0 654.1C1453.9 556.1 1453.7 538.1 1452.5 537.6C1450.6 536.9 1446.9 540.1 1442.4 546.1C1437.7 552.6 1420.2 568.4 1411.3 574.2C1385.3 591.4 1354.2 599.2 1317.5 597.7C1255.2 595.1 1213.9 572.5 1178.2 521.3C1152.3 484.1 1138.9 415.1 1147.5 363.5C1153.1 330.3 1164.7 297.6 1177.8 278.2C1178.8 276.7 1181.9 272.2 1184.6 268.1C1199.4 245.7 1231.4 219.6 1255.3 210.3C1258.7 209.0 1263.9 207.0 1266.9 205.8C1272.3 203.7 1273.9 203.3 1295.4 198.5C1346.1 187.4 1407.3 198.9 1442.9 226.2C1453.0 233.9 1453.5 233.5 1453.7 216.6C1454.0 197.2 1451.6 198.6 1482.8 197.9C1508.6 197.4 1511.2 197.6 1513.0 200.9C1513.7 202.4 1514.0 284.7 1514.0 486.7C1514.0 769.9 1514.0 770.5 1512.0 772.5C1509.8 774.7 1465.6 775.8 1458.4 773.8ZM543.0 597.4C504.6 590.1 491.1 584.0 472.9 566.0C457.9 551.1 451.7 539.3 447.9 518.3C439.8 473.1 460.2 434.7 501.5 417.4C511.9 413.0 528.2 408.2 538.0 406.5C543.2 405.6 550.2 404.2 553.5 403.5C564.7 401.0 606.7 396.7 647.5 394.0C689.7 391.2 691.9 390.9 694.1 388.1C696.6 385.0 696.9 304.2 694.5 279.8C692.2 255.3 685.6 239.5 672.0 226.0C664.9 218.8 662.6 217.3 650.7 212.0C630.0 202.8 589.4 203.0 549.0 212.6C532.8 216.4 504.0 226.3 489.8 233.0C482.4 236.5 479.6 236.1 478.4 231.5C477.3 227.0 480.0 223.7 487.0 221.2C490.5 220.0 493.9 218.5 494.6 218.0C495.2 217.4 498.4 216.1 501.6 215.0C504.8 213.9 509.8 212.1 512.5 211.1C571.9 188.5 658.8 187.3 703.5 208.6C728.0 220.2 744.3 238.2 751.8 262.0C756.6 277.2 756.9 287.3 757.0 424.3C757.0 548.1 757.0 548.1 759.5 559.2C762.4 572.2 765.6 577.3 773.5 581.7C781.0 585.8 793.7 586.2 804.1 582.6C816.0 578.5 820.1 579.3 818.6 585.3C816.1 595.2 770.9 601.4 746.0 595.1C718.6 588.3 700.8 568.3 699.5 542.7C698.9 531.8 696.0 532.1 687.2 544.3C668.7 569.8 637.0 588.4 601.0 595.1C589.8 597.1 550.0 598.7 543.0 597.4ZM2093.5 597.3C2038.8 590.8 2022.0 584.8 1989.2 560.2C1957.6 536.5 1933.2 497.6 1923.5 455.0C1917.1 426.8 1916.0 382.1 1921.3 360.0C1922.6 354.2 1924.1 347.5 1924.5 345.2C1924.9 342.8 1926.5 337.1 1928.1 332.7C1929.7 328.2 1931.0 323.9 1931.0 323.2C1931.0 321.2 1936.3 309.2 1944.2 293.5C1967.6 246.7 2006.1 214.8 2056.0 201.1C2076.7 195.4 2080.5 194.9 2101.5 194.3C2153.1 193.1 2192.9 207.3 2221.6 237.2C2249.5 266.3 2265.1 303.4 2266.6 344.5C2267.1 357.6 2266.9 360.8 2265.8 362.4C2264.0 364.7 2257.0 364.8 2098.7 364.9C1987.9 365.0 1987.9 365.0 1985.3 367.6C1980.3 372.6 1983.5 437.8 1990.1 466.5C2003.3 523.7 2031.0 559.9 2075.0 577.3C2090.1 583.2 2126.5 586.8 2144.5 584.1C2147.8 583.6 2155.2 582.4 2161.0 581.6C2182.4 578.4 2217.5 565.0 2239.3 551.7C2245.8 547.7 2248.3 547.8 2250.5 552.1C2253.0 556.9 2251.1 559.1 2238.6 565.9C2199.4 587.2 2156.4 598.2 2114.4 597.9C2104.5 597.8 2095.2 597.5 2093.5 597.3ZM2421.0 597.4C2386.5 593.1 2365.0 578.7 2355.6 553.7C2349.4 537.2 2349.7 549.8 2349.3 320.5C2348.8 59.2 2349.3 5.5 2352.4 3.4C2355.2 1.6 2406.1 -0.5 2409.1 1.0C2410.1 1.6 2411.2 3.5 2411.5 5.3C2411.8 7.0 2412.1 130.4 2412.3 279.5C2412.6 550.5 2412.6 550.5 2415.2 558.8C2423.1 583.8 2444.5 591.6 2477.2 581.4C2488.1 578.0 2491.2 579.0 2489.6 585.6C2487.7 592.9 2444.6 600.3 2421.0 597.4ZM896.0 593.1C891.0 591.7 891.2 599.6 891.1 394.9C890.9 202.0 890.9 202.0 893.3 199.6C895.6 197.3 895.8 197.3 919.3 197.1C943.8 196.9 950.1 197.6 951.6 200.8C952.1 201.7 952.7 225.2 953.0 253.0C953.4 296.4 953.7 303.5 955.0 303.5C955.8 303.5 957.0 302.4 957.7 301.0C958.4 299.6 961.6 292.9 965.0 286.0C973.2 269.1 988.0 246.1 999.3 232.9C1033.1 193.4 1093.1 180.0 1112.3 207.8C1116.4 213.6 1116.2 228.9 1112.0 241.0C1106.2 257.5 1102.7 258.7 1090.6 248.8C1086.3 245.3 1080.8 240.8 1078.2 238.7C1058.3 222.6 1035.9 223.1 1012.9 240.2C996.2 252.6 980.6 273.6 970.4 297.5C969.2 300.2 966.4 306.8 964.2 312.0C962.0 317.2 958.7 327.6 956.8 335.0L953.5 348.5L953.0 469.2C952.5 583.3 952.4 590.0 950.7 591.7C948.8 593.6 901.8 594.8 896.0 593.1ZM1779.0 592.9C1770.6 591.9 1755.5 587.7 1749.6 584.8C1747.5 583.7 1743.9 582.2 1741.8 581.4C1728.4 576.7 1703.3 555.1 1692.6 539.1C1683.2 525.0 1674.2 502.5 1672.6 489.0C1672.2 486.0 1671.3 479.0 1670.5 473.5C1669.4 465.4 1669.2 440.5 1669.5 344.0C1669.7 242.7 1669.5 224.2 1668.4 222.2C1667.0 220.0 1667.0 220.0 1636.4 220.0C1600.3 220.0 1601.0 220.2 1601.0 209.0C1601.0 195.9 1603.4 194.2 1619.8 195.8C1626.8 196.5 1667.7 196.9 1737.5 196.9C1861.5 196.9 1848.7 195.5 1847.7 209.0C1846.8 220.8 1850.5 220.0 1799.0 220.0C1758.6 220.0 1755.2 220.1 1753.8 221.8C1751.4 224.5 1750.2 436.4 1752.5 453.1C1757.5 489.0 1771.0 508.3 1796.2 515.2C1804.8 517.5 1828.6 518.7 1836.7 517.2C1843.1 516.1 1846.1 517.3 1847.1 521.5C1848.5 527.3 1854.2 548.6 1856.5 556.5C1864.6 584.7 1864.5 584.3 1862.6 586.3C1856.8 592.1 1806.4 596.0 1779.0 592.9ZM1342.5 586.1C1382.9 582.7 1419.5 561.6 1443.9 527.6C1454.5 512.9 1453.7 521.0 1454.0 419.0C1454.3 279.3 1453.5 249.6 1449.4 245.1C1437.2 231.5 1400.7 213.0 1378.5 209.1C1374.7 208.4 1368.3 207.2 1364.3 206.4C1340.4 201.7 1306.0 207.3 1285.3 219.1C1268.6 228.6 1249.2 249.5 1239.2 268.5C1230.7 284.9 1219.1 319.6 1217.5 334.0C1217.1 337.0 1216.2 343.3 1215.4 348.0C1205.2 407.9 1215.9 485.2 1240.7 529.5C1247.4 541.4 1249.6 544.5 1258.5 553.9C1283.1 579.7 1307.4 589.0 1342.5 586.1ZM203.1 583.1C231.3 576.0 259.7 552.9 274.9 524.7C301.2 475.7 306.3 454.6 306.4 393.0C306.4 342.6 302.9 321.2 288.5 285.0C264.8 225.4 217.9 197.2 161.0 208.4C130.0 214.4 104.6 230.8 84.6 257.5C80.2 263.4 66.0 287.9 66.0 289.6C66.0 289.9 64.6 293.4 62.8 297.3L59.7 304.5L59.8 418.9C59.9 481.8 60.2 534.2 60.6 535.2C61.3 537.4 77.0 551.5 85.4 557.3C118.9 580.7 168.9 591.7 203.1 583.1ZM610.0 582.0C650.0 570.2 676.3 550.3 692.1 520.1C695.5 513.6 695.5 513.6 695.8 459.8C696.1 397.5 696.7 401.4 686.7 402.4C683.8 402.7 674.5 403.2 666.0 403.5C562.8 407.3 529.5 419.7 513.7 460.0C508.0 474.8 505.9 497.2 508.5 515.5C513.5 550.4 530.9 571.9 562.0 582.2C573.2 585.9 597.3 585.8 610.0 582.0ZM2204.8 352.4C2206.8 351.0 2207.0 350.1 2207.0 341.2C2207.0 295.0 2192.6 252.6 2169.0 229.0C2140.0 200.0 2086.4 195.7 2050.4 219.5C2042.2 224.9 2025.5 242.1 2019.6 251.0C2016.9 255.1 2014.0 259.6 2013.0 261.0C2002.9 276.2 1992.2 308.7 1986.0 343.3C1983.8 355.2 1971.4 354.0 2095.4 354.0C2190.8 354.0 2202.8 353.8 2204.8 352.4ZM1615.7 190.3C1614.1 188.8 1615.3 186.9 1620.6 182.8C1641.1 167.2 1653.8 152.5 1662.8 134.0C1674.8 109.3 1680.5 85.0 1681.7 53.5C1682.1 41.3 1682.6 37.1 1683.8 35.8C1685.9 33.3 1754.0 33.0 1756.0 35.5C1757.5 37.3 1757.5 64.6 1756.0 73.2C1746.3 129.5 1721.0 164.1 1677.3 180.9C1662.3 186.7 1618.7 193.4 1615.7 190.3Z"/>
   </defs>
 
-  <rect width="1200" height="430" rx="26" fill="url(#bg)"/>
-  <rect width="1200" height="430" rx="26" fill="url(#grid)"/>
-  <circle cx="990" cy="126" r="240" fill="url(#glow)"/>
-  <circle cx="1160" cy="410" r="160" fill="url(#glow)" opacity=".45"/>
+  <rect width="1200" height="420" rx="26" fill="url(#navy)"/>
+  <rect width="1200" height="420" rx="26" fill="url(#grid)"/>
 
-  <g transform="translate(58 58)">
-    <path d="M0 9h18M0 18h11" stroke="#5eead4" stroke-width="3" stroke-linecap="round"/>
-    <text x="30" y="15" class="eyebrow">SRE OBSERVABILITY ENGINE</text>
-    <text x="-4" y="112" class="title">Parqtel</text>
-    <text x="0" y="158" class="tag">OpenTelemetry metrics, logs and traces</text>
-    <text x="0" y="188" class="tag">compressed into Apache Parquet.</text>
-    <text x="0" y="218" class="tag" fill="#94a3b8">One Rust binary. No cluster. No schema.</text>
-
-    <g transform="translate(0 252)">
-      <rect width="136" height="34" rx="17" fill="#0f2a3d" stroke="#2dd4bf" stroke-opacity=".45"/>
-      <text x="18" y="22" class="chip">OTLP + gRPC</text>
-      <rect x="146" width="118" height="34" rx="17" fill="#0f2a3d" stroke="#38bdf8" stroke-opacity=".4"/>
-      <text x="164" y="22" class="chip">Parquet</text>
-      <rect x="274" width="132" height="34" rx="17" fill="#0f2a3d" stroke="#fbbf24" stroke-opacity=".4"/>
-      <text x="292" y="22" class="chip">PromQL API</text>
-      <rect x="416" width="128" height="34" rx="17" fill="#0f2a3d" stroke="#fb7185" stroke-opacity=".35"/>
-      <text x="434" y="22" class="chip">Alerting</text>
-      <rect x="554" width="116" height="34" rx="17" fill="#0f2a3d" stroke="#2dd4bf" stroke-opacity=".45"/>
-      <text x="572" y="22" class="chip">MCP / AI</text>
-    </g>
-
-    <text x="0" y="332" class="small">github.com/parqtel/parqtel-oss · Apache-2.0</text>
+  <g class="glow">
+    <ellipse cx="1010" cy="250" rx="430" ry="270" fill="url(#glow)"/>
+    <circle cx="1080" cy="520" r="380" fill="none" stroke="#2563EB" stroke-opacity=".32" stroke-width="1.5"/>
+    <circle cx="1080" cy="520" r="380" fill="none" stroke="#06B6D4" stroke-opacity=".10" stroke-width="20"/>
+    <ellipse cx="1080" cy="520" rx="380" ry="132" fill="none" stroke="#06B6D4" stroke-opacity=".18" transform="rotate(-12 1080 520)"/>
+    <ellipse cx="1080" cy="520" rx="148" ry="380" fill="none" stroke="#06B6D4" stroke-opacity=".12" transform="rotate(-18 1080 520)"/>
   </g>
 
-  <g transform="translate(716 54)">
-    <rect x="0" y="0" width="430" height="326" rx="18" fill="#081726" stroke="#38bdf8" stroke-opacity=".18"/>
-    <text x="22" y="30" class="label">TELEMETRY PATH</text>
+  <circle cx="884" cy="74" r="2.2" fill="#E2E8F0" opacity=".6" class="star"/>
+  <circle cx="962" cy="132" r="1.8" fill="#E2E8F0" opacity=".5" class="star2"/>
+  <circle cx="1108" cy="54" r="2.6" fill="#E2E8F0" opacity=".45" class="star"/>
+  <circle cx="1058" cy="196" r="1.6" fill="#E2E8F0" opacity=".4" class="star2"/>
+  <circle cx="786" cy="128" r="1.7" fill="#E2E8F0" opacity=".35" class="star"/>
 
-    <g class="drift">
-      <rect x="22" y="52" width="112" height="44" rx="10" class="node pulse"/>
-      <text x="38" y="70" class="chip">OTel SDK</text>
-      <text x="38" y="86" class="small">metrics · logs</text>
-
-      <rect x="22" y="112" width="112" height="44" rx="10" class="node pulse2"/>
-      <text x="38" y="130" class="chip">Collector</text>
-      <text x="38" y="146" class="small">batching · retry</text>
-
-      <rect x="22" y="172" width="112" height="44" rx="10" class="node pulse3"/>
-      <text x="38" y="190" class="chip">Prometheus</text>
-      <text x="38" y="206" class="small">remote_write</text>
-
-      <rect x="22" y="232" width="112" height="44" rx="10" class="node pulse"/>
-      <text x="38" y="250" class="chip">Kafka / JSON</text>
-      <text x="38" y="266" class="small">logs · apps</text>
-    </g>
-
-    <rect x="170" y="86" width="104" height="158" rx="14" fill="#0b2234" stroke="#2dd4bf" stroke-width="1.5"/>
-    <text x="190" y="116" class="chip" fill="#5eead4">PARQTEL</text>
-    <text x="184" y="140" class="small">ingest</text>
-    <text x="184" y="158" class="small">buffer + WAL</text>
-    <text x="184" y="176" class="small">query engine</text>
-    <text x="184" y="194" class="small">alerts · rules</text>
-    <text x="184" y="212" class="small">console / MCP</text>
-
-    <rect x="308" y="86" width="100" height="72" rx="12" fill="#0b2234" stroke="#fbbf24" stroke-opacity=".55"/>
-    <text x="324" y="112" class="chip" fill="#fde68a">Parquet</text>
-    <text x="322" y="132" class="small">zstd blocks</text>
-
-    <rect x="308" y="172" width="100" height="72" rx="12" fill="#0b2234" stroke="#38bdf8" stroke-opacity=".5"/>
-    <text x="324" y="198" class="chip" fill="#bae6fd">S3 / disk</text>
-    <text x="318" y="218" class="small">shared catalog</text>
-
-    <path class="rail" d="M134 74 H170"/>
-    <path class="rail" d="M134 134 H170"/>
-    <path class="rail" d="M134 194 H170"/>
-    <path class="rail" d="M134 254 H170"/>
-    <path class="rail" d="M274 120 H308"/>
-    <path class="rail" d="M274 208 H308"/>
-    <path class="flow" d="M134 74 H170"/>
-    <path class="flow2" d="M134 134 H170"/>
-    <path class="flow" d="M134 194 H170"/>
-    <path class="flow2" d="M134 254 H170"/>
-    <path class="flow" d="M274 120 H308"/>
-    <path class="flow2" d="M274 208 H308"/>
-
-    <circle cx="170" cy="74" r="3" fill="#5eead4"/>
-    <circle cx="170" cy="134" r="3" fill="#fbbf24"/>
-    <circle cx="170" cy="194" r="3" fill="#38bdf8"/>
-    <circle cx="170" cy="254" r="3" fill="#fb7185"/>
-    <circle cx="308" cy="120" r="3" fill="#fbbf24"/>
-    <circle cx="308" cy="208" r="3" fill="#38bdf8"/>
-
-    <text x="22" y="304" class="small">WAL before acknowledgement · zstd blocks · live tail</text>
+  <circle cx="109" cy="137" r="92" fill="url(#mark-glow)"/>
+  <use href="#parqtel-wordmark" transform="translate(200 72) scale(0.117)"/>
+  <g transform="translate(64 92) scale(0.9)" fill="none" stroke="url(#parqtel-brand)" stroke-width="3.5" stroke-linejoin="round" stroke-linecap="round">
+    <path d="M50 4 88 22 94 62 66 94 28 90 6 58 12 20Z"/>
+    <path d="M50 28 71 43 63 68 37 68 29 43Z"/>
+    <path d="M50 28V4M71 43 88 22M71 43 94 62M63 68 66 94M37 68 28 90M29 43 6 58M29 43 12 20"/>
   </g>
+  <text x="202" y="190" class="sub">PLANETSCALE OBSERVABILITY</text>
+
+  <line x1="176" y1="84" x2="176" y2="192" stroke="#E2E8F0" stroke-opacity=".22"/>
+  <line x1="518" y1="84" x2="518" y2="192" stroke="#E2E8F0" stroke-opacity=".22"/>
+
+  <text x="550" y="104" class="tagline">One platform. Complete visibility.</text>
+  <text x="550" y="146" class="tagline">Built for <tspan class="accent">what's next.</tspan></text>
+  <text x="550" y="184" class="subline">OpenTelemetry metrics, logs and traces · Apache Parquet</text>
+
+  <line x1="40" y1="296" x2="1160" y2="296" stroke="#E2E8F0" stroke-opacity=".14"/>
+
+  <g transform="translate(66 326)" fill="none" stroke="#06B6D4" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round">
+    <path d="M13 2 24 8 13 14 2 8Z"/>
+    <path d="M2 13 13 19 24 13"/>
+    <path d="M2 18 13 24 24 18"/>
+  </g>
+  <text x="102" y="346" class="stat">25×</text>
+  <text x="102" y="366" class="stat-label">Cheaper Storage</text>
+
+  <g transform="translate(330 326)" fill="none" stroke="#2563EB" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round">
+    <path d="M14 2 4 16h7l-1 8 10-14h-7Z"/>
+  </g>
+  <text x="366" y="346" class="stat">&lt;20MB</text>
+  <text x="366" y="366" class="stat-label">Binary Footprint</text>
+
+  <g transform="translate(618 326)" fill="none" stroke="#8B5CF6" stroke-width="1.8" stroke-linecap="round">
+    <path d="M13 5 3 20M13 5l10 15M3 20h20"/>
+    <circle cx="13" cy="5" r="2.4" fill="#8B5CF6" stroke="none"/>
+    <circle cx="3" cy="20" r="2.4" fill="#8B5CF6" stroke="none"/>
+    <circle cx="23" cy="20" r="2.4" fill="#8B5CF6" stroke="none"/>
+  </g>
+  <text x="654" y="346" class="stat">AI-Native</text>
+  <text x="654" y="366" class="stat-label">Incident Response</text>
+
+  <line x1="304" y1="318" x2="304" y2="376" stroke="#E2E8F0" stroke-opacity=".14"/>
+  <line x1="592" y1="318" x2="592" y2="376" stroke="#E2E8F0" stroke-opacity=".14"/>
+  <line x1="880" y1="318" x2="880" y2="376" stroke="#E2E8F0" stroke-opacity=".14"/>
+
+  <g transform="translate(904 332) scale(0.24)" fill="none" stroke="url(#parqtel-brand)" stroke-width="6" stroke-linejoin="round" stroke-linecap="round">
+    <path d="M50 4 88 22 94 62 66 94 28 90 6 58 12 20Z"/>
+    <path d="M50 28 71 43 63 68 37 68 29 43Z"/>
+    <path d="M50 28V4M71 43 88 22M71 43 94 62M63 68 66 94M37 68 28 90M29 43 6 58M29 43 12 20"/>
+  </g>
+  <text x="944" y="357" class="legal">Open Source <tspan class="accent">•</tspan> <tspan fill="#94A3B8">Enterprise Ready</tspan></text>
 </svg>

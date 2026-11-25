@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/assets/hero.svg" alt="Parqtel — OpenTelemetry metrics, logs and traces compressed into Parquet; one Rust binary with OTLP, PromQL, alerting, console and MCP" width="100%">
+  <img src="docs/assets/hero.svg" alt="Parqtel brand banner — One platform. Complete visibility. Built for what's next. OpenTelemetry metrics, logs and traces in compressed Parquet, from one Rust binary." width="100%">
 </p>
 
 <h1 align="center">Parqtel</h1>
@@ -31,7 +31,7 @@
   <a href="https://github.com/parqtel/parqtel-oss/actions/workflows/release.yml"><img src="https://img.shields.io/badge/cosign-signed-green?logo=sigstore" alt="Cosign Signed"></a>
   <a href="https://github.com/parqtel/parqtel-oss/releases"><img src="https://img.shields.io/github/v/release/parqtel/parqtel-oss?color=success&include_prereleases" alt="GitHub Release"></a>
   <a href="https://parqtel.github.io"><img src="https://img.shields.io/badge/docs-parqtel.github.io-success?logo=github" alt="GitHub Pages"></a>
-  <img src="https://img.shields.io/badge/query-PQL%20%7C%20ParQL%20%7C%20ParqtelQL%20%7C%20Pipelines-00F5D4" alt="PQL query surfaces">
+  <img src="https://img.shields.io/badge/query-PQL%20%7C%20ParQL%20%7C%20ParqtelQL%20%7C%20Pipelines-06B6D4" alt="PQL query surfaces">
 </p>
 
 <p align="center">
@@ -83,6 +83,7 @@ S3-compatible bucket with a shared catalog is optional.
 | **Querying** | [**PQL Guide**](docs/guides/pql-guide.md) — ParQL metrics, ParqtelQL log/trace search, cross-signal pipelines |
 | **Deep Dive** | [Architecture](docs/development/architecture.md) • [Configuration](docs/operations/configuration.md) • [Developer Guide](docs/development/developer-guide.md) • [MCP Integrations](docs/guides/mcp.md) • [Query Functions](docs/guides/query-functions.md) • [Performance](docs/performance/README.md) • [CI/CD](docs/development/ci-cd.md) |
 | **Operations** | [Deployment](docs/operations/deployment.md) • [Object storage](docs/operations/object-storage.md) • [Security](docs/operations/security.md) • [Alerting](docs/operations/alerting.md) • [Known Issues](docs/operations/known-issues.md) • [Troubleshooting](docs/operations/troubleshooting.md) • [Best Practices](docs/guides/best-practices.md) • [Testing & Validation](docs/development/testing.md) |
+| **Brand** | [Brand identity](docs/brand/README.md) • [Logo and palette assets](docs/assets/brand/) |
 | **Community** | [Contributing](CONTRIBUTING.md) • [Support](SUPPORT.md) • [Code of Conduct](CODE_OF_CONDUCT.md) • [Security policy](SECURITY.md) • [Changelog](CHANGELOG.md) |
 
 ## Features
@@ -420,6 +421,34 @@ make perf-audit     # Full performance audit
 - **Error handling** — `thiserror` for library errors, `anyhow` at the binary level
 - **Async runtime** — Tokio with full features
 - **Release binary** — LTO, single codegen unit, symbols stripped, unwinding (reported as 500s)
+
+## Brand
+
+Parqtel is **Planetscale observability**: OpenTelemetry telemetry compressed
+into Parquet, served from one binary. The identity pairs Midnight Navy with a
+cyan-to-blue geodesic sphere; the tagline is **One platform. Complete
+visibility. Built for what's next.**
+
+| Primary lockup (light surfaces) | Reverse lockup (dark surfaces) | Icon |
+|---|---|---|
+| <img src="docs/assets/brand/parqtel-logo-primary.svg" width="280" alt="Parqtel primary logo with navy wordmark"> | <img src="docs/assets/brand/parqtel-logo-reverse.svg" width="280" alt="Parqtel reverse logo with white wordmark"> | <img src="docs/assets/brand/parqtel-icon.svg" width="64" alt="Parqtel geodesic icon"> |
+
+| Token | Hex | Use |
+|---|---|---|
+| Midnight Navy | `#0B1530` | Hero canvas, dark panels |
+| Electric Blue | `#2563EB` | Primary action, links |
+| Signal Cyan | `#06B6D4` | Brand accent, active state |
+| Intelligence Violet | `#8B5CF6` | AI and incident-response surfaces |
+| Cloud White | `#F8FAFC` | Page background, reverse wordmark |
+| White | `#FFFFFF` | Cards and raised surfaces |
+| Slate | `#64748B` | Secondary text and captions |
+| Border Gray | `#E2E8F0` | Hairlines and dividers |
+
+Typography: Playfair Display for the wordmark and headlines, Inter for UI and
+body text, JetBrains Mono for code and technical labels. The
+[palette sheet](docs/assets/brand/palette.svg) shows all eight tokens. Clear
+space, minimum sizes, voice and motion rules are in
+[docs/brand/README.md](docs/brand/README.md).
 
 ## License
 
