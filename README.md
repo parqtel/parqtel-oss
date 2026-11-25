@@ -3,12 +3,6 @@
 </p>
 
 <p align="center">
-  <img src="docs/assets/brand/parqtel-icon.svg" width="72" alt="Parqtel logo">
-</p>
-
-<h1 align="center">Parqtel</h1>
-
-<p align="center">
   <strong>OpenTelemetry metrics, logs and traces in compressed Parquet.</strong><br>
   One Rust binary. PromQL-compatible queries. Optional S3-compatible storage.
 </p>
