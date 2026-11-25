@@ -104,7 +104,7 @@ Suggested scale: 40–56 px display, 24–32 px section heading, 16 px body,
 The README hero is the brand banner: Midnight Navy field, geodesic mark,
 wordmark, category line, tagline and the four proof points.
 
-![Parqtel brand banner: geodesic logo, the tagline One platform. Complete visibility. Built for what's next., and proof points 25× cheaper storage, <20 MB binary, AI-native incident response, open source and enterprise ready](../assets/hero.svg)
+![Parqtel brand banner: geodesic logo, the tagline One platform. Complete visibility. Built for what's next., and proof points 25× cheaper storage, <20 MB binary, AI-native incident response, open source and enterprise ready](../assets/brand/parqtel-hero.svg)
 
 | Slot | Copy |
 |---|---|
@@ -150,7 +150,7 @@ rules.
 | [`parqtel-icon.svg`](../assets/brand/parqtel-icon.svg) | 100 × 100 | Transparent background |
 | [`parqtel-app-icon.svg`](../assets/brand/parqtel-app-icon.svg) | 512 × 512 | Midnight Navy rounded square |
 | [`palette.svg`](../assets/brand/palette.svg) | 1000 × 420 | Colour tokens with hex values |
-| [`hero.svg`](../assets/hero.svg) | 1200 × 420 | README and landing-page banner |
+| [`parqtel-hero.svg`](../assets/brand/parqtel-hero.svg) | 1200 × 420 | README and landing-page banner |
 
 All assets are self-contained SVG: no external fonts, no scripts, no network
 requests.

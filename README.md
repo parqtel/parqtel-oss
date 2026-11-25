@@ -1,5 +1,9 @@
 <p align="center">
-  <img src="docs/assets/hero.svg" alt="Parqtel brand banner — One platform. Complete visibility. Built for what's next. OpenTelemetry metrics, logs and traces in compressed Parquet, from one Rust binary." width="100%">
+  <img src="docs/assets/brand/parqtel-hero.svg" alt="Parqtel brand banner — One platform. Complete visibility. Built for what's next. OpenTelemetry metrics, logs and traces in compressed Parquet, from one Rust binary." width="100%">
+</p>
+
+<p align="center">
+  <img src="docs/assets/brand/parqtel-icon.svg" width="72" alt="Parqtel logo">
 </p>
 
 <h1 align="center">Parqtel</h1>
