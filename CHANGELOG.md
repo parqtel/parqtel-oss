@@ -40,6 +40,15 @@ build cannot reach a registry or the release page.
 - **Corrected stale claims** about S3 support, TLS, notification delivery,
   authentication, object-store multi-writer behaviour, log/trace projection,
   the compressed sidecar shape and profiling endpoints.
+### Security
+
+- **Two dependency advisories cleared.** `url` 2.5.4 → 2.5.9 closes
+  RUSTSEC-2026-0592 (stack overflow in `Url::origin()` on nested `blob:` URLs,
+  reached via `object_store`), and the `arrow`/`parquet` stack moves to 60.2.0
+  for RUSTSEC-2026-0595 (bloom filters written as plaintext when writing
+  encrypted Parquet). Both bump the resolver floor in `Cargo.toml`; MSRV stays
+  1.88. `Security Audit` is green again.
+
 ### Fixed
 
 - **S3 block upload used temporary names.** Uploads now happen only after the

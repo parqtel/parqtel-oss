@@ -14,17 +14,17 @@ resolver = "2"
 [workspace.package]
 version = "0.3.1"
 edition = "2021"
-rust-version = "1.88" # arrow 60.1.0 requires Rust 1.88
+rust-version = "1.88" # arrow 60.2.0 requires Rust 1.88
 authors = ["parqtel team"]
 license = "Apache-2.0"
 description = "An ultra-lightweight SRE observability tool for streaming OTel metrics and logs into compressed Parquet chunks"
 
 [workspace.dependencies]
 tokio = { version = "1", features = ["full"] }
-arrow = { version = "60", features = ["ipc", "json", "csv", "prettyprint"] }
-parquet = { version = "60", features = ["zstd", "async", "encryption"] }
-arrow_array = { package = "arrow-array", version = "60" }
-arrow_schema = { package = "arrow-schema", version = "60" }
+arrow = { version = "60.2", features = ["ipc", "json", "csv", "prettyprint"] }
+parquet = { version = "60.2", features = ["zstd", "async", "encryption"] }
+arrow_array = { package = "arrow-array", version = "60.2" }
+arrow_schema = { package = "arrow-schema", version = "60.2" }
 zstd = "0.14"
 axum = "0.7"
 serde = { version = "1", features = ["derive"] }

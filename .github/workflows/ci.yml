@@ -18,7 +18,7 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
-  MSRV: "1.88" # arrow 60.1.0 requires Rust 1.88; matches Cargo.toml rust-version and Dockerfile RUST_VERSION
+  MSRV: "1.88" # arrow 60.2.0 requires Rust 1.88; matches Cargo.toml rust-version and Dockerfile RUST_VERSION
 
 # Global timeout for every job; guards against hung tests or a stuck buildx
 # daemon from burning minutes. Individual jobs can override with timeout-minutes.
