@@ -228,6 +228,11 @@ jobs:
           tool: git-cliff@2.14.2
       - name: Verify version sites and changelog structure
         run: python3 scripts/release/release_tool.py check
+      - name: Fetch release tags
+        # The release commit lands on main at the same moment its tag is
+        # pushed; a clone that raced the push sees no tags and reports the
+        # whole history as unreleased.
+        run: git fetch --quiet --tags --force origin '+refs/tags/v*:refs/tags/v*'
       - name: Verify the generated changelog block is current
         run: |
           python3 scripts/release/release_tool.py update-changelog

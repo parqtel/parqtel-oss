@@ -470,6 +470,25 @@ def replace_block(text: str, block: str) -> str:
 
 def changelog_update(dry_run: bool = False) -> None:
     text = read(CHANGELOG)
+    # `git-cliff --unreleased` reports every commit since the newest tag. If
+    # that tag is missing from the clone — a race with the tag push, or a
+    # shallow checkout — the whole history shows up as unreleased and the
+    # block looks stale for no reason. Say so instead of writing that block.
+    released = release_versions(text)
+    if released:
+        newest = f"v{released[0]['version']}"
+        tag_exists = subprocess.run(
+            ["git", "rev-parse", "--verify", "--quiet", f"refs/tags/{newest}"],
+            cwd=ROOT,
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        ).returncode == 0
+        if not tag_exists:
+            raise ReleaseError(
+                f"tag {newest} is missing locally; run `git fetch --tags` "
+                "(without it every commit looks unreleased)"
+            )
     block = render_block()
     new_text = replace_block(text, block)
     if new_text == text:

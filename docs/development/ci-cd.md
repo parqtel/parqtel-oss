@@ -100,3 +100,9 @@ Local builds of `parqtel-ingest` need `protoc` (prost-build compiles the OTLP sc
 - **MSRV is 1.88** and lives in three places that must move together: `ci.yml` (`MSRV` env + toolchain matrix), `Cargo.toml` `[workspace.package].rust-version`, `Dockerfile` `RUST_VERSION`, the compose Dockerfiles under `deploy/compose/`, and the `main` ruleset's required-check name. It's pinned by the lockfile: arrow 60.2.0 requires rustc 1.88, so lowering it needs precise dependency pins.
 - CI installs `cargo-audit` via `taiki-e/install-action` and runs `cargo audit --deny warnings` plus a Trivy filesystem scan (CRITICAL/HIGH). Both read `Cargo.lock`/the tree only — run `cargo update` deliberately and review the audit diff. (The old `rustsec/audit-check` action was dropped: its embedded cargo exited 101 under the Node 24 runner migration.)
 - If runner minutes ever matter less than latency again, the Docker job is safe to promote back to always-on via the `changes.outputs.docker` condition.
+- **The `Release Metadata` job needs the release tag in its clone.** A cut
+  pushes the release commit to `main` and the tag in quick succession, so a
+  clone can start before the tag lands; `git-cliff --unreleased` then reports
+  the entire history as unreleased and the job fails on a stale block that is
+  not stale. The job fetches `refs/tags/v*` first, and `release_tool.py`
+  refuses to rewrite the block when the newest released tag is missing.
