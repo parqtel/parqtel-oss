@@ -11,6 +11,16 @@ verifies that nothing drifted.
 | Publish | (automatic) | `.github/workflows/release.yml` builds, signs and releases |
 | Verify | `make verify-release` | checks the release, assets, checksums, image, chart, attestation |
 
+## Build matrix
+
+`release.yml` publishes four binaries: `linux/amd64`, `linux/arm64`,
+`darwin/amd64`, `darwin/arm64`. Linux targets build on a runner of the same
+architecture (`ubuntu-latest`, `ubuntu-24.04-arm`); macOS targets use the
+Apple toolchain's cross-target support on `macos-latest`. Linux must not
+cross-compile: `rdkafka-sys` builds librdkafka with cmake and needs a matching
+C++ compiler, which the `x86_64` host does not carry — the first `v0.4.0`
+attempt failed on exactly that.
+
 ## Version source of truth
 
 `[workspace.package].version` in `Cargo.toml` is the only hand-edited version.

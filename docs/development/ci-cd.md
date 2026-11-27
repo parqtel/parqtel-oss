@@ -42,6 +42,8 @@ Key mechanics:
 
 The `test` gate re-runs the release-metadata check (with `--tag`), clippy `-D warnings` and the full workspace suite on the tagged commit. Tags can point at stale commits — without this gate a tag could publish binaries that were never validated, and a tag whose version disagrees with `Cargo.toml` could publish under the wrong version.
 
+`linux/arm64` builds on `ubuntu-24.04-arm`, not cross-compiled from `x86_64`: `rdkafka-sys` compiles librdkafka with cmake and needs an `aarch64` C++ compiler. macOS targets keep using the Apple toolchain's cross-target support on `macos-latest`.
+
 The GitHub release body is generated from the tag's `CHANGELOG.md` section (`scripts/release/release_tool.py notes`), not from `generate_release_notes`, so the release page and the changelog cannot disagree. Full release procedure: [Release process](release.md).
 
 Supply chain guarantees retained: build provenance attestation, SBOM, cosign signing, Trivy image scan, checksums for every binary asset.
