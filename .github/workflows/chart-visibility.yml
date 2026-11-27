@@ -2,13 +2,20 @@ name: Chart Visibility
 
 # GHCR packages created by a workflow start private, which breaks the
 # documented `helm install oci://ghcr.io/parqtel/charts/parqtel` for anonymous
-# users. Changing visibility needs `write:packages`; the release workflow's
-# GITHUB_TOKEN has it, so this dispatch flips the chart package to public and
-# reports the result. Idempotent: run it again whenever a new chart package
-# appears.
+# users. Flipping visibility needs a token that can administer the package: a
+# repo-scoped GITHUB_TOKEN answers 404 on every candidate name, so pass a PAT
+# with `write:packages` (dispatch input `token`) or use the GHCR UI.
 
 on:
   workflow_dispatch:
+    inputs:
+      token:
+        description: "PAT with write:packages (optional; defaults to github.token)"
+        required: false
+      package:
+        description: "Package name under the org (default charts/parqtel)"
+        required: false
+        default: "charts/parqtel"
 
 permissions:
   contents: read
@@ -22,28 +29,32 @@ jobs:
     steps:
       - name: Set visibility
         env:
-          GH_TOKEN: ${{ github.token }}
           OWNER: ${{ github.repository_owner }}
+          PACKAGE: ${{ inputs.package }}
+          # An input wins over the workflow token so an org admin can dispatch
+          # with a PAT; the default attempt documents whether that token is
+          # enough (it is not for packages it does not administer).
+          GH_TOKEN: ${{ inputs.token || github.token }}
         run: |
           set -o pipefail
-          # The package name is not the OCI path verbatim; ask the API which
-          # candidate exists, then flip the first one that answers.
-          candidates="charts%2Fparqtel parqtel%2Fcharts%2Fparqtel parqtel-charts charts-parqtel parqtel"
-          rc=1
-          for enc in $candidates; do
-            code="$(gh api -i -X PATCH "/orgs/${OWNER}/packages/container/${enc}" \
-              -f visibility=public 2>/dev/null | sed -n '1s/^HTTP\/[0-9.]* //p' | tr -d '\r' || true)"
-            echo "${enc}: HTTP ${code:-none}"
-            if [[ "$code" == "200" ]]; then rc=0; fi
-          done
-          exit "$rc"
+          enc="${PACKAGE//\//%2F}"
+          code="$(gh api -i -X PATCH "/orgs/${OWNER}/packages/container/${enc}" \
+            -f visibility=public 2>/dev/null | sed -n '1s/^HTTP\/[0-9.]* //p' | tr -d '\r' || true)"
+          echo "PATCH ${enc}: HTTP ${code:-none}"
+          if [[ "$code" != "200" ]]; then
+            echo "::error::cannot change package visibility (HTTP ${code:-none}). Retry with a PAT that has write:packages, or toggle it in the UI: Organization → Packages → ${PACKAGE} → Package settings → Change visibility → Public."
+            exit 1
+          fi
       - name: Verify anonymous read
+        env:
+          PACKAGE: ${{ inputs.package }}
         run: |
           set -o pipefail
-          token="$(curl -fsS "https://ghcr.io/token?scope=repository:parqtel/charts/parqtel:pull" \
+          # Anonymous pull token, i.e. the exact request `helm install` makes.
+          token="$(curl -fsS "https://ghcr.io/token?scope=repository:parqtel/${PACKAGE}:pull" \
             | jq -r .token)"
           code="$(curl -s -o /dev/null -w '%{http_code}' \
             -H "Authorization: Bearer ${token}" \
-            "https://ghcr.io/v2/parqtel/charts/parqtel/tags/list")"
+            "https://ghcr.io/v2/parqtel/${PACKAGE}/tags/list")"
           echo "anonymous tags/list: HTTP ${code}"
-          [[ "$code" == "200" ]] || { echo "::error::chart package is still not anonymously readable"; exit 1; }
+          [[ "$code" == "200" ]] || { echo "::error::package is still not anonymously readable"; exit 1; }
