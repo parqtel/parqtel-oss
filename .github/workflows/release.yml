@@ -27,6 +27,8 @@ jobs:
         with:
           components: clippy
           cache-key: release-gate
+      - name: Release metadata
+        run: python3 scripts/release/release_tool.py check --tag "$GITHUB_REF_NAME"
       - name: Clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Run tests
@@ -254,42 +256,18 @@ jobs:
           path: artifacts
           pattern: parqtel-*
 
+      - name: Generate release notes
+        # One source of truth: the changelog section for this tag, plus the
+        # fixed install/verify footer. No generate_release_notes, so the page
+        # matches CHANGELOG.md instead of GitHub's commit-subject summary.
+        run: python3 scripts/release/release_tool.py notes --tag "$GITHUB_REF_NAME" > release-notes.md
+
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
-          generate_release_notes: true
+          body_path: release-notes.md
           files: artifacts/**/*.tar.gz*
-          body: |
-            ## Install
 
-            **Docker:**
-            ```bash
-            docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.docker-publish.outputs.version }}
-            ```
-
-            **Helm:**
-            ```bash
-            helm install parqtel oci://${{ env.REGISTRY }}/${{ github.repository_owner }}/charts/parqtel \
-              --version ${{ needs.docker-publish.outputs.version }}
-            ```
-
-            **Binary:**
-            Download from the assets below for your platform, or via Homebrew:
-            ```bash
-            brew tap parqtel/tap
-            brew install parqtel
-            ```
-
-            ## Verify
-
-            ```bash
-            # Docker image attestation
-            gh attestation verify oci://${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.docker-publish.outputs.version }} --owner parqtel
-
-            # Binary checksum
-            sha256sum -c parqtel-linux-amd64.tar.gz.sha256
-              ```
-  
   # ── Homebrew Tap ─────────────────────────────────────────────────────────
   # Zero-touch coordination with parqtel/homebrew-tap (see that repo's
   # docs/RELEASE_COORDINATION.md): on every release we fire a

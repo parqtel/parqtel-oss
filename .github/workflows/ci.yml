@@ -205,6 +205,37 @@ jobs:
       - name: Validate links, anchors, quoted paths and API coverage
         run: python3 scripts/checks/check_docs.py
 
+  # ── Release Metadata ──────────────────────────────────────────────────────
+  # Every version site agrees with Cargo.toml, CHANGELOG.md is structurally
+  # valid, and its generated commit block matches the conventional commits in
+  # the pull request. The last part is why git-cliff is installed here: a
+  # stale block is a red check, not a silently wrong changelog. Run
+  # `make changelog` and commit the result.
+  release-metadata:
+    name: Release Metadata
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # git-cliff needs the history and every tag to find unreleased commits.
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: git-cliff@2.14.2
+      - name: Verify version sites and changelog structure
+        run: python3 scripts/release/release_tool.py check
+      - name: Verify the generated changelog block is current
+        run: |
+          python3 scripts/release/release_tool.py update-changelog
+          if ! git diff --exit-code -- CHANGELOG.md; then
+            echo "::error::CHANGELOG.md is stale; run 'make changelog' and commit the result"
+            exit 1
+          fi
+
   # ── Helm Lint (only when chart config changes) ────────────────────────────
   helm-lint:
     name: Helm Lint

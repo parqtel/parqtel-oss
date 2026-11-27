@@ -19,6 +19,7 @@
 | `security` | Rust sources changed, or push to `main` | ~2 min |
 | `helm-lint` | `deploy/helm/**` or `deploy/compose/**` changed | <1 min |
 | `docs` | Documentation, Markdown, the router or the docs checker changed | <1 min |
+| `release-metadata` | always | <1 min |
 | `docker` + smoke test | Dockerfile/sources/deps changed **and** lint+test pass | ~10–15 min |
 
 Typical docs-only PR: ~20 s (changes detection plus the docs check — `security` is gated on Rust sources, so it is skipped too).
@@ -39,7 +40,9 @@ Key mechanics:
 
 ![Release pipeline: the tag test gate runs first; binaries, Docker and Helm publish; Docker feeds Trivy scan and cosign signing; the GitHub release is created after the gates and notifies the Homebrew tap](../assets/diagrams/ci-release-pipeline.svg)
 
-The new `test` gate re-runs clippy `-D warnings` + the full workspace suite on the tagged commit. Tags can point at stale commits — without this gate a tag could publish binaries that were never validated.
+The `test` gate re-runs the release-metadata check (with `--tag`), clippy `-D warnings` and the full workspace suite on the tagged commit. Tags can point at stale commits — without this gate a tag could publish binaries that were never validated, and a tag whose version disagrees with `Cargo.toml` could publish under the wrong version.
+
+The GitHub release body is generated from the tag's `CHANGELOG.md` section (`scripts/release/release_tool.py notes`), not from `generate_release_notes`, so the release page and the changelog cannot disagree. Full release procedure: [Release process](release.md).
 
 Supply chain guarantees retained: build provenance attestation, SBOM, cosign signing, Trivy image scan, checksums for every binary asset.
 
@@ -65,8 +68,10 @@ Supply chain guarantees retained: build provenance attestation, SBOM, cosign sig
 ## Local equivalents
 
 ```bash
-make lint        # fmt --check + clippy -D warnings
-cargo test --workspace   # same suite CI runs
+make lint          # fmt --check + clippy -D warnings
+cargo test --workspace     # same suite CI runs
+make release-check # version sites + changelog contract (the release-metadata job)
+make changelog     # refresh the generated CHANGELOG.md block (needs git-cliff)
 make docker      # same multi-stage build CI validates
 helm lint deploy/helm/parqtel
 ```
@@ -77,7 +82,8 @@ Local builds of `parqtel-ingest` need `protoc` (prost-build compiles the OTLP sc
 
 - **The `main` ruleset's required status checks are named after the job names**
   (`Lint`, `Test`, `MSRV (1.88)`, `Security Audit`, `Docker Build & Smoke
-  Test`, `Docs Check`). Renaming a job in `ci.yml` without updating the ruleset
+  Test`, `Docs Check`, `Release Metadata`). Renaming a job in `ci.yml` without
+  updating the ruleset
   leaves the PR permanently blocked: the required context can never be
   produced. When the MSRV moved to 1.88, the ruleset still required
   `MSRV (1.87)` and every PR to `main` was stuck until it was fixed.

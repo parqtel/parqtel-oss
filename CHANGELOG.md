@@ -11,95 +11,89 @@ build cannot reach a registry or the release page.
 
 ## [Unreleased]
 
-### Changed
+<!-- changelog:auto-start -->
+#### Features
 
-- **Faster builds.** The default `release` profile now uses thin LTO with 16
-  codegen units — cold build 5m34s → 2m30s and a one-file relink 3m48s → 1m01s
-  on 16 cores, for a +24% binary. Published release artifacts use the new
-  `release-dist` profile (fat LTO, one codegen unit); `make release-dist`
-  builds it locally. The `dev` profile now emits `line-tables-only` debug info.
+- add Alertmanager routing config schema, matchers, inhibition, and notifiers
+- add bounded grouping dispatcher, retry worker, and routing metrics
+- wire Alertmanager routing dispatcher, test_route API, and metrics
+- Alertmanager-compatible routing, grouping, inhibition, and native Slack/PagerDuty/Teams receivers (#79)
+- enforce outbound egress policy for receivers
+- persist rule definitions and gate runtime mutations
+- bound the in-memory query buffer
+- compile definitions into executable stages
+- execute pipelines on live log ingest
+- execute recording rules against the live engine
+- validate definitions and expose registry status
+- add scoped HTTP bearer tokens
+- add in-process TLS for HTTP and OTLP gRPC
+- record configuration mutations as JSONL
+- add generic JSON and Prometheus remote_write
+- add SSE live tail
+- cap distinct series per metric
+- add per-service storage snapshot
+- add chunked NDJSON result streaming
+- add traces, storage stats, and pipeline tools
+- add median+MAD baseline anomaly rules
+- persist multi-panel dashboards and render them
+- add S3 block upload and a bounded read cache
+- add a CAS shared catalog for object storage
+- compact and expire blocks through BlockStore
+- add OIDC login and role-to-scope mapping
+- add an optional Kafka JSON log consumer
+- add dataset-prefixed storage and token scopes
+- derive noise score from transition history
+- independent two-replica mode (#81)
+- make alerts explain themselves and stop noisy repeats
+- suppress duplicate deliveries across restarts
+- adopt the Parqtel brand palette in the console
 
-### Documentation (current refresh)
+#### Bug Fixes
 
-- **README hero and current positioning.** Added an animated SVG hero, corrected
-  the status/version, feature matrix, API surface, storage design and security
-  caveats, and replaced the Mermaid architecture block with an animated SVG.
-- **Configuration reference rebuilt against `parqtel-core/src/config/`.** Every
-  section, key, default, validation rule and environment-variable example now
-  covers server/TLS, storage, logs, ingest, Kafka, tail sampling, query, UI,
-  object storage, auth/OIDC, audit, alerts/presets, legacy notifications,
-  Alertmanager routing/egress, telemetry and the two explicitly inert sections.
-- **New operations guides.** Object storage (S3 bucket policy, shared catalog,
-  cache, failure modes), security (tokens, OIDC, TLS, datasets, audit, egress)
-  and alerting (evaluation, routing, grouping, inhibition, receivers).
-- **New ingestion guide.** OTLP gRPC/HTTP, generic JSON, remote_write, Kafka,
-  live pipelines, RED/tail sampling, limits and verification.
-- **SVG-only diagrams.** Architecture, ingestion, object storage, security,
-  configuration, edge topology and alert delivery are self-contained animated
-  SVG; `make docs-check` now rejects Mermaid fences.
-- **Corrected stale claims** about S3 support, TLS, notification delivery,
-  authentication, object-store multi-writer behaviour, log/trace projection,
-  the compressed sidecar shape and profiling endpoints.
-### Security
+- scope query timeout and shed ingest load
+- give evaluation its own scan slot
+- deliver each event through one routing path
+- reject multi-replica deployments
+- time-adjacent compaction and lookback override
+- install libcurl dev headers for the librdkafka OAuthbearer build
+- install libcurl4-openssl-dev in the Rust builder images
+- repair upload, catalog, cache, and trace paths
+- apply backpressure before dropping a page
+- finish the queue backpressure change
+- protect active groups and acknowledged inhibitors
+- keep health responsive under load (#85)
+- surface the Parqtel logo in README and console
+- give the console a default time range
 
-- **Two dependency advisories cleared.** `url` 2.5.4 → 2.5.9 closes
-  RUSTSEC-2026-0592 (stack overflow in `Url::origin()` on nested `blob:` URLs,
-  reached via `object_store`), and the `arrow`/`parquet` stack moves to 60.2.0
-  for RUSTSEC-2026-0595 (bloom filters written as plaintext when writing
-  encrypted Parquet). Both bump the resolver floor in `Cargo.toml`; MSRV stays
-  1.88. `Security Audit` is green again.
+#### Performance
 
-### Fixed
+- series table and log skip index, faster ingest, exact crash recovery (#75)
+- bound scans and stream metrics into 5-minute L1 blocks (#77)
+- move label values to a sibling sidecar
+- prune data pages with the timestamp page index
+- decode attributes and links only for selected rows
+- zstd-compress the block-index sidecar
+- add phase 2 execution plan and benchmark
+- intersect postings without intermediate vectors
+- lazily materialize series labels
+- read series tables without query postings
+- lazy series index for cold queries (#80)
+- bound memory before returning query results (#82)
+- measure query phase cost (#84)
+- intern replayed log and span labels (#86)
+- expose per-level scan counters (#90)
 
-- **S3 block upload used temporary names.** Uploads now happen only after the
-  atomic rename, so object keys are final Parquet names and compaction can read
-  them.
-- **Object deletion left local staging files.** Retention/compaction now remove
-  both the object and the local copy, preventing restart reconciliation from
-  resurrecting retired sources.
-- **Catalog manifest key was percent-encoded** (`_catalog%2Fmanifest.json`); it
-  is now the normal `_catalog` directory plus `manifest.json`.
-- **Ordered trace blocks lived outside the trace index directory**, so restart
-  reconciliation dropped every trace entry. Trace blocks now live under
-  `<data_dir>/traces`.
-- **Adopted remote blocks were republished as local**, which could resurrect
-  blocks another node had retired. Only blocks present on local disk are
-  published.
-- **Missing S3 objects now map to not-found**, so a scan skips the block instead
-  of failing the query.
-- **The read cache no longer evicts the block it is opening**, so a quota
-  smaller than one block still serves that query.
-- **Runtime image now ships `ca-certificates.crt` at the standard path**, fixing
-  the S3 HTTP client startup failure in the scratch image.
+#### Refactoring
 
-Ingest and query performance, and a set of durability and visibility fixes found
-while measuring. Measurements and method are in
-[docs/performance/README.md](docs/performance/README.md).
+- add a BlockStore seam and local backend
+- add series table accessors
 
-### Performance
+#### Build
 
-- **Ingest**: metrics 0.62 → 2.0 M points/s, logs 0.10 → 1.8 M records/s, p99
-  ingest latency 55 → 17 ms (metrics) and 538 → 10 ms (logs), on 8 cores.
-- **Queries**: single-series selector 156 → 15 ms, aggregations 180 → 28 ms,
-  instant queries 107 → 17 ms, log search 284 → 102 ms (p50, 2.4 M-point
-  dataset).
-- Peak RSS under the same load fell from 2.3 GB to 0.8 GB.
-- **Memory at high series counts**: with 578K active series (2.3M points through
-  the HTTP ingest path) peak RSS fell from 4.1 GB to 1.6 GB and steady RSS from
-  3.6 GB to 1.0 GB. Two changes: `ingest.label_interner_capacity` (new, default
-  1048576; set it to at least twice the active series count) and jemalloc as the
-  global allocator on non-MSVC targets, which returns freed block-encode memory
-  to the OS instead of keeping it resident. Startup WAL replay now replays one
-  segment at a time and shares label sets, so replay memory no longer grows with
-  the unflushed backlog.
-- **Log search** 102 → 23 ms (a term matching a fifth of the records) and
-  29 → 12 ms (a term in one record) at p50, one client; with 8 clients 311 → 64 ms
-  and 113 → 32 ms.
-- **Series table in every metric block** (see Added): a selective query now reads
-  only the rows of the series it selects. Single-series selector 15 → 0.9 ms,
-  aggregations 28 → 7 ms, instant queries 15 → 3 ms (p50, one client, same
-  dataset and build mode); with 8 concurrent clients 41 → 1.8 ms, 77 → 20 ms and
-  32 → 9.7 ms.
+- bump object_store 0.11 -> 0.14 to pick up quick-xml 0.41
+- default to a thin-LTO release profile
+- clear the url and parquet security advisories
+<!-- changelog:auto-end -->
 
 ### Added
 
@@ -302,63 +296,73 @@ while measuring. Measurements and method are in
   `parqtel_alert_notification_duration_seconds{receiver,channel}` and
   `parqtel_alert_active_groups`.
 
+### Changed
+
+- **Faster builds.** The default `release` profile now uses thin LTO with 16
+  codegen units — cold build 5m34s → 2m30s and a one-file relink 3m48s → 1m01s
+  on 16 cores, for a +24% binary. Published release artifacts use the new
+  `release-dist` profile (fat LTO, one codegen unit); `make release-dist`
+  builds it locally. The `dev` profile now emits `line-tables-only` debug info.
+
 ### Fixed
 
-- **Smaller block-index sidecar.** The shared label-value dictionary moved to a
-  sibling `label_values.json`, so `index.json` no longer rewrites it on every
-  persist or carries it through every index load. Legacy inline dictionaries
-  still load and migrate on first start; autocomplete reads the sibling.
+- **S3 block upload used temporary names.** Uploads now happen only after the
+  atomic rename, so object keys are final Parquet names and compaction can read
+  them.
+- **Object deletion left local staging files.** Retention/compaction now remove
+  both the object and the local copy, preventing restart reconciliation from
+  resurrecting retired sources.
+- **Catalog manifest key was percent-encoded** (`_catalog%2Fmanifest.json`); it
+  is now the normal `_catalog` directory plus `manifest.json`.
+- **Ordered trace blocks lived outside the trace index directory**, so restart
+  reconciliation dropped every trace entry. Trace blocks now live under
+  `<data_dir>/traces`.
+- **Adopted remote blocks were republished as local**, which could resurrect
+  blocks another node had retired. Only blocks present on local disk are
+  published.
+- **Missing S3 objects now map to not-found**, so a scan skips the block instead
+  of failing the query.
+- **The read cache no longer evicts the block it is opening**, so a quota
+  smaller than one block still serves that query.
+- **Runtime image now ships `ca-certificates.crt` at the standard path**, fixing
+  the S3 HTTP client startup failure in the scratch image.
 
-- **Compaction selects a time-adjacent run.** Small blocks are sorted by start
-  timestamp and filtered to one signal before the merge cap is applied, so
-  compacted outputs are contiguous and row-group pruning stays effective.
-- **Instant-query lookback is overridable.** `GET /api/v1/query` accepts
-  `lookback_delta` (duration or float seconds, positive, max 30d); the default
-  remains the Prometheus 5m. Documented in the OpenAPI spec.
+### Performance
 
-- **Helm chart refuses a multi-writer deployment.** `replicaCount` is capped at
-  1 in `values.schema.json` and the Deployment template fails if `replicaCount`
-  or `autoscaling.maxReplicas` would create more than one pod. Each replica owns
-  a disjoint local data directory; shared storage is not implemented. CI values
-  and deployment docs now use a single replica.
+Ingest and query performance, and a set of durability and visibility fixes found
+while measuring. Measurements and method are in
+[docs/performance/README.md](docs/performance/README.md).
 
-- **One alert delivery path.** When `[alerting.routing]` is configured it now
-  wins; the legacy `[alerts.notifications.routes]` table is a fallback only.
-  Configuring both logs a warning and disables the legacy routes, so an event
-  is never delivered twice. Removed the dead `EvaluationEngine::run` /
-  `evaluate_all` / `evaluate_rule` stub; the live query loop remains in the
-  server tasks.
-- **A capped query could return different series after every restart.** The
-  label-set fingerprint used a randomly seeded hasher although it is documented
-  as stable, and series are ordered by fingerprint before the series limit is
-  applied. It is now a fixed function of the labels (value pinned in a test).
-- **OTLP/HTTP protobuf traces** were rejected with 400 on `/v1/traces`; only gRPC
-  could ingest protobuf traces. The endpoint now negotiates on `Content-Type`
-  like metrics and logs.
-- **Crash recovery lost data.** Replay numbered WAL records by where they started
-  while commit points are where they end, so the record after the committed one
-  was skipped; and a sharded flush could commit a position past a record that
-  belonged to the next block. After `kill -9` under load, every acknowledged
-  metric, log and span is now recovered.
-- **Concurrent flushes committed out of order**, which could move the WAL commit
-  point past a block that was not yet on disk. Commits are released in flush
-  order.
-- **Recovery no longer duplicates rows.** A crash in the few milliseconds after a
-  block became durable and before its WAL range was committed replayed that
-  range into a second block. Each block now records the WAL span `(from, to]` it
-  covers in its Parquet footer and in the index, and startup advances the commit
-  point along the chain of blocks on disk before replaying. It follows the chain
-  rather than taking the largest `to`, so a later block that finished first can
-  never cause an earlier, unwritten one to be skipped. (A block closed early by
-  the writer on capacity, rather than by a flush, carries no span.)
-- **Fresh data vanished from queries after each flush.** The memory buffer was
-  emptied completely when a block became durable, including rows that arrived
-  while it was being written. Only the rows the block holds are removed now.
-- **SIGTERM could leave the process running** after "Shutting down gracefully":
-  a background task kept the ingestion services alive. Shutdown also bounds its
-  waits on the index tasks.
+### Security
+
+- **Two dependency advisories cleared.** `url` 2.5.4 → 2.5.9 closes
+  RUSTSEC-2026-0592 (stack overflow in `Url::origin()` on nested `blob:` URLs,
+  reached via `object_store`), and the `arrow`/`parquet` stack moves to 60.2.0
+  for RUSTSEC-2026-0595 (bloom filters written as plaintext when writing
+  encrypted Parquet). Both bump the resolver floor in `Cargo.toml`; MSRV stays
+  1.88. `Security Audit` is green again.
 
 ### Documentation
+
+- **README hero and current positioning.** Added an animated SVG hero, corrected
+  the status/version, feature matrix, API surface, storage design and security
+  caveats, and replaced the Mermaid architecture block with an animated SVG.
+- **Configuration reference rebuilt against `parqtel-core/src/config/`.** Every
+  section, key, default, validation rule and environment-variable example now
+  covers server/TLS, storage, logs, ingest, Kafka, tail sampling, query, UI,
+  object storage, auth/OIDC, audit, alerts/presets, legacy notifications,
+  Alertmanager routing/egress, telemetry and the two explicitly inert sections.
+- **New operations guides.** Object storage (S3 bucket policy, shared catalog,
+  cache, failure modes), security (tokens, OIDC, TLS, datasets, audit, egress)
+  and alerting (evaluation, routing, grouping, inhibition, receivers).
+- **New ingestion guide.** OTLP gRPC/HTTP, generic JSON, remote_write, Kafka,
+  live pipelines, RED/tail sampling, limits and verification.
+- **SVG-only diagrams.** Architecture, ingestion, object storage, security,
+  configuration, edge topology and alert delivery are self-contained animated
+  SVG; `make docs-check` now rejects Mermaid fences.
+- **Corrected stale claims** about S3 support, TLS, notification delivery,
+  authentication, object-store multi-writer behaviour, log/trace projection,
+  the compressed sidecar shape and profiling endpoints.
 
 - **Comparative benchmark harness.** `scripts/bench/compare_queries.py` runs a
   per-engine query set with warmup/runs and emits p50/min/max JSON plus host
@@ -403,7 +407,7 @@ while measuring. Measurements and method are in
   `docs/assets/diagrams/src/` and `scripts/diagrams/build.sh` regenerates the
   SVGs.
 
-## [0.3.1]
+## [0.3.1] - 2026-10-05
 
 Chart and release-pipeline release. No binary behaviour changes.
 
@@ -444,7 +448,7 @@ Chart and release-pipeline release. No binary behaviour changes.
   ingest path degrades to synchronous flushing, so an acknowledged write is not
   recoverable. Still overridable via `parqtel.ingest.walEnabled`.
 
-## [0.3.0]
+## [0.3.0] - 2026-10-04
 
 Second public beta.
 
@@ -527,7 +531,7 @@ row-group pruning. See
 - CODEOWNERS, dependabot, issue and PR templates, SECURITY.md, SUPPORT.md and
   an OSSF Scorecard workflow.
 
-## [0.2.0]
+## [0.2.0] - 2026-09-15
 
 Initial public beta.
 
@@ -644,11 +648,12 @@ each. They are recorded deliberately rather than left to be discovered.
 - No authentication or authorization. Do not expose the HTTP or OTLP ports
   publicly without a reverse proxy that provides it.
 
-## [0.1.0]
+## [0.1.0] - 2026-09-04
 
 - Initial internal release.
 
-[Unreleased]: https://github.com/parqtel/parqtel-oss/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/parqtel/parqtel-oss/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/parqtel/parqtel-oss/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/parqtel/parqtel-oss/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/parqtel/parqtel-oss/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/parqtel/parqtel-oss/releases/tag/v0.1.0

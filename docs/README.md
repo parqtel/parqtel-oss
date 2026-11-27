@@ -53,7 +53,8 @@ Documentation for Parqtel, an open-source SRE telemetry store.
 | [Developer guide](development/developer-guide.md) | Local setup, conventions, repository layout |
 | [Testing](development/testing.md) | Test strategy and how to run each layer |
 | [Test plan](development/test-plan.md) | End-to-end scenarios |
-| [CI/CD](development/ci-cd.md) | Pipelines, gates, release process |
+| [CI/CD](development/ci-cd.md) | Pipelines, gates, workflow layout |
+| [Release process](development/release.md) | Semver policy, cutting and verifying a release, changelog automation |
 | [Efficiency plan](development/efficiency-plan.md) | Measured engine performance and optimisation backlog |
 | [R2b UAT result](development/r2b-result.md) | Six-hour 1 GiB footer-cache soak and decision |
 | [R3 findings and Phase 2b design](development/r3-findings.md) | R3 probe evidence, memory conclusion and gated binary-footer design |

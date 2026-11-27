@@ -2,7 +2,8 @@
         mcp-image mcp-up mcp-smoke \
         local-up local-down local-purge local-logs local-ps local-rebuild \
         local-verify test-api test-aggregations test-functions test-builder \
-        test-builder-ui test-presets-static test-alert-presets docs-check tools \
+        test-builder-ui test-presets-static test-alert-presets docs-check tools cliff \
+        changelog release-check release-notes cut-release verify-release \
         run inspect load load-test perf-audit clean \
         k8s-install k8s-validate k8s-sre-validate k8s-undeploy \
         local-k3d-up local-k3d-down local-k3d-status
@@ -307,6 +308,53 @@ tools: ## Fetch pinned protoc into .tools/ if no system protoc exists
 		chmod +x $(PROTOC_BIN); \
 		echo "protoc ready: $(PROTOC_BIN) ($$($(PROTOC_BIN) --version))"; \
 	fi
+
+# ─── Release ──────────────────────────────────────────────────────────────────
+# The version lives in one place ([workspace.package].version in Cargo.toml);
+# scripts/release/release_tool.py is the only writer of every other site and
+# scripts/release/release.sh drives a release. See docs/development/release.md.
+GIT_CLIFF_VERSION ?= 2.14.2
+GIT_CLIFF_BIN     := $(PROTOC_DIR)/bin/git-cliff
+UNAME_S           := $(shell uname -s)
+UNAME_M           := $(shell uname -m)
+ifeq ($(UNAME_S),Darwin)
+  GIT_CLIFF_TARGET := $(if $(filter arm64 aarch64,$(UNAME_M)),aarch64-apple-darwin,x86_64-apple-darwin)
+else
+  GIT_CLIFF_TARGET := $(if $(filter arm64 aarch64,$(UNAME_M)),aarch64-unknown-linux-gnu,x86_64-unknown-linux-gnu)
+endif
+GIT_CLIFF_ASSET   := git-cliff-$(GIT_CLIFF_VERSION)-$(GIT_CLIFF_TARGET).tar.gz
+
+cliff: ## Fetch pinned git-cliff into .tools/bin (changelog generation)
+	@if [ -x "$(GIT_CLIFF_BIN)" ] && "$(GIT_CLIFF_BIN)" --version 2>/dev/null | grep -q "$(GIT_CLIFF_VERSION)"; then \
+		echo "git-cliff already fetched: $(GIT_CLIFF_BIN) ($$($(GIT_CLIFF_BIN) --version))"; \
+	else \
+		echo "fetching git-cliff $(GIT_CLIFF_VERSION) ($(GIT_CLIFF_TARGET)) into $(PROTOC_DIR)/bin ..."; \
+		mkdir -p "$(PROTOC_DIR)/bin" "$(PROTOC_DIR)/tmp"; \
+		curl -sSfL -o "$(PROTOC_DIR)/tmp/git-cliff.tar.gz" \
+			"https://github.com/orhun/git-cliff/releases/download/v$(GIT_CLIFF_VERSION)/$(GIT_CLIFF_ASSET)" \
+			|| { echo "error: git-cliff download failed"; exit 1; }; \
+		tar -xzf "$(PROTOC_DIR)/tmp/git-cliff.tar.gz" -C "$(PROTOC_DIR)/tmp"; \
+		mv "$$(find "$(PROTOC_DIR)/tmp" -type f -name git-cliff | head -n 1)" "$(GIT_CLIFF_BIN)"; \
+		rm -rf "$(PROTOC_DIR)/tmp"; \
+		chmod +x "$(GIT_CLIFF_BIN)"; \
+		echo "git-cliff ready: $(GIT_CLIFF_BIN) ($$($(GIT_CLIFF_BIN) --version))"; \
+	fi
+
+changelog: cliff ## Refresh the generated CHANGELOG.md block from conventional commits
+	python3 scripts/release/release_tool.py update-changelog
+
+release-check: ## Verify version sites, changelog contract and lockfile (no git-cliff needed)
+	python3 scripts/release/release_tool.py check
+	cargo metadata --locked --no-deps --format-version 1 > /dev/null
+
+release-notes: ## Print the GitHub release body for TAG (default: newest changelog release)
+	python3 scripts/release/release_tool.py notes --tag "$${TAG:-v$$(python3 scripts/release/release_tool.py version)}"
+
+cut-release: cliff ## Cut a release: make cut-release [BUMP=minor|patch|X.Y.Z] [DRY_RUN=1]
+	scripts/release/release.sh $(if $(BUMP),--bump $(BUMP),) $(if $(DRY_RUN),--dry-run,)
+
+verify-release: ## Verify a published release: make verify-release [TAG=v0.4.0]
+	scripts/release/verify-release.sh "$${TAG:-latest}"
 
 # ─── Cleanup ───────────────────────────────────────────────────────────────────
 clean: ## Remove build artefacts, local data, and repo-local tool/cache fallbacks
