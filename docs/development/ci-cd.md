@@ -58,6 +58,10 @@ Supply chain guarantees retained: build provenance attestation, SBOM, cosign sig
 
 **Homebrew tap coordination** — after the GitHub release, `notify-homebrew-tap` fires a `repository_dispatch` (`event-type: parqtel-oss-release`) at `parqtel/homebrew-tap`, carrying the version + tag. The tap's own pipeline then builds its four per-platform tarballs from that tag, publishes them as a tap release, opens a formula-bump PR, and audits a real `brew install` before merge (full contract: `parqtel/homebrew-tap` → `docs/RELEASE_COORDINATION.md`). Users get `brew upgrade parqtel-oss`. Requires the `HOMEBREW_TAP_DISPATCH_TOKEN` secret (PAT, `repo` scope); without it the tap's daily schedule poll is the fallback trigger.
 
+### `changelog.yml` — push to `main`
+
+Regenerates the marked block of `CHANGELOG.md` from the conventional commits now on `main` and reports whether it changed. Committing needs the `CHANGELOG_PUSH_TOKEN` secret: the `main` ruleset rejects the Actions integration, and a bot pull request cannot satisfy the required review. Without it the job posts a notice and `ci.yml` → `Release Metadata` (a required check) fails the run, so a stale block still blocks. Details: [Release process → Changelog](release.md#changelog).
+
 ### `scorecard.yml` — weekly OpenSSF Scorecard analysis
 
 ## Worker-hour impact (approx., per typical code PR)

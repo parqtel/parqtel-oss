@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 400" role="img" aria-labelledby="ci-title ci-desc">
   <title id="ci-title">Release pipeline</title>
-  <desc id="ci-desc">Animated release flow on a v-tag: the test gate runs first, then binary builds, Docker publish and Helm publish; Docker feeds Trivy scan and cosign signing; the GitHub release is created after the gates and notifies the Homebrew tap.</desc>
+  <desc id="ci-desc">Animated release flow on a v-tag: the test gate runs first, then binary builds, the per-architecture container images and the Helm chart; the images are merged into one manifest, signed and scanned (the scan is advisory); the GitHub release is created from the validated gates and notifies the Homebrew tap.</desc>
   <defs>
     <style>
       .bg{fill:#fff}.node{fill:#fff;stroke:#64748b;stroke-width:1.2}.gate{fill:#ecfeff;stroke:#0891b2;stroke-width:1.5}
@@ -21,10 +21,10 @@
 
   <g class="pulse"><rect class="gate" x="30" y="98" width="156" height="76" rx="10"/><text x="46" y="124" class="t">test gate</text><text x="46" y="144" class="s">clippy -D warnings</text><text x="46" y="160" class="s">workspace suite</text></g>
   <g class="pulse2"><rect class="node" x="252" y="98" width="184" height="76" rx="10"/><text x="268" y="124" class="t">build-binaries</text><text x="268" y="144" class="s">4 targets · --locked</text><text x="268" y="160" class="s">checksums</text></g>
-  <g class="pulse3"><rect class="node" x="252" y="218" width="184" height="76" rx="10"/><text x="268" y="244" class="t">docker-publish</text><text x="268" y="264" class="s">multi-arch · SBOM</text><text x="268" y="280" class="s">provenance</text></g>
+  <g class="pulse3"><rect class="node" x="252" y="218" width="184" height="76" rx="10"/><text x="268" y="244" class="t">docker-image</text><text x="268" y="264" class="s">per-arch · prebuilt</text><text x="268" y="280" class="s">manifest · SBOM</text></g>
   <g class="pulse4"><rect class="node" x="252" y="318" width="184" height="56" rx="10"/><text x="268" y="342" class="t">helm-publish</text><text x="268" y="360" class="s">OCI chart</text></g>
 
-  <g class="pulse2"><rect class="sec" x="510" y="188" width="170" height="60" rx="10"/><text x="526" y="212" class="t">trivy-scan</text><text x="526" y="230" class="s">SARIF · report-only</text></g>
+  <g class="pulse2"><rect class="sec" x="510" y="188" width="170" height="60" rx="10"/><text x="526" y="212" class="t">trivy-scan</text><text x="526" y="230" class="s">SARIF · advisory</text></g>
   <g class="pulse3"><rect class="sec" x="510" y="266" width="170" height="60" rx="10"/><text x="526" y="290" class="t">sign-image</text><text x="526" y="308" class="s">cosign keyless</text></g>
 
   <g class="pulse"><rect class="ship" x="736" y="98" width="192" height="76" rx="10"/><text x="752" y="124" class="t">github-release</text><text x="752" y="144" class="s">binaries + notes</text><text x="752" y="160" class="s">after all gates</text></g>
@@ -38,6 +38,6 @@
   <path class="flow" d="M680 296 H710 V218 H736"/>
   <path class="flow" d="M832 174 V218"/>
 
-  <text x="510" y="366" class="s">Image scan findings are report-only;</text>
-  <text x="510" y="384" class="s">the filesystem scan is the hard gate.</text>
+  <text x="510" y="366" class="s">Image scan is advisory — findings are</text>
+  <text x="510" y="384" class="s">triaged; the fs scan is the hard gate.</text>
 </svg>
