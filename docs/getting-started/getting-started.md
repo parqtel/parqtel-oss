@@ -12,7 +12,7 @@ docker run -d \
   -p 8080:8080 \
   -p 4317:4317 \
   -v parqtel_data:/var/lib/parqtel \
-  ghcr.io/parqtel/parqtel-oss:0.3.1
+  ghcr.io/parqtel/parqtel-oss:0.4.0
 ```
 
 Or install the compiled release binary via Homebrew (Linux & macOS; no Rust toolchain needed):

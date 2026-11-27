@@ -4,7 +4,7 @@ info:
   description: |
     Ultra-lightweight SRE observability engine — streaming OpenTelemetry metrics, logs, and traces into compressed Parquet.
     Exposes Prometheus-compatible query API, Grafana SimpleJSON datasource, alerting engine, and pipeline management.
-  version: "0.3.1"
+  version: "0.4.0"
   license:
     name: Apache-2.0
     url: https://www.apache.org/licenses/LICENSE-2.0

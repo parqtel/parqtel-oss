@@ -12,88 +12,10 @@ build cannot reach a registry or the release page.
 ## [Unreleased]
 
 <!-- changelog:auto-start -->
-#### Features
-
-- add Alertmanager routing config schema, matchers, inhibition, and notifiers
-- add bounded grouping dispatcher, retry worker, and routing metrics
-- wire Alertmanager routing dispatcher, test_route API, and metrics
-- Alertmanager-compatible routing, grouping, inhibition, and native Slack/PagerDuty/Teams receivers (#79)
-- enforce outbound egress policy for receivers
-- persist rule definitions and gate runtime mutations
-- bound the in-memory query buffer
-- compile definitions into executable stages
-- execute pipelines on live log ingest
-- execute recording rules against the live engine
-- validate definitions and expose registry status
-- add scoped HTTP bearer tokens
-- add in-process TLS for HTTP and OTLP gRPC
-- record configuration mutations as JSONL
-- add generic JSON and Prometheus remote_write
-- add SSE live tail
-- cap distinct series per metric
-- add per-service storage snapshot
-- add chunked NDJSON result streaming
-- add traces, storage stats, and pipeline tools
-- add median+MAD baseline anomaly rules
-- persist multi-panel dashboards and render them
-- add S3 block upload and a bounded read cache
-- add a CAS shared catalog for object storage
-- compact and expire blocks through BlockStore
-- add OIDC login and role-to-scope mapping
-- add an optional Kafka JSON log consumer
-- add dataset-prefixed storage and token scopes
-- derive noise score from transition history
-- independent two-replica mode (#81)
-- make alerts explain themselves and stop noisy repeats
-- suppress duplicate deliveries across restarts
-- adopt the Parqtel brand palette in the console
-
-#### Bug Fixes
-
-- scope query timeout and shed ingest load
-- give evaluation its own scan slot
-- deliver each event through one routing path
-- reject multi-replica deployments
-- time-adjacent compaction and lookback override
-- install libcurl dev headers for the librdkafka OAuthbearer build
-- install libcurl4-openssl-dev in the Rust builder images
-- repair upload, catalog, cache, and trace paths
-- apply backpressure before dropping a page
-- finish the queue backpressure change
-- protect active groups and acknowledged inhibitors
-- keep health responsive under load (#85)
-- surface the Parqtel logo in README and console
-- give the console a default time range
-
-#### Performance
-
-- series table and log skip index, faster ingest, exact crash recovery (#75)
-- bound scans and stream metrics into 5-minute L1 blocks (#77)
-- move label values to a sibling sidecar
-- prune data pages with the timestamp page index
-- decode attributes and links only for selected rows
-- zstd-compress the block-index sidecar
-- add phase 2 execution plan and benchmark
-- intersect postings without intermediate vectors
-- lazily materialize series labels
-- read series tables without query postings
-- lazy series index for cold queries (#80)
-- bound memory before returning query results (#82)
-- measure query phase cost (#84)
-- intern replayed log and span labels (#86)
-- expose per-level scan counters (#90)
-
-#### Refactoring
-
-- add a BlockStore seam and local backend
-- add series table accessors
-
-#### Build
-
-- bump object_store 0.11 -> 0.14 to pick up quick-xml 0.41
-- default to a thin-LTO release profile
-- clear the url and parquet security advisories
+_No unreleased changes._
 <!-- changelog:auto-end -->
+
+## [0.4.0] - 2026-11-27
 
 ### Added
 
@@ -407,6 +329,88 @@ while measuring. Measurements and method are in
   `docs/assets/diagrams/src/` and `scripts/diagrams/build.sh` regenerates the
   SVGs.
 
+#### Features
+
+- add Alertmanager routing config schema, matchers, inhibition, and notifiers
+- add bounded grouping dispatcher, retry worker, and routing metrics
+- wire Alertmanager routing dispatcher, test_route API, and metrics
+- Alertmanager-compatible routing, grouping, inhibition, and native Slack/PagerDuty/Teams receivers (#79)
+- enforce outbound egress policy for receivers
+- persist rule definitions and gate runtime mutations
+- bound the in-memory query buffer
+- compile definitions into executable stages
+- execute pipelines on live log ingest
+- execute recording rules against the live engine
+- validate definitions and expose registry status
+- add scoped HTTP bearer tokens
+- add in-process TLS for HTTP and OTLP gRPC
+- record configuration mutations as JSONL
+- add generic JSON and Prometheus remote_write
+- add SSE live tail
+- cap distinct series per metric
+- add per-service storage snapshot
+- add chunked NDJSON result streaming
+- add traces, storage stats, and pipeline tools
+- add median+MAD baseline anomaly rules
+- persist multi-panel dashboards and render them
+- add S3 block upload and a bounded read cache
+- add a CAS shared catalog for object storage
+- compact and expire blocks through BlockStore
+- add OIDC login and role-to-scope mapping
+- add an optional Kafka JSON log consumer
+- add dataset-prefixed storage and token scopes
+- derive noise score from transition history
+- independent two-replica mode (#81)
+- make alerts explain themselves and stop noisy repeats
+- suppress duplicate deliveries across restarts
+- adopt the Parqtel brand palette in the console
+
+#### Bug Fixes
+
+- scope query timeout and shed ingest load
+- give evaluation its own scan slot
+- deliver each event through one routing path
+- reject multi-replica deployments
+- time-adjacent compaction and lookback override
+- install libcurl dev headers for the librdkafka OAuthbearer build
+- install libcurl4-openssl-dev in the Rust builder images
+- repair upload, catalog, cache, and trace paths
+- apply backpressure before dropping a page
+- finish the queue backpressure change
+- protect active groups and acknowledged inhibitors
+- keep health responsive under load (#85)
+- surface the Parqtel logo in README and console
+- give the console a default time range
+
+#### Performance
+
+- series table and log skip index, faster ingest, exact crash recovery (#75)
+- bound scans and stream metrics into 5-minute L1 blocks (#77)
+- move label values to a sibling sidecar
+- prune data pages with the timestamp page index
+- decode attributes and links only for selected rows
+- zstd-compress the block-index sidecar
+- add phase 2 execution plan and benchmark
+- intersect postings without intermediate vectors
+- lazily materialize series labels
+- read series tables without query postings
+- lazy series index for cold queries (#80)
+- bound memory before returning query results (#82)
+- measure query phase cost (#84)
+- intern replayed log and span labels (#86)
+- expose per-level scan counters (#90)
+
+#### Refactoring
+
+- add a BlockStore seam and local backend
+- add series table accessors
+
+#### Build
+
+- bump object_store 0.11 -> 0.14 to pick up quick-xml 0.41
+- default to a thin-LTO release profile
+- clear the url and parquet security advisories
+
 ## [0.3.1] - 2026-10-05
 
 Chart and release-pipeline release. No binary behaviour changes.
@@ -652,7 +656,9 @@ each. They are recorded deliberately rather than left to be discovered.
 
 - Initial internal release.
 
-[Unreleased]: https://github.com/parqtel/parqtel-oss/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/parqtel/parqtel-oss/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/parqtel/parqtel-oss/compare/v0.4.0...v0.4.0
+[0.4.0]: https://github.com/parqtel/parqtel-oss/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/parqtel/parqtel-oss/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/parqtel/parqtel-oss/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/parqtel/parqtel-oss/compare/v0.1.0...v0.2.0
