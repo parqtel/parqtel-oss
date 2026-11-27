@@ -21,6 +21,13 @@ cross-compile: `rdkafka-sys` builds librdkafka with cmake and needs a matching
 C++ compiler, which the `x86_64` host does not carry — the first `v0.4.0`
 attempt failed on exactly that.
 
+The images are assembled from these binaries, never rebuilt: `docker-image`
+builds `--target runtime-prebuilt` with the tarball as its `dist` build
+context and pushes `X.Y.Z-amd64` / `X.Y.Z-arm64`; `docker-manifest` merges
+both into `X.Y.Z`, `X.Y`, `X` and `latest`. A change to the Dockerfile stages
+that shape the runtime rootfs therefore affects the release image, the CI
+smoke image (`--target runtime`, built from source) and must keep both green.
+
 ## Version source of truth
 
 `[workspace.package].version` in `Cargo.toml` is the only hand-edited version.

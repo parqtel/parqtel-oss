@@ -44,6 +44,14 @@ The `test` gate re-runs the release-metadata check (with `--tag`), clippy `-D wa
 
 `linux/arm64` builds on `ubuntu-24.04-arm`, not cross-compiled from `x86_64`: `rdkafka-sys` compiles librdkafka with cmake and needs an `aarch64` C++ compiler. macOS targets keep using the Apple toolchain's cross-target support on `macos-latest`.
 
+The container image reuses those binaries rather than recompiling the
+workspace: `docker-image` runs once per architecture on a native runner
+(`--target runtime-prebuilt`, the tarball as the `dist` build context), pushes
+`X.Y.Z-amd64` / `X.Y.Z-arm64`, and `docker-manifest` merges them into the
+`X.Y.Z`, `X.Y`, `X` and `latest` refs. Before this split, one buildx build
+compiled `linux/arm64` through QEMU and the job ran for hours — one full Rust
+workspace plus librdkafka, ring, zstd and jemalloc, emulated.
+
 The GitHub release body is generated from the tag's `CHANGELOG.md` section (`scripts/release/release_tool.py notes`), not from `generate_release_notes`, so the release page and the changelog cannot disagree. Full release procedure: [Release process](release.md).
 
 Supply chain guarantees retained: build provenance attestation, SBOM, cosign signing, Trivy image scan, checksums for every binary asset.

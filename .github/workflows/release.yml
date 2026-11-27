@@ -80,16 +80,43 @@ jobs:
             target/${{ matrix.target }}/release-dist/${{ matrix.artifact }}.tar.gz.sha256
 
   # ── Docker Image ─────────────────────────────────────────────────────────
-  docker-publish:
-    name: Docker Publish
-    runs-on: ubuntu-latest
-    needs: test
-    outputs:
-      version: ${{ steps.meta.outputs.version }}
-      digest: ${{ steps.build.outputs.digest }}
+  docker-image:
+    name: Docker (${{ matrix.arch }})
+    # One native runner per architecture, reusing the binary the build matrix
+    # already produced. Building both platforms in a single buildx build put
+    # linux/arm64 through QEMU: the whole workspace (ring, zstd-sys,
+    # rdkafka-sys, jemalloc-sys) recompiled under emulation and the v0.4.0
+    # docker-publish job ran 2.5 h without finishing, while the native arm64
+    # binary job took 8 min. Nothing compiles here now.
+    runs-on: ${{ matrix.os }}
+    needs: [test, build-binaries]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            os: ubuntu-latest
+            artifact: parqtel-linux-amd64
+          - arch: arm64
+            os: ubuntu-24.04-arm
+            artifact: parqtel-linux-arm64
     steps:
       - uses: actions/checkout@v4
-      - uses: docker/setup-qemu-action@v3
+
+      - name: Fetch the prebuilt binary
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: artifact
+
+      - name: Stage the image context
+        # The Dockerfile's `dist` build context is exactly one file: the
+        # release-profile binary from build-binaries.
+        run: |
+          mkdir -p dist
+          tar xzf artifact/${{ matrix.artifact }}.tar.gz -C dist
+          test -x dist/parqtel
+
       - uses: docker/setup-buildx-action@v3
 
       - name: Login to GHCR
@@ -99,63 +126,129 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract metadata
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          flavor: |
-            latest=auto
-          tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=semver,pattern={{major}}
-            type=sha,prefix=
+      - name: Resolve version
+        id: ver
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
 
-      - name: Build and push
-        id: build
+      - name: Build and push linux/${{ matrix.arch }}
         uses: docker/build-push-action@v6
         with:
           context: .
-          platforms: linux/amd64,linux/arm64
+          target: runtime-prebuilt
+          build-contexts: |
+            dist=./dist
+          platforms: linux/${{ matrix.arch }}
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # Per-architecture ref; docker-manifest merges these into the
+          # version, major.minor, major and latest refs.
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.ver.outputs.version }}-${{ matrix.arch }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/parqtel/parqtel-oss
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ steps.ver.outputs.version }}
           provenance: true
           sbom: true
+
+  docker-manifest:
+    name: Docker Manifest
+    runs-on: ubuntu-latest
+    needs: docker-image
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+      digest: ${{ steps.manifest.outputs.digest }}
+    steps:
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve tags
+        # /tmp/tags is passed to `imagetools create` as a `-t` list; keeping it
+        # in a file avoids GITHUB_OUTPUT heredoc parsing traps.
+        id: ver
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          image="${REGISTRY}/${IMAGE_NAME}"
+          {
+            echo "$image:$version"
+            echo "$image:${version%.*}"
+            echo "$image:${version%%.*}"
+            # `latest` is a moving pointer, never a prerelease target.
+            case "$version" in
+              *-*) ;;
+              *) echo "$image:latest" ;;
+            esac
+          } > /tmp/tags
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          cat /tmp/tags
+
+      - name: Create the multi-arch manifest
+        run: |
+          image="${REGISTRY}/${IMAGE_NAME}"
+          version="${{ steps.ver.outputs.version }}"
+          args=()
+          while IFS= read -r tag; do
+            args+=(-t "$tag")
+          done < /tmp/tags
+          docker buildx imagetools create "${args[@]}" \
+            "$image:$version-amd64" "$image:$version-arm64"
+
+      - name: Read the manifest digest
+        id: manifest
+        run: |
+          digest=$(docker buildx imagetools inspect \
+            "${REGISTRY}/${IMAGE_NAME}:${{ steps.ver.outputs.version }}" \
+            --format '{{.Manifest.Digest}}')
+          test -n "$digest"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
       - name: Attest image
         uses: actions/attest-build-provenance@v2
         with:
           subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          subject-digest: ${{ steps.build.outputs.digest }}
+          subject-digest: ${{ steps.manifest.outputs.digest }}
           push-to-registry: true
 
   # ── Image Security Scan ──────────────────────────────────────────────────
   trivy-scan:
     name: Trivy Image Scan
     runs-on: ubuntu-latest
-    needs: docker-publish
+    needs: docker-image
     permissions:
       contents: read
       packages: read
       security-events: write
     steps:
       - uses: actions/checkout@v4
-      # Scan the LOCALLY built image instead of pulling the published
-      # digest: GHCR packages are private by default and trivy's registry
-      # auth has proven unreliable in the release path (three failed
-      # runs). Same image content — the publish job used this exact ref.
+      # Scan a LOCALLY built image instead of pulling the published digest:
+      # GHCR packages are private by default and trivy's registry auth has
+      # proven unreliable in the release path (three failed runs). Same image
+      # content — it is built from the very binary docker-image published.
+      - name: Fetch the prebuilt binary
+        uses: actions/download-artifact@v4
+        with:
+          name: parqtel-linux-amd64
+          path: artifact
+      - name: Stage the image context
+        run: |
+          mkdir -p dist
+          tar xzf artifact/parqtel-linux-amd64.tar.gz -C dist
       - name: Build local scan target
+        # Same target and binary the release image published, so the scan sees
+        # exactly what users pull. Nothing is compiled here.
         uses: docker/build-push-action@v6
         with:
           context: .
+          target: runtime-prebuilt
+          build-contexts: |
+            dist=./dist
           platforms: linux/amd64
           load: true
           tags: parqtel:scan
-          cache-from: type=gha
       - name: Run Trivy vulnerability scanner
         uses: aquasecurity/trivy-action@master
         with:
@@ -179,8 +272,8 @@ jobs:
           trivy-version: v0.58.1
           cache-dir: /tmp/trivy-cache
         # REPORT-ONLY: findings surface in the Security tab for triage.
-        # Image-scan findings (distroless base CVEs awaiting upstream
-        # fixes) have no source-level remediation, so they must not gate
+        # Image-scan findings (base OS CVEs awaiting upstream fixes) have no
+        # source-level remediation, so they must not gate
         # releases — the CI filesystem scan (exit-code 1) stays the hard
         # gate for what WE can fix. Scanner ERRORS still fail the job.
       - name: Upload Trivy scan results
@@ -197,7 +290,7 @@ jobs:
   sign-image:
     name: Sign Image (cosign)
     runs-on: ubuntu-latest
-    needs: docker-publish
+    needs: docker-manifest
     steps:
       - uses: sigstore/cosign-installer@v3
       - name: Login to GHCR
@@ -209,13 +302,13 @@ jobs:
       - name: Sign image
         env:
           COSIGN_EXPERIMENTAL: "true"
-        run: cosign sign --yes ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ needs.docker-publish.outputs.digest }}
+        run: cosign sign --yes ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ needs.docker-manifest.outputs.digest }}
 
   # ── Helm Chart ───────────────────────────────────────────────────────────
   helm-publish:
     name: Helm Publish
     runs-on: ubuntu-latest
-    needs: docker-publish
+    needs: docker-manifest
     steps:
       - uses: actions/checkout@v4
       - uses: azure/setup-helm@v4
@@ -224,7 +317,7 @@ jobs:
       - name: Login to GHCR
         run: echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ${{ env.REGISTRY }} -u ${{ github.actor }} --password-stdin
       - name: Package chart
-        run: helm package deploy/helm/parqtel --version ${{ needs.docker-publish.outputs.version }} --app-version ${{ needs.docker-publish.outputs.version }}
+        run: helm package deploy/helm/parqtel --version ${{ needs.docker-manifest.outputs.version }} --app-version ${{ needs.docker-manifest.outputs.version }}
       - name: Push chart
         run: helm push parqtel-*.tgz oci://${{ env.REGISTRY }}/${{ github.repository_owner }}/charts
 
@@ -232,7 +325,7 @@ jobs:
   github-release:
     name: GitHub Release
     runs-on: ubuntu-latest
-    needs: [build-binaries, docker-publish, helm-publish, trivy-scan, sign-image]
+    needs: [build-binaries, docker-manifest, helm-publish, trivy-scan, sign-image]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -277,7 +370,7 @@ jobs:
   notify-homebrew-tap:
     name: Notify homebrew-tap
     runs-on: ubuntu-latest
-    needs: [github-release, docker-publish]
+    needs: [github-release, docker-manifest]
     steps:
       - name: Trigger homebrew-tap build
         uses: peter-evans/repository-dispatch@v3
@@ -287,6 +380,6 @@ jobs:
           event-type: parqtel-oss-release
           client-payload: |
             {
-              "version": "${{ needs.docker-publish.outputs.version }}",
+              "version": "${{ needs.docker-manifest.outputs.version }}",
               "ref":     "${{ github.ref_name }}"
             }

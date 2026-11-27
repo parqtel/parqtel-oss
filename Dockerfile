@@ -98,6 +98,7 @@ EOF
 RUN rustc -O /src/healthcheck.rs -o /usr/local/bin/healthcheck && strip /usr/local/bin/healthcheck
 
 # ── Stage 4: Collect minimal glibc runtime (drops OpenSSL/libstdc++/gconv) ──
+# Shared with stage 5 so both images collect the rootfs the same way.
 # parqtel NEEDEDs only glibc + libgcc (verified via readelf). The distroless cc
 # base also ships OpenSSL + libstdc++ we never use, and a later `RUN rm` can't
 # shrink the image (base layers still ship them). So we build a scratch rootfs
@@ -111,30 +112,65 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /usr/local/bin/parqtel /usr/local/bin/parqtel
 COPY --from=probe /usr/local/bin/healthcheck /usr/local/bin/healthcheck
-RUN set -eux; \
-    rm -rf /out && mkdir -p /out; \
-    for b in /usr/local/bin/parqtel /usr/local/bin/healthcheck; do \
-      ldd "$b" | awk '($2=="=>"){print $3; next} ($1 ~ /ld-linux/){print $1}'; \
-    done | sort -u | while read -r f; do \
-      [ -e "$f" ] || continue; \
-      mkdir -p "/out$(dirname "$f")"; \
-      cp -L "$f" "/out$f"; \
-    done; \
-    mkdir -p /out/dev /out/tmp /out/etc; \
-    mknod /out/dev/null c 1 3; mknod /out/dev/zero c 1 5; \
-    mknod /out/dev/urandom c 1 9; mknod /out/dev/random c 1 8; \
-    chmod 666 /out/dev/null /out/dev/zero /out/dev/urandom /out/dev/random; \
-    chmod 1777 /out/tmp; \
-    mkdir -p /out/data && chown 65532:65532 /out/data; \
-    printf 'nonroot:x:65532:65532::/nonexistent:/sbin/nologin\n' > /out/etc/passwd; \
-    printf 'nonroot:x:65532:\n' > /out/etc/group; \
-    if [ -d /etc/ssl/certs ]; then \
-      mkdir -p /out/etc/ssl/certs; \
-      cp -L /etc/ssl/certs/* /out/etc/ssl/certs/; \
-    fi; \
-    echo '--- runtime rootfs ---'; find /out -type f | sort
+COPY --link --chmod=755 docker/collect-runtime-libs.sh /usr/local/bin/collect-runtime-libs
+RUN collect-runtime-libs /usr/local/bin/parqtel /usr/local/bin/healthcheck
 
-# ── Stage 5: Final scratch image ────────────────────────────────────────────
+
+# ── Stage 5: Release image from prebuilt binaries ───────────────────────────
+# release.yml builds fat-LTO binaries natively, one runner per architecture
+# (`--profile release-dist`), then passes them here as the `dist` build
+# context. Reusing them removes a second full compile from the release path:
+# under buildx, linux/arm64 compiles through QEMU, which turned `docker-publish`
+# into a multi-hour job (the v0.4.0 run passed 2.5 h without finishing) while
+# the native arm64 binary job took 8 min. Build this target with:
+#
+#   docker buildx build --target runtime-prebuilt \
+#     --build-context dist=./dist --platform linux/arm64 .
+#
+# ubuntu:24.04, not bookworm: the binaries are linked on ubuntu-24.04 runners
+# (glibc 2.39) and the collected libraries must come from a base that is at
+# least as new, or the image dies at startup with a versioned symbol error.
+FROM ubuntu:24.04 AS prebuilt-libs
+ARG DEBIAN_FRONTEND=noninteractive
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=dist parqtel /usr/local/bin/parqtel
+COPY --from=probe /usr/local/bin/healthcheck /usr/local/bin/healthcheck
+COPY --link --chmod=755 docker/collect-runtime-libs.sh /usr/local/bin/collect-runtime-libs
+RUN collect-runtime-libs /usr/local/bin/parqtel /usr/local/bin/healthcheck
+
+# ── Stage 6: Final scratch image for the release build ──────────────────────
+# Same layout and metadata as stage 5; only the source of the binary differs.
+# Keep the two final stages in step (labels, ENV, HEALTHCHECK, EXPOSE, USER).
+FROM scratch AS runtime-prebuilt
+
+LABEL org.opencontainers.image.source="https://github.com/parqtel/parqtel-oss"
+LABEL org.opencontainers.image.description="Ultra-lightweight SRE observability engine"
+LABEL org.opencontainers.image.licenses="Apache-2.0"
+
+COPY --from=prebuilt-libs /out/ /
+COPY --from=dist parqtel /usr/local/bin/parqtel
+COPY --from=probe /usr/local/bin/healthcheck /usr/local/bin/healthcheck
+
+# Bound glibc malloc arenas: tokio worker threads + the blocking scan pool
+# each get their own 64MB arena by default (8×ncores, up to 32 on a 4-CPU
+# node), and transient Parquet scan/flush allocations fragment them — RSS
+# climbs and never returns (observed OOMKilled at 4Gi after ~8h). 2 arenas
+# keep contention acceptable while capping retained-but-unused heap.
+ENV MALLOC_ARENA_MAX=2
+
+HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
+    CMD ["/usr/local/bin/healthcheck"]
+
+EXPOSE 8080
+EXPOSE 4317
+
+USER 65532:65532
+ENTRYPOINT ["parqtel"]
+CMD ["serve"]
+
+# ── Stage 7: Final scratch image (default target, built from source) ────────
 # No OS packages, no shell, no OpenSSL — just the binary + its glibc deps.
 FROM scratch AS runtime
 
