@@ -26,21 +26,15 @@ jobs:
           OWNER: ${{ github.repository_owner }}
         run: |
           set -o pipefail
-          # The package name is not always `<repo>-derived`: resolve it from the
-          # org listing, then fall back to the expected Helm OCI path.
-          names="$(gh api "/orgs/${OWNER}/packages?package_type=container&per_page=100" \
-            --jq '.[].name' 2>/dev/null || true)"
-          echo "org packages:"; printf '%s\n' "$names"
-          candidates="$(printf '%s\n' "$names" | grep -iE 'charts?(/|-)' || echo 'charts/parqtel')"
+          # The package name is not the OCI path verbatim; ask the API which
+          # candidate exists, then flip the first one that answers.
+          candidates="charts%2Fparqtel parqtel%2Fcharts%2Fparqtel parqtel-charts charts-parqtel parqtel"
           rc=1
-          for name in $candidates; do
-            enc="${name//\//%2F}"
-            echo "--- PATCH ${enc}"
-            if gh api -X PATCH "/orgs/${OWNER}/packages/container/${enc}" \
-                 -f visibility=public --jq '"visibility: " + .visibility'; then
-              echo "public: ${name}"
-              rc=0
-            fi
+          for enc in $candidates; do
+            code="$(gh api -i -X PATCH "/orgs/${OWNER}/packages/container/${enc}" \
+              -f visibility=public 2>/dev/null | sed -n '1s/^HTTP\/[0-9.]* //p' | tr -d '\r' || true)"
+            echo "${enc}: HTTP ${code:-none}"
+            if [[ "$code" == "200" ]]; then rc=0; fi
           done
           exit "$rc"
       - name: Verify anonymous read
