@@ -2,10 +2,10 @@ name: Chart Visibility
 
 # GHCR packages created by a workflow start private, which breaks the
 # documented `helm install oci://ghcr.io/parqtel/charts/parqtel` for anonymous
-# users. Changing visibility needs a `write:packages` token; the release
-# workflow's GITHUB_TOKEN has it, so this dispatch flips the chart package to
-# public and reports the result. Idempotent: run it again whenever a new chart
-# package appears.
+# users. Changing visibility needs `write:packages`; the release workflow's
+# GITHUB_TOKEN has it, so this dispatch flips the chart package to public and
+# reports the result. Idempotent: run it again whenever a new chart package
+# appears.
 
 on:
   workflow_dispatch:
@@ -23,12 +23,26 @@ jobs:
       - name: Set visibility
         env:
           GH_TOKEN: ${{ github.token }}
-          PACKAGE: charts%2Fparqtel
+          OWNER: ${{ github.repository_owner }}
         run: |
           set -o pipefail
-          gh api -X PATCH "/orgs/${GITHUB_REPOSITORY_OWNER}/packages/container/${PACKAGE}" \
-            -f visibility=public > response.json
-          echo "visibility: $(jq -r .visibility response.json)"
+          # The package name is not always `<repo>-derived`: resolve it from the
+          # org listing, then fall back to the expected Helm OCI path.
+          names="$(gh api "/orgs/${OWNER}/packages?package_type=container&per_page=100" \
+            --jq '.[].name' 2>/dev/null || true)"
+          echo "org packages:"; printf '%s\n' "$names"
+          candidates="$(printf '%s\n' "$names" | grep -iE 'charts?(/|-)' || echo 'charts/parqtel')"
+          rc=1
+          for name in $candidates; do
+            enc="${name//\//%2F}"
+            echo "--- PATCH ${enc}"
+            if gh api -X PATCH "/orgs/${OWNER}/packages/container/${enc}" \
+                 -f visibility=public --jq '"visibility: " + .visibility'; then
+              echo "public: ${name}"
+              rc=0
+            fi
+          done
+          exit "$rc"
       - name: Verify anonymous read
         run: |
           set -o pipefail
