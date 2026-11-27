@@ -184,7 +184,9 @@ jobs:
           scan-ref: .
           severity: CRITICAL,HIGH
           exit-code: 1
-          trivy-version: v0.58.1
+          # Must be a published tag: v0.58.1 never existed upstream, so the
+          # input was ignored and only the action's default made this pass.
+          version: v0.76.2
           cache-dir: /tmp/trivy-cache
 
   # ── Documentation ──────────────────────────────────────────────────────────
