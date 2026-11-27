@@ -12,7 +12,9 @@ build cannot reach a registry or the release page.
 ## [Unreleased]
 
 <!-- changelog:auto-start -->
-_No unreleased changes._
+#### Features
+
+- assert the release body matches the changelog section
 <!-- changelog:auto-end -->
 
 ## [0.4.0] - 2026-11-27

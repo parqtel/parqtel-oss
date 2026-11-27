@@ -171,11 +171,14 @@ scripts/release/verify-release.sh v0.4.0 --skip-download
 ```
 
 It asserts: release is published (not draft/prerelease), all eight assets
-exist, every tarball matches its `.sha256`, the linux/amd64 binary reports the
-tagged version, all four image tags resolve to the same digest, the
-attestation verifies with `gh attestation verify`, and the chart version
-matches. Missing `docker`/`helm` are reported as SKIP; any failed assertion
-exits non-zero.
+exist, the release body equals `release_tool.py notes --tag` for that tag
+(changelog and release page cannot drift), every tarball matches its
+`.sha256`, the linux/amd64 binary reports the tagged version, all four image
+tags resolve to the same digest, the attestation verifies with
+`gh attestation verify`, and the chart version matches. Missing
+`docker`/`helm` are reported as SKIP; any failed assertion exits non-zero.
+Releases tagged before the notes generator existed (up to v0.3.1) fail the
+body comparison by design — GitHub generated those bodies.
 
 Two assertions can report SKIP without hiding a defect, because the pipeline
 already ran them: provenance verification needs gh >= 2.49, and the chart read

@@ -75,7 +75,7 @@ MINOR="${REST%%.*}"
 echo
 echo "GitHub release"
 release_json="$(gh release view "$TAG" --repo "$REPO" \
-  --json tagName,isDraft,isPrerelease,publishedAt,url,assets)" || {
+  --json tagName,isDraft,isPrerelease,publishedAt,url,assets,body)" || {
   echo "  \033[31mFAIL\033[0m  release $TAG does not exist"
   exit 1
 }
@@ -107,6 +107,25 @@ for asset in "${expected_assets[@]}"; do
     missing=1
   fi
 done
+
+# ── Release notes ──────────────────────────────────────────────────────────
+# The release body is generated from the tag's CHANGELOG.md section, so a body
+# that differs from what the changelog yields means the two drifted apart.
+echo
+echo "Release notes"
+local_notes="$(mktemp)"
+if (cd "$ROOT" && python3 scripts/release/release_tool.py notes --tag "$TAG") \
+    >"$local_notes" 2>/dev/null; then
+  normalize() { sed -e 's/[[:space:]]*$//' "$1" | sed -e :a -e '/^\n*$/{$d;N;};/\n$/ba'; }
+  if diff -q <(normalize "$local_notes") <(echo "$release_json" | jq -r .body | normalize /dev/stdin) >/dev/null; then
+    pass "body matches the changelog section"
+  else
+    fail "body differs from 'release_tool.py notes --tag $TAG' (changelog and release page disagree)"
+  fi
+else
+  skip "no local changelog for $TAG (run from a checkout that has the tag)"
+fi
+rm -f "$local_notes"
 
 # ── Checksums + binary version ──────────────────────────────────────────────
 if [[ "$DO_DOWNLOAD" -eq 1 && "$missing" -eq 0 ]]; then
