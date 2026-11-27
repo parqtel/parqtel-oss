@@ -124,6 +124,8 @@ make cut-release               # commit + tag + push
 4. runs `release_tool.py check` and `cargo metadata --locked`,
 5. commits, creates the annotated tag `vX.Y.Z`, pushes `main` then the tag.
 
+Add `--no-push` to stop after the local commit and tag.
+
 The tag push starts `release.yml`, which re-runs **clippy and the full test
 suite on the tagged commit** before anything is published. A tag can point at
 an untested commit; this gate is what makes that harmless. It also runs the
@@ -131,8 +133,8 @@ release-metadata check with `--tag`, so a tag whose version disagrees with
 `Cargo.toml` cannot publish.
 
 After the gate: four platform binaries with `.sha256` files, a multi-arch
-image (`ghcr.io/parqtel/parqtel-oss`) tagged `X.Y.Z`, `X.Y`, `X`, `latest` and
-`sha-<commit>`, build provenance attestation, SBOM, cosign signature, Trivy
+image (`ghcr.io/parqtel/parqtel-oss`) tagged `X.Y.Z`, `X.Y`, `X` and `latest`,
+build provenance attestation, SBOM, cosign signature, Trivy
 image scan, the Helm chart under `oci://ghcr.io/parqtel/charts/parqtel`, and
 the GitHub release. The last job dispatches to `parqtel/homebrew-tap` and is
 skipped until the `HOMEBREW_TAP_DISPATCH_TOKEN` secret exists — a release
@@ -165,8 +167,6 @@ admin operation on the package: the workflow token is repo-scoped and answers
 
 A private chart package makes the documented `helm install` line fail for
 every user, so treat step 2 as part of the release.
-
-Use `--no-push` to inspect the commit and tag locally first.
 
 ## Verifying a release
 
@@ -214,7 +214,6 @@ Releases are immutable by convention; never re-tag the same version.
 | `ci.yml` → `Release Metadata` | version sites, changelog structure and generated-block freshness on every PR and push |
 | `release.yml` → `Test Release Candidate` | metadata check with `--tag`, clippy, full tests |
 | `release.yml` → `GitHub Release` | body from `release_tool.py notes` |
-
 | `changelog.yml` → `Refresh generated block` | regenerates the block on every push to `main` and commits it when `CHANGELOG_PUSH_TOKEN` is configured |
 
 The generated block is refreshed by the contributor, by
