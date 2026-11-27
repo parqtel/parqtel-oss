@@ -1,0 +1,75 @@
+name: Changelog
+
+# Keeps the generated block of CHANGELOG.md current on main.
+#
+# Why a token and not GITHUB_TOKEN: the `main` ruleset rejects pushes from the
+# Actions integration, and a bot pull request cannot satisfy the review or the
+# required checks (commits pushed with GITHUB_TOKEN never trigger workflows).
+# So the automatic commit is opt-in: add a fine-grained personal access token
+# with `contents: write` for this repository as the CHANGELOG_PUSH_TOKEN secret
+# and the job commits on your behalf. Without the secret the job still runs and
+# reports whether the block is stale — `ci.yml` → `Release Metadata` remains
+# the enforcement point either way.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: changelog-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  refresh:
+    name: Refresh generated block
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Secrets are not available in `if:` expressions, so the token is lifted
+    # into the job environment and the steps test that instead.
+    env:
+      CHANGELOG_PUSH_TOKEN: ${{ secrets.CHANGELOG_PUSH_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          # Checkout with the push token when it exists so the commit is
+          # attributed to whoever owns the token, not to github-actions[bot].
+          token: ${{ secrets.CHANGELOG_PUSH_TOKEN || github.token }}
+      - name: Fetch release tags
+        # render_block() needs the newest release tag: without it git-cliff
+        # reports the whole history as unreleased and the block looks stale.
+        run: git fetch --quiet --tags --force origin '+refs/tags/v*:refs/tags/v*'
+      - name: Install git-cliff
+        uses: taiki-e/install-action@v2
+        with:
+          tool: git-cliff@2.14.2
+      - name: Regenerate the block
+        id: regen
+        run: |
+          python3 scripts/release/release_tool.py update-changelog
+          if git diff --quiet -- CHANGELOG.md; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "CHANGELOG.md is current; nothing to commit."
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Commit and push
+        if: steps.regen.outputs.changed == 'true' && env.CHANGELOG_PUSH_TOKEN != ''
+        run: |
+          git config user.name "parqtel changelog bot"
+          git config user.email "changelog@parqtel.dev"
+          git add CHANGELOG.md
+          git commit -m "chore(changelog): refresh generated changes" \
+            -m "Regenerated from conventional commits by .github/workflows/changelog.yml."
+          # main moves between checkout and push (squash merges, other bots):
+          # replay our single-file commit on top of whatever landed first.
+          git pull --rebase --quiet origin main
+          git push origin HEAD:main
+      - name: Report the stale block
+        if: steps.regen.outputs.changed == 'true' && env.CHANGELOG_PUSH_TOKEN == ''
+        run: |
+          echo "::notice title=CHANGELOG.md is stale::Run \`make changelog\` and commit the result, or add the CHANGELOG_PUSH_TOKEN secret to let this workflow do it."

@@ -206,12 +206,14 @@ Releases are immutable by convention; never re-tag the same version.
 | `release.yml` → `Test Release Candidate` | metadata check with `--tag`, clippy, full tests |
 | `release.yml` → `GitHub Release` | body from `release_tool.py notes` |
 
-The generated block is refreshed by the contributor or by
-`scripts/release/release.sh`, not by a bot commit to `main`. GitHub does not
-allow the GitHub Actions integration to bypass a **repository** ruleset (only
-an organization ruleset can name it; deploy keys are disabled for this
-repository), and a bot pull request cannot satisfy the required review. The
-gate therefore runs in the other direction: CI fails when the committed block
-is stale, which keeps `CHANGELOG.md` accurate without weakening the branch
-protection. If the organization later moves this ruleset to the organization
-level, a `changelog.yml` push job can be added and the freshness gate relaxed.
+| `changelog.yml` → `Refresh generated block` | regenerates the block on every push to `main` and commits it when `CHANGELOG_PUSH_TOKEN` is configured |
+
+The generated block is refreshed by the contributor, by
+`scripts/release/release.sh`, or by `changelog.yml`. That workflow commits with
+the `CHANGELOG_PUSH_TOKEN` secret because GitHub does not allow the Actions
+integration to bypass a **repository** ruleset, and a bot pull request cannot
+satisfy the required review. Without the secret the workflow still runs and
+posts a notice when the block is stale; `ci.yml` → `Release Metadata` then
+fails the corresponding run, so `CHANGELOG.md` cannot drift silently. Add the
+secret (fine-grained token, `contents: write` on this repository) to turn the
+notice into a commit.
