@@ -52,9 +52,11 @@ runs:
       with:
         # Save the full registry+incremental so the next job reuses the
         # compiled dependencies instead of redoing 8-10 min of cold work.
-        # `sharedKey` is appended to the cache key so MSRV / release /
-        # build-binary caches don't collide.
-        sharedKey: ${{ inputs.cache-key }}
+        # `shared-key` is appended to the cache key so MSRV / release /
+        # build-binary caches don't collide. The input is kebab-case; the
+        # camelCase spelling this file used was silently ignored and every
+        # job shared one cache.
+        shared-key: ${{ inputs.cache-key }}
         cache-on-failure: true
         cache-all-crates: true
         # Cache CARGO_HOME_REGISTRY (= $CARGO_HOME/registry) by default;
