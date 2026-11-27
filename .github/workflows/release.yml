@@ -260,6 +260,16 @@ jobs:
           platforms: linux/amd64
           load: true
           tags: parqtel:scan
+      # The scanner is installed here, not by trivy-action's bundled
+      # setup-trivy: that installer downloads the release tarball and, on a
+      # cold cache, died with a bare "exit code 1" right after resolving the
+      # version — which failed the release even though the scan is only
+      # advisory. install-action fetches the same pinned release with a
+      # checksum-verified download and a cache that actually hits.
+      - name: Install Trivy
+        uses: taiki-e/install-action@v2
+        with:
+          tool: trivy@0.58.1
       - name: Run Trivy vulnerability scanner
         uses: aquasecurity/trivy-action@master
         with:
@@ -269,13 +279,7 @@ jobs:
           severity: CRITICAL,HIGH
           ignore-unfixed: true
           exit-code: 0
-          # PINNED through `version` (the input this action declares; the
-          # earlier `trivy-version` spelling was silently ignored, so the
-          # action installed whatever release it defaulted to). v0.58.1 is
-          # what the CI filesystem scan pins and runs green on every push.
-          # Because `release` needs this job, an installer failure here used
-          # to present as a failed release.
-          version: v0.58.1
+          skip-setup-trivy: true
           cache-dir: /tmp/trivy-cache
         # REPORT-ONLY: findings surface in the Security tab for triage.
         # Image-scan findings (base OS CVEs awaiting upstream fixes) have no
@@ -348,7 +352,11 @@ jobs:
   github-release:
     name: GitHub Release
     runs-on: ubuntu-latest
-    needs: [build-binaries, docker-manifest, helm-publish, trivy-scan, sign-image]
+    # trivy-scan is deliberately absent: the image scan is report-only
+    # (exit-code 0, findings triaged in the Security tab), so a scanner that
+    # cannot install or reach its vulnerability database must not withhold the
+    # release. It still runs in parallel and reports.
+    needs: [build-binaries, docker-manifest, helm-publish, sign-image]
     steps:
       - uses: actions/checkout@v4
         with:
