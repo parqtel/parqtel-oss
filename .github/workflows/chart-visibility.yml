@@ -1,0 +1,41 @@
+name: Chart Visibility
+
+# GHCR packages created by a workflow start private, which breaks the
+# documented `helm install oci://ghcr.io/parqtel/charts/parqtel` for anonymous
+# users. Changing visibility needs a `write:packages` token; the release
+# workflow's GITHUB_TOKEN has it, so this dispatch flips the chart package to
+# public and reports the result. Idempotent: run it again whenever a new chart
+# package appears.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    name: Make the chart package public
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Set visibility
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PACKAGE: charts%2Fparqtel
+        run: |
+          set -o pipefail
+          gh api -X PATCH "/orgs/${GITHUB_REPOSITORY_OWNER}/packages/container/${PACKAGE}" \
+            -f visibility=public > response.json
+          echo "visibility: $(jq -r .visibility response.json)"
+      - name: Verify anonymous read
+        run: |
+          set -o pipefail
+          token="$(curl -fsS "https://ghcr.io/token?scope=repository:parqtel/charts/parqtel:pull" \
+            | jq -r .token)"
+          code="$(curl -s -o /dev/null -w '%{http_code}' \
+            -H "Authorization: Bearer ${token}" \
+            "https://ghcr.io/v2/parqtel/charts/parqtel/tags/list")"
+          echo "anonymous tags/list: HTTP ${code}"
+          [[ "$code" == "200" ]] || { echo "::error::chart package is still not anonymously readable"; exit 1; }

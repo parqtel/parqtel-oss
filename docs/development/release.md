@@ -147,9 +147,15 @@ publishing token is the only one guaranteed to read the package).
 
 A new GHCR package starts **private**, whatever the image or chart. The image
 package inherits public visibility once set; a newly created
-`parqtel/charts/parqtel` package does not. Nothing in the workflow can change
-that — package visibility needs an admin token with `write:packages`. On the
-first publish of either package:
+`parqtel/charts/parqtel` package does not. Package visibility needs an admin
+token with `write:packages`, which the release workflow's `GITHUB_TOKEN` has:
+run the **Chart Visibility** workflow (`chart-visibility.yml`, manual
+dispatch) after the first chart publish. It PATCHes the package to public and
+then proves it by reading `tags/list` with an anonymous GHCR token — the exact
+request `helm install` makes.
+
+If the dispatch cannot change it (the token lost `packages: write`), the
+fallback is manual:
 
 1. Open the organization's **Packages** list, pick the package,
    **Package settings → Danger Zone → Change visibility → Public**.
