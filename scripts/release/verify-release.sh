@@ -181,7 +181,12 @@ if [[ "$DO_IMAGE" -eq 1 ]]; then
       fi
     done
 
-    if gh attestation verify "oci://$IMAGE:$VERSION" --owner parqtel >/dev/null 2>&1; then
+    # `gh attestation` landed in gh 2.49; older clients cannot verify, and
+    # this must not look like a release defect. The release workflow runs the
+    # same check with the runner's gh after the attestation is created.
+    if ! gh attestation verify --help >/dev/null 2>&1; then
+      skip "provenance signature needs gh >= 2.49 ($(gh --version | head -n 1))"
+    elif gh attestation verify "oci://$IMAGE:$VERSION" --owner parqtel >/dev/null 2>&1; then
       pass "build provenance attestation verifies"
     else
       fail "build provenance attestation missing or invalid"
@@ -193,15 +198,23 @@ if [[ "$DO_IMAGE" -eq 1 ]]; then
   if ! command -v helm >/dev/null; then
     skip "helm not installed"
   else
-    if chart_meta="$(helm show chart "$CHART" --version "$VERSION" 2>/dev/null)"; then
+    err_file="$(mktemp)"
+    if chart_meta="$(helm show chart "$CHART" --version "$VERSION" 2>"$err_file")"; then
       chart_version="$(sed -n 's/^version: *//p' <<<"$chart_meta" | head -n 1)"
       if [[ "$chart_version" == "$VERSION" ]]; then
         pass "chart $VERSION published"
       else
         fail "chart version is '$chart_version', expected $VERSION"
       fi
+      rm -f "$err_file"
+    elif grep -qiE 'unauthorized|forbidden|denied|authentication|anonymous token' "$err_file"; then
+      rm -f "$err_file"
+      # A new GHCR package starts private, and the gh OAuth token in a normal
+      # checkout has no read:packages scope. Nothing can be concluded.
+      skip "chart package not readable (GHCR package needs public visibility or a read:packages token)"
     else
-      fail "chart $VERSION not found in $CHART"
+      fail "chart $VERSION not found in $CHART: $(head -n 1 "$err_file")"
+      rm -f "$err_file"
     fi
   fi
 else

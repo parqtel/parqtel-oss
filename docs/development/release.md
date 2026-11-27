@@ -133,8 +133,32 @@ release-metadata check with `--tag`, so a tag whose version disagrees with
 After the gate: four platform binaries with `.sha256` files, a multi-arch
 image (`ghcr.io/parqtel/parqtel-oss`) tagged `X.Y.Z`, `X.Y`, `X`, `latest` and
 `sha-<commit>`, build provenance attestation, SBOM, cosign signature, Trivy
-image scan, the Helm chart under `oci://ghcr.io/parqtel/charts/parqtel`, the
-GitHub release, and a `repository_dispatch` to `parqtel/homebrew-tap`.
+image scan, the Helm chart under `oci://ghcr.io/parqtel/charts/parqtel`, and
+the GitHub release. The last job dispatches to `parqtel/homebrew-tap` and is
+skipped until the `HOMEBREW_TAP_DISPATCH_TOKEN` secret exists — a release
+without a tap update is still a complete release.
+
+Two checks run inside that pipeline because no local checkout can run them
+reliably: `gh attestation verify` on the index digest (the local script
+requires gh >= 2.49), and `helm show chart` on the freshly pushed chart (the
+publishing token is the only one guaranteed to read the package).
+
+### Package visibility
+
+A new GHCR package starts **private**, whatever the image or chart. The image
+package inherits public visibility once set; a newly created
+`parqtel/charts/parqtel` package does not. Nothing in the workflow can change
+that — package visibility needs an admin token with `write:packages`. On the
+first publish of either package:
+
+1. Open the organization's **Packages** list, pick the package,
+   **Package settings → Danger Zone → Change visibility → Public**.
+2. Confirm `docker pull ghcr.io/parqtel/parqtel-oss:X.Y.Z` and
+   `helm show chart oci://ghcr.io/parqtel/charts/parqtel --version X.Y.Z`
+   work without credentials.
+
+A private chart package makes the documented `helm install` line fail for
+every user, so treat step 2 as part of the release.
 
 Use `--no-push` to inspect the commit and tag locally first.
 
@@ -152,6 +176,12 @@ tagged version, all four image tags resolve to the same digest, the
 attestation verifies with `gh attestation verify`, and the chart version
 matches. Missing `docker`/`helm` are reported as SKIP; any failed assertion
 exits non-zero.
+
+Two assertions can report SKIP without hiding a defect, because the pipeline
+already ran them: provenance verification needs gh >= 2.49, and the chart read
+needs a `read:packages` token. A permission error is never counted as a
+failure, but it is also never silent — the SKIP line names the missing scope,
+and `--skip-image` exists for machines without a registry login at all.
 
 ## Rollback
 
