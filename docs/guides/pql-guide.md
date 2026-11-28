@@ -1,6 +1,6 @@
 # Parqtel Query Language (PQL) — End-User Guide
 
-**Version:** 0.4.0 · **Applies to:** Parqtel 0.4.0
+**Version:** 0.5.0 · **Applies to:** Parqtel 0.5.0
 
 PQL is the umbrella name for Parqtel's three query surfaces:
 

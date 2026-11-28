@@ -12,12 +12,16 @@ build cannot reach a registry or the release page.
 ## [Unreleased]
 
 <!-- changelog:auto-start -->
+_No unreleased changes._
+<!-- changelog:auto-end -->
+
+## [0.5.0] - 2026-11-28
+
 #### Features
 
 - assert the release body matches the changelog section
 - add L2 compaction, scan budgets and scoped block ownership
 - run sharded writers, readers and compactor from one chart
-<!-- changelog:auto-end -->
 
 ## [0.4.0] - 2026-11-27
 
@@ -660,8 +664,9 @@ each. They are recorded deliberately rather than left to be discovered.
 
 - Initial internal release.
 
-[Unreleased]: https://github.com/parqtel/parqtel-oss/compare/v0.4.0...HEAD
-[0.4.0]: https://github.com/parqtel/parqtel-oss/compare/v0.4.0...v0.4.0
+[Unreleased]: https://github.com/parqtel/parqtel-oss/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/parqtel/parqtel-oss/compare/v0.5.0...v0.5.0
+[0.5.0]: https://github.com/parqtel/parqtel-oss/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/parqtel/parqtel-oss/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/parqtel/parqtel-oss/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/parqtel/parqtel-oss/compare/v0.2.0...v0.3.0

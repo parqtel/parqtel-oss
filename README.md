@@ -468,7 +468,7 @@ and [docs/performance/README.md](docs/performance/README.md).
 
 ## Status
 
-`0.4.0` is a public beta. The binary is single-writer per data root. Optional
+`0.5.0` is a public beta. The binary is single-writer per data root. Optional
 scoped bearer tokens and OIDC protect HTTP; **OTLP gRPC has no token layer**, so
 keep `:4317` behind a private listener or proxy. Object storage supports one
 writer per prefix and has no fencing.
