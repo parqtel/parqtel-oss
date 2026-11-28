@@ -1,4 +1,6 @@
 # OTel Collector -> both Parqtel replicas over OTLP/gRPC.
+# This deliberately duplicates every signal to all replicas (HA), unlike the
+# sharded config, which hashes each item to exactly one writer.
 extensions:
   file_storage:
     directory: /var/lib/otelcol/ha-queue

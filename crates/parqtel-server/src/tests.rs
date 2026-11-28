@@ -219,7 +219,8 @@ async fn setup_test_state_from(config: Config) -> AppState {
             ))
         }),
     )
-    .await;
+    .await
+    .expect("the test configuration builds an app state");
 
     state
 }
@@ -283,6 +284,32 @@ async fn internal_buffer_endpoint_requires_the_token_and_respects_the_watermark(
             }],
         )
         .await;
+    // A writer clamps the caller's watermark to its own newest local flush,
+    // so the watermark is only honoured once this node has a block of its own.
+    let flushed = state
+        .inner
+        .config
+        .storage
+        .data_dir
+        .join("flushed-at-1000.parquet");
+    std::fs::write(&flushed, b"").unwrap();
+    state
+        .inner
+        .index
+        .write()
+        .await
+        .add(parqtel_core::models::storage::BlockMetadata {
+            path: flushed,
+            start_timestamp_ns: 0,
+            end_timestamp_ns: 1_000,
+            row_count: 1,
+            size_bytes: 1,
+            metric_names: Default::default(),
+            label_names: Default::default(),
+            label_values: Default::default(),
+            signal_type: parqtel_core::models::storage::SignalType::Metrics,
+            wal_range: None,
+        });
     let app = build_router(state);
 
     let request = |since_ns: i64, token: Option<&'static str>| {
@@ -337,6 +364,224 @@ async fn internal_buffer_endpoint_requires_the_token_and_respects_the_watermark(
     // Empty vectors are omitted on the wire, so an absent field is empty.
     assert_eq!(value["points"].as_array().map(Vec::len).unwrap_or(0), 0);
     assert!(value["watermark_ns"].is_null());
+}
+
+/// Writes a real `cpu` block (one series, `host="r1"`) so the reader can decode
+/// the flushed rows, and returns the metadata to index.
+fn write_cpu_block(
+    dir: &std::path::Path,
+    file_name: &str,
+    mut points: Vec<parqtel_core::DataPoint>,
+) -> parqtel_core::BlockMetadata {
+    use parqtel_core::models::storage::MetricRun;
+    use parqtel_core::storage::{write_block_file, FooterIndex};
+    use parqtel_core::StorageModel;
+
+    points.sort_by(|a, b| {
+        a.labels
+            .fingerprint()
+            .cmp(&b.labels.fingerprint())
+            .then(a.timestamp_ns.cmp(&b.timestamp_ns))
+    });
+    let resource = parqtel_core::LabelSet::default();
+    let run = MetricRun {
+        name: "cpu",
+        kind: parqtel_core::MetricKind::Gauge,
+        resource: &resource,
+        points: points.iter().collect(),
+    };
+    let (batch, table) = StorageModel::metric_runs_to_block(&[run]).unwrap();
+    let path = dir.join(file_name);
+    write_block_file(
+        &path,
+        batch,
+        "zstd",
+        None,
+        1024,
+        None,
+        Some(FooterIndex::Series(&table)),
+    )
+    .unwrap();
+    parqtel_core::BlockMetadata {
+        path: path.clone(),
+        start_timestamp_ns: points.iter().map(|point| point.timestamp_ns).min().unwrap(),
+        end_timestamp_ns: points.iter().map(|point| point.timestamp_ns).max().unwrap(),
+        row_count: points.len(),
+        size_bytes: std::fs::metadata(path).unwrap().len(),
+        metric_names: std::iter::once("cpu".to_string()).collect(),
+        label_names: Default::default(),
+        label_values: Default::default(),
+        signal_type: parqtel_core::SignalType::Metrics,
+        wal_range: None,
+    }
+}
+
+/// Runs the same instant query the UI issues and returns `(ns, value)` pairs,
+/// sorted, with no assumption about order on the wire.
+async fn instant_cpu_samples(app: &axum::Router) -> Vec<(i64, f64)> {
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/query?query=cpu&time=0.000001&lookback_delta=1h")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let value: Value = serde_json::from_slice(&body).unwrap();
+    let result = value["data"]["result"].as_array().unwrap();
+    assert_eq!(result.len(), 1, "one series in the answer: {value}");
+    let values = result[0]["values"].as_array().unwrap();
+    let mut samples: Vec<(i64, f64)> = values
+        .iter()
+        .map(|pair| {
+            let seconds = pair[0].as_f64().unwrap();
+            let value = pair[1].as_str().unwrap().parse::<f64>().unwrap();
+            ((seconds * 1e9).round() as i64, value)
+        })
+        .collect();
+    samples.sort_by_key(|(timestamp_ns, _)| *timestamp_ns);
+    samples
+}
+
+/// Two writers flush on skewed schedules: writer-0 flushed through ts=1000,
+/// writer-1 still holds 300/600/900 in its buffer. The reader sees writer-0's
+/// block, so its global watermark is 1000; without the per-writer clamp,
+/// writer-1 would drop every buffered row below the watermark and the answer
+/// would silently lose them. Once writer-1 flushes, the same rows must arrive
+/// through block storage with no duplicate.
+#[tokio::test(flavor = "current_thread")]
+async fn skewed_writers_lose_no_buffered_rows_and_do_not_duplicate_them() {
+    use crate::remote_buffer::HttpWriterFanout;
+    use parqtel_core::config::NodeRole;
+    use parqtel_core::{LabelSet, MetricValue};
+
+    let labels = LabelSet::try_from_iter([("host", "r1")]).unwrap();
+    let point = |timestamp_ns: i64, value: f64| parqtel_core::DataPoint {
+        timestamp_ns,
+        value: MetricValue::Double(value),
+        labels: labels.clone(),
+    };
+
+    // Writer-0: flushed through ts=1000, nothing buffered.
+    let mut writer0_config = temp_config();
+    writer0_config.server.role = NodeRole::Writer;
+    writer0_config.query.internal_auth_token = Some("tok".into());
+    let writer0 = setup_test_state_from(writer0_config).await;
+    let writer0_dir = writer0.inner.config.storage.data_dir.clone();
+    let writer0_block = write_cpu_block(&writer0_dir, "w0-flushed.parquet", vec![point(1000, 1.0)]);
+    writer0.inner.index.write().await.add(writer0_block.clone());
+    let writer0_router = build_router(writer0.clone());
+
+    // Writer-1: same token, never flushed, three buffered seconds.
+    let mut writer1_config = temp_config();
+    writer1_config.server.role = NodeRole::Writer;
+    writer1_config.query.internal_auth_token = Some("tok".into());
+    let writer1 = setup_test_state_from(writer1_config).await;
+    let writer1_dir = writer1.inner.config.storage.data_dir.clone();
+    let buffered = vec![point(300, 0.3), point(600, 0.6), point(900, 0.9)];
+    writer1
+        .inner
+        .query_executor
+        .memory_buffer()
+        .push_metrics("cpu", &buffered)
+        .await;
+    let writer1_router = build_router(writer1.clone());
+
+    // Bind ephemeral ports and serve both writers. The listener is listening
+    // as soon as `bind` returns, so the reader can connect without a sleep.
+    let listener0 = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let writer0_url = format!("http://{}", listener0.local_addr().unwrap());
+    let writer0_task =
+        tokio::spawn(async move { axum::serve(listener0, writer0_router).await.unwrap() });
+    let listener1 = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let writer1_url = format!("http://{}", listener1.local_addr().unwrap());
+    let writer1_task =
+        tokio::spawn(async move { axum::serve(listener1, writer1_router).await.unwrap() });
+
+    // Reader: sees writer-0's published block, fans out to both writers.
+    let mut reader_config = temp_config();
+    reader_config.server.role = NodeRole::Reader;
+    reader_config.query.internal_auth_token = Some("tok".into());
+    let reader = setup_test_state_from(reader_config).await;
+    let fanout = HttpWriterFanout::new(
+        vec![writer0_url, writer1_url],
+        Some("tok".into()),
+        std::time::Duration::from_secs(5),
+    )
+    .unwrap();
+    let mut inner = match Arc::try_unwrap(reader.inner) {
+        Ok(inner) => inner,
+        Err(_) => panic!("the reader state is not shared yet"),
+    };
+    let reader_index = inner.index.clone();
+    let reader_dir = inner.config.storage.data_dir.clone();
+    let reader_logs = reader_dir.join("logs");
+    inner.query_executor = QueryExecutor::new(
+        reader_index.clone(),
+        Arc::new(tokio::sync::RwLock::new(BlockIndex::new(&reader_logs))),
+        reader_dir.join("traces"),
+    )
+    .with_remote_buffer(Arc::new(fanout));
+    let reader = AppState {
+        inner: Arc::new(inner),
+    };
+    reader_index.write().await.add(writer0_block);
+    let reader_router = build_router(reader);
+
+    let first = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        instant_cpu_samples(&reader_router),
+    )
+    .await
+    .expect("the reader query must not hang");
+    assert_eq!(
+        first.iter().map(|(ts, _)| *ts).collect::<Vec<_>>(),
+        vec![300, 600, 900, 1000],
+        "no buffered writer-1 row may be lost, and writer-0's flush must be there"
+    );
+    for (timestamp_ns, expected) in [(300, 0.3), (600, 0.6), (900, 0.9), (1000, 1.0)] {
+        let actual = first
+            .iter()
+            .find(|(ts, _)| *ts == timestamp_ns)
+            .map(|(_, value)| *value)
+            .unwrap();
+        assert!(
+            (actual - expected).abs() < 1e-9,
+            "timestamp {timestamp_ns}: expected {expected}, got {actual}"
+        );
+    }
+
+    // Writer-1 flushes the same rows: a block ending at 1000 lands in its own
+    // index and in the reader's published view. Its clamp now hides the
+    // buffered copy, so no row is served twice.
+    let writer1_block = write_cpu_block(&writer1_dir, "w1-flushed.parquet", buffered);
+    writer1.inner.index.write().await.add(writer1_block.clone());
+    reader_index.write().await.add(writer1_block);
+
+    let second = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        instant_cpu_samples(&reader_router),
+    )
+    .await
+    .expect("the reader query after the flush must not hang");
+    assert_eq!(
+        second, first,
+        "after writer-1 flushes, the answer must be identical and duplicate-free"
+    );
+    let mut timestamps: Vec<i64> = second.iter().map(|(ts, _)| *ts).collect();
+    timestamps.dedup();
+    assert_eq!(
+        timestamps.len(),
+        second.len(),
+        "no timestamp may appear twice: {second:?}"
+    );
+
+    writer0_task.abort();
+    writer1_task.abort();
 }
 
 /// Liveness and readiness answer different questions and must not be the same

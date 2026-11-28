@@ -954,13 +954,25 @@ fn write_metric_compaction(
         .close_and_sync()
 }
 
+/// How a merged metrics block's WAL span is validated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WalCheck {
+    /// Local writer: the merged sources must be covered by this node's WAL
+    /// commit, otherwise the group is rejected.
+    LocalWal(u64),
+    /// Shared catalog: sources were written by different nodes, so no single
+    /// WAL covers them. A mixed or gapped span yields `None` instead of
+    /// rejecting the merge; cross-writer output carries no replayable span.
+    Published,
+}
+
 fn compact_metric_blocks(
     blocks: &[BlockMetadata],
     config: &BlockConfig,
     target_level: u8,
+    wal_check: WalCheck,
 ) -> Result<BlockMetadata> {
-    let committed = crate::wal::read_commit(&config.data_dir, "metrics");
-    let wal_range = merged_wal_range(blocks, committed)?;
+    let wal_range = merged_wal_range(blocks, wal_check)?;
     let sources = blocks
         .iter()
         .cloned()
@@ -1041,23 +1053,26 @@ fn validate_compacted_file(path: &Path, plan: &OutputPlan) -> Result<()> {
 
 /// The WAL span the merged block makes durable.
 ///
-/// Contiguous ranges merge into one span. Mixed or gapped ranges cannot be
-/// described by one span, but if every range is already at or below the WAL
-/// commit point none of those records can be replayed again, so the output
-/// needs no span at all. Otherwise the group is rejected.
-fn merged_wal_range(
-    blocks: &[BlockMetadata],
-    committed: crate::wal::WalPosition,
-) -> Result<Option<(u64, u64)>> {
+/// Contiguous ranges merge into one span. Under [`WalCheck::LocalWal`], mixed
+/// or gapped ranges cannot be described by one span; if every range is already
+/// at or below the WAL commit point none of those records can be replayed
+/// again, so the output needs no span at all, otherwise the group is rejected.
+/// Under [`WalCheck::Published`] a cross-writer group has no local WAL to
+/// prove anything against, so an unprovable span simply becomes `None`.
+fn merged_wal_range(blocks: &[BlockMetadata], check: WalCheck) -> Result<Option<(u64, u64)>> {
     let ranges: Vec<_> = blocks.iter().filter_map(|block| block.wal_range).collect();
     if ranges.is_empty() {
         return Ok(None);
     }
-    let all_committed = ranges
-        .iter()
-        .all(|&(_, to)| crate::wal::WalPosition(to).is_covered_by(committed));
+    let published = matches!(check, WalCheck::Published);
+    let all_committed = match check {
+        WalCheck::Published => true,
+        WalCheck::LocalWal(committed) => ranges.iter().all(|&(_, to)| {
+            crate::wal::WalPosition(to).is_covered_by(crate::wal::WalPosition(committed))
+        }),
+    };
     if ranges.len() != blocks.len() {
-        if all_committed {
+        if published || all_committed {
             return Ok(None);
         }
         return Err(Error::Internal(
@@ -1067,7 +1082,7 @@ fn merged_wal_range(
     let mut ranges = ranges;
     ranges.sort_unstable_by_key(|range| range.0);
     if ranges.windows(2).any(|pair| pair[0].1 != pair[1].0) {
-        if all_committed {
+        if published || all_committed {
             return Ok(None);
         }
         return Err(Error::Internal(
@@ -1296,6 +1311,13 @@ pub(crate) async fn compact_metrics_levels_once_scoped(
         return Ok(0);
     };
     let now_ns = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
+    // A compactor merges blocks several writers produced: there is no single
+    // WAL commit here, so an unprovable span must not reject the merge.
+    let wal_check = if ownership.is_compactor() {
+        WalCheck::Published
+    } else {
+        WalCheck::LocalWal(crate::wal::read_commit(&config.data_dir, "metrics").0)
+    };
     let fan_in = config
         .compaction_max_merge_blocks
         .clamp(2, MAX_MERGE_FAN_IN);
@@ -1345,10 +1367,11 @@ pub(crate) async fn compact_metrics_levels_once_scoped(
         }
         let paths: Vec<_> = blocks.iter().map(|block| block.path.clone()).collect();
         let config = config.clone();
-        let merged =
-            tokio::task::spawn_blocking(move || compact_metric_blocks(&blocks, &config, 1))
-                .await
-                .map_err(|e| Error::Internal(format!("metrics compaction task panicked: {e}")))?;
+        let merged = tokio::task::spawn_blocking(move || {
+            compact_metric_blocks(&blocks, &config, 1, wal_check)
+        })
+        .await
+        .map_err(|e| Error::Internal(format!("metrics compaction task panicked: {e}")))?;
         let new_meta = match merged {
             Ok(meta) => meta,
             Err(error) => {
@@ -1401,10 +1424,11 @@ pub(crate) async fn compact_metrics_levels_once_scoped(
         }
         let paths: Vec<_> = blocks.iter().map(|block| block.path.clone()).collect();
         let config = config.clone();
-        let merged =
-            tokio::task::spawn_blocking(move || compact_metric_blocks(&blocks, &config, 2))
-                .await
-                .map_err(|e| Error::Internal(format!("metrics compaction task panicked: {e}")))?;
+        let merged = tokio::task::spawn_blocking(move || {
+            compact_metric_blocks(&blocks, &config, 2, wal_check)
+        })
+        .await
+        .map_err(|e| Error::Internal(format!("metrics compaction task panicked: {e}")))?;
         let new_meta = match merged {
             Ok(meta) => meta,
             Err(error) => {
@@ -1653,7 +1677,10 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
     use crate::storage::block_file::write_block_file;
-    use crate::storage::{SeriesIndex, SeriesSelector, SeriesTable, SERIES_INDEX_FOOTER_KEY};
+    use crate::storage::{
+        CatalogBlock, ObjectCatalog, RetentionPolicy, SeriesIndex, SeriesSelector, SeriesTable,
+        SERIES_INDEX_FOOTER_KEY,
+    };
     use std::collections::BTreeSet;
 
     fn write_metrics_block(
@@ -1758,7 +1785,13 @@ mod tests {
         let first = write_metrics_block(dir.path(), "first.parquet", 100, (0, 4), true);
         let second = write_metrics_block(dir.path(), "second.parquet", 200, (4, 8), true);
 
-        let merged = compact_metric_blocks(&[first.clone(), second.clone()], &config, 1).unwrap();
+        let merged = compact_metric_blocks(
+            &[first.clone(), second.clone()],
+            &config,
+            1,
+            WalCheck::LocalWal(0),
+        )
+        .unwrap();
         assert_eq!(merged.row_count, 8);
         assert_eq!(merged.wal_range, Some((0, 8)));
         assert!(merged
@@ -1862,7 +1895,13 @@ mod tests {
         let first = write_metrics_block(dir.path(), "first.parquet", 100, (0, 4), true);
         let second = write_metrics_block(dir.path(), "second.parquet", 200, (5, 8), true);
 
-        assert!(compact_metric_blocks(&[first.clone(), second.clone()], &config, 1).is_err());
+        assert!(compact_metric_blocks(
+            &[first.clone(), second.clone()],
+            &config,
+            1,
+            WalCheck::LocalWal(0),
+        )
+        .is_err());
         assert!(first.path.exists());
         assert!(second.path.exists());
         assert_eq!(
@@ -1872,6 +1911,36 @@ mod tests {
                 .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "parquet"))
                 .count(),
             2
+        );
+    }
+
+    #[test]
+    fn published_mode_merges_cross_writer_noncontiguous_ranges_without_a_span() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = BlockConfig {
+            data_dir: dir.path().to_path_buf(),
+            compression: "uncompressed".into(),
+            ..Default::default()
+        };
+        // Two writers each staged a block with its own WAL span; on a
+        // compactor the ranges are not contiguous and the local commit
+        // position is zero.
+        let first = write_metrics_block(dir.path(), "writer0.parquet", 100, (0, 4), true);
+        let second = write_metrics_block(dir.path(), "writer1.parquet", 200, (5, 8), true);
+
+        let merged = compact_metric_blocks(
+            &[first.clone(), second.clone()],
+            &config,
+            1,
+            WalCheck::Published,
+        )
+        .unwrap();
+        assert_eq!(merged.row_count, 8);
+        assert_eq!(merged.wal_range, None);
+
+        assert!(
+            compact_metric_blocks(&[first, second], &config, 1, WalCheck::LocalWal(0)).is_err(),
+            "the single-node path still rejects the same input"
         );
     }
 
@@ -1903,6 +1972,7 @@ mod tests {
             ],
             &config,
             1,
+            WalCheck::LocalWal(0),
         )
         .unwrap_err();
         assert!(error
@@ -1926,15 +1996,17 @@ mod tests {
         // Commit below the ranges: still not mergeable, still rejected.
         crate::wal::commit_position(dir.path(), "metrics", crate::wal::WalPosition(3)).unwrap();
         let mixed = [with_range.clone(), without_range.clone()];
-        assert!(compact_metric_blocks(&mixed, &config, 1).is_err());
+        assert!(compact_metric_blocks(&mixed, &config, 1, WalCheck::LocalWal(3)).is_err());
 
         // Every range committed: nothing can be replayed, so merge with no span.
         crate::wal::commit_position(dir.path(), "metrics", crate::wal::WalPosition(12)).unwrap();
-        let merged = compact_metric_blocks(&mixed, &config, 1).unwrap();
+        let merged = compact_metric_blocks(&mixed, &config, 1, WalCheck::LocalWal(12)).unwrap();
         assert_eq!(merged.row_count, 8);
         assert_eq!(merged.wal_range, None);
 
-        let merged = compact_metric_blocks(&[with_range, gapped], &config, 1).unwrap();
+        let merged =
+            compact_metric_blocks(&[with_range, gapped], &config, 1, WalCheck::LocalWal(12))
+                .unwrap();
         assert_eq!(merged.row_count, 8);
         assert_eq!(merged.wal_range, None);
     }
@@ -2243,5 +2315,238 @@ mod tests {
             .collect();
         assert_eq!(merged.len(), 1, "the two owned L1 blocks still merge");
         assert_eq!(merged[0].row_count, 8);
+    }
+
+    /// R-2 end-to-end: two writers and one compactor share the object catalog.
+    /// The compactor merges a cross-writer L0 pair, retires those sources in the
+    /// manifest, and a subsequent writer catalog tick cannot resurrect them.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sharded_compaction_retires_sources_and_writers_never_resurrect_them() {
+        let _guard = COMPACTION_PASS_TEST.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let config = BlockConfig {
+            data_dir: dir.path().to_path_buf(),
+            compression: "uncompressed".into(),
+            row_group_size: 2,
+            ..Default::default()
+        };
+
+        // Two L0 blocks per writer. The "a" pair shares one completed
+        // five-minute bucket so the compactor merges across writers; the "b"
+        // blocks sit alone in older buckets and stay as each writer's live
+        // block. No two blocks share a completed two-hour window afterwards, so
+        // the L1 -> L2 pass has nothing to merge.
+        let window_start = completed_two_hour_window();
+        let merged_ts = window_start + 10 * 60 * 1_000_000_000;
+        let older = window_start - LEVEL_TWO_WINDOW_NS;
+        let w0_a = write_metrics_block(
+            dir.path(),
+            "m_l0_writer0_a.parquet",
+            merged_ts,
+            (0, 4),
+            true,
+        );
+        let w1_a = write_metrics_block(
+            dir.path(),
+            "m_l0_writer1_a.parquet",
+            merged_ts + 1_000_000_000,
+            (5, 8),
+            true,
+        );
+        let w0_b = write_metrics_block(
+            dir.path(),
+            "m_l0_writer0_b.parquet",
+            older + 10 * 60 * 1_000_000_000,
+            (20, 24),
+            true,
+        );
+        let w1_b = write_metrics_block(
+            dir.path(),
+            "m_l0_writer1_b.parquet",
+            older - LEVEL_TWO_WINDOW_NS + 10 * 60 * 1_000_000_000,
+            (30, 34),
+            true,
+        );
+
+        let mut built = BlockIndex::new(dir.path());
+        for block in [&w0_a, &w1_a, &w0_b, &w1_b] {
+            built.add(block.clone());
+        }
+        let store = BlockIndexStore::at_path(dir.path().join("index.json"));
+        let index = Arc::new(RwLock::new(built));
+
+        // Shared catalog over in-memory object storage: each writer publishes
+        // its own two L0 keys under its lease.
+        let catalog = ObjectCatalog::new(
+            std::sync::Arc::new(object_store::memory::InMemory::new()),
+            "p",
+        );
+        let published = |meta: &BlockMetadata, writer: &str| {
+            let mut block = CatalogBlock::from_metadata(meta).unwrap();
+            block.writer = Some(writer.to_string());
+            block
+        };
+        catalog
+            .publish(
+                vec![published(&w0_a, "writer-0"), published(&w0_b, "writer-0")],
+                Some("writer-0".into()),
+            )
+            .await
+            .unwrap();
+        catalog
+            .publish(
+                vec![published(&w1_a, "writer-1"), published(&w1_b, "writer-1")],
+                Some("writer-1".into()),
+            )
+            .await
+            .unwrap();
+        let (manifest, _) = catalog.read().await.unwrap().unwrap();
+        assert_eq!(
+            manifest.blocks.len(),
+            4,
+            "manifest holds both writers' L0 keys"
+        );
+        let writers: HashSet<&str> = manifest
+            .blocks
+            .iter()
+            .filter_map(|block| block.writer.as_deref())
+            .collect();
+        assert_eq!(writers, HashSet::from(["writer-0", "writer-1"]));
+
+        // The compactor sees the whole catalog but no local WAL, so it merges
+        // the cross-writer pair with WalCheck::Published.
+        let completed = compact_metrics_levels_once_scoped(
+            &index,
+            &store,
+            &config,
+            &OwnershipRegistry::compactor(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(completed, 1, "only the cross-writer L0 pair merges");
+
+        let l1 = {
+            let idx = index.read().await;
+            idx.blocks
+                .iter()
+                .find(|block| metric_compaction_level(&block.path) == 1)
+                .cloned()
+                .expect("compactor must produce an L1 block")
+        };
+        assert!(l1.path.exists(), "the L1 output is written to the data dir");
+        assert_eq!(l1.row_count, 8, "both sources' rows survive the merge");
+        assert_eq!(
+            l1.wal_range, None,
+            "non-contiguous cross-writer WAL spans yield no replayable range"
+        );
+
+        let sources: Vec<String> = read_compacted_sources(&l1.path)
+            .unwrap()
+            .iter()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            sources,
+            vec![
+                "m_l0_writer0_a.parquet".to_string(),
+                "m_l0_writer1_a.parquet".to_string()
+            ],
+            "the merged block's footer names exactly the two retired sources"
+        );
+        let retired: HashSet<String> = sources.iter().cloned().collect();
+
+        // Publishing the compactor's output retires the merged sources in the
+        // same CAS update.
+        let l1_key = l1.path.file_name().unwrap().to_string_lossy().into_owned();
+        let mut merged = CatalogBlock::from_metadata(&l1).unwrap();
+        merged.writer = Some("compactor".into());
+        let manifest = catalog
+            .publish_with_retirements(vec![merged], Some("compactor".into()), &retired)
+            .await
+            .unwrap();
+        let keys: HashSet<&str> = manifest
+            .blocks
+            .iter()
+            .map(|block| block.key.as_str())
+            .collect();
+        assert!(
+            keys.contains(l1_key.as_str()),
+            "the merged block is published"
+        );
+        for source in &sources {
+            assert!(
+                !keys.contains(source.as_str()),
+                "retired source {source} must be gone from the manifest"
+            );
+        }
+        assert!(keys.contains("m_l0_writer0_b.parquet"));
+        assert!(keys.contains("m_l0_writer1_b.parquet"));
+        assert_eq!(keys.len(), 3);
+
+        // Resurrection check: writer-0's next catalog tick republishes its own
+        // live block. The retired sources are already absent from the manifest,
+        // so nothing brings them back.
+        let manifest = catalog
+            .publish(vec![published(&w0_b, "writer-0")], Some("writer-0".into()))
+            .await
+            .unwrap();
+        let keys: HashSet<&str> = manifest
+            .blocks
+            .iter()
+            .map(|block| block.key.as_str())
+            .collect();
+        assert!(
+            keys.contains(l1_key.as_str()),
+            "the compactor's output survives a writer tick"
+        );
+        assert!(keys.contains("m_l0_writer0_b.parquet"));
+        for source in &sources {
+            assert!(
+                !keys.contains(source.as_str()),
+                "writer-0's tick must not resurrect retired source {source}"
+            );
+        }
+
+        // Retention evidence: the compactor registry retires an expired block
+        // while in-window blocks (including its own merged output) survive.
+        let now = chrono::Utc::now().timestamp_nanos_opt().unwrap();
+        let expired_ts = now - 30 * 24 * 3600 * 1_000_000_000;
+        let expired = write_metrics_block(
+            dir.path(),
+            "retention_expired.parquet",
+            expired_ts,
+            (100, 104),
+            true,
+        );
+        let fresh = write_metrics_block(
+            dir.path(),
+            "retention_fresh.parquet",
+            now - 1_000_000_000,
+            (200, 204),
+            true,
+        );
+        {
+            let mut idx = index.write().await;
+            idx.add(expired.clone());
+            idx.add(fresh.clone());
+        }
+        RetentionPolicy::enforce_scoped(&index, &store, 7, &OwnershipRegistry::compactor())
+            .await
+            .unwrap();
+        assert!(!expired.path.exists(), "the expired block file is deleted");
+        assert!(fresh.path.exists(), "the in-window block survives");
+        assert!(
+            l1.path.exists(),
+            "the compactor's merged output survives the sweep"
+        );
+        {
+            let idx = index.read().await;
+            assert!(
+                !idx.blocks.iter().any(|block| block.path == expired.path),
+                "the expired block leaves the index"
+            );
+            assert!(idx.blocks.iter().any(|block| block.path == fresh.path));
+            assert!(idx.blocks.iter().any(|block| block.path == l1.path));
+        }
     }
 }

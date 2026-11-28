@@ -159,3 +159,121 @@ async fn remote_points_are_merged_into_the_ast_result() {
         .iter()
         .all(|sample| (0..=4000).contains(&sample.timestamp_ns)));
 }
+
+/// A writer clamps the reader's global watermark down to the newest block it
+/// flushed itself. Adopted blocks live at the same metadata path but through a
+/// cache copy, so in the default local store only a path that exists counts.
+#[tokio::test]
+async fn local_flushed_watermark_ignores_adopted_blocks() {
+    let dir = tempdir().unwrap();
+    let exec = QueryExecutor::new(
+        Arc::new(RwLock::new(BlockIndex::new(dir.path()))),
+        Arc::new(RwLock::new(BlockIndex::new(&dir.path().join("logs")))),
+        dir.path().join("traces"),
+    );
+
+    let local = dir.path().join("local.parquet");
+    std::fs::write(&local, b"").unwrap();
+    {
+        let mut index = exec.index.write().await;
+        index.add(block(local, 2000, SignalType::Metrics));
+        // A block this node only knows from the catalog: its bytes are a
+        // read-cache copy elsewhere, so it must not raise the writer's own
+        // flush watermark.
+        index.add(block(
+            std::path::PathBuf::from("/nonexistent/adopted.parquet"),
+            9000,
+            SignalType::Metrics,
+        ));
+    }
+
+    assert_eq!(
+        exec.local_flushed_watermark_ns(RemoteSignal::Metrics).await,
+        2000
+    );
+}
+
+/// No local flush means every buffered row is asked for: the clamp must not
+/// invent a watermark out of another writer's blocks.
+#[tokio::test]
+async fn local_flushed_watermark_is_zero_without_local_blocks() {
+    let dir = tempdir().unwrap();
+    let exec = QueryExecutor::new(
+        Arc::new(RwLock::new(BlockIndex::new(dir.path()))),
+        Arc::new(RwLock::new(BlockIndex::new(&dir.path().join("logs")))),
+        dir.path().join("traces"),
+    );
+
+    assert_eq!(
+        exec.local_flushed_watermark_ns(RemoteSignal::Metrics).await,
+        0
+    );
+    assert_eq!(exec.local_flushed_watermark_ns(RemoteSignal::Logs).await, 0);
+    assert_eq!(
+        exec.local_flushed_watermark_ns(RemoteSignal::Traces).await,
+        0
+    );
+}
+
+/// The three signals have separate indexes; one writer's metric flush must not
+/// clamp its log or trace buffers.
+#[tokio::test]
+async fn local_flushed_watermark_is_per_signal() {
+    let dir = tempdir().unwrap();
+    let exec = QueryExecutor::new(
+        Arc::new(RwLock::new(BlockIndex::new(dir.path()))),
+        Arc::new(RwLock::new(BlockIndex::new(&dir.path().join("logs")))),
+        dir.path().join("traces"),
+    );
+
+    let metrics = dir.path().join("metrics.parquet");
+    let logs = dir.path().join("logs.parquet");
+    let traces = dir.path().join("traces.parquet");
+    for path in [&metrics, &logs, &traces] {
+        std::fs::write(path, b"").unwrap();
+    }
+    exec.index
+        .write()
+        .await
+        .add(block(metrics, 7000, SignalType::Metrics));
+    exec.log_index
+        .write()
+        .await
+        .add(block(logs, 2000, SignalType::Logs));
+    exec.trace_index
+        .write()
+        .await
+        .add(block(traces, 3000, SignalType::Traces));
+
+    assert_eq!(
+        exec.local_flushed_watermark_ns(RemoteSignal::Metrics).await,
+        7000
+    );
+    assert_eq!(
+        exec.local_flushed_watermark_ns(RemoteSignal::Logs).await,
+        2000
+    );
+    assert_eq!(
+        exec.local_flushed_watermark_ns(RemoteSignal::Traces).await,
+        3000
+    );
+}
+
+fn block(
+    path: std::path::PathBuf,
+    end_timestamp_ns: i64,
+    signal_type: SignalType,
+) -> BlockMetadata {
+    BlockMetadata {
+        path,
+        start_timestamp_ns: 0,
+        end_timestamp_ns,
+        row_count: 1,
+        size_bytes: 1,
+        metric_names: Default::default(),
+        label_names: Default::default(),
+        label_values: Default::default(),
+        signal_type,
+        wal_range: None,
+    }
+}

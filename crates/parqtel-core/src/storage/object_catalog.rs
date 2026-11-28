@@ -169,6 +169,23 @@ impl ObjectCatalog {
         blocks: Vec<CatalogBlock>,
         writer_lease: Option<String>,
     ) -> Result<CatalogManifest> {
+        self.publish_with_retirements(blocks, writer_lease, &HashSet::new())
+            .await
+    }
+
+    /// As [`Self::publish`], but also removes every manifest key in `retired`
+    /// in the same CAS update.
+    ///
+    /// A compactor retires the source blocks it merged: leaving them in the
+    /// manifest lets a writer resurrect its stale staged copy on the next
+    /// tick. A key that also appears in `blocks` is never dropped — the new
+    /// block is authoritative.
+    pub async fn publish_with_retirements(
+        &self,
+        blocks: Vec<CatalogBlock>,
+        writer_lease: Option<String>,
+        retired: &HashSet<String>,
+    ) -> Result<CatalogManifest> {
         for attempt in 0..self.retries {
             let current = self.read().await?;
             let (mut manifest, mode) = match current {
@@ -180,6 +197,11 @@ impl ObjectCatalog {
                 .blocks
                 .into_iter()
                 .filter(|block| {
+                    // A retired source stays out even if the writer is still
+                    // publishing it; the replacement block in `blocks` wins.
+                    if retired.contains(&block.key) && !local_keys.contains(block.key.as_str()) {
+                        return false;
+                    }
                     // A writer retires only its own missing blocks; another
                     // node's blocks stay until that node says so.
                     block.writer.as_deref() != writer_lease.as_deref()
@@ -311,6 +333,64 @@ mod tests {
             let key = format!("block-{i}.parquet");
             assert!(keys.contains(key.as_str()), "lost update for {key}");
         }
+    }
+
+    #[tokio::test]
+    async fn compactor_retires_merged_sources_and_they_stay_gone() {
+        let store = Arc::new(object_store::memory::InMemory::new());
+        let catalog = ObjectCatalog::new(store, "p");
+        let mut source_a = block("w0-a.parquet", 1);
+        source_a.writer = Some("node-w0".into());
+        let mut source_b = block("w0-b.parquet", 2);
+        source_b.writer = Some("node-w0".into());
+        catalog
+            .publish(vec![source_a, source_b], Some("node-w0".into()))
+            .await
+            .unwrap();
+
+        let mut merged = block("m_l1_merged.parquet", 1);
+        merged.writer = Some("compactor".into());
+        let retired: HashSet<String> = ["w0-a.parquet", "w0-b.parquet"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        let manifest = catalog
+            .publish_with_retirements(vec![merged], Some("compactor".into()), &retired)
+            .await
+            .unwrap();
+        assert_eq!(manifest.blocks.len(), 1);
+        assert_eq!(manifest.blocks[0].key, "m_l1_merged.parquet");
+
+        // A writer publishing an unrelated block must not resurrect its
+        // retired staged sources.
+        let mut unrelated = block("w0-c.parquet", 3);
+        unrelated.writer = Some("node-w0".into());
+        catalog
+            .publish(vec![unrelated], Some("node-w0".into()))
+            .await
+            .unwrap();
+        let (manifest, _) = catalog.read().await.unwrap().unwrap();
+        let keys: HashSet<&str> = manifest.blocks.iter().map(|b| b.key.as_str()).collect();
+        assert_eq!(keys.len(), 2);
+        assert!(keys.contains("m_l1_merged.parquet"));
+        assert!(keys.contains("w0-c.parquet"));
+        assert!(!keys.contains("w0-a.parquet"));
+        assert!(!keys.contains("w0-b.parquet"));
+    }
+
+    #[tokio::test]
+    async fn a_retired_key_relisted_in_blocks_survives() {
+        let store = Arc::new(object_store::memory::InMemory::new());
+        let catalog = ObjectCatalog::new(store, "p");
+        let mut kept = block("kept.parquet", 1);
+        kept.writer = Some("node-w0".into());
+        let retired: HashSet<String> = ["kept.parquet".to_string()].into_iter().collect();
+        let manifest = catalog
+            .publish_with_retirements(vec![kept], Some("compactor".into()), &retired)
+            .await
+            .unwrap();
+        assert_eq!(manifest.blocks.len(), 1);
+        assert_eq!(manifest.blocks[0].key, "kept.parquet");
     }
 
     #[tokio::test]

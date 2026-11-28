@@ -28,10 +28,11 @@ using the same Collector distribution that will run this config.
 ## Sharded writers
 
 Use [`otel-collector-sharded.yaml`](otel-collector-sharded.yaml) when the chart
-runs with `mode: sharded`. It fans OTLP/gRPC out to every writer pod
-(`parqtel-writer-<i>.parqtel-writer:4317`); any writer may take any batch
-because the readers union every writer's unflushed buffer with the shared
-bucket. Never point it at the reader Service: readers do not ingest.
+runs with `mode: sharded`. It hashes each item to exactly one writer pod
+(traces by `traceID`, metrics and logs by `service`) using the `load_balancing`
+exporter over the headless writer Service, so no signal is written twice and a
+trace stays on one writer. Never point it at the reader Service: readers do not
+ingest.
 
 Parqtel accepts OTLP protobuf over gRPC/HTTP and OTLP JSON. A collector using
 the SDK defaults needs no encoding override. Generic applications can post a

@@ -83,12 +83,14 @@ pub(crate) async fn run_server(
     let role = config.server.role;
     let node_id = config.server.resolved_node_id();
     // In a sharded deployment this node shares the catalog with other writers:
-    // compaction and retention must not retire the blocks they own. Local
-    // single-node deployments keep the unscoped registry.
-    let ownership = std::sync::Arc::new(if config.object_store.enabled {
-        OwnershipRegistry::scoped()
-    } else {
-        OwnershipRegistry::everything()
+    // compaction and retention must not retire the blocks they own. A
+    // compactor is the exception: it has no staged copies of writer blocks and
+    // is the single authority for the bucket, so it retires whatever it merges
+    // or expires. Local single-node deployments keep the unscoped registry.
+    let ownership = std::sync::Arc::new(match role {
+        parqtel_core::config::NodeRole::Compactor => OwnershipRegistry::compactor(),
+        _ if config.object_store.enabled => OwnershipRegistry::scoped(),
+        _ => OwnershipRegistry::everything(),
     });
     let runs_alert_evaluator = role.runs_alert_evaluator(config.server.alert_evaluator);
     parqtel_core::Scanner::configure_footer_cache_budget(config.query.footer_cache_bytes)
@@ -468,7 +470,7 @@ pub(crate) async fn run_server(
             trace_index_store.clone(),
         ],
     )
-    .await;
+    .await?;
     tracing::debug!(
         signals = "metrics, logs, traces",
         "parqtel application state initialized"

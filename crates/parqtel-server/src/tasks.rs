@@ -9,15 +9,92 @@ use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, RwLock};
 use tokio::task::JoinHandle;
 
-/// Applies the block metadata a flush publishes to an in-memory index.
+/// Per-tick catalog decisions, computed from a snapshot so they can be applied
+/// without holding structure locks across the catalog await.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct SyncPlan {
+    /// Keys my locally staged blocks that the manifest should contain.
+    publish: Vec<String>,
+    /// Keys this node closed earlier and that must leave the manifest.
+    retire: std::collections::HashSet<String>,
+    /// Local paths to drop from the index and from the bucket.
+    prune_local: Vec<std::path::PathBuf>,
+    /// Adopted cache paths to drop from the index.
+    prune_adopted: Vec<String>,
+}
+
+/// Decides one catalog tick from a snapshot of this node's indexes.
 ///
-/// The index is updated under its write lock, but only in memory: the lock must
-/// never be held across serialising and writing the whole index. A block whose WAL
-/// has not been committed yet (`durable` is set) must be in the sidecar *before*
-/// the flush proceeds, or a crash in between would leave the block on disk, absent
-/// from the index and already marked recovered; so the sidecar is written now
-/// instead of waiting for the debounce, and the flush is then told it may go on.
+/// `local` entries are `(path, locally produced, present in the bucket)` for
+/// every block in the index. `published` is the set of keys this task published
+/// earlier; an entry in it that disappeared from the manifest was retired or
+/// expired by the compactor and must never be republished. Only the compactor
+/// retires: adopted keys it closed by merging or retention are keys it no longer
+/// lists in its index. The rule is deliberately limited to adopted keys, so a
+/// cold compactor with an empty index cannot wipe the manifest. When the
+/// manifest itself is absent (`manifest_known == false`) no absence-based
+/// pruning happens: a missing catalog object is not evidence of retirement.
 ///
+/// A full multi-node end-to-end test in one process is impossible because the
+/// block store is a process-global `OnceLock`; this function covers the decision
+/// logic and the callers are exercised by the sharded integration setup.
+fn plan_sync(
+    local: &[(std::path::PathBuf, bool, bool)],
+    manifest_keys: &std::collections::HashSet<String>,
+    published: &std::collections::HashSet<String>,
+    adopted: &std::collections::HashSet<String>,
+    role_is_compactor: bool,
+    manifest_known: bool,
+) -> SyncPlan {
+    let mut plan = SyncPlan::default();
+    let mut local_keys = std::collections::HashSet::new();
+    for (path, locally_produced, in_bucket) in local {
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        local_keys.insert(name.to_string());
+        // A cache copy of a foreign block is neither ours to publish nor ours
+        // to prune: its presence is driven by the manifest adoption path.
+        if !locally_produced || adopted.contains(name) {
+            continue;
+        }
+        if published.contains(name) {
+            if !manifest_known || manifest_keys.contains(name) {
+                plan.publish.push(name.to_string());
+            } else {
+                // The compactor retired this block after we flushed it. Drop
+                // the staged copy instead of bringing the key back.
+                plan.prune_local.push(path.clone());
+            }
+        } else if *in_bucket {
+            plan.publish.push(name.to_string());
+        } else {
+            // The block was deleted while this node was down; publishing it
+            // would resurrect a key compaction already accounted for.
+            plan.prune_local.push(path.clone());
+        }
+    }
+    // An absent manifest is not evidence that every key was retired; never
+    // prune from it. A compactor also has nothing to retire in a manifest that
+    // does not exist.
+    if !manifest_known {
+        return plan;
+    }
+    if role_is_compactor {
+        for key in adopted {
+            if !local_keys.contains(key) {
+                plan.retire.insert(key.clone());
+            }
+        }
+    }
+    for key in adopted {
+        if !manifest_keys.contains(key) {
+            plan.prune_adopted.push(key.clone());
+        }
+    }
+    plan
+}
+
 /// The task ends when every sender is gone.
 /// Pushes local block metadata into the shared manifest and adopts blocks
 /// other nodes published. Local indexes remain authoritative for this node;
@@ -39,7 +116,11 @@ pub(crate) fn spawn_catalog_sync_task(
         // Keys adopted from the manifest, remembered across ticks. A cache
         // materialisation can make `path.exists()` true for a foreign block;
         // this set keeps it from ever being published under our node id.
-        let mut adopted_keys = std::collections::HashSet::new();
+        let mut adopted_keys: std::collections::HashSet<String> = std::collections::HashSet::new();
+        // Keys this task published under our writer lease, remembered so a key
+        // the compactor retired while we were down is never republished.
+        let mut published_keys: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
         loop {
             ticker.tick().await;
             // Read the manifest before publishing so a block the catalog
@@ -52,37 +133,66 @@ pub(crate) fn spawn_catalog_sync_task(
                     continue;
                 }
             };
-            let foreign_keys: std::collections::HashSet<&str> = remote
-                .as_ref()
-                .map(|manifest| {
-                    manifest
+            let manifest_known = remote.is_some();
+            let (remote_blocks, manifest_keys, foreign_keys) = match remote {
+                Some(manifest) => {
+                    let keys = manifest
+                        .blocks
+                        .iter()
+                        .map(|block| block.key.clone())
+                        .collect::<std::collections::HashSet<_>>();
+                    let foreign = manifest
                         .blocks
                         .iter()
                         .filter(|block| block.writer.is_some() && block.writer != node_id)
-                        .map(|block| block.key.as_str())
-                        .collect()
-                })
-                .unwrap_or_default();
-            let mut local = Vec::new();
-            let mut local_keys = std::collections::HashSet::new();
-            for index in &indexes {
+                        .map(|block| block.key.clone())
+                        .collect::<std::collections::HashSet<_>>();
+                    (manifest.blocks, keys, foreign)
+                }
+                None => (
+                    Vec::new(),
+                    std::collections::HashSet::new(),
+                    std::collections::HashSet::new(),
+                ),
+            };
+
+            // Snapshot the indexes. Every lock is dropped before any await on
+            // the catalog; only the HEAD batch below runs elsewhere.
+            let mut local_entries: Vec<(std::path::PathBuf, bool, bool)> = Vec::new();
+            let mut blocks_by_key: std::collections::HashMap<
+                String,
+                parqtel_core::storage::CatalogBlock,
+            > = std::collections::HashMap::new();
+            let mut index_keys = std::collections::HashSet::new();
+            let mut path_signal: std::collections::HashMap<std::path::PathBuf, usize> =
+                std::collections::HashMap::new();
+            let mut path_by_key: std::collections::HashMap<String, (usize, std::path::PathBuf)> =
+                std::collections::HashMap::new();
+            let mut head_requests: Vec<(usize, std::path::PathBuf)> = Vec::new();
+            for (signal, index) in indexes.iter().enumerate() {
                 let idx = index.read().await;
                 for block in &idx.blocks {
                     let Some(name) = block.path.file_name().and_then(|name| name.to_str()) else {
                         continue;
                     };
-                    // A block adopted from another node lives only in this
-                    // node's index until its cache is materialised. Publishing
-                    // it as our own would resurrect entries the owner has
-                    // already retired.
-                    if adopted_keys.contains(name) {
-                        continue;
-                    }
+                    let name = name.to_string();
+                    index_keys.insert(name.clone());
+                    path_signal.insert(block.path.clone(), signal);
+                    path_by_key
+                        .entry(name.clone())
+                        .or_insert_with(|| (signal, block.path.clone()));
                     // Ask the installed store, not the filesystem: only the
                     // backend knows whether `path` is a locally staged block
                     // or a read-cache artefact of an adopted one.
-                    if !parqtel_core::storage::block_store::store().is_locally_produced(&block.path)
-                    {
+                    let locally_produced = parqtel_core::storage::block_store::store()
+                        .is_locally_produced(&block.path)
+                        && !adopted_keys.contains(&name);
+                    let slot = local_entries.len();
+                    local_entries.push((block.path.clone(), locally_produced, false));
+                    if locally_produced && !published_keys.contains(&name) {
+                        head_requests.push((slot, block.path.clone()));
+                    }
+                    if !locally_produced || foreign_keys.contains(&name) {
                         continue;
                     }
                     let Ok(mut catalog_block) =
@@ -90,35 +200,141 @@ pub(crate) fn spawn_catalog_sync_task(
                     else {
                         continue;
                     };
-                    if foreign_keys.contains(catalog_block.key.as_str()) {
-                        continue;
-                    }
                     catalog_block.writer = node_id.clone();
-                    local_keys.insert(catalog_block.key.clone());
-                    local.push(catalog_block);
+                    blocks_by_key.insert(name, catalog_block);
                 }
             }
-            drop(foreign_keys);
+            // Retired/compacted sources leave the index; forgetting them here
+            // keeps the remembered set bounded. Their manifest entries are
+            // still withdrawn by the publish filter because they are absent
+            // from the local keys of this tick.
+            published_keys.retain(|key| index_keys.contains(key));
+            // A block flushed before this node restarted is republished only
+            // if its object still exists; `head` catches a compaction or
+            // retention delete that happened while the node was down. New
+            // flushes publish before this tick, so they still ship.
+            if !head_requests.is_empty() {
+                let slots: Vec<usize> = head_requests.iter().map(|(slot, _)| *slot).collect();
+                let paths: Vec<std::path::PathBuf> =
+                    head_requests.iter().map(|(_, path)| path.clone()).collect();
+                let count = paths.len();
+                let in_bucket = tokio::task::spawn_blocking(move || {
+                    paths
+                        .iter()
+                        .map(|path| {
+                            parqtel_core::storage::block_store::store()
+                                .head(path)
+                                .ok()
+                                .flatten()
+                                .is_some()
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .await
+                .unwrap_or_else(|e| {
+                    // Do not delete blocks because the probe failed; shipping
+                    // them is recoverable, deleting live data is not.
+                    tracing::warn!(error = %e, "block head probe failed");
+                    vec![true; count]
+                });
+                for (slot, present) in slots.into_iter().zip(in_bucket) {
+                    local_entries[slot].2 = present;
+                }
+            }
+
+            let mut plan = plan_sync(
+                &local_entries,
+                &manifest_keys,
+                &published_keys,
+                &adopted_keys,
+                ownership.is_compactor(),
+                manifest_known,
+            );
+            // A block whose metadata could not be rebuilt, or that another
+            // writer owns, is not ours to publish.
+            plan.publish.retain(|key| blocks_by_key.contains_key(key));
+
+            // Prune retired local blocks and vanished adopted caches under the
+            // index write locks; delete the files afterwards on the blocking
+            // pool so no lock spans I/O.
+            let mut doomed: Vec<std::path::PathBuf> = Vec::new();
+            for path in &plan.prune_local {
+                if let Some(&signal) = path_signal.get(path) {
+                    let mut idx = indexes[signal].write().await;
+                    idx.remove(path);
+                    stores[signal].mark_dirty();
+                }
+                if let Some(name) = path.file_name().and_then(|name| name.to_str()) {
+                    published_keys.remove(name);
+                }
+                doomed.push(path.clone());
+            }
+            for key in &plan.prune_adopted {
+                adopted_keys.remove(key);
+                if let Some(pair) = path_by_key.get(key) {
+                    let (signal, path) = pair;
+                    let mut idx = indexes[*signal].write().await;
+                    idx.remove(path);
+                    stores[*signal].mark_dirty();
+                    doomed.push(path.clone());
+                }
+            }
+            if !doomed.is_empty() {
+                let _ = tokio::task::spawn_blocking(move || {
+                    for path in doomed {
+                        let _ = parqtel_core::storage::block_store::store().delete(&path);
+                    }
+                })
+                .await;
+            }
+
             // A reader must not claim blocks: the manifest's writer lease is
             // what tells the owner its blocks are still live.
-            if publish_local {
-                let own_keys: Vec<String> = local.iter().map(|block| block.key.clone()).collect();
-                if let Err(e) = catalog.publish(local, node_id.clone()).await {
-                    tracing::warn!(error = %e, "catalog publish failed");
-                    continue;
-                }
-                for key in own_keys {
-                    ownership.own(&key);
+            if publish_local && (!plan.publish.is_empty() || !plan.retire.is_empty()) {
+                let blocks: Vec<parqtel_core::storage::CatalogBlock> = plan
+                    .publish
+                    .iter()
+                    .filter_map(|key| blocks_by_key.get(key).cloned())
+                    .collect();
+                match catalog
+                    .publish_with_retirements(blocks, node_id.clone(), &plan.retire)
+                    .await
+                {
+                    Ok(_) => {
+                        for key in &plan.publish {
+                            published_keys.insert(key.clone());
+                            ownership.own(key);
+                        }
+                        for key in &plan.retire {
+                            adopted_keys.remove(key);
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "catalog publish failed");
+                        continue;
+                    }
                 }
             }
-            let Some(remote) = remote else { continue };
+
+            // Keys pruned this tick must not be adopted right back from the
+            // manifest snapshot taken before the retirement was published.
+            let mut remaining_keys = index_keys;
+            for path in &plan.prune_local {
+                if let Some(name) = path.file_name().and_then(|name| name.to_str()) {
+                    remaining_keys.remove(name);
+                }
+            }
+            for key in &plan.prune_adopted {
+                remaining_keys.remove(key);
+            }
+
             let local_node = node_id.as_deref().unwrap_or_default();
-            for block in remote.blocks {
+            for block in remote_blocks {
                 // Compaction and retention consult this registry before
                 // retiring a block; a key another writer owns must survive
                 // this node's sweep.
                 ownership.adopt(&block.key, block.writer.as_deref(), local_node);
-                if local_keys.contains(&block.key) {
+                if remaining_keys.contains(&block.key) || plan.retire.contains(&block.key) {
                     continue;
                 }
                 let signal = block.signal_type.index();
@@ -136,6 +352,14 @@ pub(crate) fn spawn_catalog_sync_task(
     })
 }
 
+/// Applies the block metadata a flush publishes to an in-memory index.
+///
+/// The index is updated under its write lock, but only in memory: the lock must
+/// never be held across serialising and writing the whole index. A block whose WAL
+/// has not been committed yet (`durable` is set) must be in the sidecar *before*
+/// the flush proceeds, or a crash in between would leave the block on disk, absent
+/// from the index and already marked recovered; so the sidecar is written now
+/// instead of waiting for the debounce, and the flush is then told it may go on.
 pub(crate) fn spawn_index_task(
     mut rx: mpsc::UnboundedReceiver<parqtel_core::storage::PendingIndex>,
     index: Arc<RwLock<BlockIndex>>,
@@ -560,5 +784,149 @@ mod anomaly_tests {
         let baseline = vec![1.0, 1.0, 1.0, 1.0, 1.0, 1.0];
         assert_eq!(anomaly_condition(&baseline, 50.0, 3.0), Some(true));
         assert_eq!(anomaly_condition(&[1.0, 2.0], 3.0, 3.0), None);
+    }
+}
+
+/// Catalog-tick decisions, tested without a live block store: the store is a
+/// process-global `OnceLock`, so a full multi-node end-to-end scenario cannot
+/// run inside one test process. These cover the writer, compactor and reader
+/// rules that decide what each tick publishes, retires and prunes.
+#[cfg(test)]
+mod catalog_sync_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+    use super::plan_sync;
+    use std::collections::HashSet;
+    use std::path::PathBuf;
+
+    fn key_set(keys: &[&str]) -> HashSet<String> {
+        keys.iter().map(|key| (*key).to_string()).collect()
+    }
+
+    fn entry(name: &str, locally_produced: bool, in_bucket: bool) -> (PathBuf, bool, bool) {
+        (
+            PathBuf::from(format!("/data/blocks/{name}")),
+            locally_produced,
+            in_bucket,
+        )
+    }
+
+    #[test]
+    fn writer_publishes_new_blocks_and_prunes_blocks_missing_from_the_bucket() {
+        let manifest = key_set(&["fresh.pq"]);
+        let published = HashSet::new();
+        let adopted = HashSet::new();
+        let local = vec![
+            entry("fresh.pq", true, true),
+            entry("deleted-while-down.pq", true, false),
+        ];
+        let plan = plan_sync(&local, &manifest, &published, &adopted, false, true);
+        assert_eq!(plan.publish, vec!["fresh.pq".to_string()]);
+        assert_eq!(
+            plan.prune_local,
+            vec![PathBuf::from("/data/blocks/deleted-while-down.pq")]
+        );
+        assert!(plan.retire.is_empty());
+        assert!(plan.prune_adopted.is_empty());
+    }
+
+    #[test]
+    fn writer_republishes_a_known_block_but_never_resurrects_a_retired_one() {
+        let local = vec![
+            entry("keep.pq", true, true),
+            entry("retired.pq", true, true),
+        ];
+        let published = key_set(&["keep.pq", "retired.pq"]);
+
+        let live = plan_sync(
+            &local,
+            &key_set(&["keep.pq", "retired.pq"]),
+            &published,
+            &HashSet::new(),
+            false,
+            true,
+        );
+        assert_eq!(
+            live.publish,
+            vec!["keep.pq".to_string(), "retired.pq".to_string()]
+        );
+        assert!(live.prune_local.is_empty());
+
+        // The compactor removed `retired.pq` from the manifest after merging it.
+        let after_retirement = plan_sync(
+            &local,
+            &key_set(&["keep.pq"]),
+            &published,
+            &HashSet::new(),
+            false,
+            true,
+        );
+        assert_eq!(after_retirement.publish, vec!["keep.pq".to_string()]);
+        assert_eq!(
+            after_retirement.prune_local,
+            vec![PathBuf::from("/data/blocks/retired.pq")]
+        );
+    }
+
+    #[test]
+    fn reader_prunes_adopted_keys_that_left_the_manifest() {
+        let adopted = key_set(&["gone.pq"]);
+        let local = vec![entry("gone.pq", false, true)];
+        let plan = plan_sync(
+            &local,
+            &HashSet::new(),
+            &HashSet::new(),
+            &adopted,
+            false,
+            true,
+        );
+        assert!(plan.publish.is_empty());
+        assert!(plan.prune_local.is_empty());
+        assert_eq!(plan.prune_adopted, vec!["gone.pq".to_string()]);
+        assert!(plan.retire.is_empty());
+    }
+
+    #[test]
+    fn compactor_retires_only_adopted_keys_it_no_longer_lists() {
+        let adopted = key_set(&["src0.pq", "src1.pq"]);
+        let local = vec![entry("merged.pq", true, true)];
+        let plan = plan_sync(
+            &local,
+            &key_set(&["src0.pq", "src1.pq", "merged.pq", "unrelated.pq"]),
+            &HashSet::new(),
+            &adopted,
+            true,
+            true,
+        );
+        assert_eq!(plan.publish, vec!["merged.pq".to_string()]);
+        assert_eq!(plan.retire, key_set(&["src0.pq", "src1.pq"]));
+        assert!(!plan.retire.contains("unrelated.pq"));
+        assert!(plan.prune_adopted.is_empty());
+    }
+
+    #[test]
+    fn cold_compactor_never_retires_keys_it_never_adopted() {
+        let plan = plan_sync(
+            &[],
+            &key_set(&["writer-a.pq", "writer-b.pq"]),
+            &HashSet::new(),
+            &HashSet::new(),
+            true,
+            true,
+        );
+        assert!(plan.retire.is_empty());
+        assert!(plan.publish.is_empty());
+        assert!(plan.prune_adopted.is_empty());
+    }
+
+    #[test]
+    fn absent_manifest_does_not_prune_local_or_adopted_keys() {
+        let published = key_set(&["mine.pq"]);
+        let adopted = key_set(&["theirs.pq"]);
+        let local = vec![entry("mine.pq", true, false)];
+        let plan = plan_sync(&local, &HashSet::new(), &published, &adopted, false, false);
+        assert_eq!(plan.publish, vec!["mine.pq".to_string()]);
+        assert!(plan.prune_local.is_empty());
+        assert!(plan.prune_adopted.is_empty());
+        assert!(plan.retire.is_empty());
     }
 }

@@ -15,3 +15,6 @@ sharding:
   reader:
     minReplicas: 2
     maxReplicas: 4
+  # Exercise the dedicated single-replica alert evaluator workload.
+  alertEvaluator:
+    enabled: true

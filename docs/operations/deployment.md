@@ -156,7 +156,7 @@ The chart (`deploy/helm/parqtel`) includes:
 
 - **Deployment** with configurable resources and probes; default mode caps `replicaCount` at 1
 - **Independent HA StatefulSet** — opt in with `ha.enabled: true`; see the [HA guide](high-availability.md) for per-pod ingest and operational requirements
-- **Sharded topology** — `mode: sharded` renders writer StatefulSet, reader Deployment + HPA and compactor Deployment; see [Sharded writers and stateless readers](#sharded-writers-and-stateless-readers)
+- **Sharded topology** — `mode: sharded` renders writer StatefulSet, reader Deployment + HPA, compactor Deployment and optionally one alert-evaluator Deployment; see [Sharded writers and stateless readers](#sharded-writers-and-stateless-readers)
 - **PodDisruptionBudget** — ensures availability during rollouts
 - **NetworkPolicy** — restricts ingress/egress traffic
 - **ServiceMonitor** — Prometheus Operator integration
@@ -209,13 +209,26 @@ writer pod, from the headless Service) and every pod gets
 without the token. A reader with no reachable writer still answers correctly,
 from the bucket alone.
 
-Alerting runs on whichever pod `server.alert_evaluator = true` selects: off on
-writers in this topology, on for a reader if you want it. Ingest-side effects
-(spans, RED metrics) stay on the writers.
+Writers, readers and the compactor always run with
+`server.alert_evaluator = false`: every replica of those workloads would
+otherwise evaluate every rule and duplicate notifications. Enable
+`sharding.alertEvaluator.enabled` to add exactly one dedicated evaluator pod
+(`Recreate` strategy, never scale it above one replica); it queries the same
+reader-facing storage and posts the notifications. Ingest-side effects (spans,
+RED metrics) stay on the writers.
 
-Point each collector at the writers' headless pods, not the reader Service:
+```yaml
+sharding:
+  alertEvaluator:
+    enabled: true
+    cacheSize: 2Gi   # ephemeral block cache for rule evaluation
+```
+
+Point each collector at the writers' headless Service, not the reader Service:
 [otel-collector-sharded.yaml](../../examples/agents/otel-collector-sharded.yaml)
-fans OTLP/gRPC out to every writer with a disk-backed retry queue.
+hashes every item to exactly one writer (traces by `traceID`, metrics and logs
+by `service`) through the `load_balancing` exporter, with a disk-backed retry
+queue per signal. Nothing is duplicated across writers.
 
 ```bash
 kubectl get pods -l app.kubernetes.io/component=writer    # parqtel-writer-0/1

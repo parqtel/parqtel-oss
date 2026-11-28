@@ -58,7 +58,7 @@ impl AppState {
         ui_etag: String,
         contention: Arc<parqtel_core::ContentionMetrics>,
         index_stores: [Arc<parqtel_core::BlockIndexStore>; 3],
-    ) -> Self {
+    ) -> anyhow::Result<Self> {
         let data_dir = config.storage.data_dir.clone();
         // The server owns block I/O for the process. Absolute block paths are
         // unchanged; the store is the seam an object-store backend replaces.
@@ -126,25 +126,29 @@ impl AppState {
                 .with_silence_dir(config.storage.data_dir.clone()),
         );
         let routing_metrics = Arc::new(RoutingMetrics::new());
-        let alert_dispatcher = config.alerting.routing.as_ref().and_then(|routing_cfg| {
-            match AlertDispatcher::from_config(routing_cfg, routing_metrics.clone()) {
-                Ok(d) => {
-                    let d = d.with_delivery_ledger(
+        // A routing config that cannot be built (an unresolved `${VAR}`, a bad
+        // URL scheme) must abort startup: the previous soft-fail ran the
+        // evaluator with no dispatcher, so every alert fired silently and the
+        // operator only found out by its absence.
+        let alert_dispatcher = match config.alerting.routing.as_ref() {
+            Some(routing_cfg) => {
+                let dispatcher = AlertDispatcher::from_config(routing_cfg, routing_metrics.clone())
+                    .map_err(|e| {
+                        anyhow::anyhow!("failed to initialize the Alertmanager dispatcher: {e}")
+                    })?;
+                Some(Arc::new(
+                    dispatcher.with_delivery_ledger(
                         parqtel_alert::dispatcher::ledger::DeliveryLedger::new(Some(
                             std::path::PathBuf::from(&config.storage.data_dir)
                                 .join("alert_delivery_ledger.json"),
                         )),
-                    );
-                    Some(Arc::new(d))
-                }
-                Err(e) => {
-                    tracing::error!(error = %e, "failed to initialize Alertmanager dispatcher");
-                    None
-                }
+                    ),
+                ))
             }
-        });
+            None => None,
+        };
 
-        Self {
+        Ok(Self {
             inner: Arc::new(AppStateInner {
                 ingestion_service,
                 log_ingestion_service,
@@ -170,7 +174,7 @@ impl AppState {
                 auth: auth.clone(),
                 audit,
             }),
-        }
+        })
     }
 
     #[cfg(test)]
@@ -180,8 +184,18 @@ impl AppState {
     }
 
     #[cfg(test)]
+    #[allow(clippy::unwrap_used, clippy::expect_used)]
+    pub async fn default_for_tests_with_config(config: Config) -> Self {
+        Self::try_for_tests_with_config(config)
+            .await
+            .expect("test configuration builds an app state")
+    }
+
+    /// The test builder without the panic, so a test can assert that a rejected
+    /// configuration fails here instead of at the first delivery.
+    #[cfg(test)]
     #[allow(clippy::unwrap_used)]
-    pub async fn default_for_tests_with_config(mut config: Config) -> Self {
+    pub async fn try_for_tests_with_config(mut config: Config) -> anyhow::Result<Self> {
         use tokio::sync::mpsc;
         // Kept for the life of the process: the services below flush from
         // background tasks and must not write into the working directory.
@@ -267,5 +281,48 @@ impl AppState {
             index_stores,
         )
         .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+    use super::*;
+    use parqtel_core::config::{AlertmanagerRoutingConfig, ReceiverConfig, WebhookReceiverConfig};
+
+    /// An unresolved `${VAR}` used to fall back to no dispatcher at all: the
+    /// evaluator kept firing alerts that nothing delivered. Startup must abort
+    /// instead, so the operator sees the misconfiguration.
+    #[tokio::test]
+    async fn an_unresolved_receiver_secret_fails_state_construction() {
+        let mut config = Config::default();
+        config.alerting.routing = Some(AlertmanagerRoutingConfig {
+            receivers: vec![ReceiverConfig {
+                name: "ops".into(),
+                webhook_configs: vec![WebhookReceiverConfig {
+                    url: "${PARQTEL_TEST_UNSET_RECEIVER_SECRET}".into(),
+                    ..WebhookReceiverConfig::default()
+                }],
+                ..ReceiverConfig::default()
+            }],
+            ..AlertmanagerRoutingConfig::default()
+        });
+
+        let error = AppState::try_for_tests_with_config(config)
+            .await
+            .err()
+            .expect("an unresolved receiver secret must abort startup");
+        assert!(
+            error.to_string().contains("Alertmanager dispatcher"),
+            "unexpected error: {error}"
+        );
+    }
+
+    /// No routing section means no dispatcher, and that stays a valid state.
+    #[tokio::test]
+    async fn no_routing_section_builds_state_without_a_dispatcher() {
+        let state = AppState::default_for_tests_with_config(Config::default()).await;
+        assert!(state.inner.alert_dispatcher.is_none());
     }
 }

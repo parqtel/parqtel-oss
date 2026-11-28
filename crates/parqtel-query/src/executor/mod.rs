@@ -168,6 +168,35 @@ impl QueryExecutor {
             .unwrap_or(0)
     }
 
+    /// Newest block this node flushed itself for `signal`. Adopted remote
+    /// blocks are read through a cache copy, so `is_locally_produced` is the
+    /// ownership test; a writer with no local block answers 0.
+    ///
+    /// This exists because writers flush on skewed schedules. The reader sends
+    /// one global watermark — the newest block it can see anywhere — and a
+    /// writer that flushed earlier would then drop its own buffered rows in
+    /// `(its flush, reader watermark]`. Block storage still serves the flushed
+    /// rows, so the buffer only needs rows newer than
+    /// `min(reader_watermark, local_flushed)`; the reader dedups the overlap.
+    pub async fn local_flushed_watermark_ns(&self, signal: crate::remote::RemoteSignal) -> i64 {
+        use crate::remote::RemoteSignal;
+        let index = match signal {
+            RemoteSignal::Metrics => &self.index,
+            RemoteSignal::Logs => &self.log_index,
+            RemoteSignal::Traces => &self.trace_index,
+        };
+        let store = parqtel_core::storage::block_store::store();
+        index
+            .read()
+            .await
+            .blocks
+            .iter()
+            .filter(|block| store.is_locally_produced(&block.path))
+            .map(|block| block.end_timestamp_ns)
+            .max()
+            .unwrap_or(0)
+    }
+
     /// Buffered rows from every configured writer. An unreachable writer is a
     /// warning, not a failed query: the reader still answers from block
     /// storage plus whichever writers did respond.

@@ -10,17 +10,24 @@ same role-neutral ConfigMap.
 {{- printf "%s-%s" (include "parqtel.fullname" .root) .role | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
-{{/* Component selector labels: one workload per component in one release. */}}
+{{/*
+Component selector labels: one workload per component in one release. The
+component defaults to the role; the alert evaluator sets it explicitly because
+it runs with `--role reader`.
+*/}}
 {{- define "parqtel.shardedSelector" -}}
 app.kubernetes.io/name: {{ include "parqtel.name" .root }}
 app.kubernetes.io/instance: {{ .root.Release.Name }}
-app.kubernetes.io/component: {{ .role }}
+app.kubernetes.io/component: {{ .component | default .role }}
 {{- end }}
 
 {{/*
 The container every sharded workload runs.
 
-Arguments: dict "root" $ "role" "writer|reader|compactor".
+Arguments: dict "root" $ "role" "writer|reader|compactor" plus optional
+"component" (defaults to the role) and "alertEvaluator" (default false).
+Every sharded workload pins PARQTEL__SERVER__ALERT_EVALUATOR, so only the
+dedicated single-replica evaluator Deployment ever evaluates alerts.
 */}}
 {{- define "parqtel.shardedContainer" -}}
 - name: {{ .root.Chart.Name }}
@@ -62,6 +69,10 @@ Arguments: dict "root" $ "role" "writer|reader|compactor".
         secretKeyRef:
           name: {{ include "parqtel.internalTokenSecretName" .root }}
           key: {{ .root.Values.sharding.internalToken.secretKey }}
+    # Readers/writers/compactors must never evaluate alerts: only the dedicated
+    # single-replica evaluator may (otherwise every replica notifies).
+    - name: PARQTEL__SERVER__ALERT_EVALUATOR
+      value: {{ .alertEvaluator | default false | quote }}
     {{- with .root.Values.sharding.objectStore.existingSecret }}
     - name: AWS_ACCESS_KEY_ID
       valueFrom:
@@ -92,9 +103,11 @@ Arguments: dict "root" $ "role" "writer|reader|compactor".
   resources:
     {{- $default := .root.Values.resources }}
     {{- $override := dict }}
-    {{- if eq .role "writer" }}{{ $override = .root.Values.sharding.writer.resources }}{{ end }}
-    {{- if eq .role "reader" }}{{ $override = .root.Values.sharding.reader.resources }}{{ end }}
-    {{- if eq .role "compactor" }}{{ $override = .root.Values.sharding.compactor.resources }}{{ end }}
+    {{- $component := .component | default .role }}
+    {{- if eq $component "writer" }}{{ $override = .root.Values.sharding.writer.resources }}{{ end }}
+    {{- if eq $component "reader" }}{{ $override = .root.Values.sharding.reader.resources }}{{ end }}
+    {{- if eq $component "compactor" }}{{ $override = .root.Values.sharding.compactor.resources }}{{ end }}
+    {{- if eq $component "alert-evaluator" }}{{ $override = .root.Values.sharding.alertEvaluator.resources }}{{ end }}
     {{- toYaml (mergeOverwrite (deepCopy $default) $override) | nindent 4 }}
   {{- with .root.Values.lifecycle }}
   lifecycle:

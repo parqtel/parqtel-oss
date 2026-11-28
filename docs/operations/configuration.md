@@ -275,7 +275,7 @@ tls_secret_name = "parqtel-provider-tls"
 | `retention_interval_secs` | Integer | `3600` | Retention sweep interval. |
 | `grpc_concurrency_limit` | Integer | `64` | Concurrent OTLP exports per gRPC connection. |
 | `index_persist_interval_secs` | Integer | `2` | Debounce for block-index sidecar writes. A durable flush forces an immediate write. |
-| `alert_evaluator` | Boolean | `false` | Run alert evaluation on a `reader`. On by default for `all` and `writer`; a `reader` only evaluates alerts when this is set, which is how a sharded install keeps alerting off the ingest pods. |
+| `alert_evaluator` | Boolean | `false` | Run alert evaluation on a `reader`. Always on for `all`, and never on for `writer` or `compactor`: alerts follow the query tier, so a sharded install keeps alerting off the ingest pods and turns it on in one reader-shaped pod (the chart's `sharding.alertEvaluator`). |
 | `tls` | Table | unset | Optional [`server.tls`](#servertls). |
 
 ### Node roles
@@ -642,6 +642,11 @@ receivers. When present, firing and resolved alerts flow through it; the legacy
 `[alerts.notifications.routes]` table is disabled. Configuring both logs a
 warning. Validation rejects bad matchers, bad durations, or a route naming an
 unknown receiver.
+
+Startup is fail-fast: a routing section that cannot be built — an unresolved
+`${VAR}` secret, an invalid receiver URL — aborts the process instead of
+running with no dispatcher. The server never evaluates alerts whose
+notifications have nowhere to go.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|

@@ -233,6 +233,16 @@ sharding:
     # -- Size limit of the compactor's block cache volume.
     cacheSize: 10Gi
     resources: {}
+  alertEvaluator:
+    # -- Dedicated alert evaluator Deployment. Writers, readers and the
+    # compactor always run with `server.alert_evaluator = false`, so enabling
+    # this adds exactly one pod that evaluates rules against the reader-facing
+    # storage and posts the notifications. Never scale it above one replica:
+    # every replica would evaluate every rule and duplicate notifications.
+    enabled: false
+    # -- Size limit of the evaluator's block cache volume.
+    cacheSize: 2Gi
+    resources: {}
 
 # ── Persistent Storage ───────────────────────────────────────────────────────
 storage:

@@ -131,6 +131,24 @@ mcp:
       PARQTEL_API_URL: "http://parqtel:8080"
 ```
 
+### Sharded Topology
+
+With `mode: sharded`, writers, readers and the compactor always run with
+`server.alert_evaluator = false`, because every replica would otherwise
+evaluate every rule and duplicate notifications. Set
+`sharding.alertEvaluator.enabled: true` to add exactly one dedicated evaluator
+Deployment (Recreate strategy) that queries the reader-facing storage and posts
+notifications. Never scale it above one replica.
+
+```yaml
+mode: sharded
+sharding:
+  alertEvaluator:
+    enabled: true
+    cacheSize: 2Gi
+    resources: {}
+```
+
 ### Value Overlays
 
 Pre-configured value files for different environments (in `deploy/k8s/overlays/`):

@@ -22,6 +22,9 @@ pub struct OwnershipRegistry {
     /// Whether ownership is scoped at all. A scoped registry never retires a
     /// block it cannot prove is local.
     scoped: bool,
+    /// A compactor is the single authority for its bucket/prefix: it owns the
+    /// merged output and may retire any source it was asked to merge.
+    compactor: bool,
 }
 
 impl OwnershipRegistry {
@@ -36,12 +39,32 @@ impl OwnershipRegistry {
         Self {
             foreign: Arc::new(RwLock::new(HashSet::new())),
             scoped: true,
+            compactor: false,
+        }
+    }
+
+    /// Compactor registry: every block in the shared catalog is retirable.
+    ///
+    /// A compactor has no staged local copy of writer blocks, so the scoped
+    /// check would refuse every merge and retention sweep. It is also the only
+    /// node allowed to retire a key another writer produced, because it is the
+    /// single authority for that bucket/prefix.
+    pub fn compactor() -> Self {
+        Self {
+            foreign: Arc::new(RwLock::new(HashSet::new())),
+            scoped: true,
+            compactor: true,
         }
     }
 
     /// True when the registry distinguishes owners.
     pub fn is_scoped(&self) -> bool {
         self.scoped
+    }
+
+    /// True when this registry belongs to a compactor node.
+    pub fn is_compactor(&self) -> bool {
+        self.compactor
     }
 
     /// Records the catalog's owner for `key`. A `None` writer is a legacy
@@ -79,7 +102,7 @@ impl OwnershipRegistry {
     /// another writer, and the block is staged locally rather than being a
     /// read-cache artefact of an adopted remote block.
     pub fn may_retire(&self, path: &Path) -> bool {
-        if !self.scoped {
+        if !self.scoped || self.compactor {
             return true;
         }
         let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
@@ -153,5 +176,26 @@ mod tests {
         assert!(!registry.may_retire(&path));
         registry.own("c.parquet");
         assert!(registry.may_retire(&path));
+    }
+
+    #[test]
+    fn compactor_retires_a_foreign_key_without_local_staging() {
+        let registry = OwnershipRegistry::compactor();
+        assert!(registry.is_compactor());
+        assert!(registry.is_scoped());
+        let missing = std::path::Path::new("/nonexistent/cache/m_l0_writer.parquet");
+        registry.adopt("m_l0_writer.parquet", Some("writer-0"), "compactor");
+        assert!(
+            registry.may_retire(missing),
+            "the compactor is the single authority for the bucket and has no local copy"
+        );
+    }
+
+    #[test]
+    fn scoped_registry_still_refuses_a_foreign_key_without_local_staging() {
+        let registry = OwnershipRegistry::scoped();
+        let missing = std::path::Path::new("/nonexistent/cache/m_l0_writer.parquet");
+        registry.adopt("m_l0_writer.parquet", Some("writer-0"), "compactor");
+        assert!(!registry.may_retire(missing));
     }
 }

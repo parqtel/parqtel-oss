@@ -1362,6 +1362,21 @@
               "type": "object"
             }
           }
+        },
+        "alertEvaluator": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "cacheSize": {
+              "type": "string"
+            },
+            "resources": {
+              "type": "object"
+            }
+          }
         }
       }
     }

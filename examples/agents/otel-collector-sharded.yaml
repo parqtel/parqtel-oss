@@ -1,14 +1,24 @@
-# OTel Collector -> every Parqtel writer in a sharded install over OTLP/gRPC.
+# OTel Collector -> Parqtel writer StatefulSet in a sharded install over OTLP/gRPC.
 #
-# The exporters target the writer StatefulSet's headless Service pods
-# (`parqtel-writer-<i>.parqtel-writer`). Any writer may take any batch: a reader
-# unions every writer's unflushed buffer with the shared bucket, so a row is
-# never lost to which pod received it, and the block it lands in is published to
-# the same catalog for everyone.
+# Sharded mode shards each item to exactly ONE writer: the load_balancing
+# exporter hashes the routing key with consistent hashing over the writer pods
+# it discovers through DNS, so CPU, RAM, WAL and Parquet blocks are not
+# duplicated and a row is never written twice. Sending every item to every
+# writer (broadcast fan-out) is HA duplication and lives in
+# otel-collector-ha.yaml instead.
 #
-# Fanning out in the collector (instead of one endpoint) keeps the OTLP stream
-# balanced when a writer restarts: the untouched exporters keep sending while
-# the failing one retries from its queue.
+# Routing keys must be per signal, and `routing_key` is set per exporter
+# instance, hence one load_balancing exporter per pipeline:
+#   - traces hash on `traceID`, so a whole trace lands on one writer and stays
+#     trace-coherent (a writer owning spans from the same trace sees all of it).
+#   - metrics and logs hash on `service`, so a service's stream is ordered on
+#     one writer.
+#
+# The resolver needs a stable per-pod DNS name, which requires the writer
+# Service to be headless: the chart renders `parqtel-writer` (release
+# namespace; shown here as `parqtel`) as a headless Service driving the
+# `parqtel-writer` StatefulSet, so each pod is `parqtel-writer-<i>.parqtel-writer`.
+# Replace `parqtel` below with your release namespace.
 extensions:
   file_storage:
     directory: /var/lib/otelcol/sharded-queue
@@ -25,10 +35,16 @@ processors:
     send_batch_max_size: 1000
 
 exporters:
-  otlp_grpc/parqtel-writer-0:
-    endpoint: parqtel-writer-0.parqtel-writer:4317
-    tls:
-      insecure: true
+  load_balancing/traces:
+    routing_key: traceID
+    protocol:
+      otlp:
+        tls:
+          insecure: true
+    resolver:
+      dns:
+        hostname: parqtel-writer.parqtel.svc.cluster.local
+        port: 4317
     sending_queue:
       enabled: true
       storage: file_storage
@@ -37,10 +53,33 @@ exporters:
     retry_on_failure:
       enabled: true
       max_elapsed_time: 0s
-  otlp_grpc/parqtel-writer-1:
-    endpoint: parqtel-writer-1.parqtel-writer:4317
-    tls:
-      insecure: true
+  load_balancing/metrics:
+    routing_key: service
+    protocol:
+      otlp:
+        tls:
+          insecure: true
+    resolver:
+      dns:
+        hostname: parqtel-writer.parqtel.svc.cluster.local
+        port: 4317
+    sending_queue:
+      enabled: true
+      storage: file_storage
+      queue_size: 6000
+    retry_on_failure:
+      enabled: true
+      max_elapsed_time: 0s
+  load_balancing/logs:
+    routing_key: service
+    protocol:
+      otlp:
+        tls:
+          insecure: true
+    resolver:
+      dns:
+        hostname: parqtel-writer.parqtel.svc.cluster.local
+        port: 4317
     sending_queue:
       enabled: true
       storage: file_storage
@@ -55,12 +94,12 @@ service:
     metrics:
       receivers: [otlp]
       processors: [batch]
-      exporters: [otlp_grpc/parqtel-writer-0, otlp_grpc/parqtel-writer-1]
+      exporters: [load_balancing/metrics]
     logs:
       receivers: [otlp]
       processors: [batch]
-      exporters: [otlp_grpc/parqtel-writer-0, otlp_grpc/parqtel-writer-1]
+      exporters: [load_balancing/logs]
     traces:
       receivers: [otlp]
       processors: [batch]
-      exporters: [otlp_grpc/parqtel-writer-0, otlp_grpc/parqtel-writer-1]
+      exporters: [load_balancing/traces]

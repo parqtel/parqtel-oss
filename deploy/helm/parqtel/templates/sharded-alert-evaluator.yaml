@@ -1,0 +1,68 @@
+{{- if and (eq .Values.mode "sharded") .Values.sharding.alertEvaluator.enabled }}
+{{- $root := . }}
+{{- $role := "alert-evaluator" }}
+{{- $name := include "parqtel.shardedName" (dict "root" . "role" $role) }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "parqtel.labels" . | nindent 4 }}
+    app.kubernetes.io/component: {{ $role }}
+spec:
+  # Exactly one evaluator. Every replica evaluates every rule against the same
+  # storage, so a second pod would duplicate every notification.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "parqtel.shardedSelector" (dict "root" . "role" $role) | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ include "parqtel.configChecksum" . }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "parqtel.shardedSelector" (dict "root" . "role" $role) | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.image.pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "parqtel.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        {{- include "parqtel.shardedContainer" (dict "root" $root "role" "reader" "component" $role "alertEvaluator" true) | nindent 8 }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "parqtel.fullname" . }}
+        - name: tmp
+          emptyDir:
+            sizeLimit: 100Mi
+        - name: data
+          emptyDir:
+            sizeLimit: {{ .Values.sharding.alertEvaluator.cacheSize }}
+        {{- with .Values.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}
