@@ -17,6 +17,61 @@ _No unreleased changes._
 
 ## [0.5.0] - 2026-11-28
 
+### Added
+
+- **Sharded topology.** `server.role` (`all`, `writer`, `reader`, `compactor`)
+  splits one process into the workloads a large deployment needs; a role that
+  does not run a subsystem does not mount its routes, so a writer answers
+  `404` on `/api/v1/query` instead of serving a partial view. `--role` /
+  `PARQTEL_ROLE` and `--node-id` / `PARQTEL_NODE_ID` override the file. The
+  chart renders the whole topology with `mode: sharded`: a writer StatefulSet
+  (one PVC per pod), a reader Deployment with an HPA, and one compactor, all on
+  a shared S3-compatible bucket.
+- **Reader buffer fan-out.** A reader has no ingest path, so the newest seconds
+  live in the writers' memory. It now fetches rows newer than its own newest
+  block from every writer (`POST /internal/v1/buffer`, bearer token from
+  `query.internal_auth_token`) and merges them into metric, log, trace and
+  pipeline results. With no reachable writer it still answers, from the bucket
+  alone.
+- **L2 compaction.** After L0 → L1, a pass merges level-one blocks into
+  two-hour `m_l2_` windows (at most two per pass, sharing the 16M-row budget).
+  Long ranges stop scanning hundreds of one-flush blocks.
+- **Scan budgets and truncation.** `query.max_scan_blocks` (default 1024) caps
+  the blocks one query scans; a truncated scan returns
+  `warnings: ["scan truncated to N of M blocks"]` and sets
+  `X-Parqtel-Truncated: true`, and the response reports `scanned_blocks` /
+  `truncated_blocks`. `query.max_concurrent_scans` replaces the fixed
+  four-slot budget with `min(cpus, 8)`, and `query.compaction_scan_slots`
+  (default 2) gives compaction its own slots so a merge never queues behind a
+  query. Cold block footers are prefetched ahead of slot acquisition (bounded
+  at 16).
+- **Per-signal Kafka ingestion.** `[ingest.kafka]` now takes `logs_topic`,
+  `metrics_topic` and `traces_topic` (each falling back to the legacy `topic`)
+  with `format = "json"` or `"otlp_proto"`, consumed independently. An offset
+  is committed only after its payload was ingested — a decode failure now
+  leaves the batch for a retry instead of dropping it.
+- **Scoped block ownership.** With an object store, compaction and retention
+  only retire blocks this node produced, so a sharded node cannot delete a
+  peer's data. Catalog publishes retry CAS races with jittered backoff and
+  uploads use create-only semantics, making a duplicated publish idempotent.
+- **Alerting on a reader.** `server.alert_evaluator = true` runs the alert
+  evaluator on a reader, which keeps alerting off the ingest path in a sharded
+  deployment.
+
+### Changed
+
+- `[query]` and `[server]` gained the keys above; all of them are optional and
+  default to the previous behaviour, so an existing configuration file keeps
+  working unchanged.
+
+### Upgrade notes
+
+- `mode: sharded` requires `sharding.objectStore.enabled` with a bucket, and
+  `sharding.internalToken` (value or existing Secret); the chart fails the
+  render otherwise. Standalone installs are untouched.
+- A `reader` needs `query.writer_endpoints` to see unflushed rows; without it
+  it logs a warning at startup and answers from the shared bucket only.
+
 #### Features
 
 - assert the release body matches the changelog section
