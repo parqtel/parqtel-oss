@@ -42,6 +42,17 @@ pub trait BlockStore: Send + Sync + std::fmt::Debug {
         Ok(())
     }
 
+    /// Drops this node's local copy of a block — the staged file and the read
+    /// cache — without touching the bucket.
+    ///
+    /// A writer or reader that only observed a block leave the manifest must
+    /// not delete the object: another pod may still be scanning it from an
+    /// older catalog snapshot. Source deletion belongs to the compactor, which
+    /// waits out its grace period, and to retention.
+    fn discard_local(&self, _key: &Path) -> Result<()> {
+        Ok(())
+    }
+
     /// Whether this node produced the block at `key`.
     ///
     /// The catalog sync task publishes only blocks this node produced. An
@@ -88,6 +99,16 @@ impl BlockStore for LocalBlockStore {
         }
     }
 
+    fn discard_local(&self, key: &Path) -> Result<()> {
+        // Local mode has no bucket: the file is the only copy, and a caller
+        // only discards a block it already dropped from its index.
+        match fs::remove_file(self.resolve(key)) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(Error::Io(e)),
+        }
+    }
+
     fn head(&self, key: &Path) -> Result<Option<BlockObject>> {
         let path = self.resolve(key);
         match fs::metadata(path) {
@@ -100,7 +121,6 @@ impl BlockStore for LocalBlockStore {
             Err(e) => Err(Error::Io(e)),
         }
     }
-
     fn list(&self, prefix: &Path) -> Result<Vec<BlockObject>> {
         let dir = self.resolve(prefix);
         let entries = match fs::read_dir(dir) {
@@ -358,6 +378,15 @@ impl BlockStore for ObjectBlockStore {
         }
     }
 
+    fn discard_local(&self, key: &Path) -> Result<()> {
+        let _ = fs::remove_file(self.cache_path(key));
+        match fs::remove_file(key) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(Error::Io(e)),
+        }
+    }
+
     fn head(&self, key: &Path) -> Result<Option<BlockObject>> {
         let object_key = self.key(key);
         match self.block_on(async { self.store.head(&object_key).await })? {
@@ -486,6 +515,40 @@ mod object_tests {
         assert_eq!(local.list(Path::new("")).unwrap().len(), 1);
         assert!(local.delete(&src).unwrap());
         assert!(local.head(&src).unwrap().is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn discard_local_drops_the_staging_and_cache_copy_but_keeps_the_object() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(object_store::memory::InMemory::new());
+        let local = ObjectBlockStore::new(
+            store,
+            "blocks",
+            dir.path().join("cache"),
+            8,
+            tokio::runtime::Handle::current(),
+        )
+        .unwrap();
+        let src = dir.path().join("block.parquet");
+        File::create(&src).unwrap().write_all(b"parquet").unwrap();
+        local.publish(&src).unwrap();
+        // Materialise the read cache, then drop this node's copies.
+        drop(local.open(&src).unwrap());
+        local.discard_local(&src).unwrap();
+
+        assert!(!src.exists(), "the staged file is gone");
+        assert!(
+            !dir.path().join("cache").join("block.parquet").exists(),
+            "the read cache copy is gone"
+        );
+        assert!(
+            local.head(&src).unwrap().is_some(),
+            "another reader's snapshot must still find the object in the bucket"
+        );
+        assert!(
+            local.open(&src).is_ok(),
+            "the object re-materialises on demand"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

@@ -17,9 +17,11 @@ struct SyncPlan {
     publish: Vec<String>,
     /// Keys this node closed earlier and that must leave the manifest.
     retire: std::collections::HashSet<String>,
-    /// Local paths to drop from the index and from the bucket.
+    /// Local staging paths to drop from the index and from this node's disk.
+    /// The bucket object is left alone: the compactor's grace period or
+    /// retention owns object deletion.
     prune_local: Vec<std::path::PathBuf>,
-    /// Adopted cache paths to drop from the index.
+    /// Adopted cache paths to drop from the index and from the read cache.
     prune_adopted: Vec<String>,
 }
 
@@ -30,10 +32,13 @@ struct SyncPlan {
 /// earlier; an entry in it that disappeared from the manifest was retired or
 /// expired by the compactor and must never be republished. Only the compactor
 /// retires: adopted keys it closed by merging or retention are keys it no longer
-/// lists in its index. The rule is deliberately limited to adopted keys, so a
-/// cold compactor with an empty index cannot wipe the manifest. When the
-/// manifest itself is absent (`manifest_known == false`) no absence-based
-/// pruning happens: a missing catalog object is not evidence of retirement.
+/// lists in its index, and its own published keys that left the index (the
+/// retention sweep expired the last block) must leave the manifest too, even
+/// when there is nothing else to publish. The rule is deliberately limited to
+/// keys the compactor adopted or published, so a cold compactor with an empty
+/// index cannot wipe the manifest. When the manifest itself is absent
+/// (`manifest_known == false`) no absence-based pruning happens: a missing
+/// catalog object is not evidence of retirement.
 ///
 /// A full multi-node end-to-end test in one process is impossible because the
 /// block store is a process-global `OnceLock`; this function covers the decision
@@ -82,6 +87,15 @@ fn plan_sync(
     }
     if role_is_compactor {
         for key in adopted {
+            if !local_keys.contains(key) {
+                plan.retire.insert(key.clone());
+            }
+        }
+        // A merged block this compactor published can leave its index through
+        // retention without any new block replacing it. If nothing retires it,
+        // the manifest keeps pointing at a deleted object until the next
+        // merge happens to publish, so withdraw it on this tick.
+        for key in published {
             if !local_keys.contains(key) {
                 plan.retire.insert(key.clone());
             }
@@ -204,11 +218,9 @@ pub(crate) fn spawn_catalog_sync_task(
                     blocks_by_key.insert(name, catalog_block);
                 }
             }
-            // Retired/compacted sources leave the index; forgetting them here
-            // keeps the remembered set bounded. Their manifest entries are
-            // still withdrawn by the publish filter because they are absent
-            // from the local keys of this tick.
-            published_keys.retain(|key| index_keys.contains(key));
+            // The retain below happens after the plan is computed: a compactor
+            // must still see a published key that left its index (retention
+            // expired the last block) so it can withdraw the manifest entry.
             // A block flushed before this node restarted is republished only
             // if its object still exists; `head` catches a compaction or
             // retention delete that happened while the node was down. New
@@ -253,10 +265,16 @@ pub(crate) fn spawn_catalog_sync_task(
             // A block whose metadata could not be rebuilt, or that another
             // writer owns, is not ours to publish.
             plan.publish.retain(|key| blocks_by_key.contains_key(key));
+            // Retired/compacted sources and retention-expired merges leave the
+            // index; forgetting them here keeps the remembered set bounded.
+            published_keys.retain(|key| index_keys.contains(key));
 
             // Prune retired local blocks and vanished adopted caches under the
-            // index write locks; delete the files afterwards on the blocking
-            // pool so no lock spans I/O.
+            // index write locks; drop the files afterwards on the blocking
+            // pool so no lock spans I/O. Only this node's copies go: the
+            // bucket object stays until the compactor's grace period or the
+            // retention sweep deletes it, so a reader still scanning from an
+            // older catalog snapshot never hits a missing object.
             let mut doomed: Vec<std::path::PathBuf> = Vec::new();
             for path in &plan.prune_local {
                 if let Some(&signal) = path_signal.get(path) {
@@ -282,7 +300,15 @@ pub(crate) fn spawn_catalog_sync_task(
             if !doomed.is_empty() {
                 let _ = tokio::task::spawn_blocking(move || {
                     for path in doomed {
-                        let _ = parqtel_core::storage::block_store::store().delete(&path);
+                        if let Err(e) =
+                            parqtel_core::storage::block_store::store().discard_local(&path)
+                        {
+                            tracing::debug!(
+                                path = ?path,
+                                error = %e,
+                                "cannot drop a pruned block copy"
+                            );
+                        }
                     }
                 })
                 .await;
@@ -901,6 +927,36 @@ mod catalog_sync_tests {
         assert_eq!(plan.retire, key_set(&["src0.pq", "src1.pq"]));
         assert!(!plan.retire.contains("unrelated.pq"));
         assert!(plan.prune_adopted.is_empty());
+    }
+
+    #[test]
+    fn compactor_withdraws_a_published_merge_that_retention_expired() {
+        // The last merged block expired: the index is empty and nothing new
+        // replaces it, so only the remembered published key can withdraw the
+        // manifest entry.
+        let published = key_set(&["merged.pq"]);
+        let plan = plan_sync(
+            &[],
+            &key_set(&["merged.pq", "writer-a.pq"]),
+            &published,
+            &HashSet::new(),
+            true,
+            true,
+        );
+        assert!(plan.publish.is_empty());
+        assert_eq!(plan.retire, key_set(&["merged.pq"]));
+        assert!(!plan.retire.contains("writer-a.pq"));
+        // A writer/reader must never withdraw a key just because it left the
+        // index: it never published on behalf of the compactor.
+        let not_compactor = plan_sync(
+            &[],
+            &key_set(&["merged.pq"]),
+            &published,
+            &HashSet::new(),
+            false,
+            true,
+        );
+        assert!(not_compactor.retire.is_empty());
     }
 
     #[test]
