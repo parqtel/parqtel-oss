@@ -1,6 +1,7 @@
 pub mod alerts;
 pub mod dashboards;
 pub mod ingest;
+pub mod internal;
 pub mod misc;
 pub mod pipeline;
 pub mod query;

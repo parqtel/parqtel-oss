@@ -24,6 +24,9 @@ keys take the defaults in the tables below.
 ```toml
 [server]
 dataset = "default"                 # one dataset per process; non-default prefixes data dirs
+# role = "all"                      # all | writer | reader | compactor (also --role / PARQTEL_ROLE)
+# node_id = "writer-0"              # catalog identity; defaults to $HOSTNAME (also --node-id)
+# alert_evaluator = false           # run alerting on a reader; ignored by the other roles
 bind_address = "0.0.0.0:8080"
 grpc_bind_address = "0.0.0.0:4317"  # "" disables OTLP gRPC
 max_connections = 1024
@@ -115,6 +118,10 @@ max_scan_blocks = 1024              # per-metric scan cap; must be greater than 
 # max_concurrent_scans defaults to the CPU count, capped at 8; must be greater than 0.
 # max_concurrent_scans = 8
 compaction_scan_slots = 2           # background compaction scan budget; must be greater than 0
+# Reader-tier buffer fan-out (sharded mode). Both are required for it to work:
+# writer_endpoints = ["http://parqtel-writer-0.parqtel-writer:8080"]
+# internal_auth_token = "${PARQTEL_INTERNAL_TOKEN}"
+# writer_fanout_timeout_ms = 2000
 
 [ui]
 enabled = true
@@ -268,6 +275,7 @@ tls_secret_name = "parqtel-provider-tls"
 | `retention_interval_secs` | Integer | `3600` | Retention sweep interval. |
 | `grpc_concurrency_limit` | Integer | `64` | Concurrent OTLP exports per gRPC connection. |
 | `index_persist_interval_secs` | Integer | `2` | Debounce for block-index sidecar writes. A durable flush forces an immediate write. |
+| `alert_evaluator` | Boolean | `false` | Run alert evaluation on a `reader`. On by default for `all` and `writer`; a `reader` only evaluates alerts when this is set, which is how a sharded install keeps alerting off the ingest pods. |
 | `tls` | Table | unset | Optional [`server.tls`](#servertls). |
 
 ### Node roles
@@ -285,6 +293,20 @@ changing stored data.
 
 Every role still serves `/health`, `/ready` and `/metrics`. Routes a role does
 not run are not mounted, so they answer `404`; there are no stub handlers.
+
+A `reader` has no ingest path, so the newest seconds of each signal live in the
+writers' memory until the next flush. Point `query.writer_endpoints` at the
+writers' per-pod DNS names and set `query.internal_auth_token` on every pod;
+the reader then merges each writer's buffered rows above its own watermark into
+the query result. Without the endpoints a reader is still correct, just older
+by up to one flush interval. See
+[Sharded writers and stateless readers](deployment.md#sharded-writers-and-stateless-readers).
+
+Retention and compaction only act on blocks a node owns: with
+`object_store.enabled`, a `reader` or `compactor` never retires a block another
+node wrote, and the writer that produced a block keeps externality tags off it.
+A standalone (`mode: standalone`, no bucket) install keeps the previous
+behaviour — every local block is fair game.
 
 `--role` (`PARQTEL_ROLE`) and `--node-id` (`PARQTEL_NODE_ID`) override the file
 for any invocation, including bare `parqtel` (which serves by default).
@@ -423,6 +445,9 @@ and traces.
 | `query.max_scan_blocks` | Integer | `1024` | Maximum blocks scanned per query metric. A scan that hits the cap returns `"warnings": ["scan truncated to N of M blocks"]` and the response header `X-Parqtel-Truncated: true`; must be greater than 0. |
 | `query.max_concurrent_scans` | Integer | CPU count, capped at 8 | Query scan admission limit, shared by all query paths. Must be greater than 0. Fixed at startup; a second install is ignored. |
 | `query.compaction_scan_slots` | Integer | `2` | Scan slots reserved for background compaction, so maintenance never starves queries. Must be greater than 0. |
+| `query.writer_endpoints` | Array of strings | `[]` | Writer base URLs a `reader` asks for its unflushed buffer, e.g. `["http://parqtel-writer-0.parqtel-writer:8080"]`. Empty on a reader means it answers from the bucket alone; ignored by every other role. |
+| `query.internal_auth_token` | String | unset | Bearer token for `/internal/v1/buffer`. The writers reject the endpoint with `404` while it is unset, so an unauthenticated buffer is impossible. Set it on every sharded pod. |
+| `query.writer_fanout_timeout_ms` | Integer | `2000` | Per-writer timeout for one buffer query. A writer that misses it is skipped with a warning; the query still answers from the bucket. |
 | `ui.enabled` | Boolean | `true` | Serve the embedded console at `/ui`. |
 
 `GET /api/v1/query` accepts `lookback_delta` as a duration or float seconds

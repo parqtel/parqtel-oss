@@ -197,6 +197,17 @@ sharding:
     # -- Secret with AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY. Empty uses the
     # standard AWS chain (instance role, IRSA, environment).
     existingSecret: ""
+  # -- Shared bearer token guarding the writers' `/internal/v1/buffer`
+  # endpoint. The readers use it to fetch rows the writers have not flushed
+  # yet. Required in sharded mode: without it the endpoint is disabled and a
+  # reader silently answers from the catalog alone.
+  internalToken:
+    # -- Token value written into a Secret. Leave empty when `existingSecret`
+    # is set (or pass `--set sharding.internalToken.value=...`).
+    value: ""
+    # -- Existing Secret holding the token under `secretKey`.
+    existingSecret: ""
+    secretKey: "internal-auth-token"
   writer:
     # -- Writer pods. Each owns one PVC for WAL staging and publishes its own
     # blocks to the shared catalog.

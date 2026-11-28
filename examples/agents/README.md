@@ -25,6 +25,14 @@ about 10 minutes at 9.5K metric points/s, assuming batches of up to 1,000 points
 Validate with `otelcol validate --config examples/agents/otel-collector-ha.yaml`
 using the same Collector distribution that will run this config.
 
+## Sharded writers
+
+Use [`otel-collector-sharded.yaml`](otel-collector-sharded.yaml) when the chart
+runs with `mode: sharded`. It fans OTLP/gRPC out to every writer pod
+(`parqtel-writer-<i>.parqtel-writer:4317`); any writer may take any batch
+because the readers union every writer's unflushed buffer with the shared
+bucket. Never point it at the reader Service: readers do not ingest.
+
 Parqtel accepts OTLP protobuf over gRPC/HTTP and OTLP JSON. A collector using
 the SDK defaults needs no encoding override. Generic applications can post a
 JSON object/array to `/api/v1/ingest`; see

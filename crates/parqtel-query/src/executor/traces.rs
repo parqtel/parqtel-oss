@@ -147,6 +147,7 @@ impl QueryExecutor {
         // Buffered spans cannot overlap flushed blocks: the buffer is drained
         // whenever a flush completes, so a plain extend is safe.
         spans.extend(self.buffer.scan_spans(start_ns, end_ns).await);
+        spans.extend(self.remote_spans(start_ns, end_ns).await);
 
         // Sort newest-first for deterministic, relevance-ordered results.
         spans.sort_unstable_by_key(|s| std::cmp::Reverse(s.start_time_ns));

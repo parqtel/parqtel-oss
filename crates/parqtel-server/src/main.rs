@@ -11,6 +11,7 @@ mod kafka;
 mod metrics;
 mod otel_sli;
 mod recovery;
+mod remote_buffer;
 mod router;
 mod ruler;
 mod saved_searches;

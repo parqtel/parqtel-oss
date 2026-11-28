@@ -174,7 +174,8 @@ impl QueryExecutor {
             let idx = self.log_index.read().await;
             idx.query(start_ns, end_ns, None)
         };
-        let buffered = self.buffer.scan_logs(start_ns, end_ns).await;
+        let mut buffered = self.buffer.scan_logs(start_ns, end_ns).await;
+        buffered.extend(self.remote_logs(start_ns, end_ns).await);
         let logs = if blocks.is_empty() {
             buffered
         } else {
@@ -244,6 +245,7 @@ impl QueryExecutor {
                 Scanner::scan(blocks, name.clone(), start_ns, end_ns, None).await?
             };
             points.extend(self.buffer.scan_metrics(&name, start_ns, end_ns).await);
+            points.extend(self.remote_points_for(&name, start_ns, end_ns, None).await);
             for p in points {
                 let mut fields = std::collections::BTreeMap::new();
                 fields.insert("timestamp_ns".to_string(), json!(p.timestamp_ns));

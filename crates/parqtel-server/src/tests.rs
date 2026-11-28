@@ -171,10 +171,17 @@ async fn setup_test_state() -> AppState {
 
 #[cfg(test)]
 async fn setup_test_state_with_role(role: parqtel_core::config::NodeRole) -> AppState {
-    // Kept for the life of the test process: the ingestion services write blocks
-    // under it from background tasks, so it must not vanish with this function.
     let mut config = temp_config();
     config.server.role = role;
+    setup_test_state_from(config).await
+}
+
+/// Builds the state for an explicit configuration, so a test can configure
+/// internals (the buffer token) before the router is built.
+#[cfg(test)]
+async fn setup_test_state_from(config: Config) -> AppState {
+    // Kept for the life of the test process: the ingestion services write blocks
+    // under it from background tasks, so it must not vanish with this function.
     let dir = config.storage.data_dir.clone();
     let (tx, _) = mpsc::unbounded_channel();
     let (ltx, _) = mpsc::unbounded_channel();
@@ -215,6 +222,121 @@ async fn setup_test_state_with_role(role: parqtel_core::config::NodeRole) -> App
     .await;
 
     state
+}
+
+/// The internal buffer endpoint is the reader tier's window into unflushed
+/// rows. It must stay closed by default: an unauthenticated buffer endpoint
+/// would expose live telemetry to anything that can reach the pod.
+#[cfg(test)]
+#[tokio::test(flavor = "current_thread")]
+async fn internal_buffer_endpoint_is_closed_without_a_configured_token() {
+    let app = setup_test_app().await;
+    let body = serde_json::to_vec(&parqtel_query::remote::RemoteBufferRequest {
+        signal: parqtel_query::remote::RemoteSignal::Logs,
+        metric: None,
+        since_ns: 0,
+        start_ns: 0,
+        end_ns: 1_000,
+        limit: 10,
+    })
+    .unwrap();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/internal/v1/buffer")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let text = String::from_utf8_lossy(&body);
+    assert!(
+        text.contains("internal_auth_token"),
+        "the rejection must name the setting that enables the endpoint: {text}"
+    );
+}
+
+/// With a token configured the endpoint answers only authenticated calls and
+/// returns the buffered rows newer than the caller's watermark.
+#[cfg(test)]
+#[tokio::test(flavor = "current_thread")]
+async fn internal_buffer_endpoint_requires_the_token_and_respects_the_watermark() {
+    use parqtel_query::remote::{RemoteBufferRequest, RemoteSignal};
+
+    let mut config = temp_config();
+    config.query.internal_auth_token = Some("s3cret".into());
+    let state = setup_test_state_from(config).await;
+    state
+        .inner
+        .query_executor
+        .memory_buffer()
+        .push_metrics(
+            "cpu",
+            &[parqtel_core::DataPoint {
+                timestamp_ns: 1_000,
+                value: parqtel_core::MetricValue::Double(1.0),
+                labels: parqtel_core::LabelSet::default(),
+            }],
+        )
+        .await;
+    let app = build_router(state);
+
+    let request = |since_ns: i64, token: Option<&'static str>| {
+        let body = serde_json::to_vec(&RemoteBufferRequest {
+            signal: RemoteSignal::Metrics,
+            metric: Some("cpu".into()),
+            since_ns,
+            start_ns: 0,
+            end_ns: 5_000,
+            limit: 100,
+        })
+        .unwrap();
+        let mut builder = Request::builder()
+            .method("POST")
+            .uri("/internal/v1/buffer")
+            .header(header::CONTENT_TYPE, "application/json");
+        if let Some(token) = token {
+            builder = builder.header(header::AUTHORIZATION, format!("Bearer {token}"));
+        }
+        builder.body(Body::from(body)).unwrap()
+    };
+
+    let unauthorized = app.clone().oneshot(request(0, None)).await.unwrap();
+    assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+    let wrong = app
+        .clone()
+        .oneshot(request(0, Some("wrong")))
+        .await
+        .unwrap();
+    assert_eq!(wrong.status(), StatusCode::UNAUTHORIZED);
+
+    let ok = app
+        .clone()
+        .oneshot(request(0, Some("s3cret")))
+        .await
+        .unwrap();
+    assert_eq!(ok.status(), StatusCode::OK);
+    let body = to_bytes(ok.into_body(), usize::MAX).await.unwrap();
+    let value: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(value["points"].as_array().unwrap().len(), 1);
+    assert_eq!(value["watermark_ns"], 1_000);
+
+    // Past the watermark the writer has nothing new to offer.
+    let empty = app
+        .clone()
+        .oneshot(request(1_000, Some("s3cret")))
+        .await
+        .unwrap();
+    assert_eq!(empty.status(), StatusCode::OK);
+    let body = to_bytes(empty.into_body(), usize::MAX).await.unwrap();
+    let value: Value = serde_json::from_slice(&body).unwrap();
+    // Empty vectors are omitted on the wire, so an absent field is empty.
+    assert_eq!(value["points"].as_array().map(Vec::len).unwrap_or(0), 0);
+    assert!(value["watermark_ns"].is_null());
 }
 
 /// Liveness and readiness answer different questions and must not be the same

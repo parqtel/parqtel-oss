@@ -29,6 +29,8 @@ pub struct QueryExecutor {
     max_series: usize,
     /// Maximum samples retained per series.
     max_samples_per_series: usize,
+    /// Writers to ask for unflushed rows. `None` on a writer or a single node.
+    remote: Option<Arc<dyn crate::remote::RemoteBuffer>>,
 }
 
 /// Snapshot of per-signal storage stats for ops surfaces (UI overview,
@@ -95,6 +97,7 @@ impl QueryExecutor {
             lookback_ns: Self::DEFAULT_LOOKBACK_NS,
             max_series: Self::DEFAULT_MAX_SERIES,
             max_samples_per_series: Self::DEFAULT_MAX_SAMPLES_PER_SERIES,
+            remote: None,
         }
     }
 
@@ -137,6 +140,144 @@ impl QueryExecutor {
     /// Returns a clone of the memory buffer for use by ingestion services.
     pub fn memory_buffer(&self) -> MemoryBuffer {
         self.buffer.clone()
+    }
+
+    /// Installs the writer fan-out used by a reader node (builder).
+    pub fn with_remote_buffer(mut self, remote: Arc<dyn crate::remote::RemoteBuffer>) -> Self {
+        self.remote = Some(remote);
+        self
+    }
+
+    /// The reader's watermark: the newest block timestamp it can already see
+    /// for a signal. Zero when no block is visible yet, so every buffered row
+    /// on the writers is requested.
+    pub(crate) async fn remote_watermark_ns(&self, signal: crate::remote::RemoteSignal) -> i64 {
+        use crate::remote::RemoteSignal;
+        let index = match signal {
+            RemoteSignal::Metrics => &self.index,
+            RemoteSignal::Logs => &self.log_index,
+            RemoteSignal::Traces => &self.trace_index,
+        };
+        index
+            .read()
+            .await
+            .blocks
+            .iter()
+            .map(|block| block.end_timestamp_ns)
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// Buffered rows from every configured writer. An unreachable writer is a
+    /// warning, not a failed query: the reader still answers from block
+    /// storage plus whichever writers did respond.
+    pub(crate) async fn remote_rows(
+        &self,
+        signal: crate::remote::RemoteSignal,
+        metric: Option<String>,
+        start_ns: i64,
+        end_ns: i64,
+    ) -> crate::remote::RemoteBufferRows {
+        let Some(remote) = self.remote.clone() else {
+            return Default::default();
+        };
+        let since_ns = self.remote_watermark_ns(signal).await;
+        let request = crate::remote::RemoteBufferRequest {
+            signal,
+            metric,
+            since_ns,
+            start_ns,
+            end_ns,
+            limit: crate::remote::MAX_BUFFER_ROWS,
+        };
+        match remote.fetch(request).await {
+            Ok(rows) => rows,
+            Err(error) => {
+                tracing::warn!(
+                    signal = ?signal,
+                    error = %error,
+                    "writer buffer fan-out failed; answering from block storage only"
+                );
+                Default::default()
+            }
+        }
+    }
+
+    /// Appends remote points, skipping identities the local buffer already
+    /// holds: a retried OTLP export can land one row on a writer and on the
+    /// local buffer, and the same sample must not be counted twice.
+    pub(crate) fn merge_remote_points(
+        local: &mut Vec<parqtel_core::DataPoint>,
+        remote: Vec<parqtel_core::DataPoint>,
+    ) -> usize {
+        let mut seen: std::collections::HashSet<(u64, i64)> = local
+            .iter()
+            .map(|point| (point.labels.fingerprint(), point.timestamp_ns))
+            .collect();
+        let before = local.len();
+        for point in remote {
+            if seen.insert((point.labels.fingerprint(), point.timestamp_ns)) {
+                local.push(point);
+            }
+        }
+        local.len() - before
+    }
+
+    /// Remote metric points for one series name, keeping only rows that match
+    /// the selector and are newer than the watermark.
+    pub(crate) async fn remote_points_for(
+        &self,
+        name: &str,
+        start_ns: i64,
+        end_ns: i64,
+        filter: Option<&parqtel_core::storage::scanner::SeriesFilter>,
+    ) -> Vec<parqtel_core::DataPoint> {
+        let rows = self
+            .remote_rows(
+                crate::remote::RemoteSignal::Metrics,
+                Some(name.to_string()),
+                start_ns,
+                end_ns,
+            )
+            .await;
+        rows.points
+            .into_iter()
+            .filter(|(metric, _)| metric == name)
+            .filter(|(_, point)| point.timestamp_ns >= start_ns && point.timestamp_ns <= end_ns)
+            .filter(|(_, point)| filter.is_none_or(|keep| keep(&point.labels)))
+            .map(|(_, point)| point)
+            .collect()
+    }
+
+    /// Remote logs in range. The caller applies its own row predicate: the
+    /// transport cannot carry a closure, and the predicated paths re-check
+    /// every buffered row anyway.
+    pub(crate) async fn remote_logs(
+        &self,
+        start_ns: i64,
+        end_ns: i64,
+    ) -> Vec<parqtel_core::LogRecord> {
+        let rows = self
+            .remote_rows(crate::remote::RemoteSignal::Logs, None, start_ns, end_ns)
+            .await;
+        rows.logs
+            .into_iter()
+            .filter(|log| log.timestamp_ns >= start_ns && log.timestamp_ns <= end_ns)
+            .collect()
+    }
+
+    /// Remote spans in range, deduplicated by span id so a span that reaches
+    /// two writers' buffers (a retried export) still counts once.
+    pub(crate) async fn remote_spans(&self, start_ns: i64, end_ns: i64) -> Vec<parqtel_core::Span> {
+        let rows = self
+            .remote_rows(crate::remote::RemoteSignal::Traces, None, start_ns, end_ns)
+            .await;
+        let mut seen = std::collections::HashSet::new();
+        rows.spans
+            .into_iter()
+            .filter(|span| span.start_time_ns >= start_ns && span.start_time_ns <= end_ns)
+            .filter(|span| seen.insert((span.trace_id, span.span_id)))
+            .collect()
     }
 
     /// Snapshot of per-signal storage stats for ops surfaces (UI overview,

@@ -1,6 +1,6 @@
 //! Log search, count and field-discovery endpoints.
 
-use super::common::{map_error, PrometheusResponse};
+use super::common::{map_error, truncation_warnings, with_truncation_header, PrometheusResponse};
 use crate::state::AppState;
 use axum::{
     extract::{rejection::QueryRejection, Query, State},

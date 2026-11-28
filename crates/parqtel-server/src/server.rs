@@ -11,7 +11,10 @@ use crate::tasks::{
 use crate::{grpc, telemetry};
 use flate2::write::GzEncoder;
 use flate2::Compression;
-use parqtel_core::{start_maintenance, BlockIndex, BlockIndexStore, Config, RetentionPolicy};
+use parqtel_core::{
+    start_maintenance_owned, BlockIndex, BlockIndexStore, Config, OwnershipRegistry,
+    RetentionPolicy,
+};
 use parqtel_ingest::{IngestionService, LogIngestionService, TraceIngestionService};
 use parqtel_pipeline::config::RulerConfig;
 use parqtel_pipeline::ruler::{RulerEvaluator, RulerScheduler};
@@ -79,6 +82,15 @@ pub(crate) async fn run_server(
 ) -> anyhow::Result<()> {
     let role = config.server.role;
     let node_id = config.server.resolved_node_id();
+    // In a sharded deployment this node shares the catalog with other writers:
+    // compaction and retention must not retire the blocks they own. Local
+    // single-node deployments keep the unscoped registry.
+    let ownership = std::sync::Arc::new(if config.object_store.enabled {
+        OwnershipRegistry::scoped()
+    } else {
+        OwnershipRegistry::everything()
+    });
+    let runs_alert_evaluator = role.runs_alert_evaluator(config.server.alert_evaluator);
     parqtel_core::Scanner::configure_footer_cache_budget(config.query.footer_cache_bytes)
         .map_err(anyhow::Error::msg)?;
     parqtel_core::Scanner::configure_limits(
@@ -147,7 +159,9 @@ pub(crate) async fn run_server(
             }
         }
     } else {
-        tracing::warn!("metrics WAL is disabled; a crash can lose up to a whole block window");
+        if role.runs_ingest() {
+            tracing::warn!("metrics WAL is disabled; a crash can lose up to a whole block window");
+        }
         None
     };
 
@@ -280,7 +294,7 @@ pub(crate) async fn run_server(
         contention.clone(),
     );
 
-    let query_executor = QueryExecutor::with_trace_index(
+    let mut query_executor = QueryExecutor::with_trace_index(
         index.clone(),
         log_index.clone(),
         trace_index.clone(),
@@ -289,23 +303,80 @@ pub(crate) async fn run_server(
     )
     .with_query_lookback(config.query.lookback_delta_ns)
     .with_result_limits(config.query.max_series, config.query.max_samples_per_series);
+    if !role.runs_ingest() {
+        if config.query.writer_endpoints.is_empty() {
+            tracing::warn!(
+                role = ?role,
+                "query.writer_endpoints is empty: this node cannot see rows still buffered on the writers"
+            );
+        } else {
+            let fanout = crate::remote_buffer::HttpWriterFanout::new(
+                config.query.writer_endpoints.clone(),
+                config.query.internal_auth_token.clone(),
+                std::time::Duration::from_millis(config.query.writer_fanout_timeout_ms.max(1)),
+            )
+            .map_err(anyhow::Error::msg)?;
+            tracing::info!(
+                writers = fanout.writer_count(),
+                "writer buffer fan-out enabled"
+            );
+            query_executor = query_executor.with_remote_buffer(std::sync::Arc::new(fanout));
+        }
+    }
 
     let retention_interval_secs = config.server.retention_interval_secs;
     let persist_interval_secs = config.server.index_persist_interval_secs;
-    let metrics_maintenance = start_maintenance(
-        index.clone(),
-        index_store.clone(),
-        config.storage.clone(),
-        retention_interval_secs,
-        persist_interval_secs,
-    );
-    let logs_maintenance = start_maintenance(
-        log_index.clone(),
-        log_index_store.clone(),
-        config.logs.clone().into(),
-        retention_interval_secs,
-        persist_interval_secs,
-    );
+    let metrics_maintenance = if role.runs_compaction() {
+        Some(start_maintenance_owned(
+            index.clone(),
+            index_store.clone(),
+            config.storage.clone(),
+            retention_interval_secs,
+            persist_interval_secs,
+            ownership.clone(),
+        ))
+    } else {
+        None
+    };
+    let logs_maintenance = if role.runs_compaction() {
+        Some(start_maintenance_owned(
+            log_index.clone(),
+            log_index_store.clone(),
+            config.logs.clone().into(),
+            retention_interval_secs,
+            persist_interval_secs,
+            ownership.clone(),
+        ))
+    } else {
+        None
+    };
+    // Compaction owns the persistence loop too, so roles that do not compact
+    // still need one: block metadata adopted from the catalog or written by a
+    // local flush must reach the sidecar or a restart re-reads a stale index.
+    let mut metrics_persist = None;
+    let mut logs_persist = None;
+    if metrics_maintenance.is_none() {
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        metrics_persist = Some((
+            shutdown_tx,
+            tokio::spawn(parqtel_core::storage::run_index_persist_loop(
+                index.clone(),
+                index_store.clone(),
+                std::time::Duration::from_secs(persist_interval_secs.max(1)),
+                shutdown_rx,
+            )),
+        ));
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        logs_persist = Some((
+            shutdown_tx,
+            tokio::spawn(parqtel_core::storage::run_index_persist_loop(
+                log_index.clone(),
+                log_index_store.clone(),
+                std::time::Duration::from_secs(persist_interval_secs.max(1)),
+                shutdown_rx,
+            )),
+        ));
+    }
     // Traces: retention only. Trace blocks share the metrics BlockConfig
     // (TraceWriter is built from config.storage), but the compactor's
     // read_source_blocks only decodes metrics/logs schemas — running full
@@ -333,13 +404,18 @@ pub(crate) async fn run_server(
     ));
 
     let (trace_shutdown_tx, trace_shutdown_rx) = tokio::sync::watch::channel(false);
-    let trace_retention = tokio::spawn(RetentionPolicy::run_loop(
-        trace_index.clone(),
-        trace_index_store.clone(),
-        config.storage.clone(),
-        retention_interval_secs,
-        trace_shutdown_rx,
-    ));
+    let trace_retention = if role.runs_retention() {
+        Some(tokio::spawn(RetentionPolicy::run_loop_scoped(
+            trace_index.clone(),
+            trace_index_store.clone(),
+            config.storage.clone(),
+            retention_interval_secs,
+            trace_shutdown_rx,
+            ownership.clone(),
+        )))
+    } else {
+        None
+    };
 
     // Replay before the listener binds, so nothing is served until recovered
     // telemetry is back in the write path, and through exactly the entry points
@@ -417,6 +493,7 @@ pub(crate) async fn run_server(
             config.object_store.catalog_interval_secs,
             Some(node_id.clone()),
             role.runs_catalog_publish(),
+            ownership.clone(),
         );
     }
 
@@ -489,14 +566,21 @@ pub(crate) async fn run_server(
         None
     };
 
-    let preset_task = activate_alert_presets(&state).await;
-    load_alert_rules(&state).await;
+    let preset_task = if runs_alert_evaluator {
+        activate_alert_presets(&state).await
+    } else {
+        None
+    };
+    if runs_alert_evaluator {
+        load_alert_rules(&state).await;
+    }
 
     // Alert routing: consume firing/resolved events from the eval engine.
     // The Alertmanager dispatcher wins when configured; the legacy webhook
     // route table is the fallback. Delivering through both would send every
     // notification twice.
-    if state.inner.alert_dispatcher.is_some()
+    if runs_alert_evaluator
+        && state.inner.alert_dispatcher.is_some()
         && state
             .inner
             .config
@@ -509,19 +593,21 @@ pub(crate) async fn run_server(
             "both [alerting.routing] and legacy [alerts.notifications.routes] are configured;              the Alertmanager dispatcher wins and legacy routes are disabled"
         );
     }
-    let router_state = state.clone();
-    let alert_router_task = tokio::spawn(async move {
-        let rx = router_state.inner.alert_event_rx.lock().await.take();
-        if let Some(mut rx) = rx {
-            while let Some(event) = rx.recv().await {
-                if let Some(ref dispatcher) = router_state.inner.alert_dispatcher {
-                    let silences = router_state.inner.alert_router.silences().await;
-                    let active_alerts = router_state.inner.alert_store.list_active().await;
-                    dispatcher
-                        .ingest_event(event.instance.clone(), &silences, &active_alerts)
-                        .await;
-                } else {
-                    let _ = router_state.inner.alert_router.handle_event(event).await;
+    let alert_router_task = if runs_alert_evaluator {
+        let router_state = state.clone();
+        Some(tokio::spawn(async move {
+            let rx = router_state.inner.alert_event_rx.lock().await.take();
+            if let Some(mut rx) = rx {
+                while let Some(event) = rx.recv().await {
+                    if let Some(ref dispatcher) = router_state.inner.alert_dispatcher {
+                        let silences = router_state.inner.alert_router.silences().await;
+                        let active_alerts = router_state.inner.alert_store.list_active().await;
+                        dispatcher
+                            .ingest_event(event.instance.clone(), &silences, &active_alerts)
+                            .await;
+                    } else {
+                        let _ = router_state.inner.alert_router.handle_event(event).await;
+                    }
                 }
             }
         }))
@@ -529,12 +615,16 @@ pub(crate) async fn run_server(
         None
     };
 
-    let alert_dispatcher_tick_task = state.inner.alert_dispatcher.as_ref().map(|d| {
-        parqtel_alert::dispatcher::AlertDispatcher::spawn_tick_loop(
-            d.clone(),
-            std::time::Duration::from_secs(1),
-        )
-    });
+    let alert_dispatcher_tick_task = if runs_alert_evaluator {
+        state.inner.alert_dispatcher.as_ref().map(|d| {
+            parqtel_alert::dispatcher::AlertDispatcher::spawn_tick_loop(
+                d.clone(),
+                std::time::Duration::from_secs(1),
+            )
+        })
+    } else {
+        None
+    };
 
     let _kafka_task = if role.runs_ingest() {
         crate::kafka::spawn_kafka_consumer(state.clone())
@@ -551,7 +641,14 @@ pub(crate) async fn run_server(
         None
     };
 
-    let alert_eval_task = spawn_alert_eval_task(state.clone(), config.server.alert_interval_secs);
+    let alert_eval_task = if runs_alert_evaluator {
+        Some(spawn_alert_eval_task(
+            state.clone(),
+            config.server.alert_interval_secs,
+        ))
+    } else {
+        None
+    };
 
     let router = build_router(state.clone());
     let addr = config.server.bind_address.clone();

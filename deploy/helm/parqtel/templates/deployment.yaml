@@ -1,4 +1,4 @@
-{{- if not .Values.ha.enabled }}
+{{- if and (not .Values.ha.enabled) (ne .Values.mode "sharded") }}
 {{- if gt (int .Values.replicaCount) 1 }}
 {{- fail "parqtel is single-writer: replicaCount > 1 gives each pod a disjoint local data directory and splits the dataset. Keep replicaCount=1; shared storage is not implemented." }}
 {{- end }}

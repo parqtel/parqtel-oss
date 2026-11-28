@@ -19,6 +19,7 @@ pub async fn list_metric_names(State(state): State<AppState>) -> Response {
         Json(PrometheusResponse {
             status: "success".into(),
             data: names.into_iter().collect::<Vec<_>>(),
+            warnings: Vec::new(),
         }),
     )
         .into_response()
@@ -32,6 +33,7 @@ pub async fn list_label_names(State(state): State<AppState>) -> Response {
         Json(PrometheusResponse {
             status: "success".into(),
             data: names.into_iter().collect::<Vec<_>>(),
+            warnings: Vec::new(),
         }),
     )
         .into_response()
@@ -96,6 +98,7 @@ pub async fn list_label_values(
         Json(PrometheusResponse {
             status: "success".into(),
             data: values.into_iter().collect::<Vec<_>>(),
+            warnings: Vec::new(),
         }),
     )
         .into_response()

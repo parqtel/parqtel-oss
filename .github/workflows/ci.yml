@@ -263,6 +263,20 @@ jobs:
         run: helm lint deploy/helm/parqtel -f deploy/helm/parqtel/ci/minimal-values.yaml
       - name: Lint chart (full)
         run: helm lint deploy/helm/parqtel -f deploy/helm/parqtel/ci/full-values.yaml
+      - name: Lint chart (sharded topology)
+        run: helm lint deploy/helm/parqtel -f deploy/helm/parqtel/ci/sharded-values.yaml
+      - name: Render sharded topology
+        run: |
+          helm template parqtel deploy/helm/parqtel -f deploy/helm/parqtel/ci/sharded-values.yaml > /tmp/sharded.yaml
+          for kind_name in "StatefulSet/parqtel-writer" "Deployment/parqtel-reader" "Deployment/parqtel-compactor" "HorizontalPodAutoscaler/parqtel-reader"; do
+            kind="${kind_name%%/*}"; name="${kind_name##*/}"
+            grep -q "kind: ${kind}" /tmp/sharded.yaml || { echo "::error::missing ${kind_name}"; exit 1; }
+            grep -q "name: ${name}$" /tmp/sharded.yaml || { echo "::error::missing ${kind_name}"; exit 1; }
+          done
+          # Standalone workload must not be rendered next to the sharded ones.
+          if grep -q "kind: StatefulSet" /tmp/sharded.yaml && [ "$(grep -c 'kind: StatefulSet' /tmp/sharded.yaml)" -ne 1 ]; then
+            echo "::error::sharded render contains an unexpected StatefulSet"; exit 1
+          fi
       - name: Template validation
         run: helm template test deploy/helm/parqtel --debug > /dev/null
 

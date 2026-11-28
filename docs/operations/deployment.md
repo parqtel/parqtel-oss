@@ -143,6 +143,7 @@ The chart (`deploy/helm/parqtel`) includes:
 
 - **Deployment** with configurable resources and probes; default mode caps `replicaCount` at 1
 - **Independent HA StatefulSet** — opt in with `ha.enabled: true`; see the [HA guide](high-availability.md) for per-pod ingest and operational requirements
+- **Sharded topology** — `mode: sharded` renders writer StatefulSet, reader Deployment + HPA and compactor Deployment; see [Sharded writers and stateless readers](#sharded-writers-and-stateless-readers)
 - **PodDisruptionBudget** — ensures availability during rollouts
 - **NetworkPolicy** — restricts ingress/egress traffic
 - **ServiceMonitor** — Prometheus Operator integration
@@ -151,6 +152,64 @@ The chart (`deploy/helm/parqtel`) includes:
 - **PersistentVolumeClaim** — for data persistence
 - **RBAC** — ServiceAccount, Role, RoleBinding
 - **MCP Deployment** — `mcp.parqtel.enabled` renders its own Deployment + Service, not a sidecar
+
+### Sharded writers and stateless readers
+
+`mode: sharded` renders three workloads instead of one, all reading one shared
+S3-compatible bucket:
+
+| Workload | Kind | Role | Durable state |
+|----------|------|------|---------------|
+| `parqtel-writer` | StatefulSet, headless Service | `writer` | one PVC per pod: WAL staging + block cache |
+| `parqtel-reader` | Deployment (+ HPA) | `reader` | none: `emptyDir` cache only |
+| `parqtel-compactor` | Deployment | `compactor` | none: `emptyDir` cache only |
+
+Writers ingest, flush and publish their blocks to the shared catalog; readers
+answer queries from the catalog; the single compactor merges and retires
+blocks. The main Service selects the readers, so a load balancer never sends a
+query to a pod that can only see its own directory.
+
+```yaml
+mode: sharded
+sharding:
+  objectStore:
+    enabled: true
+    bucket: parqtel-blocks
+    region: eu-north-1
+    existingSecret: parqtel-aws        # AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY
+  internalToken:
+    value: <random-string>             # or existingSecret + secretKey
+  writer:
+    replicas: 2
+    storageSize: 50Gi
+  reader:
+    minReplicas: 2
+    maxReplicas: 10
+```
+
+The writers keep the newest seconds in memory, so a reader cannot see them from
+the bucket. The chart gives the readers `query.writer_endpoints` (one URL per
+writer pod, from the headless Service) and every pod gets
+`PARQTEL__QUERY__INTERNAL_AUTH_TOKEN` from a Secret; the endpoint answers `404`
+without the token. A reader with no reachable writer still answers correctly,
+from the bucket alone.
+
+Alerting runs on whichever pod `server.alert_evaluator = true` selects: off on
+writers in this topology, on for a reader if you want it. Ingest-side effects
+(spans, RED metrics) stay on the writers.
+
+Point each collector at the writers' headless pods, not the reader Service:
+[otel-collector-sharded.yaml](../../examples/agents/otel-collector-sharded.yaml)
+fans OTLP/gRPC out to every writer with a disk-backed retry queue.
+
+```bash
+kubectl get pods -l app.kubernetes.io/component=writer    # parqtel-writer-0/1
+kubectl get pods -l app.kubernetes.io/component=reader
+helm template parqtel deploy/helm/parqtel -f deploy/helm/parqtel/ci/sharded-values.yaml | kubectl apply -f -
+```
+
+`helm lint`/`helm template` fail if `mode: sharded` is set without the bucket,
+without the internal token, or together with `ha.enabled`.
 
 ### Custom Values Example
 

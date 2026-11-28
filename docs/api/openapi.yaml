@@ -1301,6 +1301,116 @@ paths:
                           logs: { type: array, items: { type: integer } }
                           traces: { type: array, items: { type: integer } }
 
+  /internal/v1/buffer:
+    post:
+      tags: [Internal]
+      summary: Unflushed rows a writer still holds in memory
+      description: >
+        Answers a `reader` node request for rows the writer has ingested but
+        not flushed to a block yet. Mounted only when the process ingests, and
+        only reachable with `query.internal_auth_token` configured: without it
+        the route answers 404, with a wrong bearer token 401. Returned rows are
+        strictly newer than `since_ns` and capped at 10000. A reader merges
+        these rows with the blocks it reads from the shared bucket, so it sees
+        the newest seconds. Not part of the public API.
+      operationId: internalBufferQuery
+      parameters:
+        - name: Authorization
+          in: header
+          required: true
+          schema:
+            type: string
+            example: Bearer <query.internal_auth_token>
+          description: Bearer token equal to `query.internal_auth_token`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [signal, start_ns, end_ns]
+              properties:
+                signal:
+                  type: string
+                  enum: [metrics, logs, traces]
+                metric:
+                  type: string
+                  description: >
+                    Metric name. Required for `metrics`, ignored for the other
+                    signals.
+                since_ns:
+                  type: integer
+                  format: int64
+                  description: >
+                    Exclusive lower bound: only rows newer than this are
+                    returned. The reader sends the newest block timestamp it
+                    holds, so the answer fills exactly the gap.
+                start_ns:
+                  type: integer
+                  format: int64
+                end_ns:
+                  type: integer
+                  format: int64
+                  description: Must not be lower than `start_ns`.
+                limit:
+                  type: integer
+                  minimum: 1
+                  maximum: 10000
+                  default: 10000
+      responses:
+        "200":
+          description: Rows currently buffered by this writer
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  watermark_ns:
+                    type: integer
+                    format: int64
+                    nullable: true
+                    description: >
+                      Newest returned row timestamp; null when the answer is
+                      empty.
+                  points:
+                    type: array
+                    description: "Pairs of [metric name, data point]."
+                    items:
+                      type: array
+                      minItems: 2
+                      maxItems: 2
+                      items: {}
+                  logs:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        timestamp_ns: { type: integer, format: int64 }
+                        severity_number: { type: integer }
+                        severity_text: { type: string }
+                        body: { type: string }
+                        trace_id: { type: string }
+                        span_id: { type: string }
+                        labels: { type: object, additionalProperties: true }
+                  spans:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        trace_id: { type: string }
+                        span_id: { type: string }
+                        name: { type: string }
+                        start_time_ns: { type: integer, format: int64 }
+                        end_time_ns: { type: integer, format: int64 }
+                        status: { type: object, additionalProperties: true }
+                        attributes: { type: object, additionalProperties: true }
+        "400":
+          description: Malformed request (end before start, metrics without a name)
+        "401":
+          description: Missing or wrong bearer token
+        "404":
+          description: Internal endpoints are disabled (no `query.internal_auth_token`)
+
   /v1/metrics:
     post:
       tags: [Ingestion]

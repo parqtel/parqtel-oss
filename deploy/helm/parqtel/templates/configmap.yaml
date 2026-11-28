@@ -4,6 +4,17 @@ metadata:
   name: {{ include "parqtel.fullname" . }}
   labels:
     {{- include "parqtel.labels" . | nindent 4 }}
+{{- if eq .Values.mode "sharded" }}
+{{- if .Values.ha.enabled }}
+{{- fail "mode=sharded replaces the ha topology: set ha.enabled=false (each sharded workload sets its own replica count)" }}
+{{- end }}
+{{- if not .Values.sharding.objectStore.enabled }}
+{{- fail "mode=sharded needs sharding.objectStore.enabled=true: writers publish blocks to the bucket and readers read them back" }}
+{{- end }}
+{{- if not .Values.sharding.objectStore.bucket }}
+{{- fail "mode=sharded needs sharding.objectStore.bucket" }}
+{{- end }}
+{{- end }}
 data:
   parqtel.toml: |
     [server]
@@ -24,6 +35,20 @@ data:
     retention_days = {{ .Values.parqtel.storage.retentionDays | int }}
     compaction_interval_secs = {{ .Values.parqtel.storage.compactionIntervalSecs | int }}
     row_group_size = {{ .Values.parqtel.storage.rowGroupSize | int }}
+    {{- if eq .Values.mode "sharded" }}
+
+    [object_store]
+    enabled = true
+    bucket = {{ .Values.sharding.objectStore.bucket | quote }}
+    region = {{ .Values.sharding.objectStore.region | quote }}
+    prefix = {{ .Values.sharding.objectStore.prefix | quote }}
+    cache_dir = "/data/cache"
+    cache_bytes = {{ .Values.sharding.objectStore.cacheBytes | int }}
+    catalog_interval_secs = {{ .Values.sharding.objectStore.catalogIntervalSecs | int }}
+    {{- if .Values.sharding.objectStore.endpoint }}
+    endpoint = {{ .Values.sharding.objectStore.endpoint | quote }}
+    {{- end }}
+    {{- end }}
 
     [logs]
     data_dir = {{ .Values.parqtel.logs.dataDir | quote }}
@@ -70,6 +95,19 @@ data:
     max_samples_per_series = {{ .Values.parqtel.query.maxSamplesPerSeries | int }}
     timeout_secs = {{ .Values.parqtel.query.timeoutSecs | int }}
     lookback_delta_ns = {{ .Values.parqtel.query.lookbackDeltaNs | int }}
+    {{- if eq .Values.mode "sharded" }}
+    {{- $fullname := include "parqtel.fullname" . }}
+    {{- $writerService := printf "%s-writer" $fullname }}
+    {{- $endpoints := list }}
+    {{- range $i := until (int .Values.sharding.writer.replicas) }}
+    {{- $endpoints = append $endpoints (printf "http://%s-writer-%d.%s.%s.svc.cluster.local:%d" $fullname $i $writerService $.Release.Namespace (int $.Values.service.port)) }}
+    {{- end }}
+    writer_endpoints = {{ toJson $endpoints }}
+    writer_fanout_timeout_ms = {{ .Values.parqtel.query.writerFanoutTimeoutMs | default 2000 | int }}
+    max_scan_blocks = {{ .Values.parqtel.query.maxScanBlocks | int }}
+    max_concurrent_scans = {{ .Values.parqtel.query.maxConcurrentScans | int }}
+    compaction_scan_slots = {{ .Values.parqtel.query.compactionScanSlots | int }}
+    {{- end }}
 
     [ui]
     enabled = {{ .Values.parqtel.ui.enabled }}

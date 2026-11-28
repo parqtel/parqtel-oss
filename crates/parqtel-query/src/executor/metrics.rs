@@ -62,10 +62,16 @@ impl QueryExecutor {
                 // points. The service matcher additionally prunes row groups.
                 let filter = series_filter(matchers, name);
                 // Buffer
-                let (buffered, buffered_rows) = self
+                let (mut buffered, mut buffered_rows) = self
                     .buffer
                     .scan_metrics_filtered(name, scan_start, end_ns, filter.as_ref())
                     .await;
+                // Reader tier: the writers still hold the unflushed seconds.
+                let remote = self
+                    .remote_points_for(name, scan_start, end_ns, filter.as_ref())
+                    .await;
+                let added = Self::merge_remote_points(&mut buffered, remote);
+                buffered_rows += added as u64;
                 let scan = Scanner::scan_filtered_limited(
                     blocks,
                     name.clone(),
@@ -159,7 +165,7 @@ impl QueryExecutor {
         };
         let blocks_count = blocks.len();
         let filter = series_filter(&plan.matchers, &plan.metric_name);
-        let (buffered, buffered_rows) = self
+        let (mut buffered, mut buffered_rows) = self
             .buffer
             .scan_metrics_filtered(
                 &plan.metric_name,
@@ -168,6 +174,16 @@ impl QueryExecutor {
                 filter.as_ref(),
             )
             .await;
+        let remote = self
+            .remote_points_for(
+                &plan.metric_name,
+                plan.start_ns,
+                plan.end_ns,
+                filter.as_ref(),
+            )
+            .await;
+        let added = Self::merge_remote_points(&mut buffered, remote);
+        buffered_rows += added as u64;
         let window_ns = (plan.end_ns - plan.start_ns) / 60;
         let scan = Scanner::scan_filtered_limited(
             blocks,

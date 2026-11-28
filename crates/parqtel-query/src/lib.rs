@@ -10,6 +10,7 @@ pub mod parser;
 pub mod pipeline;
 pub mod pipeline_exec;
 pub mod plan;
+pub mod remote;
 
 pub use executor::QueryExecutor;
 pub use matcher::{needs_ast, parse_query, parse_selector, LabelMatcher, MatchOp};

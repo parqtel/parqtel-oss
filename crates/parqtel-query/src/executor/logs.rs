@@ -62,12 +62,15 @@ impl QueryExecutor {
             };
 
         // Unflushed logs: only the rows that match are copied out of the buffer.
-        let buffered_logs = {
+        let mut buffered_logs = {
             let keep = make_filter(matchers.clone(), severity_min, search.clone());
             self.buffer
                 .scan_logs_filtered(start_ns, end_ns, |l| keep(l))
                 .await
         };
+        // Reader tier: the writers still hold the unflushed seconds. The row
+        // predicate below re-checks every remote row.
+        buffered_logs.extend(self.remote_logs(start_ns, end_ns).await);
         if blocks.is_empty() && buffered_logs.is_empty() {
             return Ok(LogQueryResult {
                 logs: Vec::new(),
@@ -223,10 +226,11 @@ impl QueryExecutor {
             move |log: &parqtel_core::LogRecord| prepared_pred.matches(log, &extra)
         };
 
-        let buffered_logs = self
+        let mut buffered_logs = self
             .buffer
             .scan_logs_filtered(start_ns, end_ns, &apply_pred)
             .await;
+        buffered_logs.extend(self.remote_logs(start_ns, end_ns).await);
         let mut total_logs_count = 0usize;
         let mut volume_summary = vec![0u64; 60];
         let mut scanned_blocks = 0usize;
@@ -317,10 +321,11 @@ impl QueryExecutor {
             move |log: &parqtel_core::LogRecord| prepared_search.matches(log, &extra)
         };
 
-        let buffered_logs = self
+        let mut buffered_logs = self
             .buffer
             .scan_logs_filtered(start_ns, end_ns, &apply_search)
             .await;
+        buffered_logs.extend(self.remote_logs(start_ns, end_ns).await);
         if blocks.is_empty() && buffered_logs.is_empty() {
             return Ok(LogQueryResult {
                 logs: Vec::new(),

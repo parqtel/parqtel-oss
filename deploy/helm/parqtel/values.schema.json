@@ -474,6 +474,22 @@
             "lookbackDeltaNs": {
               "type": "integer",
               "minimum": 1000000000
+            },
+            "maxScanBlocks": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "maxConcurrentScans": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "compactionScanSlots": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "writerFanoutTimeoutMs": {
+              "type": "integer",
+              "minimum": 1
             }
           }
         },
@@ -1229,39 +1245,172 @@
           "minimum": 1
         }
       }
+    },
+    "mode": {
+      "type": "string",
+      "enum": [
+        "standalone",
+        "sharded"
+      ]
+    },
+    "sharding": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "objectStore": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "bucket": {
+              "type": "string"
+            },
+            "region": {
+              "type": "string"
+            },
+            "endpoint": {
+              "type": "string"
+            },
+            "prefix": {
+              "type": "string"
+            },
+            "cacheBytes": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "catalogIntervalSecs": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "existingSecret": {
+              "type": "string"
+            }
+          }
+        },
+        "internalToken": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "value": {
+              "type": "string"
+            },
+            "existingSecret": {
+              "type": "string"
+            },
+            "secretKey": {
+              "type": "string"
+            }
+          }
+        },
+        "writer": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "replicas": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "storageSize": {
+              "type": "string"
+            },
+            "storageClassName": {
+              "type": "string"
+            },
+            "resources": {
+              "type": "object"
+            }
+          }
+        },
+        "reader": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "minReplicas": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "maxReplicas": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "targetCPUUtilizationPercentage": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "cacheSize": {
+              "type": "string"
+            },
+            "resources": {
+              "type": "object"
+            }
+          }
+        },
+        "compactor": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "replicas": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "cacheSize": {
+              "type": "string"
+            },
+            "resources": {
+              "type": "object"
+            }
+          }
+        }
+      }
     }
   },
   "allOf": [
     {
       "if": {
-        "required": ["ha"],
+        "required": [
+          "ha"
+        ],
         "properties": {
           "ha": {
             "properties": {
-              "enabled": { "const": true }
+              "enabled": {
+                "const": true
+              }
             }
           }
         }
       },
       "then": {
         "properties": {
-          "replicaCount": { "minimum": 2 },
+          "replicaCount": {
+            "minimum": 2
+          },
           "storage": {
             "properties": {
-              "enabled": { "const": true },
-              "existingClaim": { "const": "" }
+              "enabled": {
+                "const": true
+              },
+              "existingClaim": {
+                "const": ""
+              }
             }
           },
           "autoscaling": {
             "properties": {
-              "enabled": { "const": false }
+              "enabled": {
+                "const": false
+              }
             }
           }
         }
       },
       "else": {
         "properties": {
-          "replicaCount": { "maximum": 1 }
+          "replicaCount": {
+            "maximum": 1
+          }
         }
       }
     }

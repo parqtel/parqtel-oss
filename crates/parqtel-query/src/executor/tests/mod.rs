@@ -14,6 +14,7 @@ mod correlate;
 mod labels;
 mod logs;
 mod metrics;
+mod remote;
 mod series;
 
 /// Persists one of the storage engine's in-memory indexes to its sidecar.

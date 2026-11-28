@@ -31,6 +31,7 @@ pub(crate) fn spawn_catalog_sync_task(
     interval_secs: u64,
     node_id: Option<String>,
     publish_local: bool,
+    ownership: Arc<parqtel_core::OwnershipRegistry>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(Duration::from_secs(interval_secs.max(1)));
@@ -101,13 +102,22 @@ pub(crate) fn spawn_catalog_sync_task(
             // A reader must not claim blocks: the manifest's writer lease is
             // what tells the owner its blocks are still live.
             if publish_local {
+                let own_keys: Vec<String> = local.iter().map(|block| block.key.clone()).collect();
                 if let Err(e) = catalog.publish(local, node_id.clone()).await {
                     tracing::warn!(error = %e, "catalog publish failed");
                     continue;
                 }
+                for key in own_keys {
+                    ownership.own(&key);
+                }
             }
             let Some(remote) = remote else { continue };
+            let local_node = node_id.as_deref().unwrap_or_default();
             for block in remote.blocks {
+                // Compaction and retention consult this registry before
+                // retiring a block; a key another writer owns must survive
+                // this node's sweep.
+                ownership.adopt(&block.key, block.writer.as_deref(), local_node);
                 if local_keys.contains(&block.key) {
                     continue;
                 }

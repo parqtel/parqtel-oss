@@ -18,11 +18,19 @@ spec:
       {{- if and (eq .Values.service.type "NodePort") .Values.service.nodePort }}
       nodePort: {{ .Values.service.nodePort }}
       {{- end }}
-    {{- if .Values.ingestion.grpc.enabled }}
+    {{- if and .Values.ingestion.grpc.enabled (ne .Values.mode "sharded") }}
     - port: {{ .Values.ingestion.grpc.port }}
       targetPort: grpc
       protocol: TCP
       name: grpc
     {{- end }}
+  {{- if eq .Values.mode "sharded" }}
+  # Query traffic goes to the readers: a writer answers only from its own
+  # local directory and would return a partial answer to a client that landed
+  # on it.
+  selector:
+    {{- include "parqtel.shardedSelector" (dict "root" . "role" "reader") | nindent 4 }}
+  {{- else }}
   selector:
     {{- include "parqtel.selectorLabels" . | nindent 4 }}
+  {{- end }}
