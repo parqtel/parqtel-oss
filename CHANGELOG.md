@@ -15,6 +15,8 @@ build cannot reach a registry or the release page.
 #### Features
 
 - assert the release body matches the changelog section
+- add L2 compaction, scan budgets and scoped block ownership
+- run sharded writers, readers and compactor from one chart
 <!-- changelog:auto-end -->
 
 ## [0.4.0] - 2026-11-27
