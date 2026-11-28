@@ -12,7 +12,9 @@ build cannot reach a registry or the release page.
 ## [Unreleased]
 
 <!-- changelog:auto-start -->
-_No unreleased changes._
+#### Bug Fixes
+
+- route signals per writer, scope compaction and isolate alerts
 <!-- changelog:auto-end -->
 
 ## [0.5.0] - 2026-11-28
