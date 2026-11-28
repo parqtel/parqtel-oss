@@ -296,9 +296,10 @@ jobs:
       && (needs.changes.outputs.docker == 'true' || github.event_name == 'pull_request')
     steps:
       - uses: actions/checkout@v4
+      # No extra buildx driver args: `docker/setup-buildx-action` rejects
+      # unknown inputs, and the former `maxLoad` value is not a buildkitd
+      # option. Build concurrency is bounded by the job timeout and one image.
       - uses: docker/setup-buildx-action@v3
-        with:
-          buildkit-drv-args: '{"maxLoad": 2}'
       - name: Build image
         uses: docker/build-push-action@v6
         with:
