@@ -16,8 +16,8 @@ Parqtel's memory usage is primarily driven by:
 **Recommendation:** leave `max_rows_per_block` at its default (1 M). A bigger
 block is not cheaper: the per-block series table grows with the *series count*
 in the block, not with the row count, so a block that holds more rows also
-holds a bigger index. The 5-minute L1 rollup is what keeps the number of
-blocks a query touches bounded.
+holds a bigger index. The 5-minute L1 rollup and the 2-hour L2 rollup are
+what keep the number of blocks a query touches bounded.
 
 ### CPU & I/O
 - **Compaction**: This is a CPU and Disk I/O intensive process. It runs every
@@ -34,7 +34,7 @@ Parquet is a columnar format that benefits from fast sequential and random reads
 ### Retention vs. Compaction
 - Keep `retention_days` realistic for your disk size.
 - Ensure `compaction_interval_secs` is frequent enough to merge small blocks created during low-traffic periods. The default (300 s) matches the L1 window; lower it only if the rollup lags.
-- Metric block files are named by level (`m_l0_`, `m_n_`, `m_l1_`), so `ls` on the data directory shows at a glance whether the rollup is keeping up.
+- Metric block files are named by level (`m_l0_`, `m_n_`, `m_l1_`, `m_l2_`), so `ls` on the data directory shows at a glance whether each rollup is keeping up.
 
 ## 3. Security Hardening
 

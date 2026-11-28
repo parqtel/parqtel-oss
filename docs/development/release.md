@@ -154,19 +154,25 @@ anonymous user.
 
 The **Chart Visibility** workflow (`chart-visibility.yml`, manual dispatch)
 flips the chart package to public and then proves it by reading `tags/list`
-with an anonymous GHCR token — the exact request Helm makes. Visibility is an
-admin operation on the package: the workflow token is repo-scoped and answers
-`404` for it, so dispatch with the `token` input set to a PAT that has
-`write:packages`, or toggle it by hand:
+with an anonymous GHCR token — the exact request Helm makes.
 
-1. Open the organization's **Packages** list, pick the package,
-   **Package settings → Danger Zone → Change visibility → Public**.
-2. Confirm `docker pull ghcr.io/parqtel/parqtel-oss:X.Y.Z` and
-   `helm show chart oci://ghcr.io/parqtel/charts/parqtel --version X.Y.Z`
-   work without credentials.
+GitHub restricts the package endpoints to a **personal access token (classic)**:
+OAuth app tokens (everything `gh auth login` mints, including
+`gh auth refresh -s write:packages`) and the Actions `GITHUB_TOKEN` answer
+`404` on the visibility PATCH even when they carry `write:packages`. So the
+workflow only succeeds when dispatched with a classic PAT via the `token`
+input, and the reliable path is the UI:
+
+1. Open `https://github.com/orgs/parqtel/packages/container/charts%2Fparqtel/settings`,
+   then **Danger Zone → Change visibility → Public** and confirm the package
+   name.
+2. Confirm `helm show chart oci://ghcr.io/parqtel/charts/parqtel --version X.Y.Z`
+   and `docker pull ghcr.io/parqtel/parqtel-oss:X.Y.Z` work without
+   credentials (`docker logout ghcr.io` first).
 
 A private chart package makes the documented `helm install` line fail for
-every user, so treat step 2 as part of the release.
+every user, so treat step 2 as part of the release; the release verifier
+reports it as a SKIP, not a PASS, until it is done.
 
 ## Verifying a release
 

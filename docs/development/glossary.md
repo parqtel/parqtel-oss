@@ -60,11 +60,13 @@ This document defines key terms and concepts used within the Parqtel ecosystem.
 
 ### L (levels)
 - **L0 Block**: A metric block written by one ingest flush (`m_l0_*`). Series are sorted by the final query-visible labels, so the footer series table agrees with the row order.
-- **L1 Block**: A metric block produced by the streaming compactor (`m_l1_*`), covering one 5-minute window. L1 blocks are what keeps a query's block fan-out bounded.
+- **L1 Block**: A metric block produced by the streaming compactor (`m_l1_*`), covering one 5-minute window. L1 blocks are what keeps a short query's block fan-out bounded.
+- **L2 Block**: A metric block produced by the second compaction level (`m_l2_*`), covering one 2-hour window built from L1 sources. L2 blocks bound the fan-out of long ranges.
 
 ### I (interning and admission)
 - **Label Interner**: A process-wide table of distinct label sets (`ingest.label_interner_capacity`, default 1 048 576). Points of one series share a single copy of their labels; below the working set, memory grows with points instead of series.
-- **Scan Admission / Scan Budget**: The process-wide budget of 4 concurrent block scans. Queries wait for a slot; background work (alert evaluation, compaction) reserves one without waiting and skips its cycle when none is free.
+- **Scan Admission / Scan Budget**: The process-wide budget of concurrent block scans (`query.max_concurrent_scans`, default `min(cpus, 8)`). Queries wait for a slot; compaction draws from its own `query.compaction_scan_slots` budget and alert evaluation keeps a single slot, so background work skips its cycle instead of competing with dashboards.
+- **Scoped Ownership**: With an object store, the registry that limits compaction and retention to blocks this node produced, so a sharded node never retires a peer's block.
 
 ### P (provenance)
 - **Provenance Footer**: The list of source blocks an output block was merged from (`parqtel.compacted_sources`). Reconcile drops superseded sources after a crash; sources are deleted after a 5-minute grace period.

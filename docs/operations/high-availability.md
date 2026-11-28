@@ -78,3 +78,16 @@ blocking for that hostname, so avoid broad wildcards.
 Change the collector back to its single exporter targeting replica 0, then
 scale the StatefulSet to one pod. Replica 0 keeps its PVC and data; replica 1's
 data remains separate and is not merged.
+
+## Scaling writes and reads separately
+
+The HA StatefulSet replicates one shard: every replica keeps its own PVC and
+the common Service sends every read to one replica. When ingestion outgrows a
+single shard's PVC or reads outgrow one pod, use `mode: sharded` instead: the
+writer StatefulSet ingests into a shared object-store bucket, a reader
+Deployment (with an HPA) serves queries from that bucket, and one compactor
+merges and retires blocks. Writers keep no shared state beyond the bucket and
+their own WAL staging, so readers scale independently of ingest.
+
+See [Sharded writers and stateless readers](deployment.md#sharded-writers-and-stateless-readers)
+for the values, the internal buffer token and the collector fan-out example.

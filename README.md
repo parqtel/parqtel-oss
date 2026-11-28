@@ -89,8 +89,8 @@ S3-compatible bucket with a shared catalog is optional.
 | Category | Capabilities |
 |----------|-------------|
 | **Ingestion** | OTLP gRPC (`:4317`) + HTTP protobuf/JSON; generic JSON logs; Prometheus `remote_write`; Kafka JSON consumer |
-| **Storage** | Block Parquet with Zstd/Snappy/LZ4; L0→L1 compaction; retention; series table and log skip index |
-| **Object storage** | Optional S3-compatible upload, bounded read cache and CAS shared catalog; local disk remains the WAL staging area |
+| **Storage** | Block Parquet with Zstd/Snappy/LZ4; L0→L1→L2 compaction; retention; series table and log skip index; scan budgets with explicit truncation |
+| **Object storage** | Optional S3-compatible upload, bounded read cache and CAS shared catalog; local disk remains the WAL staging area; sharded `writer`/`reader`/`compactor` roles over one bucket |
 | **Query** | PromQL-compatible instant/range, labels, aggregations, subqueries, binary matching; ParqtelQL log/trace search; PQL pipelines |
 | **Dashboards** | Persisted multi-panel dashboards; saved searches; live tail (SSE); chunked NDJSON log streaming |
 | **Alerting** | YAML rules, threshold + median/MAD anomaly, dedicated scan slot, transition history and noise score; Alertmanager route tree, grouping, inhibition, silences, Slack/PagerDuty/Teams/webhook receivers |

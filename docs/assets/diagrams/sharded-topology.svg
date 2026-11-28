@@ -1,0 +1,120 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 640" role="img" aria-labelledby="shard-title shard-desc">
+  <title id="shard-title">Parqtel sharded topology</title>
+  <desc id="shard-desc">Animated diagram of one chart rendering four workloads: collectors fan OTLP out to a writer StatefulSet whose pods keep one PVC each and publish Parquet blocks to a shared bucket with a compare-and-swap catalog; a reader Deployment (with an HPA) serves queries from the bucket and fetches rows newer than its watermark from every writer over the internal buffer endpoint; a single compactor merges level-zero and level-one blocks and applies retention, retiring only its own blocks.</desc>
+  <defs>
+    <linearGradient id="s-teal" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#2dd4bf"/><stop offset="1" stop-color="#38bdf8"/>
+    </linearGradient>
+    <linearGradient id="s-warm" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#fbbf24"/><stop offset="1" stop-color="#fb7185"/>
+    </linearGradient>
+    <style>
+      .bg{fill:#ffffff}
+      .zone{fill:#f8fafc;stroke:#cbd5e1;stroke-width:1.2}
+      .zone2{fill:#f0fdfa;stroke:#99f6e4;stroke-width:1.3}
+      .node{fill:#ffffff;stroke:#94a3b8;stroke-width:1.2}
+      .hot{fill:#ecfeff;stroke:#0891b2;stroke-width:1.4}
+      .bucket{fill:#fffbeb;stroke:#d97706;stroke-width:1.5}
+      .ghost{fill:#f8fafc;stroke:#94a3b8;stroke-width:1.1;stroke-dasharray:4 3}
+      .t{fill:#0f172a;font:600 13px/1.2 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif}
+      .s{fill:#475569;font:11px/1.2 ui-monospace,SFMono-Regular,Menlo,monospace}
+      .h{fill:#0f766e;font:700 11px/1 ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:1.2px}
+      .flow{stroke:url(#s-teal);stroke-width:2.2;fill:none;stroke-dasharray:5 9;animation:flow 1.15s linear infinite}
+      .floww{stroke:url(#s-warm);stroke-width:2.2;fill:none;stroke-dasharray:5 9;animation:flow 1.55s linear infinite}
+      .edge{stroke:#94a3b8;stroke-width:1.3;fill:none}
+      .pulse{animation:pulse 3.4s ease-in-out infinite}
+      .pulse2{animation:pulse 3.4s ease-in-out .7s infinite}
+      .pulse3{animation:pulse 3.4s ease-in-out 1.4s infinite}
+      @keyframes flow{to{stroke-dashoffset:-28}}
+      @keyframes pulse{0%,100%{stroke-opacity:.5}50%{stroke-opacity:1}}
+      @media (prefers-reduced-motion: reduce){*{animation:none!important}.flow,.floww{stroke-dasharray:none}}
+    </style>
+  </defs>
+
+  <rect class="bg" width="1000" height="640" rx="18"/>
+  <text x="28" y="34" class="h">SHARDED TOPOLOGY · ONE CHART · server.role</text>
+
+  <rect class="zone" x="24" y="56" width="460" height="94" rx="14"/>
+  <text x="42" y="80" class="h">PRODUCERS</text>
+  <g class="pulse">
+    <rect class="node" x="42" y="90" width="424" height="46" rx="9"/>
+    <text x="56" y="110" class="t">OTel Collector / SDKs</text>
+    <text x="56" y="127" class="s">OTLP gRPC :4317 · HTTP · Kafka — fan out to every writer</text>
+  </g>
+
+  <rect class="zone2" x="24" y="166" width="460" height="194" rx="14"/>
+  <text x="42" y="190" class="h">WRITER · STATEFULSET × N</text>
+  <g class="pulse2">
+    <rect class="hot" x="42" y="200" width="424" height="66" rx="9"/>
+    <text x="56" y="222" class="t">parqtel-writer-0</text>
+    <text x="56" y="240" class="s">WAL → Parquet → publish · PVC · serves /internal/v1/buffer</text>
+  </g>
+  <g class="pulse3">
+    <rect class="node" x="42" y="278" width="424" height="66" rx="9"/>
+    <text x="56" y="300" class="t">parqtel-writer-1</text>
+    <text x="56" y="318" class="s">own PVC · own WAL chain · own buffer tail</text>
+  </g>
+
+  <rect class="zone" x="24" y="376" width="460" height="184" rx="14"/>
+  <text x="42" y="400" class="h">COMPACTOR · DEPLOYMENT × 1</text>
+  <g class="pulse">
+    <rect class="node" x="42" y="410" width="424" height="58" rx="9"/>
+    <text x="56" y="432" class="t">L0 → L1 → L2</text>
+    <text x="56" y="450" class="s">8 sources · 2 groups · 16M rows · ≤ 2 L2 merges per pass</text>
+  </g>
+  <g class="pulse3">
+    <rect class="node" x="42" y="480" width="424" height="58" rx="9"/>
+    <text x="56" y="502" class="t">Retention</text>
+    <text x="56" y="520" class="s">retires only locally produced blocks · scoped ownership</text>
+  </g>
+
+  <rect class="bucket" x="540" y="56" width="436" height="244" rx="16"/>
+  <text x="558" y="80" class="h">S3-COMPATIBLE BUCKET</text>
+  <rect class="ghost" x="558" y="92" width="120" height="40" rx="7"/>
+  <text x="570" y="110" class="s">m_l0_*.parquet</text>
+  <text x="570" y="124" class="s">one per flush</text>
+  <rect class="ghost" x="690" y="92" width="120" height="40" rx="7"/>
+  <text x="702" y="110" class="s">m_l1_*.parquet</text>
+  <text x="702" y="124" class="s">5-minute window</text>
+  <rect class="ghost" x="822" y="92" width="136" height="40" rx="7"/>
+  <text x="834" y="110" class="s">m_l2_*.parquet</text>
+  <text x="834" y="124" class="s">2-hour window</text>
+  <rect class="node" x="558" y="148" width="400" height="58" rx="9"/>
+  <text x="572" y="170" class="t">_catalog/manifest.json</text>
+  <text x="572" y="188" class="s">compare-and-swap publish · create-only uploads</text>
+  <text x="558" y="228" class="s">readers materialise a bounded LRU cache per block</text>
+  <text x="558" y="246" class="s">cache_bytes caps disk · the open block is never evicted</text>
+  <text x="558" y="268" class="s">a reader polls, adopts unseen keys, reads through the cache</text>
+
+  <rect class="zone2" x="540" y="316" width="436" height="244" rx="14"/>
+  <text x="558" y="340" class="h">READER · DEPLOYMENT + HPA</text>
+  <g class="pulse">
+    <rect class="node" x="558" y="350" width="400" height="58" rx="9"/>
+    <text x="572" y="372" class="t">Scan · watermark = newest block end</text>
+    <text x="572" y="390" class="s">index → series table → row groups → predicate</text>
+  </g>
+  <g class="pulse2">
+    <rect class="hot" x="558" y="420" width="400" height="58" rx="9"/>
+    <text x="572" y="442" class="t">POST /internal/v1/buffer</text>
+    <text x="572" y="460" class="s">bearer token · rows newer than the watermark</text>
+  </g>
+  <g class="pulse3">
+    <rect class="node" x="558" y="490" width="400" height="58" rx="9"/>
+    <text x="572" y="512" class="t">Merge · dedupe · evaluate</text>
+    <text x="572" y="530" class="s">serves /api/v1/query · /ui · MCP · alerts when enabled</text>
+  </g>
+
+  <path class="flow" d="M120 150 V166"/>
+  <path class="floww" d="M484 250 H540"/>
+  <path class="floww" d="M760 300 V316"/>
+  <path class="floww" d="M540 470 H516 V370 H420 V360" stroke-dasharray="6 6"/>
+  <path class="flow" d="M484 430 H504 V288 H540"/>
+
+  <text x="492" y="240" class="s">publish</text>
+  <text x="768" y="312" class="s">read</text>
+  <text x="522" y="364" class="s">buffer rows</text>
+  <text x="492" y="424" class="s">compact</text>
+
+  <text x="24" y="592" class="s">one binary, four roles: all (default), writer, reader, compactor — a role that does not run a subsystem does not mount its routes</text>
+  <text x="24" y="612" class="s">a reader needs query.writer_endpoints to see unflushed rows; without a reachable writer it answers from the bucket and logs a warning</text>
+</svg>

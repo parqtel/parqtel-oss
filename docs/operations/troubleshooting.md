@@ -45,13 +45,15 @@ Queries involving high cardinality (thousands of series) or large time ranges ca
 - **Solution:** Use recording rules to pre-aggregate data for frequently used dashboards.
 
 ### Queries are queued behind each other
-Block scans share a process-wide budget of **4 slots**. When all four are
-busy, a query waits for one.
+Block scans share a process-wide budget of `query.max_concurrent_scans` slots
+(default `min(cpus, 8)`). When all are busy, a query waits for one. A query
+wider than `query.max_scan_blocks` (default 1024) is truncated and says so in
+`warnings` / `X-Parqtel-Truncated`.
 
 | Metric | What it tells you |
 |--------|-------------------|
 | `parqtel_scan_slots_in_use` | Slots currently held by scans |
-| `parqtel_scan_slots_limit` | The budget (4) |
+| `parqtel_scan_slots_limit` | The query budget (default `min(cpus, 8)`) |
 | `parqtel_scan_admission_wait_seconds_total` | Total time scans spent waiting for admission |
 | `parqtel_scan_low_priority_skips_total` | Background work skipped because no slot was free |
 | `parqtel_scan_blocks_total` | Blocks scanned across all signals |
@@ -62,7 +64,7 @@ A rising `parqtel_scan_low_priority_skips_total` means alert evaluation (and
 the compaction pass) are being deferred because interactive queries are using
 the budget. That is the intended priority order, but if alerts are skipping
 too often, reduce the query fan-out: narrow the alert rule's window, or roll
-metric blocks up into L1 windows more aggressively by lowering
+metric blocks up into L1 and L2 windows more aggressively by lowering
 `PARQTEL__STORAGE__COMPACTION_INTERVAL_SECS`.
 
 ## 3. Storage & Disk Issues
@@ -79,15 +81,16 @@ If the compactor cannot keep up with the ingestion rate, you will have many smal
 
 ### Many small metric files
 Metric block files are named by level, so the store's shape is visible in `ls`:
-`m_l0_` is one ingest flush, `m_n_` a normalised legacy block, and `m_l1_` a
-coalesced 5-minute window.
+`m_l0_` is one ingest flush, `m_n_` a normalised legacy block, `m_l1_` a
+coalesced 5-minute window and `m_l2_` a coalesced 2-hour window.
 - **A directory full of `m_l0_` files** means the L1 rollup is not keeping up.
   It runs every `PARQTEL__STORAGE__COMPACTION_INTERVAL_SECS` (default 300) and
   merges at most 8 sources, 2 groups and 16 M rows per pass. Lower the interval
   or give the pod more IOPS.
 - **A pass that is skipped** leaves the blocks where they are. A pass skips
-  when it cannot reserve 2 of the 4 process-wide scan slots, or when the
-  sources' WAL ranges are mixed or not contiguous — see
+  when it cannot reserve its own compaction slots
+  (`query.compaction_scan_slots`, default 2), or when the sources' WAL ranges
+  are mixed or not contiguous — see
   `parqtel_scan_low_priority_skips_total` and the `Compaction failed` log
   line.
 - **`m_n_` files** are legacy blocks being normalised, one per pass. They

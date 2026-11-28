@@ -66,12 +66,38 @@ merge** coalesces canonical blocks into one 5-minute window:
   `parqtel.compacted_sources`; reconcile drops superseded sources after a
   crash, and sources are deleted after a 5-minute grace period.
 
-One pass is bounded: 8 sources, 2 groups, 1 normalisation, 16 M rows, and 2 of
-the 4 process-wide scan slots. A pass that cannot reserve its slots is
-deferred rather than competing with interactive queries.
+One pass is bounded: 8 sources, 2 groups, 1 normalisation, 16 M rows, and its
+own scan slots (`query.compaction_scan_slots`, default 2). A pass that cannot
+reserve them is deferred rather than competing with interactive queries.
 
-`parqtel compact` runs the same bounded pass offline. It is an offline
+`parqtel compact` runs the same bounded passes offline. It is an offline
 maintenance command — stop the service first.
+
+## L1 windows roll up into 2-hour L2 blocks
+
+![Metric block levels: every flush writes an m_l0_ block, up to eight ordered sources merge into a five-minute m_l1_ window gated on the WAL commit point, and closed windows merge into two-hour m_l2_ blocks; all passes share one 16M-row budget and sources keep a five-minute query grace](../assets/diagrams/metric-block-levels.svg)
+
+The five-minute rollup bounds a short query but not a long one: a six-hour range
+still touched 72 L1 windows plus their L0 tails, and every one of those blocks
+costs an index lookup, a footer read and a row-group pass. A second level
+merges **completed** five-minute windows into one block per two hours.
+
+- **Window.** Two hours, aligned to the epoch. A window is merged only when its
+  end is in the past, so the block cannot grow after publication.
+- **Bounded.** At most two L2 merges per compaction cycle, sharing the same
+  16 M-row budget as the L0 → L1 pass. A 72-window day fills in over a few
+  cycles instead of in one long stall.
+- **Provenance.** The output records its L1 sources under
+  `parqtel.compacted_sources`; sources stay readable for the five-minute grace
+  period and are then deleted in the normal retirement path.
+- **Names.** Output files are `m_l2_*`; the series table and row order are the
+  same contract as L0 and L1, so the scanner needs no special case.
+- **Ownership.** With an object store, only the node that produced a block may
+  merge or retire it (scoped ownership), so a compactor cannot consume a peer
+  writer's data.
+
+A six-hour range now reads three L2 blocks instead of 72 L1 blocks, and the
+level is what keeps long-range panels off the L1 fan-out as retention grows.
 
 ## The label-value dictionary moved to the index
 

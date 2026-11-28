@@ -14,6 +14,9 @@ in a staggered wave, and frames lift to separate planes. Motion stops under
 | Diagram | Asset | Used by |
 |---|---|---|
 | Runtime architecture | [`architecture-overview.svg`](../assets/diagrams/architecture-overview.svg) | [Architecture](architecture.md), README |
+| Sharded topology | [`sharded-topology.svg`](../assets/diagrams/sharded-topology.svg) | [Architecture](architecture.md), [Deployment](../operations/deployment.md) |
+| Reader buffer fan-out | [`reader-fanout.svg`](../assets/diagrams/reader-fanout.svg) | [Architecture](architecture.md) |
+| Metric block levels | [`metric-block-levels.svg`](../assets/diagrams/metric-block-levels.svg) | [Architecture](architecture.md), [Compaction](../performance/compaction.md) |
 | System context | [`system-context.svg`](../assets/diagrams/system-context.svg) | [Architecture](architecture.md) |
 | Crate graph | [`crate-graph.svg`](../assets/diagrams/crate-graph.svg) | [Architecture](architecture.md) |
 | Ingest sequence | [`ingest-path.svg`](../assets/diagrams/ingest-path.svg) | [Architecture](architecture.md) |

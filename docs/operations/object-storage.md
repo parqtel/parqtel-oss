@@ -145,7 +145,11 @@ Compaction and retention operate through the same `BlockStore`:
 - the output is written and published like any other block;
 - sources are deleted from the bucket and local cache after the five-minute
   query grace period;
-- a node retires only blocks it wrote.
+- a node retires only blocks it wrote: the scoped ownership registry limits
+  both compaction and retention to locally produced keys;
+- a reader fetches the writers' unflushed rows over
+  `POST /internal/v1/buffer` (`query.writer_endpoints`), so object storage alone
+  does not decide query recency.
 
 An abandoned source remains readable until the grace period ends. This is
 intentional: a query already running against it must still find it.

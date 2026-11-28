@@ -155,6 +155,8 @@ The chart (`deploy/helm/parqtel`) includes:
 
 ### Sharded writers and stateless readers
 
+![Sharded topology: collectors fan OTLP out to a writer StatefulSet whose pods publish Parquet blocks to a shared bucket and catalog; a reader Deployment scans the bucket, fetches rows newer than its watermark from every writer, and serves queries; one compactor merges and retires blocks](../assets/diagrams/sharded-topology.svg)
+
 `mode: sharded` renders three workloads instead of one, all reading one shared
 S3-compatible bucket:
 

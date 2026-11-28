@@ -2,15 +2,16 @@ name: Chart Visibility
 
 # GHCR packages created by a workflow start private, which breaks the
 # documented `helm install oci://ghcr.io/parqtel/charts/parqtel` for anonymous
-# users. Flipping visibility needs a token that can administer the package: a
-# repo-scoped GITHUB_TOKEN answers 404 on every candidate name, so pass a PAT
-# with `write:packages` (dispatch input `token`) or use the GHCR UI.
+# users. GitHub limits the package endpoints to a personal access token
+# (classic): OAuth app tokens (what `gh auth login` mints) and the Actions
+# GITHUB_TOKEN answer 404 on the visibility PATCH even with write:packages.
+# Dispatch with a classic PAT in the `token` input, or use the GHCR UI.
 
 on:
   workflow_dispatch:
     inputs:
       token:
-        description: "PAT with write:packages (optional; defaults to github.token)"
+        description: "Personal access token (classic) with write:packages; the default github.token cannot change package visibility"
         required: false
       package:
         description: "Package name under the org (default charts/parqtel)"
@@ -42,7 +43,7 @@ jobs:
             -f visibility=public 2>/dev/null | sed -n '1s/^HTTP\/[0-9.]* //p' | tr -d '\r' || true)"
           echo "PATCH ${enc}: HTTP ${code:-none}"
           if [[ "$code" != "200" ]]; then
-            echo "::error::cannot change package visibility (HTTP ${code:-none}). Retry with a PAT that has write:packages, or toggle it in the UI: Organization → Packages → ${PACKAGE} → Package settings → Change visibility → Public."
+            echo "::error::cannot change package visibility (HTTP ${code:-none}). GitHub accepts only a personal access token (classic) with write:packages here; GITHUB_TOKEN and gh OAuth tokens always answer 404. Dispatch again with the token input, or toggle it in the UI: https://github.com/orgs/${OWNER}/packages/container/${enc}/settings"
             exit 1
           fi
       - name: Verify anonymous read

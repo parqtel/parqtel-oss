@@ -1,0 +1,100 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 460" role="img" aria-labelledby="lvl-title lvl-desc">
+  <title id="lvl-title">Metric block levels</title>
+  <desc id="lvl-desc">Animated diagram of the metric block ladder: every ingest flush writes an m_l0_ block; a streaming k-way merge gated on progress of the write-ahead log coalesces up to eight sources into one m_l1_ five-minute window; a second pass merges completed five-minute windows into two-hour m_l2_ blocks, at most two per pass and all passes sharing one 16M-row budget; sources stay readable for five minutes after publication and retention then deletes them.</desc>
+  <defs>
+    <linearGradient id="l-teal" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#2dd4bf"/><stop offset="1" stop-color="#38bdf8"/>
+    </linearGradient>
+    <marker id="l-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#0d9488"/>
+    </marker>
+    <style>
+      .bg{fill:#ffffff}
+      .zone{fill:#f8fafc;stroke:#cbd5e1;stroke-width:1.2}
+      .node{fill:#ffffff;stroke:#94a3b8;stroke-width:1.2}
+      .hot{fill:#ecfeff;stroke:#0891b2;stroke-width:1.4}
+      .warm{fill:#fffbeb;stroke:#d97706;stroke-width:1.4}
+      .ghost{fill:#f8fafc;stroke:#94a3b8;stroke-width:1.1;stroke-dasharray:4 3}
+      .t{fill:#0f172a;font:600 13px/1.2 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif}
+      .s{fill:#475569;font:11px/1.2 ui-monospace,SFMono-Regular,Menlo,monospace}
+      .h{fill:#0f766e;font:700 11px/1 ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:1.2px}
+      .flow{stroke:url(#l-teal);stroke-width:2.2;fill:none;stroke-dasharray:5 9;animation:flow 1.15s linear infinite}
+      .pulse{animation:pulse 3.4s ease-in-out infinite}
+      .pulse2{animation:pulse 3.4s ease-in-out .8s infinite}
+      .pulse3{animation:pulse 3.4s ease-in-out 1.6s infinite}
+      @keyframes flow{to{stroke-dashoffset:-28}}
+      @keyframes pulse{0%,100%{stroke-opacity:.5}50%{stroke-opacity:1}}
+      @media (prefers-reduced-motion: reduce){*{animation:none!important}.flow{stroke-dasharray:none}}
+    </style>
+  </defs>
+
+  <rect class="bg" width="1000" height="460" rx="18"/>
+  <text x="28" y="34" class="h">METRIC BLOCK LEVELS · L0 → L1 → L2 · ONE ROW BUDGET</text>
+
+  <rect class="zone" x="24" y="56" width="200" height="290" rx="14"/>
+  <text x="40" y="80" class="h">INGEST</text>
+  <g class="pulse">
+    <rect class="node" x="40" y="92" width="168" height="56" rx="9"/>
+    <text x="52" y="114" class="t">m_l0_ block</text>
+    <text x="52" y="132" class="s">one flush · series-sorted</text>
+  </g>
+  <g class="pulse2">
+    <rect class="node" x="40" y="158" width="168" height="56" rx="9"/>
+    <text x="52" y="180" class="t">m_l0_ block</text>
+    <text x="52" y="198" class="s">one flush · series-sorted</text>
+  </g>
+  <g class="pulse3">
+    <rect class="node" x="40" y="224" width="168" height="56" rx="9"/>
+    <text x="52" y="246" class="t">m_l0_ block</text>
+    <text x="52" y="264" class="s">one flush · series-sorted</text>
+  </g>
+  <text x="40" y="304" class="s">legacy blocks normalise</text>
+  <text x="40" y="322" class="s">to m_n_ first</text>
+
+  <path class="flow" d="M224 172 H288" marker-end="url(#l-arrow)"/>
+  <path class="flow" d="M224 186 H288" marker-end="url(#l-arrow)"/>
+  <path class="flow" d="M224 252 H288" marker-end="url(#l-arrow)"/>
+
+  <rect class="zone" x="300" y="92" width="250" height="220" rx="14"/>
+  <text x="316" y="116" class="h">L1 PASS · 5-MINUTE WINDOW</text>
+  <g class="pulse2">
+    <rect class="hot" x="316" y="128" width="218" height="86" rx="9"/>
+    <text x="328" y="150" class="t">m_l1_ block</text>
+    <text x="328" y="168" class="s">5-minute window</text>
+    <text x="328" y="184" class="s">≤ 8 sources · ≤ 2 groups</text>
+    <text x="328" y="200" class="s">k-way merge, one batch at a time</text>
+  </g>
+  <text x="316" y="238" class="s">gate: every source WAL range</text>
+  <text x="316" y="254" class="s">≤ the WAL commit point</text>
+  <text x="316" y="276" class="s">footer: parqtel.compacted_sources</text>
+  <text x="316" y="296" class="s">row budget: 16M per pass</text>
+
+  <path class="flow" d="M562 200 H626" marker-end="url(#l-arrow)"/>
+  <text x="566" y="190" class="s">2 h</text>
+
+  <rect class="zone" x="638" y="92" width="212" height="220" rx="14"/>
+  <text x="654" y="116" class="h">L2 PASS · 2-HOUR WINDOW</text>
+  <g class="pulse3">
+    <rect class="warm" x="654" y="128" width="180" height="86" rx="9"/>
+    <text x="666" y="150" class="t">m_l2_ block</text>
+    <text x="666" y="168" class="s">2-hour window</text>
+    <text x="666" y="184" class="s">≤ 2 merges per pass</text>
+    <text x="666" y="200" class="s">same 16M-row budget</text>
+  </g>
+  <text x="654" y="238" class="s">runs after L0 → L1</text>
+  <text x="654" y="254" class="s">skips a window holding now</text>
+  <text x="654" y="276" class="s">a long range reads one block</text>
+  <text x="654" y="292" class="s">per two hours, not per flush</text>
+
+  <path class="flow" d="M858 200 H900" marker-end="url(#l-arrow)"/>
+
+  <rect class="ghost" x="884" y="128" width="92" height="86" rx="9"/>
+  <text x="896" y="150" class="t">retention</text>
+  <text x="896" y="168" class="s">sources keep</text>
+  <text x="896" y="184" class="s">a 5-minute</text>
+  <text x="896" y="200" class="s">query grace</text>
+
+  <text x="28" y="384" class="s">every pass reserves scan slots instead of waiting: compaction never queues behind a query, and a query never waits on a merge</text>
+  <text x="28" y="404" class="s">a sharded node compacts and retires only its own blocks (scoped ownership), so peer data on the shared bucket is never deleted</text>
+  <text x="28" y="424" class="s">rows stay series-ordered per block and time-ordered inside a series; the series table in the footer is rebuilt for the merged block</text>
+</svg>

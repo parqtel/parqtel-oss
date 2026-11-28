@@ -112,9 +112,10 @@ skips it (covered by a test, since that window is milliseconds wide).
 ### The most recent work: bounding scans and rolling blocks up
 
 The two changes with the largest effect on a real deployment are the
-**process-wide 4-slot scan budget** (Phase 0) and the **5-minute L1 block
-rollup** (Phase 1). Both were driven by the same finding: the cost of a query
-is dominated by how many blocks it touches, not by how many rows it returns.
+**process-wide scan budget** (Phase 0, now `query.max_concurrent_scans`) and
+the **five-minute L1 rollup** (Phase 1), extended by the **two-hour L2
+rollup**. All were driven by the same finding: the cost of a query is dominated
+by how many blocks it touches, not by how many rows it returns.
 
 What was measured, on the UAT cluster:
 

@@ -2,9 +2,11 @@
 
 Parqtel is a single Rust binary that ingests OpenTelemetry metrics, logs and
 traces, stores them as compressed Parquet blocks, and serves metrics queries,
-log/trace search, pipelines, alerting, a web console and MCP access. This
-document describes the runtime components, the write and read paths, the
-storage contract, and the boundaries that keep the system predictable.
+log/trace search, pipelines, alerting, a web console and MCP access. The same
+binary can run as one process or split into `writer`, `reader` and `compactor`
+roles over a shared bucket. This document describes the runtime components, the
+write and read paths, the storage contract, and the boundaries that keep the
+system predictable.
 
 > **Visuals.** Every diagram below is a self-contained, animated SVG. There is
 > no JavaScript, no external asset, and no Mermaid rendering in the reading
@@ -70,6 +72,35 @@ them. MCP servers are separate processes and never link the engine.
 | Scheduler | Flush tick, compaction, retention, recording rules, catalog publish/poll |
 | Block store | Local files or S3-backed reads with a bounded LRU cache |
 | Console | Single-file embedded `/ui`; no CDNs, fonts or external requests |
+
+### Process roles
+
+`server.role` (`--role` / `PARQTEL_ROLE`) decides which subsystems a process
+runs; a role that does not run a subsystem does not mount its routes, so a
+`writer` answers `404` on `/api/v1/query` instead of serving a partial view.
+
+| Role | Runs | Does not run |
+|---|---|---|
+| `all` (default) | everything, on local disk or a bucket | — |
+| `writer` | WAL, rotators, flush, publish, gRPC, ingest HTTP | query and alert routes |
+| `reader` | query, console, MCP, catalog poll, optional alerting | ingest, WAL, flush, compaction, retention |
+| `compactor` | compaction and retention, catalog poll | ingest and query routes |
+
+![Sharded topology: collectors fan OTLP out to a writer StatefulSet whose pods publish Parquet blocks to a shared bucket and catalog; a reader Deployment scans the bucket, fetches rows newer than its watermark from every writer, and serves queries; one compactor merges and retires blocks](../assets/diagrams/sharded-topology.svg)
+
+A reader has no ingest path, so the newest seconds are still in the writers'
+memory. It fetches the rows newer than its newest block over
+`POST /internal/v1/buffer` (bearer token from `query.internal_auth_token`) and
+merges them into every signal it serves.
+
+![Reader fan-out: a query scans the reader's blocks, the newest block end becomes the watermark, the reader posts a bounded buffer request to every writer, merges and dedupes the returned rows, and answers; an unreachable writer is skipped with a warning](../assets/diagrams/reader-fanout.svg)
+
+`node_id` (config, `HOSTNAME`, or a generated `parqtel-<pid>-<nanos>`)
+identifies a process in the catalog. With an object store, compaction and
+retention use a scoped ownership registry: a process compacts and retires only
+blocks it produced, never a peer's. See the
+[sharded deployment](../operations/deployment.md#sharded-writers-and-stateless-readers)
+for the chart and the collector fan-out example.
 
 Large modules are directories with a `mod.rs` that documents the split and
 re-exports the public API, so callers import from the parent module.
@@ -205,6 +236,12 @@ is skipped only when it provably cannot match.
 
 ![Block lifecycle: ingest writes an L0 block; legacy blocks are normalised; a streaming k-way merge coalesces L0 into a 5-minute L1 block; sources are deleted after a five-minute query grace period and retention removes the block](../assets/diagrams/block-lifecycle.svg)
 
+The ladder continues above L1: completed five-minute windows are merged into
+two-hour L2 blocks, at most two merges per pass, so a long range scans one
+block per two hours instead of one per flush.
+
+![Metric block levels: every flush writes an m_l0_ block, up to eight ordered sources merge into a five-minute m_l1_ window gated on the WAL commit point, and closed windows merge into two-hour m_l2_ blocks; all passes share one 16M-row budget and sources keep a five-minute query grace](../assets/diagrams/metric-block-levels.svg)
+
 ### On-disk layout
 
 ![Storage layout: the data directory holds metric blocks, sidecars, and logs, traces and wal subdirectories with their own blocks and indexes](../assets/diagrams/storage-layout.svg)
@@ -213,6 +250,7 @@ is skipped only when it provably cannot match.
 data/
 ├── m_l0_*.parquet        metric ingest blocks
 ├── m_l1_*.parquet        coalesced five-minute metric windows
+├── m_l2_*.parquet        coalesced two-hour metric windows
 ├── index.json            metric block index (zstd PQZ1 sidecar)
 ├── label_values.json     bounded autocomplete dictionary
 ├── logs/
@@ -260,13 +298,16 @@ every row.
 | `m_l0_` | One ingest flush, series-sorted by query-visible labels |
 | `m_n_` | A legacy block normalised into the same order |
 | `m_l1_` | A coalesced five-minute window |
+| `m_l2_` | A coalesced two-hour window, built from L1 sources |
 
-The leveled compactor validates source WAL ranges, performs a streaming k-way
-merge one Arrow batch at a time, and records source files under
-`parqtel.compacted_sources`. Sources are deleted after a five-minute grace
-period so an in-flight query can still read them. The pass is bounded (8
-sources, 2 groups, 16M rows) and reserves scan capacity instead of monopolising
-the disk.
+Two passes run in one compaction cycle. The first validates source WAL ranges
+and merges up to eight L0 sources into one five-minute L1 window; the second
+merges completed L1 windows into a two-hour L2 window, at most two merges per
+cycle and skipping any window that still contains `now`. Both passes stream one
+Arrow batch at a time, share a 16M-row budget, record their sources under
+`parqtel.compacted_sources`, and reserve scan capacity instead of monopolising
+the disk. Sources are deleted after a five-minute grace period so an in-flight
+query can still read them.
 
 Logs use a separate compaction policy: small adjacent blocks are merged, and
 older blocks are merged within a six-hour tier.
@@ -348,15 +389,23 @@ Configuration priority, highest wins:
 
 ## 10. Concurrency and admission control
 
-![Concurrency model: async requests hand blocking work to a bounded pool; a process-wide four-slot budget admits scans; low-priority work skips when full; footer and series-index misses share one load per block](../assets/diagrams/admission-control.svg)
+![Concurrency model: async requests hand blocking work to a bounded pool; a configurable process-wide budget (min(cpus, 8)) admits scans, compaction has its own slots, cold footers are prefetched ahead of admission, and low-priority work skips when full](../assets/diagrams/admission-control.svg)
 
 - Tokio async workers serve HTTP/gRPC and background ticks.
 - Parquet encode/compress/IO, scans, OTLP decode and evaluation run on the
   blocking pool with a permit acquired before spawning.
 - The metrics rotator has per-shard locks (`ingest.rotator_shards`, default 4);
   log and trace services use one lock each.
-- One process-wide scan budget (4 slots) gates block scans. Low-priority work
-  reserves without waiting and skips its cycle when none is free.
+- One process-wide scan budget gates block scans:
+  `query.max_concurrent_scans` (default `min(cpus, 8)`); queries wait for a
+  slot. Compaction reserves from its own `query.compaction_scan_slots` budget
+  (default 2), and alert evaluation keeps its own single slot, so background
+  work skips its cycle instead of queueing behind dashboards.
+- A scan with more than `query.max_scan_blocks` candidate blocks (default
+  1024) stops early, returns `warnings: ["scan truncated to N of M blocks"]`
+  and sets `X-Parqtel-Truncated: true`.
+- Up to 16 cold block footers are prefetched ahead of admission, so a wide
+  query pays one round of footer loads instead of one per slot acquisition.
 - The memory buffer is drained by durability, not by scheduling.
 - The label interner shares one label set per series; capacity should be at
   least twice the active series count.

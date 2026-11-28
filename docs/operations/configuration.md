@@ -356,17 +356,20 @@ shared, so a rule cannot drift between metrics and logs.
 `logs.data_dir` equal to `storage.data_dir`; that would mix signal directories.
 
 **Compaction pass.** Every `compaction_interval_secs` the loop merges small log
-blocks, rolls metric L0 blocks into five-minute L1 windows, and runs the tiered
-log merge. Metric files are readable by level:
+blocks, runs the tiered log merge, rolls metric L0 blocks into five-minute L1
+windows, and merges completed L1 windows into two-hour L2 windows. Metric files
+are readable by level:
 
 | Prefix | Meaning |
 |---|---|
 | `m_l0_` | One ingest flush, series-sorted by query-visible labels |
 | `m_n_` | A legacy block normalised into the same order |
 | `m_l1_` | A coalesced five-minute window |
+| `m_l2_` | A coalesced two-hour window, built from L1 sources |
 
-The L1 pass is bounded and reserves scan capacity. `parqtel compact` runs the
-same pass offline.
+Both metric passes are bounded (8 sources, 2 groups, 16M rows, at most two L2
+merges per pass) and reserve their own scan slots (`query.compaction_scan_slots`,
+default 2). `parqtel compact` runs the same passes offline.
 
 ## `[ingest]`
 

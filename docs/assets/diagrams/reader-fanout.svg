@@ -1,0 +1,103 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 620" role="img" aria-labelledby="fan-title fan-desc">
+  <title id="fan-title">Reader buffer fan-out</title>
+  <desc id="fan-desc">Animated sequence diagram of one query on a reader: the reader scans the bucket blocks it already has, takes the newest block end as its watermark, posts a bounded internal buffer request to every writer with a bearer token, receives the rows newer than the watermark, merges and dedupes them with the scanned rows, and answers the client. Without a reachable writer the reader logs a warning and answers from the bucket alone.</desc>
+  <defs>
+    <linearGradient id="f-teal" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#2dd4bf"/><stop offset="1" stop-color="#38bdf8"/>
+    </linearGradient>
+    <linearGradient id="f-warm" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#fbbf24"/><stop offset="1" stop-color="#fb7185"/>
+    </linearGradient>
+    <marker id="f-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#0d9488"/>
+    </marker>
+    <marker id="f-arroww" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#d97706"/>
+    </marker>
+    <style>
+      .bg{fill:#ffffff}
+      .lane{fill:#f8fafc;stroke:#cbd5e1;stroke-width:1.2}
+      .node{fill:#ffffff;stroke:#94a3b8;stroke-width:1.2}
+      .hot{fill:#ecfeff;stroke:#0891b2;stroke-width:1.4}
+      .bucket{fill:#fffbeb;stroke:#d97706;stroke-width:1.4}
+      .life{stroke:#cbd5e1;stroke-width:1.1;stroke-dasharray:4 5}
+      .t{fill:#0f172a;font:600 13px/1.2 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif}
+      .s{fill:#475569;font:11px/1.2 ui-monospace,SFMono-Regular,Menlo,monospace}
+      .h{fill:#0f766e;font:700 11px/1 ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:1.2px}
+      .flow{stroke:url(#f-teal);stroke-width:2.2;fill:none;stroke-dasharray:5 9;animation:flow 1.15s linear infinite}
+      .floww{stroke:url(#f-warm);stroke-width:2.2;fill:none;stroke-dasharray:5 9;animation:flow 1.5s linear infinite}
+      .self{stroke:#0d9488;stroke-width:1.6;fill:none;stroke-dasharray:5 6}
+      .pulse{animation:pulse 3.4s ease-in-out infinite}
+      .pulse2{animation:pulse 3.4s ease-in-out .8s infinite}
+      @keyframes flow{to{stroke-dashoffset:-28}}
+      @keyframes pulse{0%,100%{stroke-opacity:.5}50%{stroke-opacity:1}}
+      @media (prefers-reduced-motion: reduce){*{animation:none!important}.flow,.floww,.self{stroke-dasharray:none}}
+    </style>
+  </defs>
+
+  <rect class="bg" width="1000" height="620" rx="18"/>
+  <text x="28" y="34" class="h">READER FAN-OUT · WATERMARK MERGE · /internal/v1/buffer</text>
+
+  <g class="pulse">
+    <rect class="node" x="30" y="58" width="180" height="64" rx="9"/>
+    <text x="44" y="82" class="t">Client</text>
+    <text x="44" y="100" class="s">Grafana · console</text>
+    <text x="44" y="114" class="s">MCP · curl</text>
+  </g>
+  <g class="pulse2">
+    <rect class="hot" x="310" y="58" width="180" height="64" rx="9"/>
+    <text x="324" y="82" class="t">Reader</text>
+    <text x="324" y="100" class="s">role=reader</text>
+    <text x="324" y="114" class="s">no ingest path</text>
+  </g>
+  <g class="pulse">
+    <rect class="node" x="590" y="58" width="180" height="64" rx="9"/>
+    <text x="604" y="82" class="t">Writers</text>
+    <text x="604" y="100" class="s">memory buffer</text>
+    <text x="604" y="114" class="s">one call per writer</text>
+  </g>
+  <g class="pulse2">
+    <rect class="bucket" x="800" y="58" width="170" height="64" rx="9"/>
+    <text x="814" y="82" class="t">Bucket</text>
+    <text x="814" y="100" class="s">blocks + catalog</text>
+    <text x="814" y="114" class="s">shared by all roles</text>
+  </g>
+
+  <path class="life" d="M120 122 V520"/>
+  <path class="life" d="M400 122 V520"/>
+  <path class="life" d="M680 122 V520"/>
+  <path class="life" d="M885 122 V520"/>
+
+  <text x="128" y="158" class="s">1</text>
+  <path class="flow" d="M120 172 H396" marker-end="url(#f-arrow)"/>
+  <text x="140" y="166" class="s">GET /api/v1/query_range · ParQL · ParqtelQL · PQL</text>
+
+  <text x="408" y="200" class="s">2</text>
+  <path class="floww" d="M400 216 H881" marker-end="url(#f-arroww)"/>
+  <text x="420" y="210" class="s">scan blocks ≤ now · series table · row-group pruning</text>
+
+  <text x="408" y="244" class="s">3</text>
+  <path class="self" d="M400 258 H480 V282 H404" marker-end="url(#f-arrow)"/>
+  <text x="420" y="272" class="s">watermark = max(block.end_timestamp_ns); 0 without blocks</text>
+
+  <text x="408" y="318" class="s">4</text>
+  <path class="floww" d="M400 334 H676" marker-end="url(#f-arroww)"/>
+  <text x="420" y="328" class="s">POST /internal/v1/buffer · Bearer query.internal_auth_token</text>
+  <text x="420" y="344" class="s">{signal, metric, since_ns: watermark, start_ns, end_ns, limit}</text>
+
+  <text x="688" y="374" class="s">5</text>
+  <path class="flow" d="M680 390 H404" marker-end="url(#f-arrow)"/>
+  <text x="430" y="384" class="s">rows with ts &gt; since_ns · limit clamped to 10 000</text>
+
+  <text x="408" y="416" class="s">6</text>
+  <path class="self" d="M400 430 H480 V456 H404" marker-end="url(#f-arrow)"/>
+  <text x="420" y="444" class="s">merge · dedupe (metric, labels, ts) · evaluate · count buffer rows</text>
+
+  <text x="128" y="486" class="s">7</text>
+  <path class="flow" d="M400 500 H124" marker-end="url(#f-arrow)"/>
+  <text x="140" y="494" class="s">result · scanned_blocks · truncated_blocks · warnings</text>
+
+  <text x="28" y="548" class="s">unset query.internal_auth_token → the endpoint answers 404 on every writer · a wrong bearer answers 401 · start &gt; end answers 400</text>
+  <text x="28" y="568" class="s">an unreachable writer is warned and skipped: the reader still answers from the bucket, so a lost writer degrades recency, not availability</text>
+  <text x="28" y="588" class="s">rows already in a block are never returned twice: the watermark is the newest block end this reader can see</text>
+</svg>
