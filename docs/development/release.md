@@ -170,8 +170,9 @@ input, and the reliable path is the UI:
    and `docker pull ghcr.io/parqtel/parqtel-oss:X.Y.Z` work without
    credentials (`docker logout ghcr.io` first).
 
-A private chart package makes the documented `helm install` line fail for
-every user, so treat step 2 as part of the release; the release verifier
+A private chart package makes the documented
+`helm install oci://ghcr.io/parqtel/charts/parqtel --version X.Y.Z` line fail
+for every user, so treat step 2 as part of the release; the release verifier
 reports it as a SKIP, not a PASS, until it is done.
 
 ## Verifying a release

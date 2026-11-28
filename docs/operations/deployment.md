@@ -117,6 +117,19 @@ make local-down
 
 ### Quick Install
 
+From the published chart (the package is public, so no registry login is
+needed):
+
+```bash
+helm install parqtel oci://ghcr.io/parqtel/charts/parqtel \
+  --version 0.5.0 \
+  --namespace parqtel \
+  --create-namespace \
+  -f deploy/k8s/overlays/production/values.yaml
+```
+
+From a checkout of this repository:
+
 ```bash
 helm install parqtel deploy/helm/parqtel \
   --namespace parqtel \

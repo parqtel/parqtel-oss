@@ -15,6 +15,9 @@ parqtel is an ultra-lightweight SRE observability engine — streaming OTel metr
 ## Installation
 
 ```bash
+# Published chart (public GHCR package, no login needed)
+helm install parqtel oci://ghcr.io/parqtel/charts/parqtel --version 0.5.0
+
 # From the charts directory
 helm install my-parqtel ./charts/parqtel
 
