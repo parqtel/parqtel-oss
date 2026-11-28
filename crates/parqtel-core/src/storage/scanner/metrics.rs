@@ -7,7 +7,8 @@ use super::pruning::{
 };
 use super::Scanner;
 use super::{
-    acquire_scan_slot, record_scan_block, record_scan_output, MAX_BLOCKS, SCAN_BATCH_ROWS,
+    acquire_scan_slot, max_scan_blocks, prefetch_block_footers, record_scan_block,
+    record_scan_output, SCAN_BATCH_ROWS,
 };
 use crate::error::{Error, Result};
 use crate::models::metrics::DataPoint;
@@ -69,6 +70,11 @@ pub struct MetricScan {
     /// without one reads every row of the metric. Reported as "points scanned"
     /// by the query layer.
     pub rows_considered: u64,
+    /// Blocks this scan dispatched (at most the configured limit).
+    pub scanned_blocks: usize,
+    /// Blocks the query asked for but the scan limit dropped. Nonzero means
+    /// the result is incomplete and the query layer must warn.
+    pub truncated_blocks: usize,
 }
 
 /// How a row's `labels` text is reached: through the reader's dictionary, or as
@@ -150,6 +156,11 @@ pub struct LimitedMetricScan {
     pub total_series: usize,
     /// Counts every matched point in the visible timeline.
     pub volume: [u64; 60],
+    /// Blocks this scan dispatched (at most the configured limit).
+    pub scanned_blocks: usize,
+    /// Blocks the query asked for but the scan limit dropped. Nonzero means
+    /// the result is incomplete and the query layer must warn.
+    pub truncated_blocks: usize,
 }
 
 impl Default for LimitedMetricScan {
@@ -159,6 +170,8 @@ impl Default for LimitedMetricScan {
             rows_considered: 0,
             total_series: 0,
             volume: [0; 60],
+            scanned_blocks: 0,
+            truncated_blocks: 0,
         }
     }
 }
@@ -198,13 +211,21 @@ fn add_volume(volume: &mut [u64; 60], timestamp_ns: i64, start_ns: i64, window_n
     }
 }
 
+/// What the limited scan keeps once the points are collected.
+#[derive(Clone, Copy)]
+struct LimitSummary {
+    max_series: usize,
+    volume_start_ns: i64,
+    volume_window_ns: i64,
+    scanned_blocks: usize,
+    truncated_blocks: usize,
+}
+
 fn limit_full_scan(
     scan: MetricScan,
     buffered_points: Vec<DataPoint>,
     buffered_rows: u64,
-    max_series: usize,
-    volume_start_ns: i64,
-    volume_window_ns: i64,
+    summary: LimitSummary,
 ) -> LimitedMetricScan {
     let mut fingerprints: HashSet<_> = scan
         .points
@@ -215,7 +236,7 @@ fn limit_full_scan(
     let total_series = fingerprints.len();
     let mut ordered: Vec<_> = fingerprints.drain().collect();
     ordered.sort_unstable();
-    ordered.truncate(max_series);
+    ordered.truncate(summary.max_series);
     let kept: HashSet<_> = ordered.into_iter().collect();
     let mut volume = [0; 60];
     let points = scan
@@ -226,8 +247,8 @@ fn limit_full_scan(
             add_volume(
                 &mut volume,
                 point.timestamp_ns,
-                volume_start_ns,
-                volume_window_ns,
+                summary.volume_start_ns,
+                summary.volume_window_ns,
             );
             kept.contains(&point.labels.fingerprint())
         })
@@ -237,6 +258,8 @@ fn limit_full_scan(
         rows_considered: scan.rows_considered + buffered_rows,
         total_series,
         volume,
+        scanned_blocks: summary.scanned_blocks,
+        truncated_blocks: summary.truncated_blocks,
     }
 }
 
@@ -300,6 +323,27 @@ impl Scanner {
         end_ns: i64,
         selector: SeriesSelector,
     ) -> Result<MetricScan> {
+        Self::scan_filtered_with_limit(
+            blocks,
+            metric_name,
+            start_ns,
+            end_ns,
+            selector,
+            max_scan_blocks(),
+        )
+        .await
+    }
+
+    /// [`Self::scan_filtered`] with an explicit block limit, so the truncation
+    /// path is testable without reconfiguring the process-wide limits.
+    pub(super) async fn scan_filtered_with_limit(
+        blocks: Vec<BlockMetadata>,
+        metric_name: String,
+        start_ns: i64,
+        end_ns: i64,
+        selector: SeriesSelector,
+        limit: usize,
+    ) -> Result<MetricScan> {
         let selector = Arc::new(selector);
         let start_time = std::time::Instant::now();
         let block_count = blocks.len();
@@ -312,7 +356,12 @@ impl Scanner {
         );
         let mut tasks = Vec::new();
         let mut admission_wait = std::time::Duration::ZERO;
-        for block in blocks.into_iter().take(MAX_BLOCKS) {
+        let requested_blocks = blocks.len();
+        let blocks: Vec<_> = blocks.into_iter().take(limit).collect();
+        // Footer I/O happens before a scan slot is taken; the decode phase then
+        // reopens each block as a cache hit (see `prefetch_block_footers`).
+        prefetch_block_footers(&blocks).await;
+        for block in blocks {
             let m_name = metric_name.clone();
             let selector = Arc::clone(&selector);
             let waiting = std::time::Instant::now();
@@ -325,7 +374,11 @@ impl Scanner {
             }));
         }
 
-        let mut out = MetricScan::default();
+        let mut out = MetricScan {
+            scanned_blocks: requested_blocks.min(limit),
+            truncated_blocks: requested_blocks.saturating_sub(limit),
+            ..MetricScan::default()
+        };
         for task in tasks {
             let part = task.await.map_err(|e| Error::Internal(e.to_string()))??;
             out.rows_considered += part.rows_considered;
@@ -364,7 +417,14 @@ impl Scanner {
         buffered_rows: u64,
     ) -> Result<LimitedMetricScan> {
         let scan_started = std::time::Instant::now();
-        let blocks: Vec<_> = blocks.into_iter().take(MAX_BLOCKS).collect();
+        let requested_blocks = blocks.len();
+        let limit = max_scan_blocks();
+        let blocks: Vec<_> = blocks.into_iter().take(limit).collect();
+        let scanned_blocks = blocks.len();
+        let truncated_blocks = requested_blocks.saturating_sub(blocks.len());
+        // The planning pass opens every block inside a scan slot; warm the
+        // footers outside the slots first.
+        prefetch_block_footers(&blocks).await;
         let fallback_blocks = blocks.clone();
         let selector = Arc::new(selector);
         let mut plans = Vec::with_capacity(blocks.len());
@@ -521,9 +581,13 @@ impl Scanner {
                 scan,
                 buffered_points.clone(),
                 buffered_rows,
-                max_series,
-                volume_start_ns,
-                volume_window_ns,
+                LimitSummary {
+                    max_series,
+                    volume_start_ns,
+                    volume_window_ns,
+                    scanned_blocks,
+                    truncated_blocks,
+                },
             ));
         }
 
@@ -557,6 +621,8 @@ impl Scanner {
             rows_considered,
             total_series,
             volume,
+            scanned_blocks,
+            truncated_blocks,
         })
     }
 

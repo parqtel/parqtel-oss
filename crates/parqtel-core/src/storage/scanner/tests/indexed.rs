@@ -1,6 +1,7 @@
 //! Reading blocks through their series table or log skip index.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+use super::super::block::footer_cached;
 use super::*;
 use crate::models::storage::{MetricRun, SignalType};
 use crate::storage::block_file::write_block_file;
@@ -140,6 +141,92 @@ fn footer_cache_counters_are_recorded_by_block_level() {
     assert!(
         after.index_estimated_bytes_by_level[level] > before.index_estimated_bytes_by_level[level]
     );
+}
+
+/// A cold scan warms its footers before taking a scan slot, and a warm repeat
+/// returns exactly the same points.
+#[tokio::test]
+async fn scan_prefetches_cold_footers_and_returns_the_same_points() {
+    let dir = tempfile::tempdir().unwrap();
+    let (plain, indexed) = pair(dir.path());
+    let blocks = vec![plain, indexed];
+    assert!(prefetch_needed(&blocks), "fresh temp files start cold");
+
+    let before = Scanner::scan_metrics_snapshot();
+    let cold = Scanner::scan_filtered(
+        blocks.clone(),
+        "scan.cpu".into(),
+        0,
+        i64::MAX,
+        SeriesSelector::all(),
+    )
+    .await
+    .unwrap();
+    let after_cold = Scanner::scan_metrics_snapshot();
+
+    // The prefetch phase paid the misses; each decode then found its footer.
+    assert!(after_cold.footer_cache_misses >= before.footer_cache_misses + 2);
+    assert!(after_cold.footer_cache_hits >= before.footer_cache_hits + 2);
+    for block in &blocks {
+        assert!(footer_cached(&block.path), "{:?}", block.path);
+    }
+    assert!(
+        !prefetch_needed(&blocks),
+        "a fully warm cache must skip the prefetch phase"
+    );
+
+    let warm = Scanner::scan_filtered(
+        blocks,
+        "scan.cpu".into(),
+        0,
+        i64::MAX,
+        SeriesSelector::all(),
+    )
+    .await
+    .unwrap();
+    assert!(!cold.points.is_empty());
+    assert_eq!(canonical(cold.points), canonical(warm.points));
+}
+
+/// The limited path's planning pass opens every block inside a scan slot, so it
+/// prefetches too, and its result matches the plain filtered scan.
+#[tokio::test]
+async fn limited_scan_prefetches_cold_footers() {
+    let dir = tempfile::tempdir().unwrap();
+    let (plain, indexed) = pair(dir.path());
+    let blocks = vec![plain, indexed];
+    let window_ns = ROWS as i64 / 60;
+
+    let before = Scanner::scan_metrics_snapshot();
+    let got = Scanner::scan_filtered_limited(
+        blocks.clone(),
+        "scan.cpu".into(),
+        0,
+        ROWS as i64,
+        SeriesSelector::all(),
+        usize::MAX,
+        0,
+        window_ns,
+        Vec::new(),
+        0,
+    )
+    .await
+    .unwrap();
+    let after = Scanner::scan_metrics_snapshot();
+    assert!(after.footer_cache_misses >= before.footer_cache_misses + 2);
+    assert!(after.footer_cache_hits >= before.footer_cache_hits + 2);
+    assert_eq!(got.scanned_blocks, blocks.len());
+
+    let reference = Scanner::scan_filtered(
+        blocks,
+        "scan.cpu".into(),
+        0,
+        ROWS as i64,
+        SeriesSelector::all(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(canonical(got.points), canonical(reference.points));
 }
 
 fn canonical(mut points: Vec<DataPoint>) -> Vec<(i64, String, String)> {

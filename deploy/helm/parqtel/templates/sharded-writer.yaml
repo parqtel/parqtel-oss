@@ -1,0 +1,102 @@
+{{- if eq .Values.mode "sharded" }}
+{{- $root := . }}
+{{- $name := include "parqtel.shardedName" (dict "root" . "role" "writer") }}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "parqtel.labels" . | nindent 4 }}
+    app.kubernetes.io/component: writer
+spec:
+  serviceName: {{ $name }}
+  replicas: {{ .Values.sharding.writer.replicas }}
+  selector:
+    matchLabels:
+      {{- include "parqtel.shardedSelector" (dict "root" . "role" "writer") | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ include "parqtel.configChecksum" . }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "parqtel.shardedSelector" (dict "root" . "role" "writer") | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.image.pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "parqtel.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        {{- include "parqtel.shardedContainer" (dict "root" $root "role" "writer") | nindent 8 }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "parqtel.fullname" . }}
+        - name: tmp
+          emptyDir:
+            sizeLimit: 100Mi
+        {{- with .Values.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          {{- include "parqtel.labels" . | nindent 10 }}
+      spec:
+        accessModes:
+          - {{ .Values.storage.accessMode | quote }}
+        resources:
+          requests:
+            storage: {{ .Values.sharding.writer.storageSize | quote }}
+        {{- if .Values.sharding.writer.storageClassName }}
+        storageClassName: {{ .Values.sharding.writer.storageClassName | quote }}
+        {{- end }}
+---
+# Headless: each writer pod keeps a stable DNS name because the readers fan a
+# buffer query out to every pod individually, not to whichever one a ClusterIP
+# would pick.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "parqtel.labels" . | nindent 4 }}
+    app.kubernetes.io/component: writer
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  ports:
+    - port: {{ .Values.service.port }}
+      targetPort: http
+      protocol: TCP
+      name: http
+    {{- if .Values.ingestion.grpc.enabled }}
+    - port: {{ .Values.ingestion.grpc.port }}
+      targetPort: grpc
+      protocol: TCP
+      name: grpc
+    {{- end }}
+  selector:
+    {{- include "parqtel.shardedSelector" (dict "root" . "role" "writer") | nindent 4 }}
+{{- end }}

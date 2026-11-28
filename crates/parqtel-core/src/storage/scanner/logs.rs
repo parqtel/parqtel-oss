@@ -7,7 +7,8 @@ use super::pruning::{
 };
 use super::Scanner;
 use super::{
-    acquire_scan_slot, record_scan_block, record_scan_output, MAX_BLOCKS, SCAN_BATCH_ROWS,
+    acquire_scan_slot, max_scan_blocks, prefetch_block_footers, record_scan_block,
+    record_scan_output, SCAN_BATCH_ROWS,
 };
 use crate::error::{Error, Result};
 use crate::models::logs::LogRecord;
@@ -61,6 +62,11 @@ impl LogColumnPrefilter {
 pub struct LogScanStats {
     pub total_matched: usize,
     pub volume_buckets: Vec<u64>,
+    /// Blocks this scan dispatched (at most the configured limit).
+    pub scanned_blocks: usize,
+    /// Blocks the query asked for but the scan limit dropped. Nonzero means
+    /// the result is incomplete and the query layer must warn.
+    pub truncated_blocks: usize,
 }
 
 #[derive(Debug)]
@@ -110,6 +116,8 @@ impl LogResultMerger {
             stats: LogScanStats {
                 total_matched: 0,
                 volume_buckets: vec![0; 60],
+                scanned_blocks: 0,
+                truncated_blocks: 0,
             },
         }
     }
@@ -314,7 +322,13 @@ impl Scanner {
         let mut tasks = Vec::new();
         let mut blocks_scheduled = 0;
         let mut admission_wait = std::time::Duration::ZERO;
-        for block in blocks.into_iter().take(MAX_BLOCKS) {
+        let requested_blocks = blocks.len();
+        let limit = max_scan_blocks();
+        let blocks: Vec<_> = blocks.into_iter().take(limit).collect();
+        // Warm the footers before any scan slot is held; each decode below then
+        // reopens its block as a cache hit.
+        prefetch_block_footers(&blocks).await;
+        for block in blocks {
             let waiting = std::time::Instant::now();
             let permit = acquire_scan_slot().await?;
             admission_wait += waiting.elapsed();
@@ -343,7 +357,9 @@ impl Scanner {
                 task.await.map_err(|e| Error::Internal(e.to_string()))??;
             results.add(logs, matched, buckets);
         }
-        let (all_logs, stats) = results.finish();
+        let (all_logs, mut stats) = results.finish();
+        stats.scanned_blocks = blocks_scheduled;
+        stats.truncated_blocks = requested_blocks.saturating_sub(limit);
         record_scan_output(0, all_logs.len());
         tracing::debug!(
             blocks = blocks_scheduled,
@@ -651,6 +667,8 @@ mod tests {
         let mut stats = LogScanStats {
             total_matched: 0,
             volume_buckets: vec![0; 60],
+            scanned_blocks: 0,
+            truncated_blocks: 0,
         };
         for (block_logs, matched, buckets) in blocks {
             logs.extend(block_logs.iter().cloned());

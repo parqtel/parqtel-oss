@@ -1,7 +1,8 @@
 //! Prometheus-compatible instant and range query endpoints.
 
 use super::common::{
-    map_error, parse_step_duration, PrometheusData, PrometheusResponse, PrometheusResult,
+    map_error, parse_step_duration, truncation_warnings, with_truncation_header, PrometheusData,
+    PrometheusResponse, PrometheusResult,
 };
 use crate::state::AppState;
 use axum::{
@@ -34,6 +35,8 @@ pub struct RangeQuery {
 
 /// Renders a QueryResult as a Prometheus instant-vector response.
 fn render_vector_result(result: parqtel_query::QueryResult) -> Response {
+    let warnings = truncation_warnings(result.scanned_blocks, result.truncated_blocks);
+    let truncated = result.truncated_blocks;
     let mut res = Vec::new();
     for ts in result.series {
         let values: Vec<(f64, String)> = ts
@@ -51,7 +54,7 @@ fn render_vector_result(result: parqtel_query::QueryResult) -> Response {
             values,
         });
     }
-    (
+    let response = (
         StatusCode::OK,
         Json(PrometheusResponse {
             status: "success".into(),
@@ -61,13 +64,17 @@ fn render_vector_result(result: parqtel_query::QueryResult) -> Response {
                 total_series_count: Some(result.total_series_count),
                 volume_summary: result.volume_summary,
             },
+            warnings,
         }),
     )
-        .into_response()
+        .into_response();
+    with_truncation_header(response, truncated)
 }
 
 /// Renders a QueryResult as a Prometheus matrix (range) response.
 fn render_range_result(result: parqtel_query::QueryResult) -> Response {
+    let warnings = truncation_warnings(result.scanned_blocks, result.truncated_blocks);
+    let truncated = result.truncated_blocks;
     let mut res = Vec::new();
     for ts in result.series {
         let values = ts
@@ -81,7 +88,7 @@ fn render_range_result(result: parqtel_query::QueryResult) -> Response {
             values,
         });
     }
-    (
+    let response = (
         StatusCode::OK,
         Json(PrometheusResponse {
             status: "success".into(),
@@ -91,9 +98,11 @@ fn render_range_result(result: parqtel_query::QueryResult) -> Response {
                 total_series_count: Some(result.total_series_count),
                 volume_summary: result.volume_summary,
             },
+            warnings,
         }),
     )
-        .into_response()
+        .into_response();
+    with_truncation_header(response, truncated)
 }
 
 /// Handler for GET /api/v1/query (Instant).
@@ -223,6 +232,8 @@ pub async fn query_instant(
     }
     match result {
         Ok(result) => {
+            let warnings = truncation_warnings(result.scanned_blocks, result.truncated_blocks);
+            let truncated = result.truncated_blocks;
             let mut res = Vec::new();
             for ts in result.series {
                 let values: Vec<(f64, String)> = ts
@@ -238,7 +249,7 @@ pub async fn query_instant(
                 });
             }
 
-            (
+            let response = (
                 StatusCode::OK,
                 Json(PrometheusResponse {
                     status: "success".into(),
@@ -248,9 +259,11 @@ pub async fn query_instant(
                         total_series_count: Some(result.total_series_count),
                         volume_summary: result.volume_summary,
                     },
+                    warnings,
                 }),
             )
-                .into_response()
+                .into_response();
+            with_truncation_header(response, truncated)
         }
         Err(e) => {
             state
@@ -388,6 +401,8 @@ pub async fn query_range(
     }
     match result {
         Ok(result) => {
+            let warnings = truncation_warnings(result.scanned_blocks, result.truncated_blocks);
+            let truncated = result.truncated_blocks;
             let mut res = Vec::new();
             for ts in result.series {
                 let values = ts
@@ -403,7 +418,7 @@ pub async fn query_range(
                 });
             }
 
-            (
+            let response = (
                 StatusCode::OK,
                 Json(PrometheusResponse {
                     status: "success".into(),
@@ -413,9 +428,11 @@ pub async fn query_range(
                         total_series_count: Some(result.total_series_count),
                         volume_summary: result.volume_summary,
                     },
+                    warnings,
                 }),
             )
-                .into_response()
+                .into_response();
+            with_truncation_header(response, truncated)
         }
         Err(e) => {
             state

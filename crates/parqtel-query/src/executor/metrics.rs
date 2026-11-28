@@ -36,6 +36,8 @@ impl QueryExecutor {
         let mut hist_data: crate::ast::HistData = Default::default();
         let mut points_scanned: u64 = 0;
         let mut total_series = 0usize;
+        let mut scanned_blocks = 0usize;
+        let mut truncated_blocks = 0usize;
 
         // Volume histogram: 60 buckets over the visible timeline
         // [start_ns, end_ns], counting EVERY matched point — not just the
@@ -78,6 +80,8 @@ impl QueryExecutor {
                 )
                 .await?;
                 points_scanned += scan.rows_considered;
+                scanned_blocks += scan.scanned_blocks;
+                truncated_blocks += scan.truncated_blocks;
 
                 // Grouping and value conversion run on the blocking pool.
                 let (max_samples, total, volume) =
@@ -140,6 +144,8 @@ impl QueryExecutor {
             points_scanned,
             total_series_count: total_series,
             volume_summary,
+            scanned_blocks,
+            truncated_blocks,
         })
     }
 
@@ -179,6 +185,8 @@ impl QueryExecutor {
         let points_scanned = scan.rows_considered;
         let total_series_count = scan.total_series;
         let volume_summary = scan.volume.to_vec();
+        let scanned_blocks = scan.scanned_blocks;
+        let truncated_blocks = scan.truncated_blocks;
         let mut series_map: BTreeMap<u64, (LabelSet, Vec<(i64, MetricValue)>)> = BTreeMap::new();
         for dp in scan.points {
             let fp = dp.labels.fingerprint();
@@ -248,6 +256,8 @@ impl QueryExecutor {
             points_scanned,
             total_series_count,
             volume_summary,
+            scanned_blocks,
+            truncated_blocks,
         })
     }
 }

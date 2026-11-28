@@ -1,0 +1,17 @@
+# Sharded CI values — writers, stateless readers and the compactor on one
+# shared bucket. The bucket is never contacted: `helm lint`/`helm template`
+# only prove the manifests render and the guards fire.
+mode: sharded
+sharding:
+  objectStore:
+    enabled: true
+    bucket: parqtel-ci
+    region: us-east-1
+    prefix: ci
+  internalToken:
+    value: ci-internal-token
+  writer:
+    replicas: 2
+  reader:
+    minReplicas: 2
+    maxReplicas: 4

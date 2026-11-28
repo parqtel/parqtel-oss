@@ -46,6 +46,9 @@ pub struct LogBucket {
 pub struct LogCountResponse {
     pub status: String,
     pub data: Vec<LogBucket>,
+    /// Truncation warnings; omitted when the whole range was scanned.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 /// Handler for GET /api/v1/logs.
@@ -95,20 +98,27 @@ pub async fn query_logs(
                     .search_logs_predicate(start_ns, end_ns, &pred, limit, order_desc)
                     .await;
                 return match result {
-                    Ok(result) => (
-                        StatusCode::OK,
-                        Json(json!({
-                            "status": "success",
-                            "data": {
-                                "logs": result.logs,
-                                "total_matched": result.total_logs_count,
-                                "truncated": result.total_logs_count > limit,
-                                "volume_summary": result.volume_summary,
-                                "language": "parqtelql",
-                            }
-                        })),
-                    )
-                        .into_response(),
+                    Ok(result) => {
+                        let warnings =
+                            truncation_warnings(result.scanned_blocks, result.truncated_blocks);
+                        let truncated = result.truncated_blocks;
+                        let response = (
+                            StatusCode::OK,
+                            Json(json!({
+                                "status": "success",
+                                "warnings": warnings,
+                                "data": {
+                                    "logs": result.logs,
+                                    "total_matched": result.total_logs_count,
+                                    "truncated": result.total_logs_count > limit,
+                                    "volume_summary": result.volume_summary,
+                                    "language": "parqtelql",
+                                }
+                            })),
+                        )
+                            .into_response();
+                        with_truncation_header(response, truncated)
+                    }
                     Err(e) => map_error(e),
                 };
             }
@@ -134,20 +144,26 @@ pub async fn query_logs(
             .search_logs(start_ns, end_ns, &q, limit, order_desc)
             .await;
         return match result {
-            Ok(result) => (
-                StatusCode::OK,
-                Json(json!({
-                    "status": "success",
-                    "data": {
-                        "logs": result.logs,
-                        "total_matched": result.total_logs_count,
-                        "truncated": result.total_logs_count > limit,
-                        "volume_summary": result.volume_summary,
-                        "language": "parqtelql",
-                    }
-                })),
-            )
-                .into_response(),
+            Ok(result) => {
+                let warnings = truncation_warnings(result.scanned_blocks, result.truncated_blocks);
+                let truncated = result.truncated_blocks;
+                let response = (
+                    StatusCode::OK,
+                    Json(json!({
+                        "status": "success",
+                        "warnings": warnings,
+                        "data": {
+                            "logs": result.logs,
+                            "total_matched": result.total_logs_count,
+                            "truncated": result.total_logs_count > limit,
+                            "volume_summary": result.volume_summary,
+                            "language": "parqtelql",
+                        }
+                    })),
+                )
+                    .into_response();
+                with_truncation_header(response, truncated)
+            }
             Err(e) => map_error(e),
         };
     }
@@ -171,19 +187,25 @@ pub async fn query_logs(
         )
         .await
     {
-        Ok(result) => (
-            StatusCode::OK,
-            Json(json!({
-                "status": "success",
-                "data": {
-                    "logs": result.logs,
-                    "total_matched": result.total_logs_count,
-                    "truncated": result.total_logs_count > limit,
-                    "volume_summary": result.volume_summary,
-                }
-            })),
-        )
-            .into_response(),
+        Ok(result) => {
+            let warnings = truncation_warnings(result.scanned_blocks, result.truncated_blocks);
+            let truncated = result.truncated_blocks;
+            let response = (
+                StatusCode::OK,
+                Json(json!({
+                    "status": "success",
+                    "warnings": warnings,
+                    "data": {
+                        "logs": result.logs,
+                        "total_matched": result.total_logs_count,
+                        "truncated": result.total_logs_count > limit,
+                        "volume_summary": result.volume_summary,
+                    }
+                })),
+            )
+                .into_response();
+            with_truncation_header(response, truncated)
+        }
         Err(e) => map_error(e),
     }
 }
@@ -231,6 +253,8 @@ pub async fn query_logs_count(
         .await
     {
         Ok(result) => {
+            let warnings = truncation_warnings(result.scanned_blocks, result.truncated_blocks);
+            let truncated = result.truncated_blocks;
             let win = (end_ns - start_ns) / 60;
             let buckets = result
                 .volume_summary
@@ -242,14 +266,16 @@ pub async fn query_logs_count(
                     count: c,
                 })
                 .collect();
-            (
+            let response = (
                 StatusCode::OK,
                 Json(LogCountResponse {
                     status: "success".into(),
                     data: buckets,
+                    warnings,
                 }),
             )
-                .into_response()
+                .into_response();
+            with_truncation_header(response, truncated)
         }
         Err(e) => map_error(e),
     }
@@ -266,6 +292,7 @@ pub async fn list_log_fields(State(state): State<AppState>) -> Response {
                 dedicated_columns: dedicated,
                 common_attributes: common,
             },
+            warnings: Vec::new(),
         }),
     )
         .into_response()
@@ -303,6 +330,7 @@ pub async fn list_log_field_values(
         Json(PrometheusResponse {
             status: "success".into(),
             data: values,
+            warnings: Vec::new(),
         }),
     )
         .into_response()

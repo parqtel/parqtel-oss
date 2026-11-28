@@ -2,6 +2,7 @@
 
 use super::block_file::{read_compacted_sources, sync_parent_dir, BlockFileWriter, FooterIndex};
 use super::index::{BlockIndex, BlockIndexStore};
+use super::OwnershipRegistry;
 use crate::config::BlockConfig;
 use crate::error::{Error, Result};
 use crate::models::labels::LabelSet;
@@ -25,11 +26,13 @@ use uuid::Uuid;
 
 const MAX_MERGE_FAN_IN: usize = 8;
 const LEVEL_ONE_WINDOW_NS: i64 = 5 * 60 * 1_000_000_000;
+const LEVEL_TWO_WINDOW_NS: i64 = 2 * 60 * 60 * 1_000_000_000;
 const SOURCE_DELETE_GRACE: Duration = Duration::from_secs(5 * 60);
 const MERGE_BATCH_ROWS: usize = 8192;
 const MAX_NORMALIZE_ROWS: usize = 500_000;
 const MAX_NORMALIZATIONS_PER_PASS: usize = 1;
 const MAX_LEVEL_MERGES_PER_PASS: usize = 2;
+const MAX_TIER_TWO_MERGES_PER_PASS: usize = 2;
 const MAX_COMPACTION_ROWS_PER_PASS: u64 = 16_000_000;
 const METRIC_GROUP_COLUMNS: [&str; 9] = [
     "metric_kind",
@@ -1114,27 +1117,114 @@ fn completed_bucket(timestamp_ns: i64, window_ns: i64, now_ns: i64) -> Option<i6
     (end <= now_ns).then_some(start)
 }
 
-fn candidate_groups(
+fn candidate_groups_scoped(
     index: &BlockIndex,
     now_ns: i64,
     window_ns: i64,
     target_level: u8,
     fan_in: usize,
     skipped: &BTreeSet<i64>,
+    ownership: &OwnershipRegistry,
 ) -> Vec<(i64, Vec<BlockMetadata>)> {
+    collect_candidate_groups(
+        index,
+        now_ns,
+        &GroupSpec {
+            window_ns,
+            levels: 0..=target_level,
+            fan_in,
+            skipped,
+            require_lower_source: false,
+            ownership: Some(ownership),
+        },
+    )
+}
+
+/// Two-hour groups of normalized metric blocks below level two.
+///
+/// A group is only offered when it contains at least one level-one source, so
+/// an already merged `m_l2_` block is never rewritten on its own and repeated
+/// passes converge instead of looping.
+#[cfg(test)]
+fn tier_two_candidate_groups(
+    index: &BlockIndex,
+    now_ns: i64,
+    fan_in: usize,
+    skipped: &BTreeSet<i64>,
+) -> Vec<(i64, Vec<BlockMetadata>)> {
+    collect_candidate_groups(
+        index,
+        now_ns,
+        &GroupSpec {
+            window_ns: LEVEL_TWO_WINDOW_NS,
+            levels: 1..=2,
+            fan_in,
+            skipped,
+            require_lower_source: true,
+            ownership: None,
+        },
+    )
+}
+
+fn tier_two_candidate_groups_scoped(
+    index: &BlockIndex,
+    now_ns: i64,
+    fan_in: usize,
+    skipped: &BTreeSet<i64>,
+    ownership: &OwnershipRegistry,
+) -> Vec<(i64, Vec<BlockMetadata>)> {
+    collect_candidate_groups(
+        index,
+        now_ns,
+        &GroupSpec {
+            window_ns: LEVEL_TWO_WINDOW_NS,
+            levels: 1..=2,
+            fan_in,
+            skipped,
+            require_lower_source: true,
+            ownership: Some(ownership),
+        },
+    )
+}
+
+/// Which blocks a compaction pass may group, and how many.
+struct GroupSpec<'a> {
+    window_ns: i64,
+    levels: std::ops::RangeInclusive<u8>,
+    fan_in: usize,
+    skipped: &'a BTreeSet<i64>,
+    require_lower_source: bool,
+    ownership: Option<&'a OwnershipRegistry>,
+}
+
+fn collect_candidate_groups(
+    index: &BlockIndex,
+    now_ns: i64,
+    spec: &GroupSpec<'_>,
+) -> Vec<(i64, Vec<BlockMetadata>)> {
+    let GroupSpec {
+        window_ns,
+        fan_in,
+        require_lower_source,
+        ..
+    } = *spec;
+    let max_level = *spec.levels.end();
     let mut by_bucket: BTreeMap<i64, Vec<BlockMetadata>> = BTreeMap::new();
     for block in &index.blocks {
         if block.signal_type != SignalType::Metrics
             || !is_normalized_metric_path(&block.path)
-            || metric_compaction_level(&block.path) > target_level
+            || !spec.levels.contains(&metric_compaction_level(&block.path))
             || block.end_timestamp_ns > now_ns
+            || spec
+                .ownership
+                .is_some_and(|registry| !registry.may_retire(&block.path))
         {
             continue;
         }
         let Some(bucket) = completed_bucket(block.start_timestamp_ns, window_ns, now_ns) else {
             continue;
         };
-        if !skipped.contains(&bucket) {
+        if !spec.skipped.contains(&bucket) {
             by_bucket.entry(bucket).or_default().push(block.clone());
         }
     }
@@ -1145,6 +1235,29 @@ fn candidate_groups(
                 return None;
             }
             blocks.sort_by_key(|block| block.start_timestamp_ns);
+            if require_lower_source {
+                let has_lower = blocks
+                    .iter()
+                    .any(|block| metric_compaction_level(&block.path) < max_level);
+                if !has_lower {
+                    return None;
+                }
+                if blocks.len() > fan_in
+                    && blocks
+                        .iter()
+                        .take(fan_in)
+                        .all(|block| metric_compaction_level(&block.path) == max_level)
+                {
+                    // Keep a level-one source in the batch so the window keeps
+                    // converging even when older level-two blocks sort first.
+                    let lower = blocks
+                        .iter()
+                        .find(|block| metric_compaction_level(&block.path) < max_level)?
+                        .clone();
+                    blocks.truncate(fan_in - 1);
+                    blocks.push(lower);
+                }
+            }
             blocks.truncate(fan_in);
             Some((bucket, blocks))
         })
@@ -1157,6 +1270,16 @@ pub(crate) async fn compact_metrics_levels_once(
     store: &BlockIndexStore,
     config: &BlockConfig,
 ) -> Result<usize> {
+    compact_metrics_levels_once_scoped(index, store, config, &OwnershipRegistry::everything()).await
+}
+
+/// As [`compact_metrics_levels_once`], but only owned blocks are merged.
+pub(crate) async fn compact_metrics_levels_once_scoped(
+    index: &Arc<RwLock<BlockIndex>>,
+    store: &BlockIndexStore,
+    config: &BlockConfig,
+    ownership: &OwnershipRegistry,
+) -> Result<usize> {
     let has_metrics = index
         .read()
         .await
@@ -1166,8 +1289,10 @@ pub(crate) async fn compact_metrics_levels_once(
     if !has_metrics {
         return Ok(0);
     }
-    let Some(_scan_slots) = Scanner::try_reserve_scan_slots(2) else {
-        tracing::debug!("metrics compaction deferred while scan budget is busy");
+    // Compaction draws on its own budget: query load cannot starve it, and it
+    // cannot take slots a dashboard query is waiting for.
+    let Some(_scan_slots) = Scanner::try_reserve_compaction_slots(2) else {
+        tracing::debug!("metrics compaction deferred while the compaction budget is busy");
         return Ok(0);
     };
     let now_ns = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
@@ -1183,6 +1308,7 @@ pub(crate) async fn compact_metrics_levels_once(
         config,
         normalization_limit,
         MAX_COMPACTION_ROWS_PER_PASS,
+        ownership,
     )
     .await?;
     let max_merges = config
@@ -1195,13 +1321,14 @@ pub(crate) async fn compact_metrics_levels_once(
     while attempted_merges < max_merges {
         let candidates = {
             let idx = index.read().await;
-            candidate_groups(
+            candidate_groups_scoped(
                 &idx,
                 now_ns,
                 LEVEL_ONE_WINDOW_NS,
                 1,
                 fan_in,
                 &skipped_buckets,
+                ownership,
             )
         };
         let Some((bucket, blocks)) = candidates.into_iter().next() else {
@@ -1251,6 +1378,62 @@ pub(crate) async fn compact_metrics_levels_once(
         );
     }
 
+    // L1 -> L2: merge completed two-hour windows. Runs after the L0 -> L1
+    // loop so the blocks produced above are eligible in the same pass.
+    let mut tier_two_skipped = BTreeSet::new();
+    let mut tier_two_merges = 0usize;
+    while tier_two_merges < MAX_TIER_TWO_MERGES_PER_PASS {
+        let candidates = {
+            let idx = index.read().await;
+            tier_two_candidate_groups_scoped(&idx, now_ns, fan_in, &tier_two_skipped, ownership)
+        };
+        let Some((bucket, blocks)) = candidates.into_iter().next() else {
+            break;
+        };
+        tier_two_merges += 1;
+        let group_rows = blocks
+            .iter()
+            .try_fold(0u64, |sum, block| sum.checked_add(block.row_count as u64))
+            .ok_or_else(|| Error::Internal("compaction row count overflow".into()))?;
+        if rows_processed.saturating_add(group_rows) > MAX_COMPACTION_ROWS_PER_PASS {
+            tier_two_skipped.insert(bucket);
+            continue;
+        }
+        let paths: Vec<_> = blocks.iter().map(|block| block.path.clone()).collect();
+        let config = config.clone();
+        let merged =
+            tokio::task::spawn_blocking(move || compact_metric_blocks(&blocks, &config, 2))
+                .await
+                .map_err(|e| Error::Internal(format!("metrics compaction task panicked: {e}")))?;
+        let new_meta = match merged {
+            Ok(meta) => meta,
+            Err(error) => {
+                tracing::warn!(
+                    target_level = 2,
+                    bucket_start_ns = bucket,
+                    error = %error,
+                    "metrics compaction group skipped"
+                );
+                tier_two_skipped.insert(bucket);
+                continue;
+            }
+        };
+        {
+            let mut idx = index.write().await;
+            idx.replace(&paths, Some(new_meta.clone()));
+            store.mark_dirty();
+        }
+        completed += 1;
+        rows_processed += group_rows;
+        tracing::info!(
+            target_level = 2,
+            source_blocks = paths.len(),
+            rows = new_meta.row_count,
+            bytes = new_meta.size_bytes,
+            "metrics blocks compacted"
+        );
+    }
+
     let data_dir = config.data_dir.clone();
     tokio::task::spawn_blocking(move || prune_compacted_sources(&data_dir))
         .await
@@ -1264,6 +1447,7 @@ async fn normalize_legacy_metrics_once(
     config: &BlockConfig,
     max_blocks: usize,
     row_budget: u64,
+    ownership: &OwnershipRegistry,
 ) -> Result<(usize, u64)> {
     let mut candidates = {
         let idx = index.read().await;
@@ -1274,6 +1458,7 @@ async fn normalize_legacy_metrics_once(
                     && !is_normalized_metric_path(&block.path)
                     && block.row_count > 0
                     && block.row_count <= MAX_NORMALIZE_ROWS
+                    && ownership.may_retire(&block.path)
             })
             .cloned()
             .collect::<Vec<_>>()
@@ -1857,5 +2042,206 @@ mod tests {
         assert_eq!(stats.dropped, 1);
         assert_eq!(stats.adopted, 1);
         assert_eq!(recovered.total_blocks(), 1);
+    }
+
+    static COMPACTION_PASS_TEST: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    fn completed_two_hour_window() -> i64 {
+        let now = chrono::Utc::now().timestamp_nanos_opt().unwrap();
+        (now.div_euclid(LEVEL_TWO_WINDOW_NS) - 1) * LEVEL_TWO_WINDOW_NS
+    }
+
+    fn write_tier_two_sources(dir: &Path, window_start: i64) -> (Vec<String>, BlockIndex) {
+        let mut index = BlockIndex::new(dir);
+        let mut names = Vec::new();
+        for i in 0..24i64 {
+            let name = format!("m_l1_{i}.parquet");
+            let start = window_start + i * LEVEL_ONE_WINDOW_NS;
+            let wal = ((i * 4) as u64, ((i + 1) * 4) as u64);
+            index.add(write_metrics_block(dir, &name, start, wal, true));
+            names.push(name);
+        }
+        (names, index)
+    }
+
+    async fn run_compaction_passes(
+        index: &Arc<RwLock<BlockIndex>>,
+        store: &BlockIndexStore,
+        config: &BlockConfig,
+    ) {
+        for _ in 0..8 {
+            compact_metrics_levels_once(index, store, config)
+                .await
+                .unwrap();
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn tier_two_compacts_one_completed_window_into_a_single_block() {
+        let _guard = COMPACTION_PASS_TEST.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let config = BlockConfig {
+            data_dir: dir.path().to_path_buf(),
+            compression: "uncompressed".into(),
+            row_group_size: 2,
+            ..Default::default()
+        };
+        let (names, built) = write_tier_two_sources(dir.path(), completed_two_hour_window());
+        let store = BlockIndexStore::new(&built);
+        let index = Arc::new(RwLock::new(built));
+        run_compaction_passes(&index, &store, &config).await;
+
+        let idx = index.read().await;
+        assert_eq!(idx.total_blocks(), 1, "24 L1 blocks collapse into one L2");
+        let l2 = &idx.blocks[0];
+        assert!(l2
+            .path
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("m_l2_"));
+        assert_eq!(l2.row_count, 24 * 4, "every source row is preserved");
+        let sources = read_compacted_sources(&l2.path).unwrap();
+        for name in &names {
+            assert!(
+                sources.contains(&PathBuf::from(name)),
+                "footer must list L1 source {name}"
+            );
+        }
+        let scan =
+            Scanner::scan_block_filtered(l2.clone(), "cpu", 0, i64::MAX, &SeriesSelector::all())
+                .unwrap();
+        assert_eq!(scan.points.len(), 96);
+        let hosts: BTreeSet<_> = scan
+            .points
+            .iter()
+            .filter_map(|point| point.labels.get("host"))
+            .collect();
+        assert_eq!(hosts, BTreeSet::from(["h0", "h1"]));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn tier_two_skips_window_containing_now() {
+        let _guard = COMPACTION_PASS_TEST.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let config = BlockConfig {
+            data_dir: dir.path().to_path_buf(),
+            compression: "uncompressed".into(),
+            row_group_size: 2,
+            ..Default::default()
+        };
+        let now = chrono::Utc::now().timestamp_nanos_opt().unwrap();
+        let window_start = now.div_euclid(LEVEL_TWO_WINDOW_NS) * LEVEL_TWO_WINDOW_NS;
+        let (_, built) = write_tier_two_sources(dir.path(), window_start);
+        let store = BlockIndexStore::new(&built);
+        let index = Arc::new(RwLock::new(built));
+        run_compaction_passes(&index, &store, &config).await;
+
+        let idx = index.read().await;
+        assert_eq!(idx.total_blocks(), 24);
+        assert!(idx
+            .blocks
+            .iter()
+            .all(|block| metric_compaction_level(&block.path) == 1));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn tier_two_second_pass_is_a_noop() {
+        let _guard = COMPACTION_PASS_TEST.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let config = BlockConfig {
+            data_dir: dir.path().to_path_buf(),
+            compression: "uncompressed".into(),
+            row_group_size: 2,
+            ..Default::default()
+        };
+        let (_, built) = write_tier_two_sources(dir.path(), completed_two_hour_window());
+        let store = BlockIndexStore::new(&built);
+        let index = Arc::new(RwLock::new(built));
+        run_compaction_passes(&index, &store, &config).await;
+        let converged = index.read().await.blocks[0].path.clone();
+
+        let now = chrono::Utc::now().timestamp_nanos_opt().unwrap();
+        {
+            let idx = index.read().await;
+            assert!(
+                tier_two_candidate_groups(&idx, now, MAX_MERGE_FAN_IN, &BTreeSet::new()).is_empty(),
+                "a lone L2 block in a completed window must not be re-merged"
+            );
+        }
+
+        let completed = compact_metrics_levels_once(&index, &store, &config)
+            .await
+            .unwrap();
+        assert_eq!(completed, 0);
+        let idx = index.read().await;
+        assert_eq!(idx.total_blocks(), 1);
+        assert_eq!(idx.blocks[0].path, converged);
+        assert_eq!(idx.blocks[0].row_count, 96);
+    }
+
+    /// A sharded compactor shares the catalog with other writers. It may merge
+    /// only the blocks it owns; foreign sources stay untouched, even when they
+    /// sit in the same completed window.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn scoped_compaction_merges_only_owned_sources() {
+        let _guard = COMPACTION_PASS_TEST.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let config = BlockConfig {
+            data_dir: dir.path().to_path_buf(),
+            compression: "uncompressed".into(),
+            row_group_size: 2,
+            ..Default::default()
+        };
+        let (names, built) = write_tier_two_sources(dir.path(), completed_two_hour_window());
+        let store = BlockIndexStore::new(&built);
+        let index = Arc::new(RwLock::new(built));
+
+        let ownership = OwnershipRegistry::scoped();
+        let owned = [names[0].clone(), names[1].clone()];
+        for name in &names {
+            let writer = if owned.contains(name) { "me" } else { "other" };
+            ownership.adopt(name, Some(writer), "me");
+        }
+
+        for _ in 0..8 {
+            compact_metrics_levels_once_scoped(&index, &store, &config, &ownership)
+                .await
+                .unwrap();
+        }
+
+        let idx = index.read().await;
+        assert_eq!(
+            idx.total_blocks(),
+            23,
+            "22 foreign L1 blocks survive untouched"
+        );
+        let foreign: Vec<_> = idx
+            .blocks
+            .iter()
+            .filter(|block| {
+                block
+                    .path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| names[2..].iter().any(|source| source == name))
+            })
+            .collect();
+        assert_eq!(foreign.len(), 22);
+        assert!(foreign.iter().all(|block| block.path.exists()));
+
+        let merged: Vec<_> = idx
+            .blocks
+            .iter()
+            .filter(|block| {
+                block
+                    .path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with("m_l2_"))
+            })
+            .collect();
+        assert_eq!(merged.len(), 1, "the two owned L1 blocks still merge");
+        assert_eq!(merged[0].row_count, 8);
     }
 }

@@ -1,7 +1,7 @@
 //! Prometheus response envelope and shared query-parameter parsing.
 
 use axum::{
-    http::StatusCode,
+    http::{HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     Json,
 };
@@ -12,6 +12,36 @@ use serde_json::json;
 pub struct PrometheusResponse<T> {
     pub status: String,
     pub data: T,
+    /// Prometheus-style warnings. Omitted when empty so successful responses
+    /// keep their existing JSON shape.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+}
+
+/// Warning text for a truncated scan. `scanned` blocks ran; `truncated` were
+/// dropped by `query.max_scan_blocks`.
+pub(crate) fn truncation_warnings(scanned_blocks: usize, truncated_blocks: usize) -> Vec<String> {
+    if truncated_blocks == 0 {
+        return Vec::new();
+    }
+    vec![format!(
+        "scan truncated to {} of {} blocks",
+        scanned_blocks,
+        scanned_blocks + truncated_blocks
+    )]
+}
+
+/// Marks a response whose scan dropped blocks. Absent when nothing was
+/// truncated, so untruncated responses are byte-identical to before.
+pub(crate) fn with_truncation_header(response: Response, truncated_blocks: usize) -> Response {
+    if truncated_blocks == 0 {
+        return response;
+    }
+    let mut response = response;
+    response
+        .headers_mut()
+        .insert("x-parqtel-truncated", HeaderValue::from_static("true"));
+    response
 }
 
 #[derive(Serialize)]

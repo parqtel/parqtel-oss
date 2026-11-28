@@ -24,7 +24,7 @@ pub use routing::{
     MatchOp, MatcherSpec, PagerDutyReceiverConfig, ReceiverConfig, RoutingGlobalConfig,
     SlackReceiverConfig, TeamsReceiverConfig, WebhookReceiverConfig,
 };
-pub use server::{ServerConfig, TlsConfig};
+pub use server::{NodeRole, ServerConfig, TlsConfig};
 pub use storage::{BlockConfig, LogBlockConfig, RetentionConfig};
 pub use telemetry::{K8sProviderConfig, TelemetryConfig};
 

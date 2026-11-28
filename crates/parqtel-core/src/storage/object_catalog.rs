@@ -11,6 +11,33 @@ use object_store::{ObjectStore, ObjectStoreExt, PutMode, PutOptions, UpdateVersi
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
+use std::time::Duration;
+
+/// CAS attempts a publisher makes before giving up. Sixteen writers can race
+/// on the same manifest, so eight attempts starve under load.
+const DEFAULT_PUBLISH_RETRIES: usize = 16;
+const BACKOFF_BASE: Duration = Duration::from_millis(5);
+const BACKOFF_CAP: Duration = Duration::from_millis(200);
+
+/// Jittered exponential backoff for a lost CAS race.
+///
+/// `attempt` is zero-based. The delay doubles per attempt up to
+/// [`BACKOFF_CAP`], then a cheap nanosecond clock scatters it over
+/// `[half, full]` so retrying writers do not collide in lockstep. No RNG
+/// dependency: the low bits of the local clock are the jitter source.
+fn backoff_delay(attempt: usize) -> Duration {
+    let doubled = BACKOFF_BASE
+        .checked_mul(1u32 << attempt.min(6))
+        .unwrap_or(BACKOFF_CAP);
+    let base = doubled.min(BACKOFF_CAP);
+    let seed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.subsec_nanos() as u64)
+        .unwrap_or(0);
+    let half = base / 2;
+    let span = base.as_micros().saturating_sub(half.as_micros()).max(1) as u64;
+    half + Duration::from_micros(seed % span)
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CatalogBlock {
@@ -82,6 +109,7 @@ pub struct CatalogManifest {
 pub struct ObjectCatalog {
     store: Arc<dyn ObjectStore>,
     key: object_store::path::Path,
+    retries: usize,
 }
 
 impl std::fmt::Debug for ObjectCatalog {
@@ -97,7 +125,22 @@ impl ObjectCatalog {
         let key = object_store::path::Path::from(prefix)
             .join("_catalog")
             .join("manifest.json");
-        Self { store, key }
+        Self {
+            store,
+            key,
+            retries: DEFAULT_PUBLISH_RETRIES,
+        }
+    }
+
+    /// Overrides how many CAS attempts [`Self::publish`] makes. Zero falls
+    /// back to the default rather than disabling publishing.
+    pub fn with_retry_policy(mut self, retries: usize) -> Self {
+        self.retries = if retries == 0 {
+            DEFAULT_PUBLISH_RETRIES
+        } else {
+            retries
+        };
+        self
     }
 
     /// Reads the current manifest and its CAS version.
@@ -126,7 +169,7 @@ impl ObjectCatalog {
         blocks: Vec<CatalogBlock>,
         writer_lease: Option<String>,
     ) -> Result<CatalogManifest> {
-        for _ in 0..8 {
+        for attempt in 0..self.retries {
             let current = self.read().await?;
             let (mut manifest, mode) = match current {
                 Some((manifest, version)) => (manifest, PutMode::Update(version)),
@@ -162,13 +205,18 @@ impl ObjectCatalog {
             match self.store.put_opts(&self.key, body.into(), options).await {
                 Ok(_) => return Ok(manifest),
                 Err(object_store::Error::Precondition { .. })
-                | Err(object_store::Error::AlreadyExists { .. }) => continue,
+                | Err(object_store::Error::AlreadyExists { .. }) => {
+                    if attempt + 1 < self.retries {
+                        tokio::time::sleep(backoff_delay(attempt)).await;
+                    }
+                }
                 Err(e) => return Err(Error::Io(std::io::Error::other(e.to_string()))),
             }
         }
-        Err(Error::Validation(
-            "catalog update lost eight CAS races".into(),
-        ))
+        Err(Error::Validation(format!(
+            "catalog update lost {} CAS races",
+            self.retries
+        )))
     }
 }
 
@@ -176,6 +224,7 @@ impl ObjectCatalog {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn block(key: &str, ts: i64) -> CatalogBlock {
         CatalogBlock {
@@ -234,5 +283,166 @@ mod tests {
             .unwrap();
         let manifest = a.publish(Vec::new(), Some("node-a".into())).await.unwrap();
         assert!(manifest.blocks.iter().all(|block| block.key == "b.parquet"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn sixteen_concurrent_writers_lose_no_updates() {
+        let store = Arc::new(object_store::memory::InMemory::new());
+        let catalog = Arc::new(ObjectCatalog::new(store, "p"));
+        let mut tasks = tokio::task::JoinSet::new();
+        for i in 0..16u32 {
+            let catalog = catalog.clone();
+            tasks.spawn(async move {
+                let key = format!("block-{i}.parquet");
+                let mut block = block(&key, i as i64);
+                block.writer = Some(format!("node-{i}"));
+                catalog
+                    .publish(vec![block], Some(format!("node-{i}")))
+                    .await
+            });
+        }
+        while let Some(result) = tasks.join_next().await {
+            result.unwrap().unwrap();
+        }
+        let (manifest, _) = catalog.read().await.unwrap().unwrap();
+        assert_eq!(manifest.blocks.len(), 16);
+        let keys: HashSet<&str> = manifest.blocks.iter().map(|b| b.key.as_str()).collect();
+        for i in 0..16u32 {
+            let key = format!("block-{i}.parquet");
+            assert!(keys.contains(key.as_str()), "lost update for {key}");
+        }
+    }
+
+    #[tokio::test]
+    async fn retry_policy_converges_after_transient_cas_failures() {
+        let inner: Arc<dyn ObjectStore> = Arc::new(object_store::memory::InMemory::new());
+        let flaky = Arc::new(FlakyStore {
+            inner,
+            fail_puts: 3,
+            puts: AtomicUsize::new(0),
+        });
+        let catalog = ObjectCatalog::new(flaky.clone(), "p").with_retry_policy(4);
+        let manifest = catalog
+            .publish(vec![block("a.parquet", 1)], Some("node-a".into()))
+            .await
+            .unwrap();
+        assert_eq!(manifest.blocks.len(), 1);
+        assert_eq!(flaky.puts.load(Ordering::SeqCst), 4);
+    }
+
+    #[tokio::test]
+    async fn zero_retry_override_falls_back_to_default() {
+        let inner: Arc<dyn ObjectStore> = Arc::new(object_store::memory::InMemory::new());
+        let flaky = Arc::new(FlakyStore {
+            inner,
+            fail_puts: 3,
+            puts: AtomicUsize::new(0),
+        });
+        let catalog = ObjectCatalog::new(flaky, "p").with_retry_policy(0);
+        catalog
+            .publish(vec![block("a.parquet", 1)], Some("node-a".into()))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn exhausted_budget_error_names_the_retry_count() {
+        let inner: Arc<dyn ObjectStore> = Arc::new(object_store::memory::InMemory::new());
+        let flaky = Arc::new(FlakyStore {
+            inner,
+            fail_puts: usize::MAX,
+            puts: AtomicUsize::new(0),
+        });
+        let catalog = ObjectCatalog::new(flaky, "p").with_retry_policy(3);
+        let error = catalog
+            .publish(vec![block("a.parquet", 1)], Some("node-a".into()))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("3 CAS races"), "{error}");
+    }
+
+    /// Delegates to an in-memory store but fails the first `fail_puts` writes
+    /// with a CAS precondition loss.
+    #[derive(Debug)]
+    struct FlakyStore {
+        inner: Arc<dyn ObjectStore>,
+        fail_puts: usize,
+        puts: std::sync::atomic::AtomicUsize,
+    }
+
+    impl std::fmt::Display for FlakyStore {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "flaky({})", self.inner)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ObjectStore for FlakyStore {
+        async fn put_opts(
+            &self,
+            location: &object_store::path::Path,
+            payload: object_store::PutPayload,
+            opts: object_store::PutOptions,
+        ) -> object_store::Result<object_store::PutResult> {
+            let seen = self.puts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if seen < self.fail_puts {
+                return Err(object_store::Error::Precondition {
+                    path: location.to_string(),
+                    source: "injected CAS race".into(),
+                });
+            }
+            self.inner.put_opts(location, payload, opts).await
+        }
+
+        async fn put_multipart_opts(
+            &self,
+            location: &object_store::path::Path,
+            opts: object_store::PutMultipartOptions,
+        ) -> object_store::Result<Box<dyn object_store::MultipartUpload>> {
+            self.inner.put_multipart_opts(location, opts).await
+        }
+
+        async fn get_opts(
+            &self,
+            location: &object_store::path::Path,
+            options: object_store::GetOptions,
+        ) -> object_store::Result<object_store::GetResult> {
+            self.inner.get_opts(location, options).await
+        }
+
+        fn delete_stream(
+            &self,
+            locations: futures::stream::BoxStream<
+                'static,
+                object_store::Result<object_store::path::Path>,
+            >,
+        ) -> futures::stream::BoxStream<'static, object_store::Result<object_store::path::Path>>
+        {
+            self.inner.delete_stream(locations)
+        }
+
+        fn list(
+            &self,
+            prefix: Option<&object_store::path::Path>,
+        ) -> futures::stream::BoxStream<'static, object_store::Result<object_store::ObjectMeta>>
+        {
+            self.inner.list(prefix)
+        }
+
+        async fn list_with_delimiter(
+            &self,
+            prefix: Option<&object_store::path::Path>,
+        ) -> object_store::Result<object_store::ListResult> {
+            self.inner.list_with_delimiter(prefix).await
+        }
+
+        async fn copy_opts(
+            &self,
+            from: &object_store::path::Path,
+            to: &object_store::path::Path,
+            options: object_store::CopyOptions,
+        ) -> object_store::Result<()> {
+            self.inner.copy_opts(from, to, options).await
+        }
     }
 }

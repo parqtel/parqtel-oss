@@ -195,12 +195,25 @@ pub struct KafkaConfig {
     pub enabled: bool,
     #[serde(default)]
     pub brokers: String,
+    /// Log topic. Kept for backwards compatibility; `logs_topic` overrides it.
     #[serde(default)]
     pub topic: String,
+    /// Optional log topic override. Falls back to `topic` when unset.
+    #[serde(default)]
+    pub logs_topic: Option<String>,
+    /// Optional metrics topic. Starts the metrics consumer only when set.
+    #[serde(default)]
+    pub metrics_topic: Option<String>,
+    /// Optional traces topic. Starts the traces consumer only when set.
+    #[serde(default)]
+    pub traces_topic: Option<String>,
     #[serde(default = "default_kafka_group")]
     pub group_id: String,
     #[serde(default = "default_kafka_service")]
     pub service: String,
+    /// Log message encoding: `json` (generic JSON) or `otlp_proto` (OTLP
+    /// protobuf `ExportLogsServiceRequest`). Metrics and traces topics always
+    /// carry OTLP protobuf.
     #[serde(default = "default_kafka_format")]
     pub format: String,
 }
@@ -223,6 +236,9 @@ impl Default for KafkaConfig {
             enabled: false,
             brokers: String::new(),
             topic: String::new(),
+            logs_topic: None,
+            metrics_topic: None,
+            traces_topic: None,
             group_id: default_kafka_group(),
             service: default_kafka_service(),
             format: default_kafka_format(),
@@ -230,7 +246,27 @@ impl Default for KafkaConfig {
     }
 }
 
+/// Trims an optional topic and treats an empty value as unset.
+fn non_empty_topic(topic: Option<&str>) -> Option<&str> {
+    topic.filter(|topic| !topic.trim().is_empty())
+}
+
 impl KafkaConfig {
+    /// Topic for the log consumer: `logs_topic` when set, else `topic`.
+    pub fn resolved_logs_topic(&self) -> &str {
+        non_empty_topic(self.logs_topic.as_deref()).unwrap_or(&self.topic)
+    }
+
+    /// Metrics topic, if the metrics consumer is enabled.
+    pub fn resolved_metrics_topic(&self) -> Option<&str> {
+        non_empty_topic(self.metrics_topic.as_deref())
+    }
+
+    /// Traces topic, if the traces consumer is enabled.
+    pub fn resolved_traces_topic(&self) -> Option<&str> {
+        non_empty_topic(self.traces_topic.as_deref())
+    }
+
     pub fn validate_into(&self, errors: &mut Vec<String>) {
         if !self.enabled {
             return;
@@ -238,14 +274,52 @@ impl KafkaConfig {
         if self.brokers.trim().is_empty() {
             errors.push("ingest.kafka.brokers is required when enabled".into());
         }
-        if self.topic.trim().is_empty() {
-            errors.push("ingest.kafka.topic is required when enabled".into());
+        if self.resolved_logs_topic().trim().is_empty() {
+            errors.push(
+                "ingest.kafka.topic is required when enabled (or set ingest.kafka.logs_topic)"
+                    .into(),
+            );
+        }
+        if let Some(topic) = &self.logs_topic {
+            if topic.trim().is_empty() {
+                errors.push("ingest.kafka.logs_topic cannot be empty when set".into());
+            }
+        }
+        if let Some(topic) = &self.metrics_topic {
+            if topic.trim().is_empty() {
+                errors.push("ingest.kafka.metrics_topic cannot be empty when set".into());
+            }
+        }
+        if let Some(topic) = &self.traces_topic {
+            if topic.trim().is_empty() {
+                errors.push("ingest.kafka.traces_topic cannot be empty when set".into());
+            }
         }
         if self.group_id.trim().is_empty() {
             errors.push("ingest.kafka.group_id cannot be empty".into());
         }
-        if self.format != "json" {
-            errors.push("ingest.kafka.format must be 'json'".into());
+        if self.format != "json" && self.format != "otlp_proto" {
+            errors.push(format!(
+                "ingest.kafka.format must be 'json' or 'otlp_proto' (got '{}')",
+                self.format
+            ));
+        }
+        // Separate consumers with the same group must not subscribe to one
+        // topic, or they would split its partitions and decode each other's
+        // signal.
+        let log_topic = self.resolved_logs_topic().trim();
+        let metrics_topic = self.resolved_metrics_topic().map(str::trim);
+        let traces_topic = self.resolved_traces_topic().map(str::trim);
+        if !log_topic.is_empty() && metrics_topic == Some(log_topic) {
+            errors.push("ingest.kafka.metrics_topic must differ from the log topic".into());
+        }
+        if !log_topic.is_empty() && traces_topic == Some(log_topic) {
+            errors.push("ingest.kafka.traces_topic must differ from the log topic".into());
+        }
+        if metrics_topic.is_some() && metrics_topic == traces_topic {
+            errors.push(
+                "ingest.kafka.traces_topic must differ from ingest.kafka.metrics_topic".into(),
+            );
         }
     }
 }
@@ -327,7 +401,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn kafka_requires_brokers_topic_and_json() {
+    fn kafka_requires_brokers_topic_and_valid_format() {
         let mut cfg = KafkaConfig {
             enabled: true,
             ..Default::default()
@@ -341,6 +415,60 @@ mod tests {
         errors.clear();
         cfg.validate_into(&mut errors);
         assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("ingest.kafka.format"), "{}", errors[0]);
+    }
+
+    #[test]
+    fn kafka_defaults_are_legacy_json_logs() {
+        let cfg = KafkaConfig::default();
+        assert!(!cfg.enabled);
+        assert_eq!(cfg.format, "json");
+        assert!(cfg.logs_topic.is_none());
+        assert!(cfg.metrics_topic.is_none());
+        assert!(cfg.traces_topic.is_none());
+        assert_eq!(cfg.resolved_logs_topic(), "");
+        assert_eq!(cfg.resolved_metrics_topic(), None);
+        assert_eq!(cfg.resolved_traces_topic(), None);
+    }
+
+    #[test]
+    fn kafka_accepts_otlp_proto_and_resolves_optional_topics() {
+        let mut cfg = KafkaConfig {
+            enabled: true,
+            brokers: "localhost:9092".into(),
+            topic: "legacy-logs".into(),
+            logs_topic: Some("logs".into()),
+            metrics_topic: Some("metrics".into()),
+            traces_topic: Some("traces".into()),
+            format: "otlp_proto".into(),
+            ..Default::default()
+        };
+        let mut errors = Vec::new();
+        cfg.validate_into(&mut errors);
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(cfg.resolved_logs_topic(), "logs");
+        assert_eq!(cfg.resolved_metrics_topic(), Some("metrics"));
+        assert_eq!(cfg.resolved_traces_topic(), Some("traces"));
+
+        cfg.logs_topic = None;
+        assert_eq!(cfg.resolved_logs_topic(), "legacy-logs");
+    }
+
+    #[test]
+    fn kafka_rejects_duplicate_signal_topics() {
+        let cfg = KafkaConfig {
+            enabled: true,
+            brokers: "localhost:9092".into(),
+            topic: "logs".into(),
+            metrics_topic: Some("logs".into()),
+            traces_topic: Some("logs".into()),
+            ..Default::default()
+        };
+        let mut errors = Vec::new();
+        cfg.validate_into(&mut errors);
+        assert_eq!(errors.len(), 3, "{errors:?}");
+        assert!(errors.iter().any(|e| e.contains("metrics_topic")));
+        assert!(errors.iter().any(|e| e.contains("traces_topic")));
     }
 
     #[test]

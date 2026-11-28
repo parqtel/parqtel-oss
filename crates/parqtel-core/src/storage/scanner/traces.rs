@@ -4,7 +4,7 @@ use super::pruning::{
     page_ranges_in_time, project_present, restrict_to_ranges, row_groups_in_range,
 };
 use super::Scanner;
-use super::{acquire_scan_slot, record_scan_block, record_scan_output, MAX_CONCURRENT_BLOCK_SCANS};
+use super::{acquire_scan_slot, record_scan_block, record_scan_output, scan_slot_limit};
 use crate::error::{Error, Result};
 use crate::models::storage::{BlockMetadata, StorageModel};
 use crate::models::traces::Span;
@@ -53,7 +53,7 @@ impl Scanner {
         let block_count = blocks.len();
         let started = std::time::Instant::now();
         let mut admission_wait = std::time::Duration::ZERO;
-        let mut tasks = Vec::with_capacity(block_count.min(MAX_CONCURRENT_BLOCK_SCANS));
+        let mut tasks = Vec::with_capacity(block_count.min(scan_slot_limit()));
         for block in blocks {
             let waiting = std::time::Instant::now();
             let permit = acquire_scan_slot().await?;

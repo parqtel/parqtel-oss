@@ -73,6 +73,12 @@ async fn main() -> anyhow::Result<()> {
     if let Some(level) = cli.log_level {
         figment = figment.merge(Serialized::default("telemetry.log_level", level));
     }
+    if let Some(role) = cli.role {
+        figment = figment.merge(Serialized::default("server.role", role));
+    }
+    if let Some(node_id) = cli.node_id {
+        figment = figment.merge(Serialized::default("server.node_id", node_id));
+    }
 
     let mut config: Config = figment.extract()?;
     if config.server.dataset != "default" {

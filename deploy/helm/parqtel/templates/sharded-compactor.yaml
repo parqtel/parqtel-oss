@@ -1,0 +1,63 @@
+{{- if eq .Values.mode "sharded" }}
+{{- $root := . }}
+{{- $name := include "parqtel.shardedName" (dict "root" . "role" "compactor") }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "parqtel.labels" . | nindent 4 }}
+    app.kubernetes.io/component: compactor
+spec:
+  # More than one compactor would race the same catalog entries: the level-2
+  # window has no distributed lock yet.
+  replicas: {{ .Values.sharding.compactor.replicas }}
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "parqtel.shardedSelector" (dict "root" . "role" "compactor") | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ include "parqtel.configChecksum" . }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "parqtel.shardedSelector" (dict "root" . "role" "compactor") | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.image.pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "parqtel.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        {{- include "parqtel.shardedContainer" (dict "root" $root "role" "compactor") | nindent 8 }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "parqtel.fullname" . }}
+        - name: tmp
+          emptyDir:
+            sizeLimit: 100Mi
+        - name: data
+          emptyDir:
+            sizeLimit: {{ .Values.sharding.compactor.cacheSize }}
+        {{- with .Values.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

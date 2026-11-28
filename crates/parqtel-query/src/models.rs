@@ -2,6 +2,12 @@ use parqtel_core::LabelSet;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
+/// Keeps zero-valued block counters out of serialized results, so existing
+/// consumers see the same JSON shape unless a scan was actually truncated.
+fn is_zero(value: &usize) -> bool {
+    *value == 0
+}
+
 /// A single data point in a query result.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Sample {
@@ -41,6 +47,12 @@ pub struct QueryResult {
     pub total_series_count: usize,
     /// Bucketed ingestion volume for the query range (60 buckets).
     pub volume_summary: Vec<u64>,
+    /// Blocks the scan dispatched (at most `query.max_scan_blocks` per metric).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub scanned_blocks: usize,
+    /// Blocks dropped by the scan limit. Nonzero means the result is incomplete.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub truncated_blocks: usize,
 }
 
 /// The result of a log query execution.
@@ -54,6 +66,12 @@ pub struct LogQueryResult {
     pub total_logs_count: usize,
     /// Bucketed ingestion volume for the query range (60 buckets).
     pub volume_summary: Vec<u64>,
+    /// Blocks the scan dispatched (at most `query.max_scan_blocks`).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub scanned_blocks: usize,
+    /// Blocks dropped by the scan limit. Nonzero means the result is incomplete.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub truncated_blocks: usize,
 }
 
 /// The result of a trace search.
@@ -135,6 +153,8 @@ mod tests {
             points_scanned: 1000,
             total_series_count: 5,
             volume_summary: vec![1, 2, 3],
+            scanned_blocks: 0,
+            truncated_blocks: 0,
         };
         let json = serde_json::to_string(&qr).unwrap();
         let decoded: QueryResult = serde_json::from_str(&json).unwrap();
@@ -148,6 +168,8 @@ mod tests {
             execution_time: Duration::from_millis(10),
             total_logs_count: 0,
             volume_summary: vec![],
+            scanned_blocks: 0,
+            truncated_blocks: 0,
         };
         let json = serde_json::to_string(&lqr).unwrap();
         let decoded: LogQueryResult = serde_json::from_str(&json).unwrap();

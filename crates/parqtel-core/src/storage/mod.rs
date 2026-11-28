@@ -4,6 +4,7 @@ pub mod compactor;
 pub mod index;
 pub mod log_index;
 pub mod object_catalog;
+pub mod ownership;
 pub mod persist;
 pub mod retention;
 pub mod scanner;
@@ -16,6 +17,7 @@ pub use compactor::Compactor;
 pub use index::{advance_wal_commit, reconcile, BlockIndex, BlockIndexStore, PendingIndex};
 pub use log_index::{LogIndexBuilder, LogIndexTable, LogSkipIndex, LOG_INDEX_FOOTER_KEY};
 pub use object_catalog::{CatalogBlock, CatalogManifest, ObjectCatalog};
+pub use ownership::OwnershipRegistry;
 pub use persist::{persist_blocking, persist_once, run_index_persist_loop};
 pub use retention::RetentionPolicy;
 pub use scanner::{LogColumnPrefilter, LogRowFilter, LogScanStats, ScanMetricsSnapshot, Scanner};
@@ -81,20 +83,44 @@ pub fn start_maintenance(
     retention_interval_secs: u64,
     persist_interval_secs: u64,
 ) -> MaintenanceHandle {
+    start_maintenance_owned(
+        index,
+        store,
+        config,
+        retention_interval_secs,
+        persist_interval_secs,
+        Arc::new(OwnershipRegistry::everything()),
+    )
+}
+
+/// As [`start_maintenance`], but compaction and retention only retire blocks
+/// this node owns. A sharded node shares the catalog with other writers; using
+/// the unscoped variant there would let it delete their blocks.
+#[allow(clippy::too_many_arguments)]
+pub fn start_maintenance_owned(
+    index: Arc<RwLock<BlockIndex>>,
+    store: Arc<BlockIndexStore>,
+    config: BlockConfig,
+    retention_interval_secs: u64,
+    persist_interval_secs: u64,
+    ownership: Arc<OwnershipRegistry>,
+) -> MaintenanceHandle {
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
-    let compactor = tokio::spawn(Compactor::run_loop(
+    let compactor = tokio::spawn(Compactor::run_loop_scoped(
         index.clone(),
         store.clone(),
         config.clone(),
         shutdown_rx.clone(),
+        ownership.clone(),
     ));
-    let retention = tokio::spawn(RetentionPolicy::run_loop(
+    let retention = tokio::spawn(RetentionPolicy::run_loop_scoped(
         index.clone(),
         store.clone(),
         config,
         retention_interval_secs,
         shutdown_rx.clone(),
+        ownership,
     ));
     let persist = tokio::spawn(run_index_persist_loop(
         index,

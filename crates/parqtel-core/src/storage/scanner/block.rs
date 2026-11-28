@@ -126,6 +126,28 @@ pub(super) fn cache_budget_bytes() -> usize {
         .budget_bytes
 }
 
+/// Whether `path`'s footer is already cached, decided by a `stat` alone.
+///
+/// The footer key is `(path, length, mtime)`, so a block that is already warm
+/// can be recognised without opening it. The scan prefetch phase uses this to
+/// stay out of the way of queries the cache already serves.
+pub(super) fn footer_cached(path: &std::path::Path) -> bool {
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return false;
+    };
+    let mtime = metadata
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |d| d.as_nanos() as i128);
+    let key = (path.to_path_buf(), metadata.len(), mtime);
+    footer_cache()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .entries
+        .contains_key(&key)
+}
+
 impl FooterCache {
     /// Inserts `block`, evicting the least recently used entries until the cache
     /// is back under budget. An entry larger than the whole budget is not kept.

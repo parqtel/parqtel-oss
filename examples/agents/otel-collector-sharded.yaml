@@ -1,0 +1,66 @@
+# OTel Collector -> every Parqtel writer in a sharded install over OTLP/gRPC.
+#
+# The exporters target the writer StatefulSet's headless Service pods
+# (`parqtel-writer-<i>.parqtel-writer`). Any writer may take any batch: a reader
+# unions every writer's unflushed buffer with the shared bucket, so a row is
+# never lost to which pod received it, and the block it lands in is published to
+# the same catalog for everyone.
+#
+# Fanning out in the collector (instead of one endpoint) keeps the OTLP stream
+# balanced when a writer restarts: the untouched exporters keep sending while
+# the failing one retries from its queue.
+extensions:
+  file_storage:
+    directory: /var/lib/otelcol/sharded-queue
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+      http:
+
+processors:
+  batch:
+    send_batch_size: 1000
+    send_batch_max_size: 1000
+
+exporters:
+  otlp_grpc/parqtel-writer-0:
+    endpoint: parqtel-writer-0.parqtel-writer:4317
+    tls:
+      insecure: true
+    sending_queue:
+      enabled: true
+      storage: file_storage
+      # 6,000 batches x up to 1,000 points covers about 10 minutes per writer at ~9.5K points/s.
+      queue_size: 6000
+    retry_on_failure:
+      enabled: true
+      max_elapsed_time: 0s
+  otlp_grpc/parqtel-writer-1:
+    endpoint: parqtel-writer-1.parqtel-writer:4317
+    tls:
+      insecure: true
+    sending_queue:
+      enabled: true
+      storage: file_storage
+      queue_size: 6000
+    retry_on_failure:
+      enabled: true
+      max_elapsed_time: 0s
+
+service:
+  extensions: [file_storage]
+  pipelines:
+    metrics:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlp_grpc/parqtel-writer-0, otlp_grpc/parqtel-writer-1]
+    logs:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlp_grpc/parqtel-writer-0, otlp_grpc/parqtel-writer-1]
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlp_grpc/parqtel-writer-0, otlp_grpc/parqtel-writer-1]

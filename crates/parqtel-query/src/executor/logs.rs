@@ -74,6 +74,8 @@ impl QueryExecutor {
                 execution_time: start_time.elapsed(),
                 total_logs_count: 0,
                 volume_summary: vec![0; 60],
+                scanned_blocks: 0,
+                truncated_blocks: 0,
             });
         }
 
@@ -105,6 +107,8 @@ impl QueryExecutor {
         let window_ns = (end_ns - start_ns) / 60;
         let mut total_logs_count = 0usize;
         let mut volume_summary = vec![0u64; 60];
+        let mut scanned_blocks = 0usize;
+        let mut truncated_blocks = 0usize;
 
         // Filter the buffered (unflushed) rows in place with the same
         // predicate — small, and never part of the disk scan.
@@ -148,6 +152,8 @@ impl QueryExecutor {
             )
             .await?;
             total_logs_count += stats.total_matched;
+            scanned_blocks += stats.scanned_blocks;
+            truncated_blocks += stats.truncated_blocks;
             for (acc, b) in volume_summary.iter_mut().zip(stats.volume_buckets) {
                 *acc += b;
             }
@@ -169,6 +175,8 @@ impl QueryExecutor {
             execution_time: start_time.elapsed(),
             total_logs_count,
             volume_summary,
+            scanned_blocks,
+            truncated_blocks,
         })
     }
 
@@ -221,6 +229,8 @@ impl QueryExecutor {
             .await;
         let mut total_logs_count = 0usize;
         let mut volume_summary = vec![0u64; 60];
+        let mut scanned_blocks = 0usize;
+        let mut truncated_blocks = 0usize;
         let mut buffered_matching: Vec<parqtel_core::LogRecord> = Vec::new();
         if !buffered_logs.is_empty() {
             for log in buffered_logs {
@@ -250,6 +260,8 @@ impl QueryExecutor {
             )
             .await?;
             total_logs_count += stats.total_matched;
+            scanned_blocks += stats.scanned_blocks;
+            truncated_blocks += stats.truncated_blocks;
             for (acc, b) in volume_summary.iter_mut().zip(stats.volume_buckets) {
                 *acc += b;
             }
@@ -268,6 +280,8 @@ impl QueryExecutor {
             execution_time: start_time.elapsed(),
             total_logs_count,
             volume_summary,
+            scanned_blocks,
+            truncated_blocks,
         })
     }
 
@@ -313,11 +327,15 @@ impl QueryExecutor {
                 execution_time: start_time.elapsed(),
                 total_logs_count: 0,
                 volume_summary: vec![0; 60],
+                scanned_blocks: 0,
+                truncated_blocks: 0,
             });
         }
 
         let mut total_logs_count = 0usize;
         let mut volume_summary = vec![0u64; 60];
+        let mut scanned_blocks = 0usize;
+        let mut truncated_blocks = 0usize;
         let mut buffered_matching: Vec<parqtel_core::LogRecord> = Vec::new();
         if !buffered_logs.is_empty() {
             for log in buffered_logs {
@@ -347,6 +365,8 @@ impl QueryExecutor {
             )
             .await?;
             total_logs_count += stats.total_matched;
+            scanned_blocks += stats.scanned_blocks;
+            truncated_blocks += stats.truncated_blocks;
             for (acc, b) in volume_summary.iter_mut().zip(stats.volume_buckets) {
                 *acc += b;
             }
@@ -367,6 +387,8 @@ impl QueryExecutor {
             execution_time: start_time.elapsed(),
             total_logs_count,
             volume_summary,
+            scanned_blocks,
+            truncated_blocks,
         })
     }
 

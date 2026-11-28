@@ -29,22 +29,59 @@ pub(crate) fn spawn_catalog_sync_task(
     stores: [Arc<BlockIndexStore>; 3],
     dirs: [std::path::PathBuf; 3],
     interval_secs: u64,
+    node_id: Option<String>,
+    publish_local: bool,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(Duration::from_secs(interval_secs.max(1)));
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // Keys adopted from the manifest, remembered across ticks. A cache
+        // materialisation can make `path.exists()` true for a foreign block;
+        // this set keeps it from ever being published under our node id.
+        let mut adopted_keys = std::collections::HashSet::new();
         loop {
             ticker.tick().await;
+            // Read the manifest before publishing so a block the catalog
+            // already assigns to another writer is never retagged as ours.
+            let remote = match catalog.read().await {
+                Ok(Some((manifest, _))) => Some(manifest),
+                Ok(None) => None,
+                Err(e) => {
+                    tracing::warn!(error = %e, "catalog read failed");
+                    continue;
+                }
+            };
+            let foreign_keys: std::collections::HashSet<&str> = remote
+                .as_ref()
+                .map(|manifest| {
+                    manifest
+                        .blocks
+                        .iter()
+                        .filter(|block| block.writer.is_some() && block.writer != node_id)
+                        .map(|block| block.key.as_str())
+                        .collect()
+                })
+                .unwrap_or_default();
             let mut local = Vec::new();
             let mut local_keys = std::collections::HashSet::new();
             for index in &indexes {
                 let idx = index.read().await;
                 for block in &idx.blocks {
+                    let Some(name) = block.path.file_name().and_then(|name| name.to_str()) else {
+                        continue;
+                    };
                     // A block adopted from another node lives only in this
                     // node's index until its cache is materialised. Publishing
                     // it as our own would resurrect entries the owner has
                     // already retired.
-                    if !block.path.exists() {
+                    if adopted_keys.contains(name) {
+                        continue;
+                    }
+                    // Ask the installed store, not the filesystem: only the
+                    // backend knows whether `path` is a locally staged block
+                    // or a read-cache artefact of an adopted one.
+                    if !parqtel_core::storage::block_store::store().is_locally_produced(&block.path)
+                    {
                         continue;
                     }
                     let Ok(mut catalog_block) =
@@ -52,24 +89,24 @@ pub(crate) fn spawn_catalog_sync_task(
                     else {
                         continue;
                     };
-                    catalog_block.writer = std::env::var("HOSTNAME").ok();
+                    if foreign_keys.contains(catalog_block.key.as_str()) {
+                        continue;
+                    }
+                    catalog_block.writer = node_id.clone();
                     local_keys.insert(catalog_block.key.clone());
                     local.push(catalog_block);
                 }
             }
-            let lease = std::env::var("HOSTNAME").ok();
-            if let Err(e) = catalog.publish(local, lease).await {
-                tracing::warn!(error = %e, "catalog publish failed");
-                continue;
-            }
-            let remote = match catalog.read().await {
-                Ok(Some((manifest, _))) => manifest,
-                Ok(None) => continue,
-                Err(e) => {
-                    tracing::warn!(error = %e, "catalog read failed");
+            drop(foreign_keys);
+            // A reader must not claim blocks: the manifest's writer lease is
+            // what tells the owner its blocks are still live.
+            if publish_local {
+                if let Err(e) = catalog.publish(local, node_id.clone()).await {
+                    tracing::warn!(error = %e, "catalog publish failed");
                     continue;
                 }
-            };
+            }
+            let Some(remote) = remote else { continue };
             for block in remote.blocks {
                 if local_keys.contains(&block.key) {
                     continue;
@@ -81,6 +118,7 @@ pub(crate) fn spawn_catalog_sync_task(
                     continue;
                 }
                 idx.add(block.to_metadata(&dirs[signal]));
+                adopted_keys.insert(block.key.clone());
                 stores[signal].mark_dirty();
                 tracing::info!(key = %block.key, "adopted remote block from catalog");
             }

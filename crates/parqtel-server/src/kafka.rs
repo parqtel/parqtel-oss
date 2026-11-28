@@ -1,16 +1,44 @@
-//! Optional Kafka consumer for JSON logs.
+//! Optional Kafka consumers for logs, metrics, and traces.
 //!
-//! Messages are decoded with the same generic-JSON parser as
-//! `POST /api/v1/ingest`, ingested through the normal WAL/buffer path, and
-//! committed only after `ingest_logs` returns. A failed ingest leaves the
-//! offset uncommitted, so a restart redelivers rather than loses the batch.
+//! Each configured topic gets one blocking consumer. Messages are decoded with
+//! the same OTLP decoders used by the HTTP/gRPC ingest paths (or the
+//! generic-JSON parser for `format = "json"` logs) and handed to the existing
+//! ingest services. An offset is committed only after the ingest call returns
+//! `Ok(())`; a decode or ingest failure leaves it uncommitted, so a restart
+//! redelivers rather than drops the batch.
 
 use crate::state::AppState;
+use parqtel_core::config::IngestConfig;
+use parqtel_core::{LogRecord, Metric, Span};
+use parqtel_ingest::decode::OtlpDecoder;
+use parqtel_ingest::otel::collector::logs::v1::ExportLogsServiceRequest;
+use parqtel_ingest::otel::collector::metrics::v1::ExportMetricsServiceRequest;
+use parqtel_ingest::otel::collector::trace::v1::ExportTraceServiceRequest;
+use prost::Message;
 use rdkafka::consumer::{BaseConsumer, CommitMode, Consumer};
-use rdkafka::{ClientConfig, Message};
+use rdkafka::{ClientConfig, Message as KafkaMessage};
+use std::collections::HashSet;
 use std::time::Duration;
+use tokio::runtime::Handle;
 
-/// Starts a blocking Kafka consumer. Returns `None` when disabled.
+/// One decoded Kafka message, tagged with the signal its topic carries.
+#[derive(Debug)]
+enum KafkaBatch {
+    Metrics(Vec<Metric>),
+    Logs(Vec<LogRecord>),
+    Traces(Vec<Span>),
+}
+
+/// A decoded message's destination. Production routes into `AppState`'s ingest
+/// services; tests use a recording sink without a broker.
+trait BatchSink {
+    fn ingest(&self, batch: KafkaBatch) -> Result<(), String>;
+}
+
+type Decoder = Box<dyn FnMut(&[u8]) -> Result<KafkaBatch, String> + Send>;
+
+/// Starts one blocking consumer per configured topic. Returns `None` when the
+/// consumer is disabled or misconfigured.
 pub fn spawn_kafka_consumer(state: AppState) -> Option<tokio::task::JoinHandle<()>> {
     let config = state.inner.config.ingest.kafka.clone();
     if !config.enabled {
@@ -27,13 +55,24 @@ pub fn spawn_kafka_consumer(state: AppState) -> Option<tokio::task::JoinHandle<(
         {
             Ok(consumer) => consumer,
             Err(e) => {
-                tracing::error!(error = %e, "failed to create Kafka consumer");
-                return;
+                tracing::warn!(error = %e, topic, "Kafka poll failed");
+                continue;
             }
         };
-        if let Err(e) = consumer.subscribe(&[&config.topic]) {
-            tracing::error!(error = %e, topic = %config.topic, "failed to subscribe");
-            return;
+        let Some(payload) = KafkaMessage::payload(&message) else {
+            continue;
+        };
+        let commit = || {
+            consumer
+                .commit_message(&message, CommitMode::Sync)
+                .map_err(|e| e.to_string())
+        };
+        if let Err(e) = consume_payload(payload, &mut *decode, &sink, commit) {
+            tracing::warn!(
+                topic,
+                error = %e,
+                "Kafka message failed; offset not committed"
+            );
         }
         tracing::info!(
             brokers = %config.brokers,
@@ -41,42 +80,64 @@ pub fn spawn_kafka_consumer(state: AppState) -> Option<tokio::task::JoinHandle<(
             group = %config.group_id,
             "Kafka log consumer started"
         );
-        loop {
-            let Some(result) = consumer.poll(Duration::from_millis(500)) else {
-                continue;
-            };
-            let message = match result {
-                Ok(message) => message,
-                Err(e) => {
-                    tracing::warn!(error = %e, "Kafka poll failed");
-                    continue;
-                }
-            };
-            let Some(payload) = message.payload() else {
-                continue;
-            };
-            let logs = match crate::handlers::ingest::parse_generic_json(
-                payload,
-                &config.service,
-                &state.inner.config.ingest,
-            ) {
-                Ok(logs) => logs,
-                Err(e) => {
-                    tracing::warn!(error = %e, "Kafka message is not valid generic JSON; skipping");
-                    let _ = consumer.commit_message(&message, CommitMode::Async);
-                    continue;
-                }
-            };
-            match handle.block_on(state.inner.log_ingestion_service.ingest_logs(logs)) {
-                Ok(_) => {
-                    if let Err(e) = consumer.commit_message(&message, CommitMode::Sync) {
-                        tracing::warn!(error = %e, "Kafka offset commit failed");
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "Kafka batch ingest failed; offset not committed");
-                }
+        assert!(result.is_err());
+        assert_eq!(committed.get(), 0);
+    }
+
+    #[test]
+    fn decode_error_leaves_offset_uncommitted() {
+        let sink = RecordingSink::default();
+        let committed = Cell::new(0);
+        let result = consume_payload(
+            b"not a protobuf payload",
+            decode_metrics_payload,
+            &sink,
+            commit_counter(&committed),
+        );
+        assert!(result.is_err());
+        assert_eq!(committed.get(), 0);
+        assert!(sink.batches.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn consumer_specs_start_only_configured_signals() {
+        let mut ingest = IngestConfig::default();
+        ingest.kafka.enabled = true;
+        ingest.kafka.brokers = "localhost:9092".into();
+        ingest.kafka.topic = "logs".into();
+        ingest.kafka.metrics_topic = Some("metrics".into());
+        ingest.kafka.format = "otlp_proto".into();
+        let specs = consumer_specs(&ingest).unwrap();
+        let topics: Vec<&str> = specs.iter().map(|(topic, _)| topic.as_str()).collect();
+        assert_eq!(topics, vec!["logs", "metrics"]);
+    }
+
+    #[test]
+    fn json_format_uses_generic_log_parser() {
+        let mut ingest = IngestConfig::default();
+        ingest.kafka.enabled = true;
+        ingest.kafka.brokers = "localhost:9092".into();
+        ingest.kafka.topic = "logs".into();
+        let mut specs = consumer_specs(&ingest).unwrap();
+        let (_, mut decode) = specs.pop().unwrap();
+        let sink = RecordingSink::default();
+        let committed = Cell::new(0);
+        consume_payload(
+            br#"{"message":"hello","level":"INFO","timestamp":5000}"#,
+            &mut *decode,
+            &sink,
+            commit_counter(&committed),
+        )
+        .unwrap();
+        assert_eq!(committed.get(), 1);
+        let batches = sink.batches.lock().unwrap();
+        match &batches[0] {
+            KafkaBatch::Logs(logs) => {
+                assert_eq!(logs.len(), 1);
+                assert_eq!(logs[0].body, "hello");
+                assert_eq!(logs[0].timestamp_ns, 5_000_000_000_000);
             }
+            other => panic!("expected logs batch, got {other:?}"),
         }
-    }))
+    }
 }

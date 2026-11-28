@@ -2,7 +2,15 @@
 # Parqtel Helm Chart — Default Values
 # ─────────────────────────────────────────────────────────────────────────────
 
+# -- Deployment topology.
+# `standalone` runs every subsystem in one pod (`--role=all`) and reproduces the
+# historical single-writer deployment exactly. `sharded` splits ingest, query
+# and compaction into separate workloads backed by a shared S3 bucket; see
+# docs/operations/deployment.md#sharded-writers-and-stateless-readers.
+mode: standalone
+
 # -- Number of replicas. Values above 1 require ha.enabled.
+# Ignored in sharded mode (see sharding.*).
 replicaCount: 1
 
 # -- Run independent replicas with one PVC per pod.
@@ -166,6 +174,55 @@ ingress:
   # -- TLS configuration.
   tls: []
 
+# ── Sharded Topology (mode: sharded) ─────────────────────────────────────────
+# Every workload mounts one shared, role-neutral config ConfigMap; the role is
+# selected by `--role` in the container args, never by divergent configs.
+sharding:
+  objectStore:
+    # -- Required in sharded mode: writers upload blocks and publish the CAS
+    # catalog here, readers and the compactor read it back.
+    enabled: false
+    # -- Bucket that holds `<prefix>/<block>.parquet` and the manifest.
+    bucket: ""
+    region: "us-east-1"
+    # -- Custom endpoint for MinIO or another S3-compatible service.
+    endpoint: ""
+    # -- Key prefix shared by every role; must be unique per cluster/tenant.
+    prefix: "parqtel"
+    # -- Per-pod read cache quota in bytes. Must not exceed the pod's
+    # `cacheSize` emptyDir volume.
+    cacheBytes: 2147483648
+    # -- How often the manifest is published/polled, in seconds.
+    catalogIntervalSecs: 5
+    # -- Secret with AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY. Empty uses the
+    # standard AWS chain (instance role, IRSA, environment).
+    existingSecret: ""
+  writer:
+    # -- Writer pods. Each owns one PVC for WAL staging and publishes its own
+    # blocks to the shared catalog.
+    replicas: 2
+    storageSize: 50Gi
+    # -- Storage class for the per-writer PVC (empty = cluster default).
+    storageClassName: ""
+    resources: {}
+  reader:
+    # -- Stateless query tier, scaled by the HPA below. The Deployment omits
+    # `replicas` so the HPA owns the count.
+    minReplicas: 2
+    maxReplicas: 10
+    # -- HPA CPU utilization target (percent of the reader CPU request).
+    targetCPUUtilizationPercentage: 70
+    # -- Size limit of the ephemeral S3 block cache volume.
+    cacheSize: 20Gi
+    resources: {}
+  compactor:
+    # -- One compactor pod. It merges blocks and applies retention against the
+    # shared catalog; running more than one is not supported yet.
+    replicas: 1
+    # -- Size limit of the compactor's block cache volume.
+    cacheSize: 10Gi
+    resources: {}
+
 # ── Persistent Storage ───────────────────────────────────────────────────────
 storage:
   # -- Enable persistent volume.
@@ -247,6 +304,14 @@ parqtel:
     timeoutSecs: 30
     # -- Instant-query lookback window in nanoseconds (default 5m = 300000000000).
     lookbackDeltaNs: 300000000000
+    # -- Blocks one query scans before truncating the result (sharded mode
+    # only; standalone keeps the binary default).
+    maxScanBlocks: 1024
+    # -- Concurrent block scans allowed per query (sharded mode only).
+    maxConcurrentScans: 8
+    # -- Scan slots reserved for compaction so query load cannot starve it
+    # (sharded mode only).
+    compactionScanSlots: 2
   ui:
     # -- Enable built-in web UI.
     enabled: true

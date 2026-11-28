@@ -1,0 +1,89 @@
+{{- if eq .Values.mode "sharded" }}
+{{- $root := . }}
+{{- $name := include "parqtel.shardedName" (dict "root" . "role" "reader") }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "parqtel.labels" . | nindent 4 }}
+    app.kubernetes.io/component: reader
+spec:
+  {{- if le (int .Values.sharding.reader.maxReplicas) (int .Values.sharding.reader.minReplicas) }}
+  replicas: {{ .Values.sharding.reader.minReplicas }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "parqtel.shardedSelector" (dict "root" . "role" "reader") | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ include "parqtel.configChecksum" . }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "parqtel.shardedSelector" (dict "root" . "role" "reader") | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.image.pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "parqtel.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        {{- include "parqtel.shardedContainer" (dict "root" $root "role" "reader") | nindent 8 }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "parqtel.fullname" . }}
+        - name: tmp
+          emptyDir:
+            sizeLimit: 100Mi
+        - name: data
+          emptyDir:
+            sizeLimit: {{ .Values.sharding.reader.cacheSize }}
+        {{- with .Values.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- if gt (int .Values.sharding.reader.maxReplicas) (int .Values.sharding.reader.minReplicas) }}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "parqtel.labels" . | nindent 4 }}
+    app.kubernetes.io/component: reader
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ $name }}
+  minReplicas: {{ .Values.sharding.reader.minReplicas }}
+  maxReplicas: {{ .Values.sharding.reader.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.sharding.reader.targetCPUUtilizationPercentage }}
+{{- end }}
+{{- end }}

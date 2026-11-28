@@ -22,7 +22,7 @@ pub use engine::StorageEngine;
 pub use error::{Error, Result};
 pub use models::*;
 pub use storage::{
-    start_maintenance, BlockIndex, BlockIndexStore, MaintenanceHandle, RetentionPolicy,
-    ScanMetricsSnapshot, Scanner,
+    start_maintenance, start_maintenance_owned, BlockIndex, BlockIndexStore, MaintenanceHandle,
+    OwnershipRegistry, RetentionPolicy, ScanMetricsSnapshot, Scanner,
 };
 pub use telemetry::{ContentionMetrics, FlushGuard, Histogram};

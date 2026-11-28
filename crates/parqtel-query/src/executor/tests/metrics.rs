@@ -591,6 +591,8 @@ async fn reference_ast(
         points_scanned: scan.rows_considered + buffered_rows,
         total_series_count: built.total_series,
         volume_summary: built.volume.to_vec(),
+        scanned_blocks: scan.scanned_blocks,
+        truncated_blocks: scan.truncated_blocks,
     }
 }
 
@@ -658,6 +660,8 @@ async fn reference_plan(
         points_scanned: scan.rows_considered + buffered_rows,
         total_series_count,
         volume_summary,
+        scanned_blocks: scan.scanned_blocks,
+        truncated_blocks: scan.truncated_blocks,
     }
 }
 

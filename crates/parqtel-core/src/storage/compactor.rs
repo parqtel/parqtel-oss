@@ -1,5 +1,6 @@
 use super::block_file::{sync_parent_dir, BlockFileWriter, FooterIndex};
 use super::index::{BlockIndex, BlockIndexStore};
+use super::ownership::OwnershipRegistry;
 use crate::config::BlockConfig;
 use crate::error::{Error, Result};
 use crate::models::labels::LabelSet;
@@ -73,7 +74,26 @@ impl Compactor {
         index: Arc<RwLock<BlockIndex>>,
         store: Arc<BlockIndexStore>,
         config: BlockConfig,
+        shutdown: tokio::sync::watch::Receiver<bool>,
+    ) {
+        Self::run_loop_scoped(
+            index,
+            store,
+            config,
+            shutdown,
+            Arc::new(OwnershipRegistry::everything()),
+        )
+        .await;
+    }
+
+    /// As [`Self::run_loop`], but only blocks this node owns are merged and
+    /// retired. A sharded node shares the catalog with other writers.
+    pub async fn run_loop_scoped(
+        index: Arc<RwLock<BlockIndex>>,
+        store: Arc<BlockIndexStore>,
+        config: BlockConfig,
         mut shutdown: tokio::sync::watch::Receiver<bool>,
+        ownership: Arc<OwnershipRegistry>,
     ) {
         let interval = Duration::from_secs(config.compaction_interval_secs.max(60));
         tracing::debug!(interval_secs = interval.as_secs(), "compactor started");
@@ -89,15 +109,18 @@ impl Compactor {
             }
             tracing::debug!("compaction cycle starting");
             let cycle_start = std::time::Instant::now();
-            if let Err(e) = Self::compact_small_logs_once(&index, &store, &config).await {
+            if let Err(e) = Self::compact_small_logs_once(&index, &store, &config, &ownership).await
+            {
                 tracing::error!("Log compaction failed: {}", e);
             }
-            if let Err(e) = Self::compact_metrics_levels_once(&index, &store, &config).await {
+            if let Err(e) =
+                Self::compact_metrics_levels_once_scoped(&index, &store, &config, &ownership).await
+            {
                 tracing::error!("Metrics compaction failed: {}", e);
             }
             // Legacy bounded compaction remains for logs. Metrics use the
             // series-streaming leveled path above; traces compact separately.
-            if let Err(e) = Self::compact_tiered(&index, &store, &config).await {
+            if let Err(e) = Self::compact_tiered(&index, &store, &config, &ownership).await {
                 tracing::error!("Tiered compaction failed: {}", e);
             }
             tracing::debug!(
@@ -116,21 +139,41 @@ impl Compactor {
         super::stream_compactor::compact_metrics_levels_once(index, store, config).await
     }
 
+    /// As [`Self::compact_metrics_levels_once`], only merging owned blocks.
+    pub async fn compact_metrics_levels_once_scoped(
+        index: &Arc<RwLock<BlockIndex>>,
+        store: &BlockIndexStore,
+        config: &BlockConfig,
+        ownership: &OwnershipRegistry,
+    ) -> Result<usize> {
+        super::stream_compactor::compact_metrics_levels_once_scoped(index, store, config, ownership)
+            .await
+    }
+
     #[cfg(test)]
     pub(crate) async fn compact_once(
         index: &Arc<RwLock<BlockIndex>>,
         store: &BlockIndexStore,
         config: &BlockConfig,
     ) -> Result<()> {
-        Self::compact_small_blocks_once(index, store, config, None).await
+        Self::compact_small_blocks_once(
+            index,
+            store,
+            config,
+            None,
+            &OwnershipRegistry::everything(),
+        )
+        .await
     }
 
     async fn compact_small_logs_once(
         index: &Arc<RwLock<BlockIndex>>,
         store: &BlockIndexStore,
         config: &BlockConfig,
+        ownership: &OwnershipRegistry,
     ) -> Result<()> {
-        Self::compact_small_blocks_once(index, store, config, Some(SignalType::Logs)).await
+        Self::compact_small_blocks_once(index, store, config, Some(SignalType::Logs), ownership)
+            .await
     }
 
     async fn compact_small_blocks_once(
@@ -138,6 +181,7 @@ impl Compactor {
         store: &BlockIndexStore,
         config: &BlockConfig,
         signal_filter: Option<SignalType>,
+        ownership: &OwnershipRegistry,
     ) -> Result<()> {
         let (to_compact, original_paths, signal_type) = {
             let idx = index.read().await;
@@ -147,6 +191,7 @@ impl Compactor {
                 .filter(|b| {
                     b.row_count < 10000
                         && signal_filter.is_none_or(|signal| b.signal_type == signal)
+                        && ownership.may_retire(&b.path)
                 })
                 .cloned()
                 .collect();
@@ -241,6 +286,7 @@ impl Compactor {
         index: &Arc<RwLock<BlockIndex>>,
         store: &BlockIndexStore,
         config: &BlockConfig,
+        ownership: &OwnershipRegistry,
     ) -> Result<()> {
         let now_ns = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
         let six_hours_ns = 6 * 3600 * 1_000_000_000i64;
@@ -264,6 +310,7 @@ impl Compactor {
                     .filter(|b| b.signal_type == *signal_type)
                     .filter(|b| now_ns - b.end_timestamp_ns > six_hours_ns)
                     .filter(|b| b.row_count < 500_000) // don't re-merge already large blocks
+                    .filter(|b| ownership.may_retire(&b.path))
                     .cloned()
                     .collect();
                 blocks.sort_by_key(|b| b.start_timestamp_ns);

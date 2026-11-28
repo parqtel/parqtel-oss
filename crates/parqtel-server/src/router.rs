@@ -119,8 +119,9 @@ pub fn build_router(state: AppState) -> Router {
         retry_after_secs: ingest_config.load_shed_retry_after_secs.max(1),
     };
 
-    let routes = Router::new()
-        // Health & UI
+    // Every role keeps liveness, readiness, metrics and the debugging probes;
+    // an operator scrapes the same endpoints regardless of what the pod does.
+    let mut routes = Router::new()
         .route("/health", get(handlers::misc::health))
         .route("/auth/login", get(crate::auth::login))
         .route("/auth/callback", get(crate::auth::callback))
@@ -130,155 +131,11 @@ pub fn build_router(state: AppState) -> Router {
         .route("/metrics", get(handlers::misc::metrics))
         .route("/api/v1/stats", get(handlers::misc::stats))
         .route("/api/v1/ingest_rates", get(handlers::misc::ingest_rates))
-        .route("/", get(|| async { Redirect::to("/ui") }))
-        .route("/ui", get(handlers::misc::ui))
-        .route("/oas", get(handlers::misc::openapi_spec))
         // Self-profiling (CPU bottleneck analysis; 404s when disabled).
         // Flamegraph views: `go tool pprof -http=:0` on the protobuf profile.
         .route("/debug/pprof/profile", get(crate::otel_sli::pprof_profile))
         .route("/debug/pprof/summary", get(crate::otel_sli::pprof_summary))
-        .route("/debug/pprof/memory", get(crate::otel_sli::pprof_memory))
-        // OTLP Ingestion
-        .route("/v1/metrics", post(handlers::ingest::ingest_otlp_metrics))
-        .route("/v1/metrics/json", post(handlers::ingest::ingest_json))
-        .route("/v1/logs", post(handlers::ingest::ingest_otlp_logs))
-        .route("/v1/logs/json", post(handlers::ingest::ingest_logs_json))
-        .route(
-            "/api/v1/ingest",
-            post(handlers::ingest::ingest_generic_json),
-        )
-        .route("/api/v1/write", post(handlers::remote_write::remote_write))
-        .route("/v1/traces", post(handlers::ingest::ingest_otlp_traces))
-        .route(
-            "/v1/traces/json",
-            post(handlers::ingest::ingest_traces_json),
-        )
-        // Prometheus API v1
-        .route("/api/v1/query", get(handlers::query::query_instant))
-        .route("/api/v1/query_range", get(handlers::query::query_range))
-        .route("/api/v1/logs", get(handlers::query::query_logs))
-        .route("/api/v1/logs/stream", get(handlers::query::stream_logs))
-        .route("/api/v1/logs/tail", get(handlers::tail::tail_logs))
-        .route(
-            "/api/v1/label/__name__/values",
-            get(handlers::query::list_metric_names),
-        )
-        .route(
-            "/api/v1/label/:name/values",
-            get(handlers::query::list_label_values),
-        )
-        .route("/api/v1/labels", get(handlers::query::list_label_names))
-        // Log API
-        .route("/v1/logs/count", get(handlers::query::query_logs_count))
-        .route("/v1/logs/fields", get(handlers::query::list_log_fields))
-        .route(
-            "/v1/logs/field_values",
-            get(handlers::query::list_log_field_values),
-        )
-        // Correlation & Traces
-        .route("/v1/correlate", get(handlers::query::correlate))
-        .route("/v1/traces/search", get(handlers::query::search_traces))
-        // Grafana SimpleJSON
-        .route("/search", post(handlers::simplejson::search))
-        .route("/query", post(handlers::simplejson::query))
-        .route("/annotations", post(handlers::simplejson::annotations))
-        .route("/tag-keys", post(handlers::simplejson::tag_keys))
-        .route("/tag-values", post(handlers::simplejson::tag_values))
-        // Alert Engine API (basic)
-        .route("/api/v1/alerts", get(handlers::alerts::list_alerts))
-        .route("/api/v1/alerts/:id", get(handlers::alerts::get_alert))
-        .route(
-            "/api/v1/alerts/:id/evidence.json",
-            get(handlers::alerts::get_alert_evidence),
-        )
-        .route(
-            "/api/v1/alerts/:id/evidence.svg",
-            get(handlers::alerts::get_alert_evidence_svg),
-        )
-        .route(
-            "/api/v1/alerts/:id/acknowledge",
-            post(handlers::alerts::acknowledge_alert),
-        )
-        .route("/v1/search", post(handlers::query::run_pipeline_search))
-        .route(
-            "/api/v1/saved_searches",
-            get(handlers::query::list_saved_searches).post(handlers::query::create_saved_search),
-        )
-        .route(
-            "/api/v1/saved_searches/:id",
-            delete(handlers::query::delete_saved_search),
-        )
-        .route(
-            "/api/v1/dashboards",
-            get(handlers::dashboards::list_dashboards).post(handlers::dashboards::create_dashboard),
-        )
-        .route(
-            "/api/v1/dashboards/:id",
-            put(handlers::dashboards::update_dashboard)
-                .delete(handlers::dashboards::delete_dashboard),
-        )
-        .route(
-            "/api/v1/dashboards/:id/render",
-            get(handlers::dashboards::render_dashboard),
-        )
-        .route(
-            "/api/v1/alerts/routes",
-            get(handlers::alerts::list_routes).post(handlers::alerts::set_routes),
-        )
-        .route(
-            "/api/v1/alerts/test_route",
-            post(handlers::alerts::test_route),
-        )
-        .route(
-            "/api/v1/alerts/silences",
-            get(handlers::alerts::list_silences).post(handlers::alerts::create_silence),
-        )
-        .route(
-            "/api/v1/alerts/silences/:name",
-            delete(handlers::alerts::delete_silence),
-        )
-        .route(
-            "/api/v1/alerts/:id/resolve",
-            post(handlers::alerts::resolve_alert),
-        )
-        .route(
-            "/api/v1/alerts/:id/noise",
-            post(handlers::alerts::mark_alert_noise),
-        )
-        .route(
-            "/api/v1/alerts/:id/signal",
-            post(handlers::alerts::mark_alert_signal),
-        )
-        .route("/api/v1/rules", get(handlers::alerts::list_rules))
-        .route(
-            "/api/v1/rules/status",
-            get(handlers::pipeline::rules_status),
-        )
-        .route("/api/v1/rules", post(handlers::alerts::create_rule))
-        .route("/api/v1/rules/:id", put(handlers::alerts::update_rule))
-        .route("/api/v1/rules/:id", delete(handlers::alerts::delete_rule))
-        // Pipeline & Recording Rules API
-        .route(
-            "/api/v1/recording_rules",
-            get(handlers::pipeline::list_recording_rules),
-        )
-        .route(
-            "/api/v1/recording_rules",
-            post(handlers::pipeline::create_recording_rule),
-        )
-        .route(
-            "/api/v1/recording_rules/:name",
-            delete(handlers::pipeline::delete_recording_rule),
-        )
-        .route("/api/v1/pipelines", get(handlers::pipeline::list_pipelines))
-        .route(
-            "/api/v1/pipelines",
-            post(handlers::pipeline::create_pipeline),
-        )
-        .route(
-            "/api/v1/pipelines/:name",
-            delete(handlers::pipeline::delete_pipeline),
-        );
+        .route("/debug/pprof/memory", get(crate::otel_sli::pprof_memory));
 
     routes
         .layer(cors)

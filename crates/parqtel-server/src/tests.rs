@@ -25,6 +25,87 @@ async fn setup_test_app() -> axum::Router {
     build_router(setup_test_state().await)
 }
 
+#[cfg(test)]
+#[tokio::test(flavor = "current_thread")]
+async fn reader_router_omits_ingest_while_writer_serves_it() {
+    use parqtel_core::config::NodeRole;
+
+    let reader = build_router(setup_test_state_with_role(NodeRole::Reader).await);
+    let response = reader
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/metrics")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let response = reader
+        .oneshot(
+            Request::builder()
+                .uri("/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let writer = build_router(setup_test_state_with_role(NodeRole::Writer).await);
+    let response = writer
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/metrics")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_ne!(response.status(), StatusCode::NOT_FOUND);
+    let response = writer
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let response = writer
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/query?query=up")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[cfg(test)]
+#[test]
+fn figment_env_selects_node_role() {
+    use figment::{
+        providers::{Env, Serialized},
+        Figment,
+    };
+
+    std::env::set_var("PARQTEL__SERVER__ROLE", "reader");
+    let figment = Figment::from(Serialized::defaults(Config::default()))
+        .merge(Env::prefixed("PARQTEL__").split("__"));
+    let config: Config = figment.extract().unwrap();
+    std::env::remove_var("PARQTEL__SERVER__ROLE");
+    assert_eq!(config.server.role, parqtel_core::config::NodeRole::Reader);
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn health_answers_while_main_runtime_is_blocked() {
     use std::io::{Read, Write};
@@ -85,9 +166,15 @@ fn temp_config() -> Config {
 }
 
 async fn setup_test_state() -> AppState {
+    setup_test_state_with_role(parqtel_core::config::NodeRole::All).await
+}
+
+#[cfg(test)]
+async fn setup_test_state_with_role(role: parqtel_core::config::NodeRole) -> AppState {
     // Kept for the life of the test process: the ingestion services write blocks
     // under it from background tasks, so it must not vanish with this function.
-    let config = temp_config();
+    let mut config = temp_config();
+    config.server.role = role;
     let dir = config.storage.data_dir.clone();
     let (tx, _) = mpsc::unbounded_channel();
     let (ltx, _) = mpsc::unbounded_channel();

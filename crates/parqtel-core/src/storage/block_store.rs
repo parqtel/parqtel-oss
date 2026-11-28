@@ -6,7 +6,7 @@
 //! every key as a filesystem path and is byte-for-byte the previous behavior.
 
 use crate::error::{Error, Result};
-use object_store::ObjectStoreExt;
+use object_store::{ObjectStore, ObjectStoreExt, PutMode, PutOptions};
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
@@ -40,6 +40,16 @@ pub trait BlockStore: Send + Sync + std::fmt::Debug {
     /// object storage uploads here.
     fn publish(&self, _key: &Path) -> Result<()> {
         Ok(())
+    }
+
+    /// Whether this node produced the block at `key`.
+    ///
+    /// The catalog sync task publishes only blocks this node produced. An
+    /// adopted block must never be re-published under this node's writer tag:
+    /// path existence alone is not enough once a read cache materialises a
+    /// copy, so each backend answers for its own layout.
+    fn is_locally_produced(&self, key: &Path) -> bool {
+        key.exists()
     }
 }
 
@@ -111,6 +121,12 @@ impl BlockStore for LocalBlockStore {
         }
         out.sort_by(|a, b| a.key.cmp(&b.key));
         Ok(out)
+    }
+
+    fn is_locally_produced(&self, key: &Path) -> bool {
+        // Local mode has no remote blocks and `publish` is a no-op, so every
+        // block this node can see was produced here.
+        self.head(key).map(|found| found.is_some()).unwrap_or(false)
     }
 }
 
@@ -384,16 +400,35 @@ impl BlockStore for ObjectBlockStore {
         Ok(out)
     }
 
+    fn is_locally_produced(&self, key: &Path) -> bool {
+        // Only the writer stages a block under its data-dir key. Adopted blocks
+        // live in the read cache, whose path is `cache_path`, never `key`.
+        key.exists()
+    }
+
     fn publish(&self, key: &Path) -> Result<()> {
         let bytes = fs::read(key)?;
         let object_key = self.key(key);
-        self.block_on(async {
+        let options = PutOptions {
+            mode: PutMode::Create,
+            ..Default::default()
+        };
+        let outcome = self.block_on(async {
             self.store
-                .put(&object_key, bytes::Bytes::from(bytes).into())
+                .put_opts(&object_key, bytes::Bytes::from(bytes).into(), options)
                 .await
-        })?
-        .map_err(|e| Error::Io(std::io::Error::other(e.to_string())))?;
-        Ok(())
+        })?;
+        match outcome {
+            Ok(_) => Ok(()),
+            // Block keys embed an immutable ULID, so an existing object is the
+            // same block uploaded by an earlier attempt. Never overwrite it;
+            // report success only when the key is really there.
+            Err(err @ object_store::Error::AlreadyExists { .. }) => match self.head(key)? {
+                Some(_) => Ok(()),
+                None => Err(Error::Io(std::io::Error::other(err.to_string()))),
+            },
+            Err(e) => Err(Error::Io(std::io::Error::other(e.to_string()))),
+        }
     }
 }
 
@@ -451,5 +486,32 @@ mod object_tests {
         assert_eq!(local.list(Path::new("")).unwrap().len(), 1);
         assert!(local.delete(&src).unwrap());
         assert!(local.head(&src).unwrap().is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn publish_never_overwrites_an_existing_block() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(object_store::memory::InMemory::new());
+        let local = ObjectBlockStore::new(
+            store,
+            "blocks",
+            dir.path().join("cache"),
+            8,
+            tokio::runtime::Handle::current(),
+        )
+        .unwrap();
+        let src = dir.path().join("block.parquet");
+        File::create(&src).unwrap().write_all(b"first").unwrap();
+        local.publish(&src).unwrap();
+        // Re-uploading the same immutable key is reported as success, not an
+        // error, but the stored bytes stay the first upload.
+        File::create(&src).unwrap().write_all(b"second").unwrap();
+        local.publish(&src).unwrap();
+
+        fs::remove_file(&src).unwrap();
+        let mut opened = local.open(&src).unwrap();
+        let mut got = String::new();
+        opened.read_to_string(&mut got).unwrap();
+        assert_eq!(got, "first", "second upload must not overwrite the block");
     }
 }

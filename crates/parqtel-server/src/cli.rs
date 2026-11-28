@@ -22,6 +22,14 @@ pub(crate) struct Cli {
     #[arg(long, env = "RUST_LOG")]
     pub(crate) log_level: Option<String>,
 
+    /// Node role: all | writer | reader | compactor (default: all)
+    #[arg(long, global = true, env = "PARQTEL_ROLE", value_parser = ["all", "writer", "reader", "compactor"])]
+    pub(crate) role: Option<String>,
+
+    /// Cross-node identity for the shared block catalog (default: HOSTNAME)
+    #[arg(long, global = true, env = "PARQTEL_NODE_ID")]
+    pub(crate) node_id: Option<String>,
+
     #[command(subcommand)]
     pub(crate) command: Option<Commands>,
 }
@@ -49,4 +57,35 @@ pub(crate) enum Commands {
         #[arg(short, long)]
         output: PathBuf,
     },
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn role_and_node_id_parse_without_a_subcommand() {
+        let cli = Cli::try_parse_from(["parqtel", "--role", "reader", "--node-id", "reader-2"])
+            .expect("global role flags parse");
+        assert_eq!(cli.role.as_deref(), Some("reader"));
+        assert_eq!(cli.node_id.as_deref(), Some("reader-2"));
+        assert!(cli.command.is_none());
+    }
+
+    #[test]
+    fn role_and_node_id_parse_after_serve() {
+        let cli = Cli::try_parse_from([
+            "parqtel",
+            "serve",
+            "--role",
+            "writer",
+            "--node-id",
+            "writer-1",
+        ])
+        .expect("role flags are global");
+        assert_eq!(cli.role.as_deref(), Some("writer"));
+        assert_eq!(cli.node_id.as_deref(), Some("writer-1"));
+        assert!(matches!(cli.command, Some(Commands::Serve)));
+    }
 }

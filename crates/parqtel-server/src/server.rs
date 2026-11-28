@@ -77,8 +77,21 @@ pub(crate) async fn run_server(
     log_index_store: Arc<BlockIndexStore>,
     telemetry_guard: telemetry::TelemetryGuard,
 ) -> anyhow::Result<()> {
+    let role = config.server.role;
+    let node_id = config.server.resolved_node_id();
     parqtel_core::Scanner::configure_footer_cache_budget(config.query.footer_cache_bytes)
         .map_err(anyhow::Error::msg)?;
+    parqtel_core::Scanner::configure_limits(
+        config.query.max_scan_blocks,
+        config.query.max_concurrent_scans,
+        config.query.compaction_scan_slots,
+    )
+    .map_err(anyhow::Error::msg)?;
+    tracing::info!(
+        role = %role,
+        node_id = %node_id,
+        "starting parqtel node"
+    );
     let (ui_content, ui_etag) = ui_assets()?;
     parqtel_core::LabelInterner::set_capacity(config.ingest.label_interner_capacity);
 
@@ -104,16 +117,22 @@ pub(crate) async fn run_server(
 
     // Create shared in-memory buffer for stream-queryable data. The writer and
     // WAL hold the same rows, so the bounds govern queryability, not durability.
-    let memory_buffer = parqtel_core::MemoryBuffer::with_limits(
-        config.ingest.buffer_max_points,
-        config.ingest.buffer_max_bytes,
-        config.ingest.buffer_overflow_policy,
-    );
+    // A role without ingest never writes it; it still exists because the query
+    // executor reads through it, but it takes no configured ingest capacity.
+    let memory_buffer = if role.runs_ingest() {
+        parqtel_core::MemoryBuffer::with_limits(
+            config.ingest.buffer_max_points,
+            config.ingest.buffer_max_bytes,
+            config.ingest.buffer_overflow_policy,
+        )
+    } else {
+        parqtel_core::MemoryBuffer::new()
+    };
 
     // Opened before the service so replay can feed the same path live ingest
     // uses. A WAL that cannot be opened stops startup: continuing would accept
-    // data we could not promise to recover.
-    let metrics_wal = if config.ingest.wal_enabled {
+    // data we could not promise to recover. Non-ingest roles never open it.
+    let metrics_wal = if role.runs_ingest() && config.ingest.wal_enabled {
         match parqtel_core::wal::WalWriter::open_with_segment_limit(
             &config.storage.data_dir,
             "metrics",
@@ -132,34 +151,48 @@ pub(crate) async fn run_server(
         None
     };
 
-    let ingestion_service = IngestionService::with_shards(
-        config.storage.clone(),
-        tx,
-        config.ingest.rotator_shards,
-        metrics_wal,
-    )
-    .with_memory_buffer(memory_buffer.clone())
-    .with_contention(contention.clone())
-    .with_series_limit(config.ingest.series_limit_per_metric);
-    // Background flush: a request that crosses the block cap is acknowledged
-    // once the WAL has its rows rather than after the Parquet encode. Measured
-    // on a 7 MiB batch the encode is ~125 ms of a ~300 ms request, and it
-    // serialises concurrent requests behind the flush lock.
-    ingestion_service.start_flush_worker(config.ingest.max_inflight_flushes);
-    // Report the shard count so an operator can correlate lock-wait behaviour
-    // with the configured concurrency. 0 means "not reported", so the gauge is
-    // only meaningful once this runs.
-    contention.set_ingest_rotator_shards(ingestion_service.rotator_shards());
-    tracing::debug!(
-        shards = ingestion_service.rotator_shards(),
-        "metrics ingest rotator shard count"
-    );
-    let logs_wal = open_wal(
-        &config,
-        "logs",
-        &config.logs.data_dir,
-        config.ingest.log_wal_enabled,
-    )?;
+    // Only an ingest role gets the configured shards, WAL, buffer and flush
+    // worker. Other roles still hold an inert service because `AppState` is
+    // shared with handlers that are simply not mounted for them; it never
+    // receives a row and owns no rotator worker, WAL or buffer.
+    let ingestion_service = if role.runs_ingest() {
+        let service = IngestionService::with_shards(
+            config.storage.clone(),
+            tx,
+            config.ingest.rotator_shards,
+            metrics_wal,
+        )
+        .with_memory_buffer(memory_buffer.clone())
+        .with_contention(contention.clone())
+        .with_series_limit(config.ingest.series_limit_per_metric);
+        // Background flush: a request that crosses the block cap is
+        // acknowledged once the WAL has its rows rather than after the Parquet
+        // encode. Measured on a 7 MiB batch the encode is ~125 ms of a ~300 ms
+        // request, and it serialises concurrent requests behind the flush lock.
+        service.start_flush_worker(config.ingest.max_inflight_flushes);
+        // Report the shard count so an operator can correlate lock-wait
+        // behaviour with the configured concurrency. 0 means "not reported", so
+        // the gauge is only meaningful once this runs.
+        contention.set_ingest_rotator_shards(service.rotator_shards());
+        tracing::debug!(
+            shards = service.rotator_shards(),
+            "metrics ingest rotator shard count"
+        );
+        service
+    } else {
+        IngestionService::with_shards(config.storage.clone(), tx, 1, None)
+            .with_contention(contention.clone())
+    };
+    let logs_wal = if role.runs_ingest() {
+        open_wal(
+            &config,
+            "logs",
+            &config.logs.data_dir,
+            config.ingest.log_wal_enabled,
+        )?
+    } else {
+        None
+    };
     // Recording rules and pipelines live beside the alert rules. Load them at
     // startup and write API-created definitions back into the same directories,
     // so a restart does not silently lose them.
@@ -179,11 +212,14 @@ pub(crate) async fn run_server(
     // rather than growing an unbounded backlog.
     let (pipeline_metric_tx, mut pipeline_metric_rx) =
         mpsc::channel::<Vec<parqtel_core::Metric>>(64);
-    let log_ingestion_service =
+    let log_ingestion_service = if role.runs_ingest() {
         LogIngestionService::with_wal(config.logs.clone(), log_tx, logs_wal)
             .with_memory_buffer(memory_buffer.clone())
             .with_contention(contention.clone())
-            .with_pipelines(pipeline_registry.clone(), pipeline_metric_tx);
+            .with_pipelines(pipeline_registry.clone(), pipeline_metric_tx)
+    } else {
+        LogIngestionService::new(config.logs.clone(), log_tx).with_contention(contention.clone())
+    };
     let (trace_tx, trace_rx) = mpsc::unbounded_channel::<parqtel_core::storage::PendingIndex>();
     // Span-metrics RED bridge: trace ingestion derives
     // traces_service_{requests,errors,duration_ms} metrics and feeds them
@@ -197,18 +233,25 @@ pub(crate) async fn run_server(
     let mut trace_storage = config.storage.clone();
     trace_storage.data_dir = trace_data_dir.clone();
 
-    let traces_wal = open_wal(
-        &config,
-        "traces",
-        &config.storage.data_dir,
-        config.ingest.wal_enabled,
-    )?;
-    let trace_ingestion_service =
+    let traces_wal = if role.runs_ingest() {
+        open_wal(
+            &config,
+            "traces",
+            &config.storage.data_dir,
+            config.ingest.wal_enabled,
+        )?
+    } else {
+        None
+    };
+    let trace_ingestion_service = if role.runs_ingest() {
         TraceIngestionService::with_wal(trace_storage, trace_tx, traces_wal)
             .with_memory_buffer(memory_buffer.clone())
             .with_span_metrics(span_metrics_tx)
             .with_tail_sampling(config.ingest.tail_sampling.clone())
-            .with_contention(contention.clone());
+            .with_contention(contention.clone())
+    } else {
+        TraceIngestionService::new(trace_storage, trace_tx).with_contention(contention.clone())
+    };
 
     // Trace index lives beside its blocks, so reconcile sees the same directory.
     let mut trace_index = BlockIndex::new(&trace_data_dir);
@@ -303,25 +346,34 @@ pub(crate) async fn run_server(
     // live exporters use.
     // Blocks already on disk may cover WAL ranges whose commit never happened
     // (a crash between the two); skip those instead of writing them twice.
-    if config.ingest.wal_enabled {
-        let data_dir = &config.storage.data_dir;
-        parqtel_core::storage::advance_wal_commit(data_dir, "metrics", &*index.read().await);
-        parqtel_core::storage::advance_wal_commit(data_dir, "traces", &*trace_index.read().await);
-    }
-    if config.ingest.log_wal_enabled {
-        parqtel_core::storage::advance_wal_commit(
-            &config.logs.data_dir,
-            "logs",
-            &*log_index.read().await,
-        );
-    }
-    let wal_replay = replay_all_wals(
-        &config,
-        &ingestion_service,
-        &log_ingestion_service,
-        &trace_ingestion_service,
-    )
-    .await;
+    // Roles without ingest never opened a WAL, so there is nothing to replay.
+    let wal_replay = if role.runs_ingest() {
+        if config.ingest.wal_enabled {
+            let data_dir = &config.storage.data_dir;
+            parqtel_core::storage::advance_wal_commit(data_dir, "metrics", &*index.read().await);
+            parqtel_core::storage::advance_wal_commit(
+                data_dir,
+                "traces",
+                &*trace_index.read().await,
+            );
+        }
+        if config.ingest.log_wal_enabled {
+            parqtel_core::storage::advance_wal_commit(
+                &config.logs.data_dir,
+                "logs",
+                &*log_index.read().await,
+            );
+        }
+        replay_all_wals(
+            &config,
+            &ingestion_service,
+            &log_ingestion_service,
+            &trace_ingestion_service,
+        )
+        .await
+    } else {
+        Vec::new()
+    };
 
     let state = AppState::new(
         ingestion_service,
@@ -347,6 +399,7 @@ pub(crate) async fn run_server(
     );
 
     // Shared object-storage catalog: publish our blocks and adopt others'.
+    // Readers only read the manifest; they must never claim a cached block.
     if let Some(catalog) = state.inner.object_catalog.clone() {
         spawn_catalog_sync_task(
             catalog,
@@ -362,12 +415,15 @@ pub(crate) async fn run_server(
                 config.storage.data_dir.join("traces"),
             ],
             config.object_store.catalog_interval_secs,
+            Some(node_id.clone()),
+            role.runs_catalog_publish(),
         );
     }
 
     // Recording rules: evaluate on their group intervals and write results
-    // through the same metrics ingestion service as live OTLP data.
-    let ruler_runtime = if config.alerts.recording_rules_enabled {
+    // through the same metrics ingestion service as live OTLP data. A role
+    // without ingest has no sink, so it does not evaluate them.
+    let ruler_runtime = if role.runs_ingest() && config.alerts.recording_rules_enabled {
         let (ruler_tx, mut ruler_rx) = mpsc::channel::<Vec<parqtel_core::Metric>>(64);
         let sink = Arc::new(crate::ruler::ChannelMetricSink::new(ruler_tx));
         let query = Arc::new(crate::ruler::ServerQueryExecutor::new(state.clone()));
@@ -411,21 +467,27 @@ pub(crate) async fn run_server(
     };
 
     // Pipeline-extracted metrics enter the metrics WAL/buffer through the same
-    // service OTLP metrics use.
-    let pipeline_metrics_task = {
+    // service OTLP metrics use. Without ingest there is no pipeline producer.
+    let pipeline_metrics_task = if role.runs_ingest() {
         let state = state.clone();
-        tokio::spawn(async move {
+        Some(tokio::spawn(async move {
             while let Some(metrics) = pipeline_metric_rx.recv().await {
                 if let Err(e) = state.inner.ingestion_service.ingest_metrics(metrics).await {
                     tracing::warn!(error = %e, "failed to ingest pipeline-extracted metrics");
                 }
             }
-        })
+        }))
+    } else {
+        None
     };
 
     // Span-metrics RED consumer: derived metrics flow into the metrics
     // ingestion path as normal OTLP metrics would.
-    let span_metrics_task = spawn_span_metrics_consumer(state.clone(), span_metrics_rx);
+    let span_metrics_task = if role.runs_ingest() {
+        Some(spawn_span_metrics_consumer(state.clone(), span_metrics_rx))
+    } else {
+        None
+    };
 
     let preset_task = activate_alert_presets(&state).await;
     load_alert_rules(&state).await;
@@ -462,8 +524,10 @@ pub(crate) async fn run_server(
                     let _ = router_state.inner.alert_router.handle_event(event).await;
                 }
             }
-        }
-    });
+        }))
+    } else {
+        None
+    };
 
     let alert_dispatcher_tick_task = state.inner.alert_dispatcher.as_ref().map(|d| {
         parqtel_alert::dispatcher::AlertDispatcher::spawn_tick_loop(
@@ -472,9 +536,20 @@ pub(crate) async fn run_server(
         )
     });
 
-    let _kafka_task = crate::kafka::spawn_kafka_consumer(state.clone());
+    let _kafka_task = if role.runs_ingest() {
+        crate::kafka::spawn_kafka_consumer(state.clone())
+    } else {
+        None
+    };
 
-    let flush_task = spawn_flush_task(state.clone(), config.server.flush_interval_secs);
+    let flush_task = if role.runs_ingest() {
+        Some(spawn_flush_task(
+            state.clone(),
+            config.server.flush_interval_secs,
+        ))
+    } else {
+        None
+    };
 
     let alert_eval_task = spawn_alert_eval_task(state.clone(), config.server.alert_interval_secs);
 
@@ -494,15 +569,20 @@ pub(crate) async fn run_server(
     tracing::info!("parqtel server listening on {}", addr);
 
     // OTLP gRPC ingestion (default :4317; disabled when address is empty).
+    // Only ingest roles bind it; elsewhere the port stays free.
     let grpc_addr = config.server.grpc_bind_address.clone();
-    let grpc_state = state.clone();
-    let grpc_task = tokio::spawn(async move {
-        if let Err(e) = grpc::serve_grpc(grpc_state, &grpc_addr).await {
-            if !grpc_addr.is_empty() {
-                tracing::error!("OTLP gRPC server failed: {e}");
+    let grpc_task = if role.runs_ingest() {
+        let grpc_state = state.clone();
+        Some(tokio::spawn(async move {
+            if let Err(e) = grpc::serve_grpc(grpc_state, &grpc_addr).await {
+                if !grpc_addr.is_empty() {
+                    tracing::error!("OTLP gRPC server failed: {e}");
+                }
             }
-        }
-    });
+        }))
+    } else {
+        None
+    };
 
     let tls = config
         .server
@@ -519,11 +599,21 @@ pub(crate) async fn run_server(
         .map_err(|_| anyhow::anyhow!("HTTP server thread panicked"))??;
 
     tracing::info!("Shutting down gracefully...");
-    flush_task.abort();
-    alert_eval_task.abort();
-    grpc_task.abort();
-    span_metrics_task.abort();
-    pipeline_metrics_task.abort();
+    if let Some(task) = flush_task {
+        task.abort();
+    }
+    if let Some(task) = alert_eval_task {
+        task.abort();
+    }
+    if let Some(task) = grpc_task {
+        task.abort();
+    }
+    if let Some(task) = span_metrics_task {
+        task.abort();
+    }
+    if let Some(task) = pipeline_metrics_task {
+        task.abort();
+    }
     if let Some((scheduler, shutdown_tx, task, metrics_task)) = &ruler_runtime {
         let _ = shutdown_tx.send(true);
         if let Err(e) = scheduler.save_state().await {
@@ -532,7 +622,9 @@ pub(crate) async fn run_server(
         task.abort();
         metrics_task.abort();
     }
-    alert_router_task.abort();
+    if let Some(task) = alert_router_task {
+        task.abort();
+    }
     if let Some(task) = alert_dispatcher_tick_task {
         task.abort();
     }
@@ -558,11 +650,24 @@ pub(crate) async fn run_server(
 
     // Maintenance tasks stop and each perform a final persist pass before
     // returning, so the sidecars are complete without anyone writing the
-    // index from under a lock here.
-    metrics_maintenance.shutdown(stop_timeout).await;
-    logs_maintenance.shutdown(stop_timeout).await;
+    // index from under a lock here. Roles without a compactor own a bare
+    // persistence loop instead.
+    if let Some(maintenance) = metrics_maintenance {
+        maintenance.shutdown(stop_timeout).await;
+    } else if let Some((shutdown_tx, task)) = metrics_persist {
+        let _ = shutdown_tx.send(true);
+        let _ = tokio::time::timeout(stop_timeout, task).await;
+    }
+    if let Some(maintenance) = logs_maintenance {
+        maintenance.shutdown(stop_timeout).await;
+    } else if let Some((shutdown_tx, task)) = logs_persist {
+        let _ = shutdown_tx.send(true);
+        let _ = tokio::time::timeout(stop_timeout, task).await;
+    }
     let _ = trace_shutdown_tx.send(true);
-    let _ = tokio::time::timeout(stop_timeout, trace_retention).await;
+    if let Some(task) = trace_retention {
+        let _ = tokio::time::timeout(stop_timeout, task).await;
+    }
     // The persist loop's final pass runs inside the await, so this explicit
     // write is now a backstop rather than the only chance.
     let _ = trace_persist_shutdown_tx.send(true);

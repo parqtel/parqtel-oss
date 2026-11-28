@@ -1,0 +1,11 @@
+{{- if and (eq .Values.mode "sharded") (not .Values.sharding.internalToken.existingSecret) }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ include "parqtel.internalTokenSecretName" . }}
+  labels:
+    {{- include "parqtel.labels" . | nindent 4 }}
+type: Opaque
+stringData:
+  {{ .Values.sharding.internalToken.secretKey }}: {{ required "mode=sharded needs sharding.internalToken.value (or sharding.internalToken.existingSecret): it guards the writers' internal buffer endpoint" .Values.sharding.internalToken.value | quote }}
+{{- end }}

@@ -149,3 +149,49 @@ async fn test_maintenance_handle_shutdown_persists() {
         "a graceful shutdown must leave the sidecar complete"
     );
 }
+
+/// A sharded node shares the catalog with other writers. Retention must never
+/// delete blocks the manifest assigns to another writer, even when they are
+/// expired by this node's clock.
+#[tokio::test]
+async fn test_scoped_retention_keeps_foreign_blocks() {
+    let dir = tempdir().unwrap();
+    let own = dir.path().join("own.parquet");
+    let foreign = dir.path().join("foreign.parquet");
+    fs::write(&own, b"own").unwrap();
+    fs::write(&foreign, b"foreign").unwrap();
+
+    let now_ns = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
+    let old_ns = now_ns - (10 * 24 * 3600 * 1_000_000_000);
+    let mut index = BlockIndex::new(dir.path());
+    for path in [&own, &foreign] {
+        index.add(BlockMetadata {
+            path: path.clone(),
+            start_timestamp_ns: old_ns - 1000,
+            end_timestamp_ns: old_ns,
+            row_count: 5,
+            size_bytes: 100,
+            metric_names: HashSet::from(["cpu".into()]),
+            label_names: HashSet::new(),
+            label_values: Default::default(),
+            signal_type: SignalType::Metrics,
+            wal_range: None,
+        });
+    }
+
+    let ownership = OwnershipRegistry::scoped();
+    ownership.adopt("foreign.parquet", Some("writer-b"), "writer-a");
+    ownership.adopt("own.parquet", Some("writer-a"), "writer-a");
+
+    let index = Arc::new(RwLock::new(index));
+    let store = Arc::new(BlockIndexStore::at_path(dir.path().join("index.json")));
+    RetentionPolicy::enforce_scoped(&index, &store, 7, &ownership)
+        .await
+        .unwrap();
+
+    assert!(!own.exists(), "owned expired block must be deleted");
+    assert!(foreign.exists(), "foreign expired block must survive");
+    let idx = index.read().await;
+    assert_eq!(idx.total_blocks(), 1);
+    assert_eq!(idx.blocks[0].path, foreign);
+}

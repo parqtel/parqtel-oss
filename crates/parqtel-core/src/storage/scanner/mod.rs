@@ -13,6 +13,7 @@ mod pruning;
 mod traces;
 
 use crate::error::{Error, Result};
+use crate::models::storage::BlockMetadata;
 pub use logs::{LogColumnPrefilter, LogRowFilter, LogScanStats};
 pub use metrics::{
     metric_scan_indices, LimitedMetricScan, MetricScan, SeriesFilter, METRIC_SCAN_COLUMNS,
@@ -21,7 +22,7 @@ pub use pruning::{
     project_present, row_groups_in_range, row_groups_matching_metric, row_groups_matching_value,
 };
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, LazyLock};
+use std::sync::{Arc, LazyLock, OnceLock};
 use std::time::Duration;
 
 pub const SCAN_BLOCK_LEVELS: [&str; 7] =
@@ -64,30 +65,158 @@ fn block_level_index(path: &std::path::Path) -> usize {
         .unwrap_or(4)
 }
 
-/// Process-wide block-scan admission budget for the 4 GiB UAT pod.
-const MAX_CONCURRENT_BLOCK_SCANS: usize = 4;
+/// Scan admission and truncation limits, installed once at startup by
+/// [`Scanner::configure_limits`]. Until then the defaults from [`QueryConfig`]
+/// apply, so tests and the query examples need no startup wiring.
+#[derive(Debug, Clone, Copy)]
+struct ScanLimits {
+    max_scan_blocks: usize,
+    max_concurrent_scans: usize,
+    compaction_scan_slots: usize,
+}
+
+impl ScanLimits {
+    fn defaults() -> Self {
+        Self {
+            max_scan_blocks: crate::config::QueryConfig::DEFAULT_MAX_SCAN_BLOCKS,
+            max_concurrent_scans: crate::config::QueryConfig::default_max_concurrent_scans(),
+            compaction_scan_slots: crate::config::QueryConfig::DEFAULT_COMPACTION_SCAN_SLOTS,
+        }
+    }
+}
+
+/// Process-wide scan runtime: the configured limits and the three admission
+/// pools derived from them. One cell keeps the pools and the limits they were
+/// sized from impossible to disagree.
+struct ScanRuntime {
+    limits: ScanLimits,
+    query: Arc<tokio::sync::Semaphore>,
+    compaction: Arc<tokio::sync::Semaphore>,
+    background: Arc<tokio::sync::Semaphore>,
+}
+
+static SCAN_RUNTIME: OnceLock<ScanRuntime> = OnceLock::new();
+
+fn build_runtime(limits: ScanLimits) -> ScanRuntime {
+    ScanRuntime {
+        limits,
+        query: Arc::new(tokio::sync::Semaphore::new(limits.max_concurrent_scans)),
+        compaction: Arc::new(tokio::sync::Semaphore::new(limits.compaction_scan_slots)),
+        background: Arc::new(tokio::sync::Semaphore::new(BACKGROUND_BLOCK_SCANS)),
+    }
+}
+
+fn scan_runtime() -> &'static ScanRuntime {
+    SCAN_RUNTIME.get_or_init(|| build_runtime(ScanLimits::defaults()))
+}
+
+fn scan_limits() -> ScanLimits {
+    scan_runtime().limits
+}
+
+/// Blocks one query may scan before it is truncated.
+pub(super) fn max_scan_blocks() -> usize {
+    scan_limits().max_scan_blocks
+}
+
+/// Concurrent query scan slots; also the capacity hint for per-block task lists.
+pub(super) fn scan_slot_limit() -> usize {
+    scan_limits().max_concurrent_scans
+}
+
+fn install_runtime(
+    cell: &'static OnceLock<ScanRuntime>,
+    limits: ScanLimits,
+) -> std::result::Result<(), &'static str> {
+    cell.set(build_runtime(limits))
+        .map_err(|_| "scan limits are already configured")
+}
+
+fn validate_limits(limits: ScanLimits) -> std::result::Result<(), &'static str> {
+    if limits.max_scan_blocks == 0 {
+        return Err("max_scan_blocks must be greater than 0");
+    }
+    if limits.max_concurrent_scans == 0 {
+        return Err("max_concurrent_scans must be greater than 0");
+    }
+    if limits.compaction_scan_slots == 0 {
+        return Err("compaction_scan_slots must be greater than 0");
+    }
+    Ok(())
+}
+
 /// Dedicated slot for alert evaluation, so a saturating query load cannot
 /// starve the alert loop. This is one scan above the query budget on purpose:
-/// the alternative (carving it out of four) reduces query throughput and trace
-/// parallelism for every deployment.
+/// the alternative (carving it out of the configured pool) reduces query
+/// throughput and trace parallelism for every deployment.
 const BACKGROUND_BLOCK_SCANS: usize = 1;
-/// Hard cap on blocks scanned per query.
-const MAX_BLOCKS: usize = 128;
 
 /// Rows read per Arrow batch. The default (1024) makes per-batch setup - and,
 /// for dictionary columns, per-batch resolution - a visible share of the work.
 const SCAN_BATCH_ROWS: usize = 8192;
 
 fn scan_admission() -> Arc<tokio::sync::Semaphore> {
-    static ADMISSION: LazyLock<Arc<tokio::sync::Semaphore>> =
-        LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_BLOCK_SCANS)));
-    Arc::clone(&ADMISSION)
+    Arc::clone(&scan_runtime().query)
 }
 
 fn background_admission() -> Arc<tokio::sync::Semaphore> {
+    Arc::clone(&scan_runtime().background)
+}
+
+fn compaction_admission() -> Arc<tokio::sync::Semaphore> {
+    Arc::clone(&scan_runtime().compaction)
+}
+
+/// Concurrent footer prefetches. Independent of the query and background pools:
+/// a prefetch does only I/O and holds no scan slot, so it must neither wait for
+/// one nor consume one.
+const PREFETCH_BLOCK_SCANS: usize = 16;
+
+fn prefetch_admission() -> Arc<tokio::sync::Semaphore> {
     static ADMISSION: LazyLock<Arc<tokio::sync::Semaphore>> =
-        LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(BACKGROUND_BLOCK_SCANS)));
+        LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(PREFETCH_BLOCK_SCANS)));
     Arc::clone(&ADMISSION)
+}
+
+/// Whether a scan should prefetch these blocks' footers.
+///
+/// A warm cache needs no prefetch: the decode's own `open_block` is a cache
+/// hit, so prefetching would only add opens. A single block gains nothing from
+/// parallelism either, so it goes straight to the decode phase.
+fn prefetch_needed(blocks: &[BlockMetadata]) -> bool {
+    blocks.len() >= 2 && !blocks.iter().all(|block| block::footer_cached(&block.path))
+}
+
+/// Warms the footer cache for the blocks a scan is about to decode.
+///
+/// A cold `open_block` (file open, footer read, index parse) otherwise runs
+/// inside the `spawn_blocking` task that holds a scan slot, occupying it for
+/// I/O that decodes nothing. Here it runs before any slot is acquired, bounded
+/// by [`PREFETCH_BLOCK_SCANS`], and the opened handle is dropped immediately.
+///
+/// Prefetch failures are ignored on purpose: the decode phase reopens each
+/// block and reports the real error, so prefetching can never turn a readable
+/// query into an error.
+async fn prefetch_block_footers(blocks: &[BlockMetadata]) {
+    if !prefetch_needed(blocks) {
+        return;
+    }
+    let admission = prefetch_admission();
+    let mut tasks = Vec::with_capacity(blocks.len().min(PREFETCH_BLOCK_SCANS));
+    for block in blocks {
+        let path = block.path.clone();
+        let permit = match admission.clone().acquire_owned().await {
+            Ok(permit) => permit,
+            Err(_) => return,
+        };
+        tasks.push(tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            let _ = block::open_block(&path);
+        }));
+    }
+    for task in tasks {
+        let _ = task.await;
+    }
 }
 
 #[derive(Default)]
@@ -95,6 +224,8 @@ struct ScanMetrics {
     active_slots: AtomicU64,
     background_active_slots: AtomicU64,
     background_skips: AtomicU64,
+    compaction_active_slots: AtomicU64,
+    compaction_skips: AtomicU64,
     low_priority_skips: AtomicU64,
     admission_wait_ns: AtomicU64,
     blocks: AtomicU64,
@@ -124,6 +255,9 @@ pub struct ScanMetricsSnapshot {
     pub background_active_slots: u64,
     pub background_slot_limit: u64,
     pub background_skips: u64,
+    pub compaction_active_slots: u64,
+    pub compaction_slot_limit: u64,
+    pub compaction_skips: u64,
     pub low_priority_skips: u64,
     pub admission_wait_ns: u64,
     pub blocks: u64,
@@ -173,6 +307,22 @@ impl Drop for BackgroundScanPermit {
     }
 }
 
+/// Reserved slot from compaction's own pool. Background compaction acquires
+/// these instead of query slots, so a busy dashboard cannot defer compaction
+/// and a long merge cannot starve queries.
+pub(crate) struct CompactionScanPermit {
+    _permit: tokio::sync::OwnedSemaphorePermit,
+    slots: u64,
+}
+
+impl Drop for CompactionScanPermit {
+    fn drop(&mut self) {
+        scan_metrics()
+            .compaction_active_slots
+            .fetch_sub(self.slots, Ordering::Relaxed);
+    }
+}
+
 async fn acquire_scan_slot() -> Result<ScanPermit> {
     let started = std::time::Instant::now();
     let permit = scan_admission()
@@ -208,6 +358,29 @@ fn reserve_scan_slots(count: usize) -> Option<ScanPermit> {
         .active_slots
         .fetch_add(u64::from(permits), Ordering::Relaxed);
     Some(ScanPermit {
+        _permit: permit,
+        slots: u64::from(permits),
+    })
+}
+
+fn reserve_compaction_slots(count: usize) -> Option<CompactionScanPermit> {
+    let permits = u32::try_from(count).ok()?;
+    if permits == 0 {
+        return None;
+    }
+    let permit = match compaction_admission().try_acquire_many_owned(permits) {
+        Ok(permit) => permit,
+        Err(_) => {
+            scan_metrics()
+                .compaction_skips
+                .fetch_add(1, Ordering::Relaxed);
+            return None;
+        }
+    };
+    scan_metrics()
+        .compaction_active_slots
+        .fetch_add(u64::from(permits), Ordering::Relaxed);
+    Some(CompactionScanPermit {
         _permit: permit,
         slots: u64::from(permits),
     })
@@ -271,6 +444,30 @@ impl Scanner {
         block::configure_footer_cache_budget(bytes)
     }
 
+    /// Installs the process-wide scan limits. Call once at startup, before any
+    /// scan: the admission pools are sized here, so a later call fails rather
+    /// than leaving the pools and limits disagreeing.
+    pub fn configure_limits(
+        max_scan_blocks: usize,
+        max_concurrent_scans: usize,
+        compaction_scan_slots: usize,
+    ) -> std::result::Result<(), &'static str> {
+        let limits = ScanLimits {
+            max_scan_blocks,
+            max_concurrent_scans,
+            compaction_scan_slots,
+        };
+        validate_limits(limits)?;
+        install_runtime(&SCAN_RUNTIME, limits)
+    }
+
+    /// Reserves `count` slots from compaction's own scan budget without waiting.
+    /// Background compaction must use these instead of query slots so neither
+    /// workload starves the other.
+    pub fn try_reserve_compaction_slots(count: usize) -> Option<impl Send> {
+        reserve_compaction_slots(count)
+    }
+
     /// Reserves one query scan slot without waiting, for best-effort background
     /// work that may compete with queries.
     pub fn try_reserve_scan_slot() -> Option<impl Send> {
@@ -297,20 +494,19 @@ impl Scanner {
         }
     }
 
-    /// Reserves several process-wide scan slots without waiting.
-    pub(crate) fn try_reserve_scan_slots(count: usize) -> Option<ScanPermit> {
-        reserve_scan_slots(count)
-    }
-
     /// Cumulative process-wide scanner counters.
     pub fn scan_metrics_snapshot() -> ScanMetricsSnapshot {
         let metrics = scan_metrics();
+        let limits = scan_limits();
         ScanMetricsSnapshot {
             active_slots: metrics.active_slots.load(Ordering::Relaxed),
-            slot_limit: MAX_CONCURRENT_BLOCK_SCANS as u64,
+            slot_limit: limits.max_concurrent_scans as u64,
             background_active_slots: metrics.background_active_slots.load(Ordering::Relaxed),
             background_slot_limit: BACKGROUND_BLOCK_SCANS as u64,
             background_skips: metrics.background_skips.load(Ordering::Relaxed),
+            compaction_active_slots: metrics.compaction_active_slots.load(Ordering::Relaxed),
+            compaction_slot_limit: limits.compaction_scan_slots as u64,
+            compaction_skips: metrics.compaction_skips.load(Ordering::Relaxed),
             low_priority_skips: metrics.low_priority_skips.load(Ordering::Relaxed),
             admission_wait_ns: metrics.admission_wait_ns.load(Ordering::Relaxed),
             blocks: metrics.blocks.load(Ordering::Relaxed),

@@ -1,4 +1,5 @@
 use super::index::{BlockIndex, BlockIndexStore};
+use super::ownership::OwnershipRegistry;
 use crate::config::BlockConfig;
 use crate::error::{Error, Result};
 use std::sync::Arc;
@@ -18,12 +19,33 @@ impl RetentionPolicy {
         store: Arc<BlockIndexStore>,
         config: BlockConfig,
         interval_secs: u64,
+        shutdown: tokio::sync::watch::Receiver<bool>,
+    ) {
+        Self::run_loop_scoped(
+            index,
+            store,
+            config,
+            interval_secs,
+            shutdown,
+            Arc::new(OwnershipRegistry::everything()),
+        )
+        .await;
+    }
+
+    /// As [`Self::run_loop`], but only blocks this node owns are deleted.
+    pub async fn run_loop_scoped(
+        index: Arc<RwLock<BlockIndex>>,
+        store: Arc<BlockIndexStore>,
+        config: BlockConfig,
+        interval_secs: u64,
         mut shutdown: tokio::sync::watch::Receiver<bool>,
+        ownership: Arc<OwnershipRegistry>,
     ) {
         let interval = Duration::from_secs(interval_secs.max(1));
         tracing::debug!(
             interval_secs = interval.as_secs(),
             retention_days = config.retention_days,
+            scoped = ownership.is_scoped(),
             "retention policy started"
         );
         loop {
@@ -36,16 +58,34 @@ impl RetentionPolicy {
                     }
                 }
             }
-            if let Err(e) = Self::enforce(&index, &store, config.retention_days).await {
+            if let Err(e) =
+                Self::enforce_scoped(&index, &store, config.retention_days, &ownership).await
+            {
                 tracing::error!("Retention failed: {}", e);
             }
         }
     }
 
+    #[cfg(test)]
     pub(crate) async fn enforce(
         index: &Arc<RwLock<BlockIndex>>,
         store: &BlockIndexStore,
         retention_days: u64,
+    ) -> Result<()> {
+        Self::enforce_scoped(
+            index,
+            store,
+            retention_days,
+            &OwnershipRegistry::everything(),
+        )
+        .await
+    }
+
+    pub(crate) async fn enforce_scoped(
+        index: &Arc<RwLock<BlockIndex>>,
+        store: &BlockIndexStore,
+        retention_days: u64,
+        ownership: &OwnershipRegistry,
     ) -> Result<()> {
         let now_ns = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
         let cutoff = now_ns - (retention_days as i64 * 24 * 3600 * 1_000_000_000);
@@ -56,7 +96,7 @@ impl RetentionPolicy {
             let idx = index.read().await;
             idx.blocks
                 .iter()
-                .filter(|b| b.end_timestamp_ns < cutoff)
+                .filter(|b| b.end_timestamp_ns < cutoff && ownership.may_retire(&b.path))
                 .map(|b| b.path.clone())
                 .collect()
         };
@@ -78,7 +118,9 @@ impl RetentionPolicy {
 
         // Unlink on the blocking pool: a large sweep can be hundreds of
         // syscalls, which must not park a tokio worker.
-        let deleting = to_delete.clone();
+        let doomed: std::collections::HashSet<std::path::PathBuf> =
+            to_delete.iter().cloned().collect();
+        let deleting = to_delete;
         let unlink = tokio::task::spawn_blocking(move || {
             let mut failed = 0u64;
             for path in deleting {
@@ -95,17 +137,18 @@ impl RetentionPolicy {
         .await
         .map_err(|e| Error::Internal(format!("retention delete task panicked: {e}")))?;
 
-        // Only drop the index entries for files that are actually gone.
-        // Removing an entry whose file survives would silently orphan data.
+        // Only drop the index entries for files we actually tried to delete.
+        // Removing any other entry would silently orphan its data.
         let removed: Vec<std::path::PathBuf> = {
             let mut idx = index.write().await;
             let mut removed = Vec::new();
             idx.blocks.retain(|b| {
-                let expired = b.end_timestamp_ns < cutoff;
-                if expired {
+                if doomed.contains(&b.path) {
                     removed.push(b.path.clone());
+                    false
+                } else {
+                    true
                 }
-                !expired
             });
             store.mark_dirty();
             removed

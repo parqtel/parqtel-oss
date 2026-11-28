@@ -92,14 +92,18 @@ sampling_ratio = 1.0
 # keep_errors = false
 # sampling_ratio = 0.05
 
-# Optional Kafka JSON log consumer:
+# Optional Kafka consumers. The log consumer always runs; the metrics and
+# traces consumers start only when their topic is set. All topics must differ.
 # [ingest.kafka]
 # enabled = true
 # brokers = "kafka-1:9092,kafka-2:9092"
-# topic = "parqtel-logs"
+# topic = "parqtel-logs"           # log topic (kept for backwards compatibility)
+# logs_topic = "parqtel-logs"      # optional override for topic
+# metrics_topic = "parqtel-metrics" # optional; OTLP protobuf
+# traces_topic = "parqtel-traces"   # optional; OTLP protobuf
 # group_id = "parqtel"
 # service = "kafka-apps"
-# format = "json"                   # only json
+# format = "json"                   # json | otlp_proto (log topic only)
 
 [query]
 max_series = 1000
@@ -107,6 +111,10 @@ max_samples_per_series = 10000
 timeout_secs = 30
 lookback_delta_ns = 300000000000    # 5 minutes
 footer_cache_bytes = 201326592      # 192 MiB; must be greater than 0
+max_scan_blocks = 1024              # per-metric scan cap; must be greater than 0
+# max_concurrent_scans defaults to the CPU count, capped at 8; must be greater than 0.
+# max_concurrent_scans = 8
+compaction_scan_slots = 2           # background compaction scan budget; must be greater than 0
 
 [ui]
 enabled = true
@@ -249,6 +257,8 @@ tls_secret_name = "parqtel-provider-tls"
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `dataset` | String | `"default"` | Logical dataset served by this process. Non-default values prefix the metrics and logs data directories. Allowed characters: letters, digits, `-`, `_`, `.`. |
+| `role` | String | `"all"` | Subsystems this process runs: `all`, `writer`, `reader` or `compactor`. See [Node roles](#node-roles). Invalid values stop startup. |
+| `node_id` | String | unset | Identity written as this node's block-catalog writer lease. Falls back to `HOSTNAME`, then a process-local id. |
 | `bind_address` | String | `"0.0.0.0:8080"` | HTTP listen address. Must not be empty. |
 | `grpc_bind_address` | String | `"0.0.0.0:4317"` | OTLP gRPC listen address; empty disables it. |
 | `max_connections` | Integer | `1024` | Maximum simultaneous TCP connections. |
@@ -259,6 +269,30 @@ tls_secret_name = "parqtel-provider-tls"
 | `grpc_concurrency_limit` | Integer | `64` | Concurrent OTLP exports per gRPC connection. |
 | `index_persist_interval_secs` | Integer | `2` | Debounce for block-index sidecar writes. A durable flush forces an immediate write. |
 | `tls` | Table | unset | Optional [`server.tls`](#servertls). |
+
+### Node roles
+
+`server.role` decides which subsystems start. `all` is the previous single-node
+behaviour and is the default; the other roles split a deployment without
+changing stored data.
+
+| Role | Ingest (HTTP, gRPC, Kafka, remote write) | Query API and console | Compaction | Retention | Alerts | Catalog publish |
+|------|:---:|:---:|:---:|:---:|:---:|:---:|
+| `all` | yes | yes | yes | yes | yes | yes |
+| `writer` | yes | no | no | no | no | yes |
+| `reader` | no | yes | no | no | no | no |
+| `compactor` | no | no | yes | yes | no | yes |
+
+Every role still serves `/health`, `/ready` and `/metrics`. Routes a role does
+not run are not mounted, so they answer `404`; there are no stub handlers.
+
+`--role` (`PARQTEL_ROLE`) and `--node-id` (`PARQTEL_NODE_ID`) override the file
+for any invocation, including bare `parqtel` (which serves by default).
+
+```bash
+parqtel --role reader --node-id reader-2
+PARQTEL_ROLE=writer parqtel serve
+```
 
 ### `[server.tls]`
 
@@ -358,15 +392,24 @@ Buffer and rejection counters:
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `enabled` | Boolean | `false` | Start the consumer. |
+| `enabled` | Boolean | `false` | Start the consumers. |
 | `brokers` | String | `""` | Comma-separated broker list; required when enabled. |
-| `topic` | String | `""` | Topic name; required when enabled. |
-| `group_id` | String | `"parqtel"` | Consumer group. |
-| `service` | String | `"kafka"` | Service name attached to decoded logs. |
-| `format` | String | `"json"` | Only `json` is implemented. |
+| `topic` | String | `""` | Log topic, kept for backwards compatibility. Required when enabled unless `logs_topic` is set. |
+| `logs_topic` | String | unset | Overrides `topic` for the log consumer. |
+| `metrics_topic` | String | unset | Starts the metrics consumer; messages are OTLP protobuf. |
+| `traces_topic` | String | unset | Starts the traces consumer; messages are OTLP protobuf. |
+| `group_id` | String | `"parqtel"` | Consumer group. Each signal uses a separate consumer. |
+| `service` | String | `"kafka"` | Service name attached to logs decoded from generic JSON. |
+| `format` | String | `"json"` | Log encoding: `json` (generic JSON) or `otlp_proto` (OTLP protobuf). Metrics and traces always use OTLP protobuf. |
+
+The log consumer always runs. The metrics and traces consumers start only when
+their topic is set. All configured topics must be distinct, because consumers
+in the same group would otherwise split one topic's partitions between signals.
 
 Offsets commit only after the batch is written through the normal durable
-ingest path; a failed batch remains uncommitted and is redelivered.
+ingest path. A decode or ingest failure leaves the offset uncommitted, so a
+restart redelivers rather than loses the batch; this applies to metrics, logs,
+and traces.
 
 ## `[query]` and `[ui]`
 
@@ -377,6 +420,9 @@ ingest path; a failed batch remains uncommitted and is redelivered.
 | `query.timeout_secs` | Integer | `30` | Scan-endpoint timeout. Ingest is excluded. |
 | `query.lookback_delta_ns` | Integer | `300000000000` | Instant-query lookback (5 minutes). |
 | `query.footer_cache_bytes` | Integer | `201326592` | Process-wide LRU budget for cached block footers and indexes; must be greater than 0. |
+| `query.max_scan_blocks` | Integer | `1024` | Maximum blocks scanned per query metric. A scan that hits the cap returns `"warnings": ["scan truncated to N of M blocks"]` and the response header `X-Parqtel-Truncated: true`; must be greater than 0. |
+| `query.max_concurrent_scans` | Integer | CPU count, capped at 8 | Query scan admission limit, shared by all query paths. Must be greater than 0. Fixed at startup; a second install is ignored. |
+| `query.compaction_scan_slots` | Integer | `2` | Scan slots reserved for background compaction, so maintenance never starves queries. Must be greater than 0. |
 | `ui.enabled` | Boolean | `true` | Serve the embedded console at `/ui`. |
 
 `GET /api/v1/query` accepts `lookback_delta` as a duration or float seconds
@@ -864,7 +910,7 @@ they are validated and compiled before storage.
 | `storage` / `logs` | `data_dir` non-empty; codec in `zstd`, `snappy`, `lz4`, `none`; zstd level 1–22; `row_group_size` > 0 and ≤ `max_rows_per_block` |
 | `object_store` | Enabled requires bucket, region, prefix, `cache_bytes > 0`, `catalog_interval_secs > 0` |
 | `query` | `footer_cache_bytes > 0` |
-| `ingest.kafka` | Enabled requires brokers, topic, non-empty group, format `json` |
+| `ingest.kafka` | Enabled requires brokers, a log topic (`topic` or `logs_topic`), a non-empty group, format `json` or `otlp_proto`, and distinct signal topics |
 | `ingest.tail_sampling` | Every ratio in `[0.0, 1.0]` |
 | `telemetry` | `log_format` is `text` or `json` |
 | `auth` | Enabled requires a token or OIDC; token names unique; each token has a secret; OIDC issuer/client/redirect set |
