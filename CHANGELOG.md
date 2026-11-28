@@ -15,6 +15,7 @@ build cannot reach a registry or the release page.
 #### Bug Fixes
 
 - route signals per writer, scope compaction and isolate alerts
+- leave bucket deletions to the compactor and withdraw expired merges
 <!-- changelog:auto-end -->
 
 ## [0.5.0] - 2026-11-28
